@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Buddy Switch — 新架构交互原型</title>
+<link rel="stylesheet" href="demo.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ══════════════ 顶部应用栏：L1 作用域 ══════════════ -->
+  <header class="topbar">
+    <button class="scope-trigger" id="scope-trigger" aria-haspopup="menu" aria-expanded="false">
+      <span class="scope-mark" id="scope-mark"></span>
+      <span class="scope-text">
+        <span class="scope-name" id="scope-name">WorkBuddy 国内版</span>
+        <span class="scope-sub" id="scope-sub">jackey@example.com · 8 个账号</span>
+      </span>
+      <span class="scope-caret" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </span>
+    </button>
+
+    <span class="run-pill" id="run-pill"><i class="dot"></i><span>运行中</span></span>
+
+    <div class="topbar-spacer"></div>
+
+    <button class="search-btn" id="search-btn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <span>搜索账号、页面或动作</span>
+      <kbd>⌘K</kbd>
+    </button>
+
+    <button class="icon-btn" id="refresh-btn" title="刷新当前作用域">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
+    <button class="icon-btn" id="theme-btn" title="切换明暗主题">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z"/></svg>
+    </button>
+    <button class="icon-btn" id="app-settings-btn" title="应用设置">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+    </button>
+  </header>
+
+  <div class="body">
+
+    <!-- ══════════════ 侧栏：L2 目的地（固定 5 项，不随平台换血） ══════════════ -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h6l2 3 2-3h6"/><path d="M12 10v10"/><path d="m8 17 4 4 4-4"/></svg>
+        </span>
+        <span class="brand-text">
+          <b>Buddy Switch</b>
+          <i>多平台账号管理</i>
+        </span>
+      </div>
+
+      <nav class="nav" id="nav" aria-label="目的地导航"></nav>
+
+      <div class="sidebar-foot">
+        <div class="ver-row">
+          <i class="dot" id="foot-dot"></i>
+          <span>v2026.10.1</span>
+          <button class="mini-btn" title="会话悬浮窗" data-act="cp-toggle" aria-label="显示或隐藏会话悬浮窗">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </button>
+          <button class="mini-btn" title="检查更新" data-act="check-update">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ══════════════ 内容区：L3 视图参数 ══════════════ -->
+    <main class="content" id="content"></main>
+  </div>
+</div>
+
+<!-- 作用域菜单 -->
+<div class="scope-menu" id="scope-menu" role="menu" aria-hidden="true"></div>
+
+<!-- 命令面板 -->
+<div class="overlay" id="palette-overlay" aria-hidden="true">
+  <div class="palette" role="dialog" aria-label="命令面板">
+    <div class="palette-input">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="palette-input" type="text" placeholder="搜索账号、切换作用域、跳转页面或执行动作…" autocomplete="off" />
+      <kbd>ESC</kbd>
+    </div>
+    <div class="palette-list" id="palette-list"></div>
+  </div>
+</div>
+
+<!-- 右侧抽屉 -->
+<div class="drawer-overlay" id="drawer-overlay" aria-hidden="true"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <header class="drawer-head">
+    <div class="drawer-title" id="drawer-title">标题</div>
+    <button class="icon-btn" id="drawer-close" title="关闭">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </header>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<!-- 不可逆操作确认 Dialog -->
+<div class="overlay" id="confirm-overlay" aria-hidden="true">
+  <div class="confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h3 id="confirm-title">确认</h3>
+    <p id="confirm-body"></p>
+    <div class="confirm-actions">
+      <button class="btn" id="confirm-cancel" data-act="confirm-cancel">取消</button>
+      <button class="btn danger" id="confirm-ok" data-act="confirm-ok">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 桌面悬浮窗（§3.16 / D21 已拍板进本期）：独立浮层，不占侧栏项 -->
+<div id="companion-slot"></div>
+
+<!-- 提示 -->
+<div class="toasts" id="toasts"></div>
+
+<!-- 首次引导 -->
+<div class="hint" id="hint">
+  <b>可点原型</b>
+  <span>切左上角<b>作用域</b> · <kbd>⌘K</kbd> 命令面板 · 账号页勾选多项 · 点卡片开抽屉 · 按 <kbd>/</kbd> 搜索</span>
+  <button id="hint-close">知道了</button>
+</div>
+
+<script src="demo-data.js"></script>
+<script src="demo-app.js"></script>
+</body>
+</html>
