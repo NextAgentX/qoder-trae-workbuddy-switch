@@ -9,10 +9,20 @@ use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
 use buddy_switch_core::modules::{
-    account, auth_file, capability, checkin, codebuddy_cli, codebuddy_cn_ide, credit_usage, credits, export_import,
-    migrate, oauth, process, refresh, region::Region, region::RegionFilter, rotate, session, switch, token_stats, trae,
+    account, auth_file, backup, capability, checkin, config, credit_usage, credits, export_import,
+    migrate, oauth, process, programs, refresh, region::Region, region::RegionFilter, rotate, session, switch, token_stats, trae,
     travel, update,
 };
+// P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
+// ⚠️ 本文件在 `crates/buddy-switch-server/src/api.rs` 有**同款**接线（刻意不去重，见共享知识）。
+use buddy_switch_core::modules::product::{
+    require_capability, require_trae_region, require_wb_region, resolve_scope_param, Product,
+};
+use buddy_switch_core::modules::trae::region::TraeRegion;
+// P9 · 悬浮窗**只读**数据模型 + provider（core）。⚠️ 与桌面窗口模块 `crate::companion`
+// **不是一回事**：前者是跨宿主的只读数据模型，后者是 Tauri 的独立窗口实现。
+use buddy_switch_core::modules::companion as companion_state;
+use buddy_switch_core::modules::proxy;
 use buddy_switch_gateway::{AccountStrategy, GatewayConfig, GatewayStatusView};
 
 use crate::gateway;
@@ -21,6 +31,38 @@ use crate::trae_gateway;
 /// 解析 region 参数，缺省为 `cn`（保证旧行为）。
 fn parse_region(value: Option<&str>) -> Region {
     value.and_then(Region::parse).unwrap_or(Region::Cn)
+}
+
+/// ★ 参数化命令的 Trae 分支：把**区域**映射到该区域的**主程序**变体。
+///
+/// ## 为什么允许这样折叠（只对**区域纯**的命令）
+///
+/// 区域内的两条程序位（`TraeWork` / `TraeCode`）共用**同一本账号库**
+/// （见 `trae::account` 的「区域轴读取」说明：`*_for(variant)` 内部都按 `variant.region()`
+/// 落库）。因此对账号列表 / 备注 / 删除这类**只读区域库**的命令，把 `trae-cn` 折叠到
+/// 主程序 `TraeWork` **不改变结果**。
+///
+/// ## ⚠️ 程序位敏感的命令**不得**走这条路径
+///
+/// OAuth 授权线（`oauth_line()`：TraeWork→SOLO / Trae→TRAE）、打开数据目录、启动客户端、
+/// 签到（按程序位探测）都**按程序位分家**，折叠会把登录态写进错误的客户端 —— 这些命令
+/// **保留 `variant` 参数**，不参与区域折叠（详见 `docs/redesign/P5-ARCH.md` §2.3 的报告）。
+fn trae_variant_of_region(region: TraeRegion) -> trae::variant::TraeVariant {
+    // 显式穷举，不用 `unwrap_or_default()`：回落分支在这里是不可达的（区域只有两个取值），
+    // 显式匹配让「区域 → 主程序」这条约定在代码里可读，也避免引入 fail-open 形态。
+    match region {
+        TraeRegion::Cn => trae::variant::TraeVariant::TraeWork,
+        TraeRegion::Global => trae::variant::TraeVariant::Global,
+    }
+}
+
+/// WorkBuddy 账号列表的**唯一实现**（旧命令 `get_accounts` 与参数化 `accounts_list` 共用）。
+fn wb_accounts_value(region: Region) -> Value {
+    let metas: Vec<Value> = account::load_accounts_for(region)
+        .iter()
+        .map(|a| account::account_meta_for(region, a))
+        .collect();
+    json!({ "region": region, "accounts": metas })
 }
 
 /// 解析 Trae 产品线变体参数，缺省为 [`trae::variant::TraeVariant::default`]（保证旧行为）。
@@ -67,6 +109,8 @@ fn region_installed(region: Region) -> bool {
 /// `/api/switch/progress` 同契约）。事件 `switch-progress` 仍照常派发。
 static SWITCH_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
 static SWITCH_RUNNING: Mutex<bool> = Mutex::new(false);
+/// 进行中的切换操作所属 region —— 供悬浮窗快照推导 / `companion_jump` 聚焦来源用。
+static SWITCH_REGION: Mutex<Option<Region>> = Mutex::new(None);
 
 /// 应用状态（序列化为 **camelCase**，与 server `/api/status` 契约一致）。
 #[derive(Serialize)]
@@ -135,36 +179,442 @@ fn build_app_status(region: Region) -> AppStatus {
 }
 
 /// GET /api/accounts —— 账号列表（account_meta，不含 token；可按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_list`]（带 `scope`）。本命令**保留**
+/// （webui 路由 / `generate_handler!` / 前端 `ALIASES` 表都留着），实现与 [`accounts_list`]
+/// 的 WorkBuddy 分支**共用** [`wb_accounts_value`]，不会漂移。
 #[tauri::command]
 pub fn get_accounts(region: Option<String>) -> Value {
-    let region = parse_region(region.as_deref());
-    let metas: Vec<Value> = account::load_accounts_for(region)
-        .iter()
-        .map(|a| account::account_meta_for(region, a))
-        .collect();
-    json!({ "region": region, "accounts": metas })
+    wb_accounts_value(parse_region(region.as_deref()))
+}
+
+// ---------------------------------------------------------------------------
+// P5 T03 · 参数化命令（`scope` 同时决定平台与区域）
+// ---------------------------------------------------------------------------
+//
+// 命名与语义见 `docs/redesign/P5-ARCH.md` §2.3。本组只覆盖**区域纯且 arity 同构**的命令
+// （账号列表 / 备注 / 删除）：旧命令保留为别名（见 `src/lib/api.ts` 的 `ALIASES`）。
+//
+// ⚠️ **`scope` 是必填维度且 fail-closed**：未知 / 空 / 缺一律 `Err`（[`resolve_scope_param`]），
+// **绝不**回落到任何默认作用域 —— 静默回落会把数据读写到**错误的库**。
+
+/// ★ 参数化命令：账号列表 —— `scope` 同时决定**平台**与**区域**。
+///
+/// 与旧命令的关系：`get_accounts`（WB）与 `get_trae_accounts`（Trae）保留为**别名**，
+/// 三者共用同一份实现：
+/// - WB 分支 → [`wb_accounts_value`]（与 `get_accounts` 逐字同源）；
+/// - Trae 分支 → `trae::handlers::accounts_overview_for`（与 `get_trae_accounts` 同源）。
+///
+/// ## 为什么可以合并（安全性论证）
+///
+/// 本命令是**区域纯**的：Trae 的账号 / 分组 / 冷却全部按 `variant.region()` 落到同一本区域库
+/// （见 [`trae_variant_of_region`]），故 `trae-cn` 折叠到主程序 `TraeWork` **不改变结果**。
+///
+/// ## 为什么返回形状按平台分叉（诚实口径）
+///
+/// 两平台账号视图的**字段不同**（WB `AccountMeta` vs Trae `account_view`），强行统一会丢字段。
+/// 故本命令**按 `scope.product()` 返回各自的**原生形状，由前端的平台专属 wrapper 解读 ——
+/// 这是 §2.3「概念同构但形状不同」的落点，**不是**类型安全的统一契约。
+#[tauri::command]
+pub async fn accounts_list(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => Ok(wb_accounts_value(require_wb_region(scope)?)),
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            tauri::async_runtime::spawn_blocking(move || trae::handlers::accounts_overview_for(variant))
+                .await
+                .map_err(|error| format!("读取 Trae 账号总览失败: {error}"))
+        }
+    }
+}
+
+/// ★ 参数化命令：设置账号备注（**字段级更新**，不触碰 token）。
+///
+/// 合并旧 `set_account_remark`（WB）与 `trae_set_account_remark`（Trae）。**区域纯**
+/// （Trae 侧 `set_remark_for` 按 `variant.region()` 落库）。`remark` 空串 / 缺省 = 清空备注。
+#[tauri::command(rename_all = "camelCase")]
+pub fn account_remark(
+    scope: String,
+    account_id: String,
+    remark: Option<String>,
+) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    match scope.product() {
+        Product::Workbuddy => {
+            account::set_account_remark_for(require_wb_region(scope)?, &account_id, remark.as_deref())
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            // Trae 侧「缺 remark ⇒ 清空」：与 `trae_set_account_remark` 的契约一致（空串即清空）。
+            let remark = remark.unwrap_or_default();
+            trae::handlers::set_remark_for(variant, &account_id, Some(remark.as_str()))
+        }
+    }
+}
+
+/// ★ 参数化命令：删除账号（Trae 侧可选一并删除登录态快照）。
+///
+/// 合并旧 `delete_account`（WB）与 `trae_delete_account`（Trae）。**区域纯**。
+/// ⚠️ WB 侧仍是**硬删除**（软删除 + 回收站属 T01，不在本命令范围）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn account_delete(
+    scope: String,
+    account_id: String,
+    delete_profile: Option<bool>,
+) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    match scope.product() {
+        Product::Workbuddy => {
+            account::delete_account_for(require_wb_region(scope)?, &account_id)?;
+            Ok(json!({ "ok": true }))
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            let delete_profile = delete_profile.unwrap_or(false);
+            tauri::async_runtime::spawn_blocking(move || {
+                trae::handlers::delete_account_for(variant, &account_id, delete_profile)
+            })
+            .await
+            .map_err(|error| format!("删除账号失败: {error}"))?
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 回收站 4 命令（P5 §2.7）—— **全新命令**（非参数化、无别名），全部带 `scope` 且 fail-closed
+// ---------------------------------------------------------------------------
+//
+// 与 `account_delete` 的区别：这四条**不是**旧命令的「参数化替代」，而是回收站功能的新命令，
+// 因此在 `api.ts` 的 `ALIASES` 里**没有**对应旧名。它们**仍**带 `scope`：scope 决定
+// **平台 + 区域**，从而决定读/写哪个 `*.trash.<region>.json`。
+//
+// ⚠️ **fail-closed**（§2.7 硬约束 1）：非法 scope（如 `trae-glboal`）必须 `Err`，
+// **绝不**静默回落到 `cn` 的回收站 —— 否则会出现「删了 A 库账号，却在 B 库回收站里找」。
+// 这由 `resolve_scope_param` + `require_wb_region` / `require_trae_region` 共同保证。
+//
+// ⚠️ 本文件在 `crates/buddy-switch-server/src/api.rs` 有**同款**接线（刻意不去重，见共享知识）。
+
+/// ★ 回收站列表（P5 §2.7）：返回 `{ scope, entries }`，条目按删除时间倒序。
+#[tauri::command(rename_all = "camelCase")]
+pub fn account_trash_list(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => Ok(account::trash_list_value(require_wb_region(scope)?)),
+        Product::Trae => Ok(trae::account::trash_list_value_for_region(require_trae_region(
+            scope,
+        )?)),
+    }
+}
+
+/// ★ 从回收站恢复账号（P5 §2.7）：把记录移回 live（`id` **或** `uid` 谓词）。
+///
+/// `key` 是账号标识：WB 侧 `id` / `uid` 皆可命中；Trae 侧为 `user_id`。
+#[tauri::command(rename_all = "camelCase")]
+pub fn account_restore(scope: String, key: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    if key.trim().is_empty() {
+        return Err("缺少 key".to_string());
+    }
+    match scope.product() {
+        Product::Workbuddy => {
+            account::restore_account_for(require_wb_region(scope)?, &key)?;
+            Ok(json!({ "ok": true }))
+        }
+        Product::Trae => {
+            trae::account::restore_for_region(require_trae_region(scope)?, &key)?;
+            Ok(json!({ "ok": true }))
+        }
+    }
+}
+
+/// ★ 永久删除（purge，**唯一不可逆步**，P5 §2.7）：从回收站真删 + 销毁关联凭据 / 快照。
+///
+/// ⚠️ 前端**必须**先走 danger 二次确认 Dialog；本命令只负责执行（后端不做「确认状态」的假设）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn account_purge(scope: String, key: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    if key.trim().is_empty() {
+        return Err("缺少 key".to_string());
+    }
+    match scope.product() {
+        Product::Workbuddy => {
+            account::purge_account_for(require_wb_region(scope)?, &key)?;
+            Ok(json!({ "ok": true }))
+        }
+        Product::Trae => {
+            trae::account::purge_for_region(require_trae_region(scope)?, &key)?;
+            Ok(json!({ "ok": true }))
+        }
+    }
+}
+
+/// ★ 清空回收站（**不可逆**，P5 §2.7）：返回被删除的条数 `{ ok, removed }`。
+///
+/// ⚠️ 前端**必须**先走 danger 二次确认 Dialog，且**明示将删除的条数**（§2.7 验收 13）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn account_trash_clear(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let removed = match scope.product() {
+        Product::Workbuddy => account::clear_trash_for(require_wb_region(scope)?),
+        Product::Trae => trae::account::clear_trash_for_region(require_trae_region(scope)?),
+    };
+    Ok(json!({ "ok": true, "removed": removed }))
+}
+
+/// ★ 参数化命令：导出账号完整记录（含 token / JWT）—— `scope` 同时决定平台与区域。
+///
+/// 合并旧 `export_accounts`（WB）与 `trae_export_accounts`（Trae）。**区域纯**：两边都只按
+/// 区域读账号库（`export_accounts_for(region, ids)` / `export_accounts_for(variant, ids)`），
+/// **不触碰客户端 / 程序位**，因此可安全折叠到 `scope`。
+///
+/// ## 为什么名字**不**沿用 §2.3 的 `export_accounts`
+///
+/// §2.3 给本行的「参数化后」名字是 `export_accounts`，但它与 **WorkBuddy 旧命令同名** ——
+/// 而 §2.4 硬约束要求「旧命令保留为别名」（`generate_handler!` 不允许重名）。二者冲突时
+/// 保留旧命令、给参数化命令取**不冲突的新名**（与已落地的 `accounts_list` 同款做法）。
+///
+/// 旧命令保留为别名（见 `src/lib/api.ts` 的 `ALIASES`）；本命令是其**同源实现**。
+#[tauri::command(rename_all = "camelCase")]
+pub fn accounts_export(scope: String, account_ids: Vec<String>) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => export_import::export_accounts_for(require_wb_region(scope)?, &account_ids)
+            .map(|records| json!({ "ok": true, "accounts": records })),
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            trae::handlers::export_accounts_for(variant, &account_ids)
+        }
+    }
+}
+
+/// ★ 参数化命令：把勾选账号的完整记录写入指定路径 —— `scope` 同时决定平台与区域。
+///
+/// 合并旧 `export_accounts_to_path`（WB）与 `trae_export_accounts_to_path`（Trae）。**区域纯**。
+/// 名字理由同 [`accounts_export`]（§2.3 的 `export_accounts_to_path` 与 WB 旧命令同名）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn accounts_export_to_path(
+    scope: String,
+    account_ids: Vec<String>,
+    path: String,
+) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => {
+            export_import::export_accounts_to_path_for(require_wb_region(scope)?, &account_ids, &path)
+                .map(|path| json!({ "ok": true, "path": path }))
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            trae::handlers::export_accounts_to_path_for(variant, &account_ids, &path)
+        }
+    }
+}
+
+/// ★ 参数化命令：按选中索引把账号导入该区域账号库 —— `scope` 同时决定平台与区域。
+///
+/// 合并旧 `import_accounts`（WB）与 `trae_import_accounts`（Trae）。**区域纯**：导入只写
+/// 区域账号库，不涉及客户端 / 程序位。名字理由同 [`accounts_export`]。
+#[tauri::command(rename_all = "camelCase")]
+pub fn accounts_import(
+    scope: String,
+    file_text: String,
+    indexes: Vec<usize>,
+) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => {
+            let result = export_import::import_accounts_for(require_wb_region(scope)?, &file_text, &indexes)?;
+            Ok(json!({
+                "ok": true,
+                "imported": result.imported,
+                "skipped": result.skipped,
+                "overwritten": result.overwritten,
+            }))
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            trae::handlers::import_accounts_for(variant, &file_text, &indexes)
+        }
+    }
+}
+
+/// ★ 参数化命令：从本机客户端登录态导入当前账号 —— `scope` 同时决定平台与区域。
+///
+/// 合并旧 `import_local`（WB，读 WorkBuddy 认证文件）与 `trae_import_local_account`
+/// （Trae，读 Trae userData 登录态）。两者都是**区域纯**的：读取**该区域客户端**的登录态
+/// 并写入**该区域**账号库 —— 读哪个客户端由 `scope` 决定，**不**用
+/// `detected_variant` / `detect_data_dir` 猜测活跃客户端。
+///
+/// ## 名字为何**不**沿用 §2.3 的 `import_local`
+///
+/// `import_local` 与 **WorkBuddy 旧命令同名**，与 §2.4「旧命令保留为别名」冲突
+/// （`generate_handler!` 不允许重名）。故取不冲突新名 `accounts_import_local`
+/// （与 [`accounts_import`] / [`accounts_export`] 同族）。旧命令保留为别名
+/// （见 `src/lib/api.ts` 的 `ALIASES`）。
+///
+/// ## 形状按平台分叉（诚实口径）
+///
+/// WB 返回 `{ok, account}`（单账号 `AccountMeta`）；Trae 返回 `{userId, name, accounts}`
+/// （导入账号 + 最新账号视图）。与 [`accounts_list`] 同款落点，由前端平台专属 wrapper 解读。
+///
+/// `async` + `spawn_blocking`：要读客户端认证文件 / userData（**慢 IO**），
+/// 同步命令跑在 Tauri 主线程上会阻塞原生窗口消息循环。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn accounts_import_local(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => {
+            let region = require_wb_region(scope)?;
+            tauri::async_runtime::spawn_blocking(move || {
+                account::import_local_for(region).map(|acc| json!({ "ok": true, "account": acc }))
+            })
+            .await
+            .map_err(|error| format!("导入本机账号失败: {error}"))?
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            tauri::async_runtime::spawn_blocking(move || {
+                trae::handlers::import_local_account_for(variant)
+            })
+            .await
+            .map_err(|error| format!("导入本机账号失败: {error}"))?
+        }
+    }
+}
+
+/// ★ 参数化命令：积分 / 积分总览 —— `scope` 同时决定**平台**与**区域**。
+///
+/// 合并旧 `get_credit_expiry`（WB，单账号积分资源与到期时间）与 `get_trae_credits`
+/// （Trae，区域级积分总览）。两者都是**区域纯**的（只按区域读账号库 / 积分缓存，
+/// 不触碰客户端 / 程序位），故可折叠到 `scope`。
+///
+/// ## 形状按平台分叉（诚实口径）
+///
+/// 两平台返回形状**不同**（WB `CreditExpiry` 单账号 vs Trae `TraeCreditsOverview` 区域总览），
+/// 故**按 `scope.product()` 返回各自原生形状**，由前端平台专属 wrapper 解读
+/// —— 与 [`accounts_list`] 同款落点，不是类型安全的统一契约。
+///
+/// ## `account_id` 仅 WorkBuddy 分支使用
+///
+/// WB 侧是**单账号**查询（旧 `get_credit_expiry(accountId, region)` 的契约），故 WB 分支
+/// **必须**带 `accountId`；Trae 侧是**区域总览**（旧 `get_trae_credits(variant)` 无账号参数），
+/// 故 Trae 分支**忽略** `accountId`。这是两平台原生契约的差异，不是漏参数。
+///
+/// 旧命令保留为别名（见 `src/lib/api.ts` 的 `ALIASES`）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn credits(scope: String, account_id: Option<String>) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => {
+            require_capability(Product::Workbuddy, capability::Capability::Credits)?;
+            let region = require_wb_region(scope)?;
+            let account_id = account_id.unwrap_or_default();
+            let acc = account::find_account_for(region, &account_id).ok_or("账号不存在")?;
+            Ok(credits::get_credit_expiry_for(region, &acc).await)
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            Ok(trae::handlers::credits_overview_for(variant))
+        }
+    }
+}
+
+/// ★ 参数化命令：签到状态 —— `scope` 同时决定**平台**与**区域**。
+///
+/// 合并旧 `get_checkin_status`（WB，单账号签到状态）与 `get_trae_checkin_status`
+/// （Trae，区域级签到摘要 + 冷却明细）。两者都是**区域纯**的（只按区域读账号库 /
+/// 签到缓存，不触碰客户端 / 程序位），故可折叠到 `scope`。
+///
+/// ## 形状按平台分叉（诚实口径）
+///
+/// 与 [`credits`] 同款落点：WB 侧是**单账号**查询（旧 `get_checkin_status(accountId, region)`
+/// 的契约），故 WB 分支**必须**带 `accountId`；Trae 侧是**区域级摘要**
+/// （旧 `get_trae_checkin_status(variant)` 无账号参数），故 Trae 分支**忽略** `accountId`。
+///
+/// ## 与 webui 批量端点的关系（**不要**在这里做批量）
+///
+/// webui 的 `GET /api/checkin/status` 是**整端点批量**（一次查全部账号，见 `api.ts` 的
+/// `getCheckinStatusMap` 文档）；本命令**不做批量** —— 桌面端逐账号调用，webui 仍走那条
+/// 批量旧路由。两端语义差异由前端 `getCheckinStatus` 收口，本命令只对齐**桌面端单账号**
+/// 契约（与旧 `get_checkin_status` 逐字一致）。
+///
+/// 旧命令保留为别名（见 `src/lib/api.ts` 的 `ALIASES`）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn checkin_status(scope: String, account_id: Option<String>) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => {
+            let region = require_wb_region(scope)?;
+            let account_id = account_id.unwrap_or_default();
+            let acc = account::find_account_for(region, &account_id).ok_or("账号不存在")?;
+            Ok(checkin::get_checkin_status_for(region, &acc).await)
+        }
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            Ok(trae::handlers::checkin_status_for(variant))
+        }
+    }
+}
+
+/// ★ 参数化命令：在系统文件管理器中打开**该作用域客户端**的数据目录 —— `scope` 同时决定
+/// 平台与区域。
+///
+/// 合并旧 `open_workbuddy_data_dir`（WB）与 `open_trae_data_dir`（Trae）。两平台**同形**
+/// （都收一个作用域参数，返回 `{ok,path}` 或结构化 `Unsupported`）。
+///
+/// ## 判据说明（为何算「区域纯」）
+///
+/// 本命令**只读**客户端数据目录的**路径**并交给文件管理器打开，**不写**任何程序位状态
+/// —— 与「会关 / 重启客户端进程」的 `switch_account` 类命令不同。目录由 `scope` 决定，
+/// **不**用 `detected_variant` / `detect_data_dir` 猜测活跃客户端。
+///
+/// 旧命令保留为别名（见 `src/lib/api.ts` 的 `ALIASES`）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_data_dir(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    match scope.product() {
+        Product::Workbuddy => capability::open_workbuddy_data_dir(require_wb_region(scope)?),
+        Product::Trae => {
+            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            trae::handlers::open_data_dir(variant)
+        }
+    }
 }
 
 /// GET /api/codebuddy-cli/status —— CodeBuddy CLI helper 轮换状态（不含 token）。
+///
+/// **表驱动**：本体是 `programs::status("codebuddy_cli")`（见 core `modules/programs.rs`）。
+/// 命令只负责「宿主异步 + 错误包装」，不再硬编码具体模块函数 —— 新增程序位无需改本文件。
 ///
 /// async + spawn_blocking：状态检测可能执行 ps / helper 定位等子进程，
 /// 避免在账号页挂载刷新时阻塞主线程造成页面卡顿。
 #[tauri::command]
 pub async fn get_codebuddy_cli_status() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(codebuddy_cli::status)
+    tauri::async_runtime::spawn_blocking(|| programs::status("codebuddy_cli"))
         .await
-        .map_err(|error| format!("查询 CodeBuddy CLI 状态失败: {error}"))
+        .map_err(|error| format!("查询 CodeBuddy CLI 状态失败: {error}"))?
 }
 
 /// POST /api/codebuddy-cli/install-helper —— 显式安装/升级 CLI helper。
+///
+/// **表驱动**：`programs::install_helper("codebuddy_cli")`。
 #[tauri::command]
 pub async fn install_codebuddy_cli_helper() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(codebuddy_cli::install_helper)
+    tauri::async_runtime::spawn_blocking(|| programs::install_helper("codebuddy_cli"))
         .await
         .map_err(|e| e.to_string())?
 }
 
 /// POST /api/codebuddy-cli/switch —— 只切换 CodeBuddy CLI，不重启 WorkBuddy。
+///
+/// **表驱动**：`programs::switch("codebuddy_cli", …)`（CLI 不重启客户端 ⇒ `restart` 传 `None`）。
 ///
 /// async + spawn_blocking：切换会用登录 shell 定位 node 并执行 apiKeyHelper
 /// 校验账号（子进程无超时），同步 command 会阻塞主线程造成 UI 卡顿。
@@ -173,23 +623,30 @@ pub async fn switch_codebuddy_cli_account(account_id: String) -> Result<Value, S
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
-    tauri::async_runtime::spawn_blocking(move || codebuddy_cli::set_active_account(&account_id))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        programs::switch("codebuddy_cli", &account_id, None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// GET /api/codebuddy-cn-ide/status —— CodeBuddy IDE 安装/运行/当前账号。
+///
+/// **表驱动**：`programs::status("codebuddy_cn_ide")`。
 ///
 /// async + spawn_blocking：状态检测会跑 ps / mdfind 等子进程（mdfind 可能
 /// 耗时数秒），账号页每次挂载都会刷新，若在主线程执行会造成页面卡顿。
 #[tauri::command]
 pub async fn get_codebuddy_cn_ide_status() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(codebuddy_cn_ide::status)
+    tauri::async_runtime::spawn_blocking(|| programs::status("codebuddy_cn_ide"))
         .await
-        .map_err(|error| format!("查询 CodeBuddy IDE 状态失败: {error}"))
+        .map_err(|error| format!("查询 CodeBuddy IDE 状态失败: {error}"))?
 }
 
 /// POST /api/codebuddy-cn-ide/switch —— 注入凭证并可选重启 CodeBuddy CN IDE。
+///
+/// **表驱动**：`programs::switch("codebuddy_cn_ide", …)`（IDE 切换默认重启 ⇒ `restart` 缺省即 `true`，
+/// 由 adapter 归一，见 core `programs.rs`）。
 ///
 /// async + spawn_blocking：切换会关闭并重启 CodeBuddy CN，可能阻塞数十秒，
 /// 与 WorkBuddy 切换同理，若在同步 command（主线程）执行会卡死整个 UI。
@@ -202,7 +659,7 @@ pub async fn switch_codebuddy_cn_ide_account(
         return Err("缺少 accountId".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        codebuddy_cn_ide::switch_account(&account_id, restart.unwrap_or(true))
+        programs::switch("codebuddy_cn_ide", &account_id, restart)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -210,16 +667,22 @@ pub async fn switch_codebuddy_cn_ide_account(
 
 /// POST /api/codebuddy-cn-ide/detect —— 读取本机 CN IDE 当前登录并尝试匹配账号库。
 ///
+/// **表驱动**：`programs::detect("codebuddy_cn_ide")`。
+///
 /// async + spawn_blocking：会通过 Keychain/secret 读取子进程，避免阻塞主线程。
 #[tauri::command]
 pub async fn detect_codebuddy_cn_ide_account() -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(codebuddy_cn_ide::detect_current_account)
+    tauri::async_runtime::spawn_blocking(|| programs::detect("codebuddy_cn_ide"))
         .await
         .map_err(|e| e.to_string())?
 }
 
 
 /// POST /api/delete —— 删除账号（按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`account_delete`]（带 `scope`）。本命令保留
+/// （webui 路由 / `generate_handler!` / 前端 `ALIASES` 表），是 [`account_delete`] 的
+/// WorkBuddy 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_account(account_id: String, region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
@@ -230,6 +693,10 @@ pub fn delete_account(account_id: String, region: Option<String>) -> Result<Valu
 /// POST /api/account/remark —— 设置账号备注（**字段级更新**，不触碰 token）。
 ///
 /// 同步 command 即可：只读一个小 JSON、改一个键、原子写回。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`account_remark`]（带 `scope`）。本命令保留
+/// （webui 路由 / `generate_handler!` / 前端 `ALIASES` 表），是 [`account_remark`] 的
+/// WorkBuddy 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_account_remark(
     account_id: String,
@@ -246,6 +713,7 @@ pub fn set_account_remark(
 /// POST /api/oauth/start —— 发起 OAuth 扫码登录（按 region）。
 #[tauri::command]
 pub async fn oauth_start(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::Oauth)?;
     let region = parse_region(region.as_deref());
     oauth::oauth_start_for(region).await
 }
@@ -258,6 +726,10 @@ pub async fn oauth_status(login_id: String, region: Option<String>) -> Value {
 }
 
 /// POST /api/import-local —— 导入本机当前账号（按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_import_local`]（带 `scope`）。
+/// 本命令保留（webui 路由 / `generate_handler!` / 前端 `ALIASES` 表），是
+/// [`accounts_import_local`] 的 WorkBuddy 分支同源实现。
 ///
 /// `async` + `spawn_blocking`：本命令要读客户端认证文件（**慢 IO**），
 /// 同步命令跑在 Tauri **主线程**上，会阻塞原生窗口消息循环（判据见 `get_status` 的注释）。
@@ -276,6 +748,10 @@ pub async fn import_local(region: Option<String>) -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 
 /// POST /api/export-accounts —— 按账号 id 列表导出完整记录（含 token，按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_export`]（带 `scope`）。本命令保留
+/// （webui 路由 / `generate_handler!` / 前端 `ALIASES` 表），是 [`accounts_export`] 的
+/// WorkBuddy 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn export_accounts(account_ids: Vec<String>, region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
@@ -284,6 +760,9 @@ pub fn export_accounts(account_ids: Vec<String>, region: Option<String>) -> Resu
 }
 
 /// POST /api/export-accounts-to-path —— 把勾选账号的完整记录写入用户选择的路径（保存对话框产物，按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_export_to_path`]（带 `scope`）。本命令保留，
+/// 是 [`accounts_export_to_path`] 的 WorkBuddy 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn export_accounts_to_path(
     account_ids: Vec<String>,
@@ -305,6 +784,9 @@ pub fn preview_import_accounts(file_text: String, _region: Option<String>) -> Re
 }
 
 /// POST /api/import —— 按选中索引把账号导入该 region 账号库，返回导入/跳过/覆盖计数。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_import`]（带 `scope`）。本命令保留，
+/// 是 [`accounts_import`] 的 WorkBuddy 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn import_accounts(
     file_text: String,
@@ -319,6 +801,72 @@ pub fn import_accounts(
         "skipped": result.skipped,
         "overwritten": result.overwritten,
     }))
+}
+
+/// ★ P7 T01：导出**全局备份** envelope（跨全部 4 作用域的账号 / 配置 / 网关）。
+///
+/// `selection` 是前端组装的勾选对象（`{ scopes, includesCredentials, appSettings }`）。
+/// 后端遍历 `SCOPES` 组装；`includesCredentials=false` 时按 `CREDENTIAL_KEYS` 逐条剥离
+/// 凭据（**备份文件里不得含凭据**）。
+///
+/// ⚠️ 与 `crates/buddy-switch-server/src/api.rs::api_export_backup` 是**同款接线**
+/// （刻意不去重，见 P7 共享知识）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn export_backup(selection: Value) -> Result<Value, String> {
+    let selection: backup::BackupSelection = serde_json::from_value(selection)
+        .map_err(|error| format!("导出参数不合法：{error}"))?;
+    backup::export_backup(&selection)
+}
+
+/// ★ P7 T02：导入**预览**（**只读安全阀**）—— 逐 scope 计数 + 需重新登录数 + 覆盖配置项。
+///
+/// `policy` 是冲突策略字符串（`keepLocal` / `overwrite` / `keepBoth`；空 ⇒ 默认保留本地）。
+/// **不写盘**：预览不得改动任何本地数据（`backup::preview_import_backup` 只 dry-run）。
+///
+/// ⚠️ 与 `crates/buddy-switch-server/src/api.rs::api_preview_import_backup` 是**同款接线**
+/// （刻意不去重，见 P7 共享知识）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn preview_import_backup(file_text: String, policy: String) -> Result<Value, String> {
+    let policy = export_import::ConflictPolicy::parse(&policy)?;
+    backup::preview_import_backup(&file_text, policy)
+}
+
+/// ★ P7 T02：导入全局备份（**先快照** → 逐 scope 合并 → 汇总，含失败 / 可重试）。
+///
+/// `selection` 与导出同形（`{ scopes, includesCredentials }`）；缺省 ⇒ 全选（D14）。
+/// 冲突策略默认**保留本地**（D16）⇒ 连导两次第二次全「跳过」（幂等）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn import_backup(file_text: String, policy: String, selection: Value) -> Result<Value, String> {
+    let policy = export_import::ConflictPolicy::parse(&policy)?;
+    let selection: backup::BackupSelection = serde_json::from_value(selection)
+        .map_err(|error| format!("导入参数不合法：{error}"))?;
+    backup::import_backup(&file_text, policy, &selection)
+}
+
+/// P7 T02：列出自动备份 / 导入前快照（最新在前）。
+#[tauri::command]
+pub fn list_auto_backups() -> Result<Value, String> {
+    backup::list_auto_backups()
+}
+
+/// P7 T02：从自动备份 / 导入前快照**恢复**（覆盖策略；恢复本身也可撤销）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn restore_auto_backup(file_name: String) -> Result<Value, String> {
+    backup::restore_auto_backup(&file_name)
+}
+
+/// P7 T02：读取自动备份配置（**默认开**，可在设置里关掉，§7 #7）。
+#[tauri::command]
+pub fn get_auto_backup_config() -> Result<Value, String> {
+    Ok(config::load_auto_backup_config())
+}
+
+/// P7 T02：保存自动备份配置（关掉后后台任务不再产生新备份，**已产生的保留**）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn save_auto_backup_config(config: Value) -> Result<Value, String> {
+    config::save_auto_backup_config(&config)
+        .map_err(|error| format!("保存自动备份配置失败：{error}"))?;
+    Ok(config::load_auto_backup_config())
 }
 
 /// 打开系统设置授权面板。默认「完全磁盘访问」（该 anchor 各版本均有效）；
@@ -454,6 +1002,7 @@ pub async fn switch_account(
         }
         *running = true;
         *SWITCH_PROGRESS.lock().unwrap() = Some("开始切换账号…".to_string());
+        *SWITCH_REGION.lock().unwrap() = Some(region);
     }
 
     let progress: switch::ProgressFn = Box::new(move |message| {
@@ -473,6 +1022,7 @@ pub async fn switch_account(
     .await;
 
     *SWITCH_RUNNING.lock().unwrap() = false;
+    *SWITCH_REGION.lock().unwrap() = None;
 
     result.map_err(|e| e.to_string())?
 }
@@ -495,6 +1045,7 @@ pub fn switch_progress() -> Value {
 /// `projects` 目录，更慢），不能跑在 Tauri 主线程上。
 #[tauri::command]
 pub async fn list_sessions(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
     tauri::async_runtime::spawn_blocking(move || match session::current_user_uid_for(region) {
         Some(uid) => {
@@ -510,6 +1061,57 @@ pub async fn list_sessions(region: Option<String>) -> Result<Value, String> {
     })
     .await
     .map_err(|error| format!("读取会话列表失败: {error}"))
+}
+
+/// GET /api/sessions/replicas —— 只读：把 copy ledger 连通成「会话副本组」（按 region）。
+///
+/// ★ 数据源是**内部去重账本**（`session.rs:928`），P8 把它提升为「副本归属」的产品语义
+/// ⇒ 只有**只读**命令，**不改 ledger 结构、不新增模型**。**只读当前 region** 的账本
+/// （P8 ✅ #2）。
+///
+/// ⚠️ **只回 ledger 里确有的字段**（`accountUid` / `sessionId` / `region`）；
+/// `title` / `updatedAt` / `hasHistory` 由**前端**用 `list_sessions` / 账号 store join 补齐
+/// —— 后端**不臆造**（`P8-ARCH.md` §3.1 注）。
+///
+/// `async` + `spawn_blocking`：读账本文件是磁盘 IO，不跑在 Tauri 主线程上（与 `list_sessions`
+/// 同款处理）。
+#[tauri::command]
+pub async fn list_session_replicas(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || session::list_replica_groups_for(region))
+        .await
+        .map_err(|error| format!("读取会话副本失败: {error}"))
+}
+
+/// POST /api/sessions/fingerprints —— **会话内容指纹**（P8「组状态派生」的数据源）。
+///
+/// 返回 `{ [sessionId]: SessionFingerprint | null }`；取不到的为 `null`（**不臆造**）。
+///
+/// 用途：算两副本的**公共前缀**（= 共同旧版）与各自的增量 —— 这是**内容级**判据。
+/// ⚠️ **不许用 `updatedAt` 冒充「落后 / 最新」**（`P8-ARCH.md` §1.2：「时间新 ≠ 内容新」）。
+///
+/// `async` + `spawn_blocking`：读 jsonl 是磁盘 IO，不跑在 Tauri 主线程上（与 `list_sessions` 同款）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn session_fingerprints(
+    session_ids: Vec<String>,
+    region: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = serde_json::Map::new();
+        for cid in session_ids {
+            let fingerprint = session::session_fingerprint_for(region, &cid);
+            out.insert(
+                cid,
+                serde_json::to_value(fingerprint).unwrap_or(Value::Null),
+            );
+        }
+        Value::Object(out)
+    })
+    .await
+    .map_err(|error| format!("读取会话指纹失败: {error}"))
 }
 
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B，按 region）。
@@ -620,6 +1222,15 @@ pub async fn migrate_account_data(
 // ---------------------------------------------------------------------------
 
 /// GET /api/checkin/status —— 查询单账号签到状态（按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`checkin_status`]（带 `scope`）。本命令保留
+/// （webui 路由 / `generate_handler!` / 前端 `ALIASES` 表），是 [`checkin_status`] 的
+/// WorkBuddy 分支同源实现。
+///
+/// ⚠️ **桌面端单账号 vs webui 批量**：本命令（桌面端）是单账号的；同路径的 webui
+/// `GET /api/checkin/status` 却是**整端点批量**（见 `api.rs::api_checkin_status`）。这条
+/// 通道差异**刻意保留**（批量在 webui 是性能优化，B7），参数化命令 [`checkin_status`]
+/// 只对齐桌面端语义。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_checkin_status(account_id: String, region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
@@ -628,8 +1239,13 @@ pub async fn get_checkin_status(account_id: String, region: Option<String>) -> R
 }
 
 /// POST /api/credits —— 查询单账号积分资源及到期时间（按 region）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`credits`]（带 `scope`）。本命令保留
+/// （webui 路由 / `generate_handler!` / 前端 `ALIASES` 表），是 [`credits`] 的
+/// WorkBuddy 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_credit_expiry(account_id: String, region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::Credits)?;
     let region = parse_region(region.as_deref());
     let acc = account::find_account_for(region, &account_id).ok_or("账号不存在")?;
     Ok(credits::get_credit_expiry_for(region, &acc).await)
@@ -654,6 +1270,7 @@ pub async fn get_token_statistics(days: Option<i64>, region: Option<String>) -> 
 /// POST /api/checkin —— 单账号立即签到（按 region）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn checkin(account_id: String, region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::Checkin)?;
     let region = parse_region(region.as_deref());
     let acc = account::find_account_for(region, &account_id).ok_or("账号不存在")?;
     Ok(checkin::checkin_account_for(region, &acc).await)
@@ -692,6 +1309,7 @@ pub fn get_checkin_logs() -> Value {
 /// GET /api/travel/status —— 查询单账号今日旅行状态标签。
 #[tauri::command]
 pub async fn get_travel_status(account_id: String) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::Travel)?;
     account::find_account(&account_id).ok_or("账号不存在")?;
     travel::reconcile_due_travel(Some(account_id.as_str())).await;
     Ok(travel::travel_display(&account_id))
@@ -1087,6 +1705,7 @@ pub fn get_gateway_config() -> Value {
 /// POST /api/gateway/config —— 保存配置并应用（启动/重启独立监听）。
 #[tauri::command]
 pub async fn save_gateway_config(app: tauri::AppHandle, config: Value) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::Gateway)?;
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: GatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
@@ -1105,6 +1724,32 @@ pub async fn save_gateway_config(app: tauri::AppHandle, config: Value) -> Result
         "running": addr.is_some(),
         "addr": addr,
     }))
+}
+
+/// GET /api/proxy/status —— P12 C 路（base URL 重定向）的**只读状态**。
+///
+/// ⚠️ 只反映**本地标记**（用户是否按引导设过），**应用不校验代理是否真的生效**
+/// （`proxy::status_view()` 里 `verified` 恒为 `false`）。C 路**不做中间人、不碰 TLS**。
+#[tauri::command]
+pub fn proxy_status() -> Value {
+    proxy::status_view()
+}
+
+/// POST /api/proxy/enable —— 记下「用户已按引导设置」的本地标记。
+///
+/// ⚠️ **不改任何系统设置** —— T02 定的是**引导式**：应用只**显示**要设的 env，
+/// 由**用户手动设置**。这是「绝不劫持」（D29）的延伸：**不碰 hosts / DNS / 用户环境**。
+#[tauri::command]
+pub fn proxy_enable() -> Result<Value, String> {
+    proxy::set_enabled(true)?;
+    Ok(proxy::status_view())
+}
+
+/// POST /api/proxy/disable —— **一键还原**：清标记（**删文件，不留残留**）。
+#[tauri::command]
+pub fn proxy_disable() -> Result<Value, String> {
+    proxy::set_enabled(false)?;
+    Ok(proxy::status_view())
 }
 
 /// GET /api/gateway/status —— 运行状态。
@@ -1152,6 +1797,9 @@ pub fn gateway_status(app: tauri::AppHandle) -> Value {
 
 /// POST /api/gateway/open-data-dir —— 打开 **WorkBuddy 客户端**的数据目录（`{region?}`）。
 ///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`open_data_dir`]（带 `scope`）。本命令保留，
+/// 是 [`open_data_dir`] 的 WorkBuddy 分支同源实现。
+///
 /// 与 Trae 侧的 `open_trae_data_dir` 同形：形状（`{ok,path}` 或结构化 `Unsupported`）
 /// 由 `capability::open_workbuddy_data_dir` 唯一产出，前端用同一段分支渲染。
 #[tauri::command]
@@ -1167,16 +1815,43 @@ pub fn list_api_keys() -> Value {
     json!({ "keys": keys })
 }
 
-/// POST /api/gateway/keys —— 创建 Key（返回一次性明文）。
-#[tauri::command]
-pub fn create_api_key(name: Option<String>, region: Option<String>) -> Value {
+/// ★ 后台探测某 region 的模型目录（「接入即识别」与「启动补识别」的**共用出口**）。
+///
+/// 复用 [`buddy_switch_gateway::catalog_probe::probe_region`]（全仓**唯一**探测入口）：
+/// 它内部用**该 region 自己的凭据**（`strategy_for(region)` + `AccountSelector`，
+/// 后者已按 region 校验）⇒ **不可能**用别的 region 的凭据写本 region 的清单
+/// （安全边界 §3.17.5 / §2.5）。
+///
+/// 失败**静默**：探测只是「顺手把清单变新」，绝不该让接入 / 启动失败
+/// （P10 §3.17.1 规则 3）。成功 / 失败都会写进 `CatalogStore`，由来源条如实展示
+/// （失败时由 `CatalogStore::refresh` 写**具体原因**进 `note`）。
+async fn probe_catalog(region: Region) {
     let state = gateway::shared_state();
+    let _ = buddy_switch_gateway::catalog_probe::probe_region(&state, region).await;
+}
+
+/// POST /api/gateway/keys —— 创建 Key（返回一次性明文）。
+///
+/// ★ **接入即识别**（P10 §1.6 / ✅ #6）：创建 Key 即用户认知里的「接入」动作
+/// （「我要让某工具连上这个网关」）⇒ 创建成功后**后台探测**该 region，
+/// 用户无需手动点「重新识别」就能看到模型清单。
+///
+/// ⚠️ **fire-and-forget**：探测在**独立任务**里跑，本命令**立即返回**；
+/// 探测失败**不得阻断接入**（§3.17.1 规则 3）。
+/// ⚠️ 桌面端必须用 `tauri::async_runtime::spawn`（**不是** `tokio::spawn`）——
+/// 见本文件既有的同款用法说明（同步命令 / 无 tokio 上下文时 `tokio::spawn` 会 panic）。
+#[tauri::command]
+pub async fn create_api_key(name: Option<String>, region: Option<String>) -> Value {
     let region = parse_region(region.as_deref());
     let name = name
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "未命名".to_string());
-    let (record, plaintext) = state.keys.create(name, region);
+    let (record, plaintext) = gateway::shared_state().keys.create(name, region);
+    // 顺序不可颠倒：先落 Key、再触发探测 —— 探测失败也绝不能影响「Key 已创建」这个事实。
+    tauri::async_runtime::spawn(async move {
+        probe_catalog(region).await;
+    });
     json!({ "ok": true, "key": plaintext, "record": record.masked() })
 }
 
@@ -1249,6 +1924,58 @@ pub async fn save_account_strategy(region: Option<String>, strategy: Value) -> R
         buddy_switch_gateway::account_strategy::save_strategies(&strategies)?;
     }
     Ok(json!({ "ok": true }))
+}
+
+/// GET /api/gateway/disabled-models —— 某 region 被用户禁用的模型 id 列表（P11）。
+///
+/// ## 为什么这条命令**不区分** WB / Trae 网关
+///
+/// 禁用存储是**进程内唯一**实例（[`buddy_switch_gateway::disabled_models::shared`]），
+/// WB 网关（`/v1/models` + `/v1/chat/completions`）、Trae 网关与命令面读的是**同一个 `Arc`**。
+/// 因此这里读到的就是两个出口此刻真正在用的那份 —— 不是「命令写一份、网关读另一份」的假开关。
+///
+/// 形状 `{ "region": …, "ids": [ … ] }`：`ids` 是该 region 被禁用的模型 id 集合
+/// （`BTreeSet` ⇒ 稳定有序，前端可直接比对）。
+#[tauri::command]
+pub async fn get_disabled_models(region: Option<String>) -> Value {
+    let region = parse_region(region.as_deref());
+    let store = buddy_switch_gateway::disabled_models::shared();
+    let disabled = store.read().await;
+    let ids: Vec<String> = disabled.get(region).iter().cloned().collect();
+    json!({ "region": region.as_str(), "ids": ids })
+}
+
+/// POST /api/gateway/disabled-models —— 置位 / 清位某 region 的一个模型（P11）。
+///
+/// ## 为什么返回 `changed`
+///
+/// `DisabledModels::set` 是**幂等**的：重复禁用 / 重复启用不改动集合，也就**不必落盘**
+/// （省一次磁盘写）。返回 `changed` 让前端能区分「真的改了」与「本来就如此」。
+/// 空白 `model_id` 被 `set` 拒绝 ⇒ `changed: false`（不写脏数据）。
+#[tauri::command]
+pub async fn set_model_disabled(
+    region: Option<String>,
+    model_id: String,
+    disabled: bool,
+) -> Result<Value, String> {
+    let region = parse_region(region.as_deref());
+    let store = buddy_switch_gateway::disabled_models::shared();
+    let changed = {
+        let mut guard = store.write().await;
+        let changed = guard.set(region, &model_id, disabled);
+        // 只在**真的变了**时落盘；写失败必须回传（否则用户以为禁用了、重启后又出现）。
+        if changed {
+            guard.save()?;
+        }
+        changed
+    };
+    Ok(json!({
+        "ok": true,
+        "region": region.as_str(),
+        "model_id": model_id.trim(),
+        "disabled": disabled,
+        "changed": changed,
+    }))
 }
 
 /// GET /api/gateway/logs —— 最近 N 条请求日志（元数据）。
@@ -1340,12 +2067,18 @@ pub async fn get_trae_accounts(variant: Option<String>) -> Result<Value, String>
 }
 
 /// GET /api/trae/checkin/status —— 最近一次签到摘要与冷却明细。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`checkin_status`]（带 `scope`）。本命令保留，
+/// 是 [`checkin_status`] 的 Trae 分支同源实现（`variant` 先按**区域**折叠成 `scope`）。
 #[tauri::command]
 pub fn get_trae_checkin_status(variant: Option<String>) -> Value {
     trae::handlers::checkin_status_for(parse_trae_variant(variant.as_deref()))
 }
 
 /// GET /api/trae/credits —— 剩余积分、明细、每日趋势。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`credits`]（带 `scope`）。本命令保留，
+/// 是 [`credits`] 的 Trae 分支同源实现（`variant` 先按**区域**折叠成 `scope`）。
 #[tauri::command]
 pub fn get_trae_credits(variant: Option<String>) -> Value {
     trae::handlers::credits_overview_for(parse_trae_variant(variant.as_deref()))
@@ -1444,6 +2177,9 @@ pub fn trae_update_account(
 ///
 /// `remark` 是**字符串**而不是 `Option`：空串（或全空白）就是「清空备注」，
 /// 后端据此删掉账号库里的 `remark` 键。语义细节见 `account::set_remark_for`。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`account_remark`]（带 `scope`）。本命令保留，
+/// 是 [`account_remark`] 的 Trae 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn trae_set_account_remark(
     user_id: String,
@@ -1455,6 +2191,9 @@ pub fn trae_set_account_remark(
 }
 
 /// POST /api/trae/accounts/delete —— 删除账号（可选一并删除登录态快照）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`account_delete`]（带 `scope`）。本命令保留，
+/// 是 [`account_delete`] 的 Trae 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn trae_delete_account(
     user_id: String,
@@ -1471,6 +2210,9 @@ pub async fn trae_delete_account(
 }
 
 /// POST /api/trae/accounts/import-local —— 从 Trae 客户端登录态导入当前账号。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_import_local`]（带 `scope`）。本命令
+/// 保留，是 [`accounts_import_local`] 的 Trae 分支同源实现（`variant` 先按**区域**折叠成 `scope`）。
 ///
 /// `variant` 为可选产品线（`"trae_work"` / `"trae_cn"`，也接受 `TRAE SOLO CN`
 /// 之类的目录名）：决定读哪条产品线的 userData。**缺失时回落默认变体**，
@@ -1493,6 +2235,7 @@ pub async fn trae_import_local_account(variant: Option<String>) -> Result<Value,
 /// 命令名不变，仅新增参数。
 #[tauri::command]
 pub async fn trae_oauth_start(variant: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Trae, capability::Capability::Oauth)?;
     trae::handlers::oauth_login_start_for(parse_trae_variant(variant.as_deref())).await
 }
 
@@ -1513,12 +2256,18 @@ pub fn trae_oauth_cancel(login_id: String) -> Value {
 }
 
 /// POST /api/trae/accounts/export —— 按 userId 列表导出完整记录（含 JWT）。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_export`]（带 `scope`）。本命令保留，
+/// 是 [`accounts_export`] 的 Trae 分支同源实现（`variant` 决定读哪个区域库）。
 #[tauri::command(rename_all = "camelCase")]
 pub fn trae_export_accounts(user_ids: Vec<String>, variant: Option<String>) -> Result<Value, String> {
     trae::handlers::export_accounts_for(parse_trae_variant(variant.as_deref()), &user_ids)
 }
 
 /// POST /api/trae/accounts/export-to-path —— 写入用户选择的路径，返回落地路径。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_export_to_path`]（带 `scope`）。本命令保留，
+/// 是 [`accounts_export_to_path`] 的 Trae 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn trae_export_accounts_to_path(
     user_ids: Vec<String>,
@@ -1535,6 +2284,9 @@ pub fn trae_preview_import_accounts(file_text: String) -> Result<Value, String> 
 }
 
 /// POST /api/trae/accounts/import —— 按选中索引导入，返回计数与最新账号视图。
+///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`accounts_import`]（带 `scope`）。本命令保留，
+/// 是 [`accounts_import`] 的 Trae 分支同源实现。
 #[tauri::command(rename_all = "camelCase")]
 pub fn trae_import_accounts(
     file_text: String,
@@ -1556,6 +2308,7 @@ pub fn trae_group_op(action: String, params: Value, variant: Option<String>) -> 
 /// [`trae::handlers::parse_checkin_options`]），因此本命令无需单独的 `variant` 参数。
 #[tauri::command]
 pub async fn trae_checkin(app: tauri::AppHandle, options: Option<Value>) -> Result<Value, String> {
+    require_capability(Product::Trae, capability::Capability::Checkin)?;
     let options = options.unwrap_or_else(|| json!({}));
     let parsed = trae::handlers::parse_checkin_options(&options)?;
     let report = trae::checkin::run_checkin(parsed, move |event| {
@@ -1573,6 +2326,7 @@ pub async fn trae_refresh_credits(
     user_id: Option<String>,
     variant: Option<String>,
 ) -> Result<Value, String> {
+    require_capability(Product::Trae, capability::Capability::Credits)?;
     let variant = parse_trae_variant(variant.as_deref());
     trae::handlers::refresh_credits_for(variant, user_id.as_deref()).await
 }
@@ -1692,6 +2446,7 @@ pub async fn save_trae_gateway_config(
     app: tauri::AppHandle,
     config: Value,
 ) -> Result<Value, String> {
+    require_capability(Product::Trae, capability::Capability::Gateway)?;
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: buddy_switch_gateway::trae::TraeGatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
@@ -1742,7 +2497,21 @@ pub async fn trae_gateway_status(app: tauri::AppHandle, variant: Option<String>)
 #[tauri::command]
 pub fn get_trae_gateway_models(variant: Option<String>) -> Value {
     let variant = parse_trae_variant(variant.as_deref());
-    buddy_switch_gateway::trae::payload::models_response_for(variant)
+    // ★ 出口 ①（P11）：与 Trae 网关本体（`trae/routes.rs`）读**同一份** `disabled`，
+    //   按 `region_of_variant` 键控 —— 否则「管理面看到的清单」与「网关实际暴露的清单」会不一致。
+    //
+    //   本命令是**同步**的（读客户端 SQLite 属磁盘 IO，见本文件头部约定），故用 `try_read`
+    //   （与 `gateway_status` 读 `last_error` 同款）。拿不到读锁时回落**空集**（= 默认全开，D27）：
+    //   这只影响管理面的瞬时显示，网关真正的出口 ①（`/v1/models`）走 async `.read().await`，不受此影响。
+    let disabled = buddy_switch_gateway::disabled_models::shared()
+        .try_read()
+        .map(|guard| {
+            guard
+                .get(buddy_switch_gateway::trae::region_of_variant(variant))
+                .clone()
+        })
+        .unwrap_or_default();
+    buddy_switch_gateway::trae::payload::models_response_for(variant, &disabled)
 }
 
 /// GET /api/trae/gateway/client-models —— 客户端（**上游下发**）的模型清单。
@@ -1816,6 +2585,9 @@ pub fn delete_trae_api_key(id: String) -> Result<Value, String> {
 
 /// POST /api/trae/open-data-dir —— 打开 Trae 数据目录（`{variant?}`）。
 ///
+/// ⚠️ **别名**：P5 T03 起前端改调参数化命令 [`open_data_dir`]（带 `scope`）。本命令保留，
+/// 是 [`open_data_dir`] 的 Trae 分支同源实现（`variant` 先按**区域**折叠成 `scope`）。
+///
 /// 形状（`{ok,path}` 或结构化 `Unsupported`）由 `handlers::open_data_dir` 唯一产出。
 #[tauri::command]
 pub fn open_trae_data_dir(variant: Option<String>) -> Result<Value, String> {
@@ -1845,6 +2617,127 @@ pub fn clear_trae_gateway_logs() -> Value {
     let state = trae_gateway::shared_state();
     state.log.clear();
     json!({ "ok": true })
+}
+
+// ---------------------------------------------------------------------------
+// 桌面悬浮窗（P9 · T02 只读数据层）
+// ---------------------------------------------------------------------------
+//
+// ★ 只读红线（`PLAN §3.16`「不做的」）：命令面**只有**读 / 显隐 / 聚焦，
+//   **绝不含任何写操作**（账号切换 / 批量 / 删除 / 导出 / 禁用模型 / 置顶…）。
+//   门禁 `scripts/check-scope-registry.cjs` 的「只读红线」条会逐条扫本段命令体。
+//
+// ★ 刷新**全在前端 webview**（`src/lib/companion.ts` 的 20s 轮询 + 既有事件订阅）
+//   ⇒ 本段**不新增任何 Rust 后台循环**，不触碰 `lib.rs` 的 `BackgroundTask` 注册表
+//   （把「任务未登记 ⇒ 永不执行」的风险归零，P9 §1.3 / R9）。
+
+/// 悬浮窗快照的 provider（**只读**，P9 §1.3）。
+///
+/// ## 本期数据源范围（P9 ✅ #2：只做「已有数据源」的来源）
+///
+/// 只接由**现有**进度状态（`switch-progress`）推导出的「进行中操作」。跨来源客户端
+/// （Codex / CodeBuddy 等）与 P8 会话工作台**不在本期** —— 这里**预留**与 P8 同源的
+/// 接口（[`companion_state::LiveOperation`]）但**不依赖**它：P8 就绪时把它的会话状态
+/// 也映射成 `LiveOperation` 即可，本函数与前端**无需改动**。
+///
+/// ## fail-closed，不造假
+///
+/// 无进行中操作 ⇒ 结构化空态（`source: "unavailable"` + `items: []`），
+/// **绝不用演示数据填充**。
+fn companion_snapshot() -> companion_state::CompanionSnapshot {
+    let mut operations: Vec<companion_state::LiveOperation> = Vec::new();
+
+    // WorkBuddy 切换：进行中 ⇒ 一条 running 项（数据源 = 现有 `switch-progress` 状态）。
+    let running = *SWITCH_RUNNING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if running {
+        let region = SWITCH_REGION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or(Region::Cn);
+        let progress = SWITCH_PROGRESS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_default();
+        operations.push(companion_state::LiveOperation {
+            // id 里带上 region：`companion_jump` 据此聚焦**正在切换的那个**客户端。
+            id: format!("workbuddy:{}:switch", region.as_str()),
+            source: process::region_app_stems(region)[0].to_string(),
+            title: progress,
+            hint: String::new(),
+            state: companion_state::CompanionState::Running,
+        });
+    }
+
+    companion_state::snapshot_from_operations(&operations, config::now_ms())
+}
+
+/// GET /api/companion/status —— 悬浮窗的**只读**快照（P9 §1.3）。
+///
+/// **只读**：无参数（app 级聚合，✅ #4）、无副作用、不改任何状态。
+#[tauri::command]
+pub async fn companion_status() -> Result<companion_state::CompanionSnapshot, String> {
+    Ok(companion_snapshot())
+}
+
+/// POST /api/companion/visibility —— 显示 / 隐藏悬浮窗。
+///
+/// ★ 这是可见性的**唯一收敛点**：侧栏图标 / 托盘菜单 / 窗口内关闭按钮都经它改变状态，
+/// 因此「不许出现第二个看起来能切的控件」这条纪律靠它守住（P9 §1.5 / R8）。
+#[tauri::command]
+pub async fn companion_set_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        crate::companion::set_visible(&app, visible).map_err(|error| error.to_string())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, visible);
+        Err("桌面悬浮窗仅在桌面端可用".to_string())
+    }
+}
+
+/// POST /api/companion/toggle —— 翻转可见性，返回翻转**之后**的状态。
+#[tauri::command]
+pub async fn companion_toggle(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        crate::companion::toggle(&app).map_err(|error| error.to_string())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Err("桌面悬浮窗仅在桌面端可用".to_string())
+    }
+}
+
+/// POST /api/companion/jump —— 聚焦 / 唤起来源客户端（P9 ✅ #1）。
+///
+/// ★ **不切账号、不导航主窗口、不删改任何数据** —— 悬浮窗只「把你带到那儿」。
+/// ⚠️ 来源客户端**未运行** ⇒ 返回**可理解的错误**（前端渲染明确反馈），**不静默失败**。
+#[tauri::command]
+pub async fn companion_jump(id: String) -> Result<(), String> {
+    if id.trim().is_empty() {
+        return Err("缺少条目 id".to_string());
+    }
+    // 本期唯一来源 = WorkBuddy（跨来源 Codex / CodeBuddy 不在本期，P9 ✅ #2）。
+    // id 形如 `workbuddy:<region>:switch`：region 决定聚焦**哪一个**客户端。
+    let mut parts = id.split(':');
+    let source = parts.next().unwrap_or_default();
+    let region = parts.next().and_then(Region::parse);
+    if source != "workbuddy" {
+        return Err(format!("未知的来源条目：{id}"));
+    }
+    let Some(region) = region else {
+        return Err(format!("未知的来源条目：{id}"));
+    };
+    // `focus_workbuddy_for` 内部的 `is_workbuddy_running_for` 在 Windows 上会起 tasklist
+    // 子进程 ⇒ 放 blocking 线程，不阻塞 Tauri 主线程（判据见 `get_status` 的注释）。
+    tauri::async_runtime::spawn_blocking(move || process::focus_workbuddy_for(region))
+        .await
+        .map_err(|error| format!("唤起客户端失败: {error}"))?
 }
 
 /// 护栏：**慢 IO / 起子进程**的命令必须 `async`（否则阻塞 Tauri 主线程）。
@@ -1892,5 +2785,78 @@ mod command_threading_tests {
                 "`{name}` 被改回同步了：同步 command 跑在 Tauri 主线程上。"
             );
         }
+    }
+}
+
+/// P5 T03 参数化命令的 **fail-closed** 护栏。
+///
+/// **与 `crates/buddy-switch-server/src/api.rs` 的
+/// `parameterized_account_commands_reject_unknown_scope` 互为镜像**：两个宿主对同一个
+/// `scope` 参数必须**同一判据**（未知 / 空 / 缺一律 `Err`），否则桌面端与 webui 会分叉
+/// —— 这正是 P5 要防的一类漂移（同款实现散落两 crate 是刻意不去重，见共享知识）。
+///
+/// 可证伪：把某条命令的 `resolve_scope_param(...)` 换成 `unwrap_or(Scope::WbCn)` 式回落，
+/// 断言立即变红 —— 那正是「拼错 `trae-glboal` 静默读写 `wb-cn` 的库」的缺陷形态。
+#[cfg(test)]
+mod parameterized_scope_tests {
+    use super::{
+        accounts_export, accounts_export_to_path, accounts_import, accounts_import_local,
+        checkin_status, credits, open_data_dir,
+    };
+
+    #[test]
+    fn parameterized_account_commands_reject_unknown_scope() {
+        // 未知 / 拼错 / 空一律 Err（fail-closed），且都在**落盘之前**失败（不触达任何库）。
+        assert!(accounts_export("trae-glboal".to_string(), Vec::new()).is_err());
+        assert!(accounts_export_to_path("nope".to_string(), Vec::new(), "x".to_string()).is_err());
+        assert!(accounts_import(String::new(), String::new(), Vec::new()).is_err());
+        // `open_data_dir` 是**同步**参数化命令：未知 scope 必须在**定位目录 / 起子进程之前**失败。
+        assert!(open_data_dir("trae-glboal".to_string()).is_err());
+        assert!(open_data_dir(String::new()).is_err());
+
+        // 错误文案必须列出合法取值，便于用户对照正确拼写。
+        let error = accounts_export("trae-glboal".to_string(), Vec::new()).unwrap_err();
+        assert!(error.contains("wb-cn"), "{error}");
+        assert!(error.contains("trae-global"), "{error}");
+    }
+
+    /// `credits` 是 **async** 参数化命令：未知 scope 必须在**取账号 / 读缓存之前**失败。
+    ///
+    /// 与上面那条同步断言同源（同款实现散落两 crate 是刻意不去重）。
+    #[tokio::test]
+    async fn parameterized_credits_rejects_unknown_scope() {
+        let error = credits("trae-glboal".to_string(), None).await.unwrap_err();
+        assert!(error.contains("wb-cn"), "{error}");
+        assert!(error.contains("trae-global"), "{error}");
+        // 缺 scope（空串）同样 Err，绝不回落默认作用域。
+        assert!(credits(String::new(), None).await.is_err());
+    }
+
+    /// `checkin_status` 同 [`credits`]：**async** 参数化命令，未知 scope 必须在
+    /// **取账号 / 读签到缓存之前**失败（fail-closed）。
+    ///
+    /// 与 server 侧 `parameterized_account_commands_reject_unknown_scope` 互为镜像。
+    #[tokio::test]
+    async fn parameterized_checkin_status_rejects_unknown_scope() {
+        let error = checkin_status("trae-glboal".to_string(), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("wb-cn"), "{error}");
+        assert!(error.contains("trae-global"), "{error}");
+        assert!(checkin_status(String::new(), None).await.is_err());
+    }
+
+    /// `accounts_import_local` 是 **async** 参数化命令：未知 scope 必须在**读客户端登录态 /
+    /// 写账号库之前**失败（fail-closed）。
+    ///
+    /// 与 server 侧 `parameterized_account_commands_reject_unknown_scope` 互为镜像。
+    #[tokio::test]
+    async fn parameterized_accounts_import_local_rejects_unknown_scope() {
+        let error = accounts_import_local("trae-glboal".to_string())
+            .await
+            .unwrap_err();
+        assert!(error.contains("wb-cn"), "{error}");
+        assert!(error.contains("trae-global"), "{error}");
+        assert!(accounts_import_local(String::new()).await.is_err());
     }
 }

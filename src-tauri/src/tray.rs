@@ -7,7 +7,8 @@ use serde_json::Value;
 use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, RunEvent, Runtime, WebviewWindowBuilder, Window, WindowEvent,
+    AppHandle, Emitter, Listener, Manager, RunEvent, Runtime, WebviewWindowBuilder, Window,
+    WindowEvent,
 };
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
@@ -63,10 +64,26 @@ pub fn setup(app: &mut tauri::App) -> tauri::Result<()> {
             "open-github" => open_github(app),
             "checkin-all" => start_checkin_all(app),
             "lightweight-mode" => toggle_lightweight(app),
+            "toggle-companion" => toggle_companion(app),
             "quit-app" => app.exit(0),
             _ => {}
         })
         .build(app)?;
+
+    // P9 · T04：悬浮窗可见性的**勾选态同步**。
+    //
+    // 托盘项是 `CheckMenuItem`，勾选态读的是 companion 窗口的**真实可见性**
+    // （`build_tray_menu` 里的 `companion::is_visible`）。但侧栏图标 / 窗口内关闭按钮
+    // 改可见性时**不经托盘菜单** —— 若不重建菜单，勾选态会**停在旧值**、与真实状态漂移。
+    //
+    // 这里监听可见性事件：任何一处改可见性都重建菜单，让勾选态跟随真实状态。
+    // 与 `toggle_companion`（托盘自身点击后刷新）互补：那条覆盖「从托盘点」，
+    // 本条覆盖「从侧栏 / 窗口内关闭按钮改」。
+    let menu_refresh_handle = app.handle().clone();
+    app.handle()
+        .listen(crate::companion::VISIBILITY_EVENT, move |_event| {
+            refresh_tray_menu(&menu_refresh_handle);
+        });
 
     Ok(())
 }
@@ -319,6 +336,15 @@ fn exit_lightweight<R: Runtime>(app: &AppHandle<R>) {
     refresh_tray_menu(app);
 }
 
+/// 托盘「会话悬浮窗」：翻转悬浮窗可见性，并重建菜单让勾选态跟随真实状态。
+///
+/// `CheckMenuItem` 会在点击时先自行翻转视觉状态，因此这里必须 `refresh_tray_menu`
+/// 用**真实状态**重建（与 `toggle_lightweight` 同款），否则失败路径下勾选态会撒谎。
+fn toggle_companion<R: Runtime>(app: &AppHandle<R>) {
+    let _ = crate::companion::toggle(app);
+    refresh_tray_menu(app);
+}
+
 fn open_github<R: Runtime>(app: &AppHandle<R>) {
     let url = format!(
         "https://github.com/{}/{}",
@@ -445,6 +471,17 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Menu<R>>
         LIGHTWEIGHT_MODE.load(Ordering::Acquire),
         None::<&str>,
     )?;
+    // 「会话悬浮窗」：勾选态 = 悬浮窗当前可见（与 `lightweight-mode` 同款）。
+    // 勾选态读的是 companion 窗口的**真实可见性**（`is_visible`），不是本地镜像 ——
+    // 侧栏 / 托盘 / 窗口内关闭按钮三处入口因此收敛到同一状态，不会各说各话。
+    let companion_item = CheckMenuItem::with_id(
+        app,
+        "toggle-companion",
+        "会话悬浮窗",
+        true,
+        crate::companion::is_visible(app),
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(app, "quit-app", "退出应用", true, None::<&str>)?;
 
     MenuBuilder::new(app)
@@ -453,6 +490,7 @@ fn build_tray_menu<R: Runtime, M: Manager<R>>(app: &M) -> tauri::Result<Menu<R>>
         .item(&checkin_item)
         .separator()
         .item(&lightweight_item)
+        .item(&companion_item)
         .separator()
         .item(&quit_item)
         .build()
