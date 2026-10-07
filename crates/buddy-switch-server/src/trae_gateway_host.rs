@@ -1,6 +1,7 @@
-//! webui / CLI 形态的 **Trae** 网关宿主：按配置起独立监听（默认 `127.0.0.1:7864`）。
+//! webui / CLI 形态的 **Trae** 网关宿主（P5 §2.4 泛化；默认 `127.0.0.1:7864`）。
 //!
-//! 与 [`crate::gateway_host`] 平行、互不复用（原因见 `buddy_switch_gateway::trae` 模块文档）。
+//! 与 [`crate::gateway_host`] 平行、**各持一个泛型 [`GatewayHost`]**（原因见
+//! `buddy_switch_gateway::trae` 模块文档与 [`buddy_switch_gateway::GatewayProduct`]）。
 //!
 //! ## 为什么不把 Trae 路由 merge 进 webui 的 API Router
 //!
@@ -15,73 +16,23 @@ use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
 
-use buddy_switch_gateway::trae::{spawn_listener, TraeGatewayConfig, TraeGatewayState};
-use buddy_switch_gateway::GatewayHandle;
+use buddy_switch_gateway::trae::{TraeGateway, TraeGatewayState};
+use buddy_switch_gateway::{GatewayHost, GatewayProduct};
 
-static SHARED_STATE: OnceLock<TraeGatewayState> = OnceLock::new();
-static HOST: OnceLock<Mutex<TraeGatewayHost>> = OnceLock::new();
+static HOST: OnceLock<Mutex<GatewayHost<TraeGateway>>> = OnceLock::new();
 
 /// 进程内共享的 Trae 网关状态（惰性初始化，读一次配置）。
 pub fn shared_state() -> TraeGatewayState {
-    SHARED_STATE
-        .get_or_init(|| TraeGatewayState::new(TraeGatewayConfig::load()))
-        .clone()
+    <TraeGateway as GatewayProduct>::shared_state()
 }
 
-/// 独立监听生命周期管理。
-#[derive(Default)]
-pub struct TraeGatewayHost {
-    handle: Option<GatewayHandle>,
+fn host() -> &'static Mutex<GatewayHost<TraeGateway>> {
+    HOST.get_or_init(|| Mutex::new(GatewayHost::new()))
 }
 
-impl TraeGatewayHost {
-    /// 新建（未启动）。
-    pub fn new() -> Self {
-        Self { handle: None }
-    }
-
-    /// 按当前配置启动/重启独立监听。返回实际监听地址；未启用时返回 `None`。
-    pub async fn start(&mut self) -> Result<Option<String>, String> {
-        self.stop().await;
-        let state = shared_state();
-        let config = state.config_snapshot().await;
-        if !config.enabled {
-            return Ok(None);
-        }
-        let handle = spawn_listener(state)
-            .await
-            .map_err(|error| error.to_string())?;
-        let addr = handle.addr().to_string();
-        self.handle = Some(handle);
-        Ok(Some(addr))
-    }
-
-    /// 停止独立监听。
-    pub async fn stop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.shutdown().await;
-        }
-    }
-
-    /// 是否运行中。
-    pub fn is_running(&self) -> bool {
-        self.handle.is_some()
-    }
-
-    /// 运行中的监听地址。
-    pub fn addr(&self) -> Option<String> {
-        self.handle.as_ref().map(|handle| handle.addr().to_string())
-    }
-}
-
-fn host() -> &'static Mutex<TraeGatewayHost> {
-    HOST.get_or_init(|| Mutex::new(TraeGatewayHost::new()))
-}
-
-/// 按当前配置应用（启动/重启）独立监听。
+/// 按当前配置应用（启动 / 重启）独立监听。
 pub async fn apply() -> Result<Option<String>, String> {
-    let mut host = host().lock().await;
-    host.start().await
+    host().lock().await.start().await
 }
 
 /// 查询运行状态（运行中, 监听地址）。

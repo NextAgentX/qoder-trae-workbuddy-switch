@@ -14,8 +14,11 @@ mod trae_gateway_host;
 use serde_json::json;
 
 use buddy_switch_core::modules::{
-    account, auth_file, config, process, region::Region, rotate, schedule, scheduler, trae, update,
+    account, auth_file, backup, config, process, region::Region, rotate, schedule, scheduler, trae,
+    update,
 };
+use buddy_switch_core::modules::background::{TaskKind, TaskSpec, TASKS};
+use buddy_switch_core::modules::product::Product;
 
 fn default_port() -> u16 {
     57890
@@ -30,34 +33,11 @@ fn spawn_scheduled_task(task: schedule::ScheduleTask) {
     tokio::spawn(scheduler::schedule_loop(task));
 }
 
-/// 后台任务的注册表条目：**「有哪些后台任务」的唯一事实来源**。
-///
-/// 设计意图：后台任务的**存在性**必须是**数据**，而不是散落在 [`spawn_background_loops`]
-/// 里的 `tokio::spawn` 调用。原因——本工单修复的账号池余额接入缺陷，本质就是一次
-/// 「**调用点静默消失**」：`Pool::set_credits` 存在、类型全对、构建全绿，但生产上没人
-/// 调用它，于是最大的两个选号权重因子从未生效，且**无人发现**。把「有哪些后台任务」
-/// 做成注册表数据后，就能用测试守住关键任务不被删除
-/// （见 `tests::background_task_registry_includes_credits_refresh`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackgroundTask {
-    /// 启动补跑：整理历史签到日志 + 签到核验 / 旅行派出领取 / 保活各跑一轮
-    /// （受各自排程开关约束，关掉的任务一次都不跑）。
-    StartupMaintenance,
-    /// 自动轮换（按 `auto_rotate_config` 间隔；CodeBuddy CLI 为 CN 专有，保持 CN）。
-    AutoRotate,
-    /// 账号池余额刷新（真实余额回填选号权重）。
-    CreditsRefresh,
-    /// 账号池**治理状态落盘**（冷却 / 熔断 / 成功率 EMA / 余额读数）。
-    PoolPersist,
-    /// **Trae** 积分刷新（两条国内产品线，顺带自动解冻已恢复的账号）。
-    ///
-    /// Trae 的剩余积分此前只在「签到页」被刷新 —— 纯用 API（不开界面）时读数会一直
-    /// 陈旧：已耗尽积分的账号仍被选中（白撞一次上游），或尚有余额的账号被误判为
-    /// 零积分而排除。
-    TraeCreditsRefresh,
-    /// 六类积分定时任务之一（各自独立排程）。
-    Scheduled(schedule::ScheduleTask),
-}
+// 「有哪些后台任务」已二维化到 core（`buddy_switch_core::modules::background::TASKS`）：
+// 每个条目是 `(product, kind)` 二维坐标。本文件此前持有一份**扁平**枚举 `BackgroundTask`
+// （且产品名进了枚举名，如 `TraeCreditsRefresh`），把「任务种类」与「产品线」两个正交维度
+// 混在一起；现改为直接消费 core 的 TASKS —— 表是**数据**（两宿主共用），宿主只负责
+// **怎么启动**（见下方 `spawn_background_task`）。
 
 /// 账号池状态落盘周期（毫秒）。
 ///
@@ -72,45 +52,45 @@ const POOL_PERSIST_INTERVAL_MS: u64 = 30_000;
 /// 与 WorkBuddy 余额刷新的缺省间隔（30 分钟）保持一致：同一管理面不该有两种节奏。
 const TRAE_CREDITS_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1000;
 
-/// 后台任务注册表：列出所有应启动的后台任务。
+/// 定时备份的检查周期（毫秒）。
 ///
-/// [`spawn_background_loops`] **严格**按本表启动；因此「增删后台任务」是数据变化，
-/// 且有测试守住关键项。**登记即执行**——不要在本表之外直接 `tokio::spawn` 后台循环。
-fn background_tasks() -> Vec<BackgroundTask> {
-    let mut tasks = vec![
-        BackgroundTask::StartupMaintenance,
-        BackgroundTask::AutoRotate,
-        BackgroundTask::CreditsRefresh,
-        BackgroundTask::PoolPersist,
-        BackgroundTask::TraeCreditsRefresh,
-    ];
-    tasks.extend(
-        schedule::ScheduleTask::all()
-            .into_iter()
-            .map(BackgroundTask::Scheduled),
-    );
-    tasks
-}
+/// 取 1 小时：`backup::auto_backup()` 当日已备份时**幂等直接返回**（不重复读全量），
+/// 故检查本身开销极低；小时级足以在跨日后尽快产生当日备份。
+const AUTO_BACKUP_CHECK_INTERVAL_MS: u64 = 60 * 60 * 1000;
 
-/// 启动全部后台任务（以 [`background_tasks`] 为唯一事实来源）。
+/// 启动全部后台任务（以 core 的 [`TASKS`] 为**唯一事实来源**）。
+///
+/// ⚠️ **登记即执行**——不要在本函数之外直接 `tokio::spawn` 后台循环；新增「写状态 /
+/// 周期性」出口必须先在 core [`TASKS`] 登记，否则两个宿主都不会启动它。
+///
+/// 「有哪些后台任务」是**数据**（core [`TASKS`]，两宿主共用），本函数只负责**按表启动**；
+/// 「怎么启动」按宿主运行时决定（server 用 `tokio::spawn`）。
 fn spawn_background_loops() {
-    for task in background_tasks() {
-        spawn_background_task(task);
+    for spec in TASKS {
+        spawn_background_task(*spec);
     }
 }
 
 /// 按注册表条目派生对应的后台循环。
-fn spawn_background_task(task: BackgroundTask) {
-    match task {
+///
+/// `match spec.kind` **穷尽**（无通配分支）：core 新增一类 [`TaskKind`] 会让本函数
+/// **编译失败**，从而强制本宿主补上派发分支（登记即执行 / P5 R9 的**编译期**护栏）。
+/// **运行期**护栏见 core `tests::both_hosts_register_every_task_kind`（直接读本文件源码）。
+///
+/// ⚠️ 产品线维度：`CreditsRefresh` 被**两个产品共用**（二维化的本意），故在该分支内再按
+/// [`TaskSpec::product`] 分派 —— 两者实现**完全不同**（WorkBuddy 走
+/// `gateway_host::shared_state` 的池，Trae 走 `trae::credits` 的区域账号库）。
+fn spawn_background_task(spec: TaskSpec) {
+    match spec.kind {
         // 启动：整理历史签到日志 + 补跑一轮（签到核验 / 旅行派出领取 / 保活），
         // 各类是否补跑受自己的排程开关约束。与桌面端共用 core::scheduler 的同一份语义。
-        BackgroundTask::StartupMaintenance => {
+        TaskKind::StartupMaintenance => {
             tokio::spawn(async move {
                 scheduler::run_startup_maintenance().await;
             });
         }
         // 自动轮换：按配置间隔执行。
-        BackgroundTask::AutoRotate => {
+        TaskKind::AutoRotate => {
             tokio::spawn(async move {
                 let mut last_cycle_at: i64 = 0;
                 loop {
@@ -131,43 +111,45 @@ fn spawn_background_task(task: BackgroundTask) {
                 }
             });
         }
-        // 账号池余额刷新：**独立**循环（不与其它循环合并成一个 tick），首次启动先跑一次，
-        // 之后按池配置 `credits_refresh_interval_ms`（默认 30 分钟）周期刷新。
-        //
-        // 为什么必须是独立后台循环：余额是慢变数据，在请求路径上同步拉余额会直接拉高
-        // 每次请求的延迟。刷新语义见 `buddy_switch_gateway::credits_refresh`。
-        BackgroundTask::CreditsRefresh => {
-            tokio::spawn(async move {
-                let state = gateway_host::shared_state();
-                loop {
-                    // 启动即刷一次（循环首轮）：补齐上次进程遗留的「从未取过余额」账号。
-                    let _ = buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
-                    // ★ 等待时长由 gateway 侧统一给（两侧宿主共用同一判据）：
-                    //   池为空 ⇒ 短探测，否则「刚导入账号」要等满一整个周期才看得到积分。
-                    let wait_ms = {
-                        let pool = state.pool.read().await;
-                        buddy_switch_gateway::credits_refresh::next_refresh_wait_ms(&pool)
-                    };
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                }
-            });
-        }
-        // Trae 积分刷新（两条国内产品线）：与 WorkBuddy 余额刷新同为独立循环。
-        BackgroundTask::TraeCreditsRefresh => {
-            tokio::spawn(async move {
-                // 启动即刷一次：补齐上次进程遗留的陈旧读数。
-                refresh_trae_credits().await;
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        TRAE_CREDITS_REFRESH_INTERVAL_MS,
-                    ))
-                    .await;
+        // 账号池余额 / 积分刷新：**独立**循环（不与其它循环合并成一个 tick），首次启动先跑
+        // 一次，之后周期刷新。按**产品线**分派实现。
+        TaskKind::CreditsRefresh => match spec.product {
+            // WorkBuddy 账号池余额刷新（真实余额回填选号权重）。
+            //
+            // 为什么必须是独立后台循环：余额是慢变数据，在请求路径上同步拉余额会直接拉高
+            // 每次请求的延迟。刷新语义见 `buddy_switch_gateway::credits_refresh`。
+            Product::Workbuddy => {
+                tokio::spawn(async move {
+                    let state = gateway_host::shared_state();
+                    loop {
+                        // 启动即刷一次（循环首轮）：补齐上次进程遗留的「从未取过余额」账号。
+                        let _ =
+                            buddy_switch_gateway::credits_refresh::refresh_once(&state).await;
+                        // ★ 等待时长由 gateway 侧统一给（两侧宿主共用同一判据）：
+                        //   池为空 ⇒ 短探测，否则「刚导入账号」要等满一整个周期才看得到积分。
+                        let wait_ms = {
+                            let pool = state.pool.read().await;
+                            buddy_switch_gateway::credits_refresh::next_refresh_wait_ms(&pool)
+                        };
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    }
+                });
+            }
+            // Trae 积分刷新（两条国内产品线）：与 WorkBuddy 余额刷新同为独立循环。
+            Product::Trae => {
+                tokio::spawn(async move {
+                    // 启动即刷一次：补齐上次进程遗留的陈旧读数。
                     refresh_trae_credits().await;
-                }
-            });
-        }
-        // 六类积分任务各自独立排程。
-        BackgroundTask::Scheduled(task) => spawn_scheduled_task(task),
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            TRAE_CREDITS_REFRESH_INTERVAL_MS,
+                        ))
+                        .await;
+                        refresh_trae_credits().await;
+                    }
+                });
+            }
+        },
         // 账号池治理状态落盘：**周期**刷新，且只在有改动时写（`flush_if_dirty`）。
         //
         // ★ 为什么必须有它：`Pool::flush_if_dirty` 此前**没有任何生产调用点** ——
@@ -177,10 +159,10 @@ fn spawn_background_task(task: BackgroundTask) {
         //   全部只在内存里，每次重启从零开始（例如刚判定 SessionDead 的账号
         //   重启后立刻又被选中、再撞一次同样的墙）。
         //
-        //   这与本注册表文档里记的 `set_credits` 事故是**同一类**：
+        //   这与 core 后台任务模块文档里记的 `set_credits` 事故是**同一类**：
         //   「函数存在、类型全对、构建全绿、测试全绿，但生产上没人调用」。
-        //   登记进注册表后，`background_task_registry_includes_pool_persist` 守住它不被删除。
-        BackgroundTask::PoolPersist => {
+        //   登记进 core TASKS 后，core 与宿主两侧的护栏都守住它不被删除。
+        TaskKind::PoolPersist => {
             tokio::spawn(async move {
                 let state = gateway_host::shared_state();
                 loop {
@@ -192,6 +174,31 @@ fn spawn_background_task(task: BackgroundTask) {
                 }
             });
         }
+        // 定时全局备份（D17）：**默认开**，但可在设置里关掉（§7 #7）——关闭后不再产生
+        // 新备份（已产生的保留）。`auto_backup()` 当日已备份则幂等返回，检查开销极低。
+        TaskKind::AutoBackup => {
+            tokio::spawn(async move {
+                loop {
+                    if config::is_auto_backup_enabled() {
+                        let _ = backup::auto_backup();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        AUTO_BACKUP_CHECK_INTERVAL_MS,
+                    ))
+                    .await;
+                }
+            });
+        }
+        // ★ 网关启动补识别（P10 §1.6 / ✅ #7）：**一次性**——启动时把「内置 / 陈旧」的清单
+        // 补成实时，之后交给「接入即识别」与手动「重新识别」。失败静默（探测不得让启动失败）。
+        TaskKind::GatewayCatalogProbe => {
+            tokio::spawn(async move {
+                let state = gateway_host::shared_state();
+                let _ = buddy_switch_gateway::catalog_probe::probe_stale_regions(&state).await;
+            });
+        }
+        // 六类积分任务各自独立排程。
+        TaskKind::Scheduled(task) => spawn_scheduled_task(task),
     }
 }
 
@@ -364,6 +371,7 @@ fn open_browser(addr: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buddy_switch_core::modules::background::has_task;
 
     /// ★★ 护栏：`BUDDY_SWITCH_HOME` **被设置但不合法**时必须**拒绝启动**。
     ///
@@ -393,75 +401,95 @@ mod tests {
         assert!(home_override_problem("--version", Some("relative")).is_none());
     }
 
-    /// 护栏：余额刷新任务**必须**登记在后台任务注册表里。
+    /// 护栏：余额刷新任务**必须**登记在 core 后台任务表（[`TASKS`]）里。
     ///
     /// 回归背景：本次修复的缺陷正是「调用点静默消失」——`Pool::set_credits` 存在、
     /// 类型全对、构建全绿，但生产上无人调用，于是四因子加权静默退化为两因子。
-    /// 把「有哪些后台任务」做成注册表数据后，本用例守住关键任务不被删除：
-    /// 从 [`background_tasks`] 移除 [`BackgroundTask::CreditsRefresh`] 会让本用例变红。
+    /// 表本体已移到 core（两宿主共用），本用例守住**服务端依赖的那份表**不丢关键任务。
+    /// 服务端 `spawn` 派发是否覆盖每个 [`TaskKind`]，由 core
+    /// `tests::both_hosts_register_every_task_kind`（直接读本文件源码）守住。
     #[test]
     fn background_task_registry_includes_credits_refresh() {
-        let tasks = background_tasks();
         assert!(
-            tasks.contains(&BackgroundTask::CreditsRefresh),
-            "后台任务注册表必须登记 CreditsRefresh（账号池余额刷新）；缺了它生产上余额永远为 0，\
-             四因子加权会静默退化为两因子。当前注册表：{tasks:?}"
+            has_task(Product::Workbuddy, TaskKind::CreditsRefresh),
+            "后台任务表必须登记 (Workbuddy, CreditsRefresh)（账号池余额刷新）；缺了它生产上\
+             余额永远为 0，四因子加权会静默退化为两因子。当前表：{TASKS:?}"
         );
     }
 
-    /// 护栏：**Trae** 积分刷新任务必须登记在注册表里。
+    /// 护栏：**Trae** 积分刷新任务必须登记在 core 后台任务表里。
     ///
     /// 回归背景：Trae 的剩余积分此前只在「签到页」被刷新 —— 纯用 API（不开界面）时
     /// 读数会一直陈旧。选号用 `credits` 做「零积分排除」与「积分多优先」，
     /// 陈旧读数会让**已耗尽积分的账号仍被选中**（白撞一次上游），或**尚有余额的账号
-    /// 被误判为零积分而排除**。这与上面两条是**同一类**事故：能力存在、
+    /// 被误判为零积分而排除**。这与上面那条是**同一类**事故：能力存在、
     /// 类型全对、单测全绿，但生产上没有调用点。
     #[test]
     fn background_task_registry_includes_trae_credits_refresh() {
-        let tasks = background_tasks();
         assert!(
-            tasks.contains(&BackgroundTask::TraeCreditsRefresh),
-            "后台任务注册表必须登记 TraeCreditsRefresh；缺了它纯用 API 时积分读数永远陈旧。\
-             当前注册表：{tasks:?}"
+            has_task(Product::Trae, TaskKind::CreditsRefresh),
+            "后台任务表必须登记 (Trae, CreditsRefresh)；缺了它纯用 API 时积分读数永远陈旧。\
+             当前表：{TASKS:?}"
         );
     }
 
-    /// 护栏：账号池**落盘**任务必须登记在注册表里。
+    /// 护栏：账号池**落盘**任务必须登记在 core 后台任务表里。
     ///
     /// 回归背景（2026-09-28 实测发现，与上面 `set_credits` 那条是**同一类**事故）：
     /// `Pool::flush_if_dirty` 存在、类型全对、单测全绿，但**生产上没有任何调用点** ——
     /// 唯一的包装 `GatewayState::persist_pool` 自身零调用者。
     /// 而 `Pool::load` 在启动时读的正是它写的那个文件 ⇒ **文件永远是旧的**：
     /// 冷却 / 熔断 / 成功率 EMA / 余额读数 / `credits_refreshed_ms` 每次重启全部归零。
-    ///
-    /// 从 [`background_tasks`] 移除 [`BackgroundTask::PoolPersist`] 会让本用例变红。
     #[test]
     fn background_task_registry_includes_pool_persist() {
-        let tasks = background_tasks();
         assert!(
-            tasks.contains(&BackgroundTask::PoolPersist),
-            "后台任务注册表必须登记 PoolPersist（账号池治理状态落盘）；缺了它 \
+            has_task(Product::Workbuddy, TaskKind::PoolPersist),
+            "后台任务表必须登记 (Workbuddy, PoolPersist)（账号池治理状态落盘）；缺了它 \
              `flush_if_dirty` 就没有任何生产调用点，冷却 / 熔断 / 成功率 / 余额读数 \
-             全部只在内存里、每次重启静默归零。当前注册表：{tasks:?}"
+             全部只在内存里、每次重启静默归零。当前表：{TASKS:?}"
         );
     }
 
-    /// 注册表还须覆盖既有的启动维护 / 自动轮换 / 六类定时任务，防止被误删。
+    /// 护栏：**定时全局备份**任务必须登记在 core 后台任务表里（P5 R9「登记即执行」）。
+    ///
+    /// 回归背景：不登记 ⇒ 生产上永不产生自动备份，而用户以为「出事时有备份」。
+    #[test]
+    fn background_task_registry_includes_auto_backup() {
+        assert!(
+            has_task(Product::Workbuddy, TaskKind::AutoBackup),
+            "后台任务表必须登记 (Workbuddy, AutoBackup)（定时全局备份）；缺了它生产上永不\
+             产生自动备份。当前表：{TASKS:?}"
+        );
+    }
+
+    /// 护栏：**网关启动补识别**任务必须登记在 core 后台任务表里（P10 T03 / ✅ #7「登记即执行」）。
+    ///
+    /// 回归背景：不登记 ⇒ 「内置 / 陈旧」的模型清单永远不会在启动时被补成实时，
+    /// 用户只能看到「内置」来源条 —— 与「接入即识别」同属「写状态出口静默消失」一类事故。
+    #[test]
+    fn background_task_registry_includes_gateway_catalog_probe() {
+        assert!(
+            has_task(Product::Workbuddy, TaskKind::GatewayCatalogProbe),
+            "后台任务表必须登记 (Workbuddy, GatewayCatalogProbe)（网关启动补识别）；缺了它\
+             启动时不会补识别「内置 / 陈旧」的清单。当前表：{TASKS:?}"
+        );
+    }
+
+    /// 表还须覆盖既有的启动维护 / 自动轮换 / 六类定时任务，防止被误删。
     #[test]
     fn background_task_registry_covers_all_existing_tasks() {
-        let tasks = background_tasks();
         assert!(
-            tasks.contains(&BackgroundTask::StartupMaintenance),
-            "注册表缺少启动维护任务"
+            has_task(Product::Workbuddy, TaskKind::StartupMaintenance),
+            "表缺少启动维护任务"
         );
         assert!(
-            tasks.contains(&BackgroundTask::AutoRotate),
-            "注册表缺少自动轮换任务"
+            has_task(Product::Workbuddy, TaskKind::AutoRotate),
+            "表缺少自动轮换任务"
         );
         for task in schedule::ScheduleTask::all() {
             assert!(
-                tasks.contains(&BackgroundTask::Scheduled(task)),
-                "注册表缺少定时任务：{}",
+                TASKS.iter().any(|spec| spec.kind == TaskKind::Scheduled(task)),
+                "表缺少定时任务：{}",
                 task.as_str()
             );
         }

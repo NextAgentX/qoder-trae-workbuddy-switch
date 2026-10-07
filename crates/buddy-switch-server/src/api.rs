@@ -17,11 +17,23 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::{
-    account, auth_file, checkin, codebuddy_cli, codebuddy_cn_ide, config, credit_usage, credits, export_import,
-    migrate, oauth, process, refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler,
+    account, auth_file, backup, checkin, config, credit_usage, credits, export_import,
+    migrate, oauth, process, programs, refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler,
     session, switch, token_stats, trae, travel, update,
 };
 use buddy_switch_gateway::{GatewayConfig, GatewayStatusView};
+
+// P9 · 悬浮窗**只读**数据模型 + provider（core）；两宿主同源。
+use buddy_switch_core::modules::companion as companion_state;
+use buddy_switch_core::modules::proxy;
+
+// P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
+// ⚠️ 本文件在 `src-tauri/src/commands.rs` 有**同款**接线（刻意不去重，见共享知识）。
+use buddy_switch_core::modules::capability;
+use buddy_switch_core::modules::product::{
+    require_capability, require_trae_region, require_wb_region, resolve_scope_param, Product,
+};
+use buddy_switch_core::modules::trae::region::TraeRegion;
 
 /// WorkBuddy 运行状态缓存：Windows 上检测要跑 tasklist（慢），缓存几秒避免
 /// 前端切 tab 频繁触发命令行导致卡顿/闪窗。缓存按 region 分别记录，避免两版串台。
@@ -54,6 +66,8 @@ struct Assets;
 /// 切换进度缓存：webui 通过 GET /api/switch/progress 轮询。
 static SWITCH_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
 static SWITCH_RUNNING: Mutex<bool> = Mutex::new(false);
+/// 进行中的切换操作所属 region —— 供悬浮窗只读快照推导用（与 Tauri 宿主同款）。
+static SWITCH_REGION: Mutex<Option<Region>> = Mutex::new(None);
 
 /// webui 对外路由。
 ///
@@ -72,6 +86,37 @@ fn api_routes() -> Router {
     Router::new()
         .route("/api/status", get(api_status))
         .route("/api/accounts", get(api_accounts))
+        // P5 T03 · 参数化命令（`scope` 决定平台与区域）。旧路由（/api/accounts、/api/account/remark、
+        // /api/delete）保留为别名，故这里用**新路径**，避免与旧路由同路径冲突。
+        .route("/api/accounts/list", get(api_accounts_list))
+        .route("/api/accounts/remark", post(api_account_remark))
+        .route("/api/accounts/delete", post(api_account_delete))
+        // P5 §2.7 · 回收站 4 命令（**全新命令**，非参数化、无别名）。`scope` 决定平台与区域，
+        // 从而决定读/写哪个 `*.trash.<region>.json`；非法 scope ⇒ 4xx 且**不落盘**（fail-closed）。
+        .route("/api/accounts/trash", get(api_account_trash_list))
+        .route("/api/accounts/trash/restore", post(api_account_restore))
+        .route("/api/accounts/trash/purge", post(api_account_purge))
+        .route("/api/accounts/trash/clear", post(api_account_trash_clear))
+        .route("/api/accounts/export", post(api_accounts_export))
+        .route("/api/accounts/export-to-path", post(api_accounts_export_to_path))
+        .route("/api/accounts/import", post(api_accounts_import))
+        // P5 T03 · 参数化「从本机客户端导入账号」（`scope` 决定平台与区域）。旧路由
+        // `/api/import-local`（WB）与 `/api/trae/accounts/import-local`（Trae）保留为别名，
+        // 故这里用**新路径**（与 `accounts_*` 家族同族）。
+        .route(
+            "/api/accounts/import-local",
+            post(api_accounts_import_local),
+        )
+        // P5 T03 · 参数化「打开客户端数据目录」（`scope` 决定平台与区域）。旧路由
+        // `/api/gateway/open-data-dir`（WB）与 `/api/trae/open-data-dir`（Trae）保留为别名。
+        .route("/api/data-dir/open", post(api_open_data_dir))
+        // P5 T03 · 参数化积分命令（`scope` 决定平台与区域）。旧路由 `/api/credits`（WB）与
+        // `/api/trae/credits`（Trae）保留为别名，故这里用**新路径**，避免与旧路由同路径冲突。
+        .route("/api/credits/query", post(api_credits_query))
+        // P5 T03 · 参数化签到状态命令（`scope` 决定平台与区域）。旧路由 `GET /api/checkin/status`
+        // （WB，**批量整端点**）与 `GET /api/trae/checkin/status`（Trae）保留为别名，故这里用
+        // **新路径 + POST**，既避开同路径冲突，也避开与旧 GET 的 method 冲突。
+        .route("/api/checkin/status/query", post(api_checkin_status_query))
         .route("/api/accounts/open-dir", post(api_open_accounts_dir))
         .route("/api/codebuddy-cli/status", get(api_codebuddy_cli_status))
         .route(
@@ -98,9 +143,23 @@ fn api_routes() -> Router {
         )
         .route("/api/import/preview", post(api_preview_import))
         .route("/api/import", post(api_import))
+        // P7 T01 · 全局备份导出（跨 4 作用域；凭据按 CREDENTIAL_KEYS 剥离）。
+        .route("/api/backup/export", post(api_export_backup))
+        // P7 T02 · 全局备份导入（预览 / 导入 / 自动备份 / 恢复 / 配置）。
+        .route("/api/backup/import/preview", post(api_preview_import_backup))
+        .route("/api/backup/import", post(api_import_backup))
+        .route("/api/backup/auto/list", get(api_list_auto_backups))
+        .route("/api/backup/auto/restore", post(api_restore_auto_backup))
+        .route(
+            "/api/backup/auto/config",
+            get(api_get_auto_backup_config).post(api_save_auto_backup_config),
+        )
         .route("/api/switch", post(api_switch))
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
+        .route("/api/sessions/replicas", get(api_session_replicas))
+        // P8 · 会话内容指纹（组状态派生的数据源；**内容级**，不用 updatedAt 冒充）。
+        .route("/api/sessions/fingerprints", post(api_session_fingerprints))
         .route("/api/sessions/copy", post(api_copy_sessions))
         .route("/api/migrate/account", post(api_migrate_account))
         .route("/api/checkin/status", get(api_checkin_status))
@@ -142,6 +201,9 @@ fn api_routes() -> Router {
             "/api/gateway/config",
             get(api_gateway_config).post(api_save_gateway_config),
         )
+        .route("/api/proxy/status", get(api_proxy_status))
+        .route("/api/proxy/enable", post(api_proxy_enable))
+        .route("/api/proxy/disable", post(api_proxy_disable))
         .route("/api/gateway/status", get(api_gateway_status))
         // 打开 WorkBuddy 客户端数据目录（非 Windows 返回结构化 Unsupported）。
         .route("/api/gateway/open-data-dir", post(api_gateway_open_data_dir))
@@ -159,6 +221,11 @@ fn api_routes() -> Router {
         .route(
             "/api/gateway/strategy",
             get(api_gateway_strategy).post(api_gateway_save_strategy),
+        )
+        // 模型禁用偏好（P11）：GET 列表 / POST 置位·清位，同一路径两种方法（与 Tauri 命令一一对应）。
+        .route(
+            "/api/gateway/disabled-models",
+            get(api_gateway_disabled_models).post(api_gateway_set_model_disabled),
         )
         .route("/api/gateway/logs", get(api_gateway_logs))
         .route("/api/gateway/logs/clear", post(api_gateway_clear_logs))
@@ -239,6 +306,14 @@ fn api_routes() -> Router {
             "/api/trae/gateway/logs/clear",
             post(api_trae_clear_gateway_logs),
         )
+        // ---- 桌面悬浮窗（P9 · 只读数据层）----
+        // 与 `src-tauri/src/commands.rs` 的 `companion_*` 一一对应（两宿主同步）。
+        // 悬浮窗本体是**桌面端**的独立窗口；webui 无此窗口 ⇒ 显隐 / 聚焦返回结构化
+        // 「仅桌面端可用」，而只读快照两宿主同源。
+        .route("/api/companion/status", get(api_companion_status))
+        .route("/api/companion/visibility", post(api_companion_set_visible))
+        .route("/api/companion/toggle", post(api_companion_toggle))
+        .route("/api/companion/jump", post(api_companion_jump))
 }
 
 fn json_ok(v: Value) -> Response {
@@ -348,9 +423,20 @@ async fn api_status(RawQuery(query): RawQuery) -> Response {
     }))
 }
 
-async fn api_accounts(RawQuery(query): RawQuery) -> Response {
-    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
-    json_ok(json!({
+/// ★ 参数化命令的 Trae 分支：把**区域**映射到该区域的**主程序**变体。
+///
+/// 与 `src-tauri/src/commands.rs` 的同名函数**同款实现**（刻意不去重，见共享知识）。
+/// 只对**区域纯**的命令（账号列表 / 备注 / 删除）使用 —— 理由见那边的文档注释。
+fn trae_variant_of_region(region: TraeRegion) -> trae::variant::TraeVariant {
+    match region {
+        TraeRegion::Cn => trae::variant::TraeVariant::TraeWork,
+        TraeRegion::Global => trae::variant::TraeVariant::Global,
+    }
+}
+
+/// WorkBuddy 账号列表的**唯一实现**（旧 `api_accounts` 与参数化 `api_accounts_list` 共用）。
+fn wb_accounts_value(region: Region) -> Value {
+    json!({
         "region": region,
         "accounts": account::load_accounts_for(region)
             .iter()
@@ -358,7 +444,478 @@ async fn api_accounts(RawQuery(query): RawQuery) -> Response {
             .collect::<Vec<_>>(),
         "current": auth_file::read_auth_file_for(region)
             .and_then(|a| a.get("account").and_then(|x| x.get("uid")).and_then(|x| x.as_str()).map(String::from)),
-    }))
+    })
+}
+
+async fn api_accounts(RawQuery(query): RawQuery) -> Response {
+    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
+    json_ok(wb_accounts_value(region))
+}
+
+// ---------------------------------------------------------------------------
+// P5 T03 · 参数化命令（`scope` 同时决定平台与区域）
+// ---------------------------------------------------------------------------
+//
+// 与 `src-tauri/src/commands.rs` 的同名命令**一一对应**（刻意不去重）。旧路由保留为别名。
+// ⚠️ `scope` 必填且 fail-closed：未知 / 空 / 缺一律 4xx（[`resolve_scope_param`]），**不落盘**。
+
+/// GET /api/accounts/list —— 参数化账号列表（`scope` 决定平台与区域）。
+///
+/// 返回形状按 `scope.product()` 分叉（WB `{region, accounts, current}` / Trae 账号总览），
+/// 由前端平台专属 wrapper 解读。理由见 `src-tauri/src/commands.rs::accounts_list`。
+async fn api_accounts_list(RawQuery(query): RawQuery) -> Response {
+    let scope = match resolve_scope_param(query_value(query.as_deref(), "scope").as_deref()) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => json_ok(wb_accounts_value(region)),
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => json_ok(trae::handlers::accounts_overview_for(trae_variant_of_region(region))),
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/remark —— 参数化设置账号备注（`scope` 决定平台与区域）。
+async fn api_account_remark(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let account_id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+    if account_id.trim().is_empty() {
+        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let remark = body.get("remark").and_then(Value::as_str);
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match account::set_account_remark_for(region, account_id, remark) {
+                Ok(meta) => json_ok(meta),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => {
+                let variant = trae_variant_of_region(region);
+                match trae::handlers::set_remark_for(variant, account_id, Some(remark.unwrap_or(""))) {
+                    Ok(value) => json_ok(value),
+                    Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+                }
+            }
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/delete —— 参数化删除账号（Trae 侧可选一并删除登录态快照）。
+async fn api_account_delete(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let account_id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+    if account_id.trim().is_empty() {
+        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let delete_profile = body.get("deleteProfile").and_then(Value::as_bool).unwrap_or(false);
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match account::delete_account_for(region, account_id) {
+                Ok(()) => json_ok(json!({ "ok": true })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => {
+                let variant = trae_variant_of_region(region);
+                let owned = account_id.to_string();
+                match tokio::task::spawn_blocking(move || {
+                    trae::handlers::delete_account_for(variant, &owned, delete_profile)
+                })
+                .await
+                {
+                    Ok(Ok(value)) => json_ok(value),
+                    Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),
+                    Err(error) => json_err(
+                        format!("删除账号失败: {error}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ),
+                }
+            }
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P5 §2.7 · 回收站 4 命令（**全新命令**，非参数化、无别名）
+// ---------------------------------------------------------------------------
+//
+// 与 `src-tauri/src/commands.rs` 的四条同名命令**一一对应**（刻意不去重，见共享知识）。
+// `scope` 决定平台 + 区域，从而决定读 / 写哪个 `*.trash.<region>.json`；非法 scope ⇒ 4xx
+// 且**不落盘**（fail-closed，§2.7 硬约束 1）。
+
+/// GET /api/accounts/trash —— 回收站列表（`scope` 决定平台与区域）。返回 `{ scope, entries }`。
+async fn api_account_trash_list(RawQuery(query): RawQuery) -> Response {
+    let scope = match resolve_scope_param(query_value(query.as_deref(), "scope").as_deref()) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => json_ok(account::trash_list_value(region)),
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => json_ok(trae::account::trash_list_value_for_region(region)),
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/trash/restore —— 从回收站恢复账号（`id` **或** `uid` 谓词）。
+async fn api_account_restore(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let key = body.get("key").and_then(Value::as_str).unwrap_or("");
+    if key.trim().is_empty() {
+        return json_err("缺少 key".to_string(), StatusCode::BAD_REQUEST);
+    }
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match account::restore_account_for(region, key) {
+                Ok(()) => json_ok(json!({ "ok": true })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => match trae::account::restore_for_region(region, key) {
+                Ok(()) => json_ok(json!({ "ok": true })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/trash/purge —— 永久删除（**唯一不可逆步**，前端须二次确认）。
+async fn api_account_purge(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let key = body.get("key").and_then(Value::as_str).unwrap_or("");
+    if key.trim().is_empty() {
+        return json_err("缺少 key".to_string(), StatusCode::BAD_REQUEST);
+    }
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match account::purge_account_for(region, key) {
+                Ok(()) => json_ok(json!({ "ok": true })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => match trae::account::purge_for_region(region, key) {
+                Ok(()) => json_ok(json!({ "ok": true })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/trash/clear —— 清空回收站（**不可逆**），返回 `{ ok, removed }`。
+async fn api_account_trash_clear(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let removed = match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => account::clear_trash_for(region),
+            Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => trae::account::clear_trash_for_region(region),
+            Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+        },
+    };
+    json_ok(json!({ "ok": true, "removed": removed }))
+}
+
+/// 从请求体读取 `key` 字段为 `Vec<String>`（非数组 / 缺省 ⇒ 空表）。
+///
+/// 与既有 `api_export_accounts` / `api_import` 内联的解析**同款**，抽成小工具避免三条新
+/// handler 各写一遍（只做「过滤非字符串条目」，不改变既有语义）。
+fn body_string_list(body: &Value, key: &str) -> Vec<String> {
+    body.get(key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// POST /api/accounts/export —— 参数化导出账号完整记录（`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::accounts_export` **一一对应**（刻意不去重）。旧路由
+/// `/api/export-accounts`（WB）与 `/api/trae/accounts/export`（Trae）保留为别名。
+async fn api_accounts_export(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let account_ids = body_string_list(&body, "accountIds");
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match export_import::export_accounts_for(region, &account_ids) {
+                Ok(records) => json_ok(json!({ "ok": true, "accounts": records })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => {
+                let variant = trae_variant_of_region(region);
+                match trae::handlers::export_accounts_for(variant, &account_ids) {
+                    Ok(value) => json_ok(value),
+                    Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+                }
+            }
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/export-to-path —— 参数化导出到指定路径（`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::accounts_export_to_path` 一一对应（刻意不去重）。
+async fn api_accounts_export_to_path(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let account_ids = body_string_list(&body, "accountIds");
+    let path = body.get("path").and_then(Value::as_str).unwrap_or("");
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match export_import::export_accounts_to_path_for(region, &account_ids, path) {
+                Ok(path) => json_ok(json!({ "ok": true, "path": path })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => {
+                let variant = trae_variant_of_region(region);
+                match trae::handlers::export_accounts_to_path_for(variant, &account_ids, path) {
+                    Ok(value) => json_ok(value),
+                    Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+                }
+            }
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/import —— 参数化导入账号（`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::accounts_import` 一一对应（刻意不去重）。
+async fn api_accounts_import(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let text = body.get("fileText").and_then(Value::as_str).unwrap_or("");
+    let indexes: Vec<usize> = body
+        .get("indexes")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|x| x.as_u64().map(|n| n as usize))
+                .collect()
+        })
+        .unwrap_or_default();
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match export_import::import_accounts_for(region, text, &indexes) {
+                Ok(result) => json_ok(json!({
+                    "ok": true,
+                    "imported": result.imported,
+                    "skipped": result.skipped,
+                    "overwritten": result.overwritten,
+                })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => {
+                let variant = trae_variant_of_region(region);
+                match trae::handlers::import_accounts_for(variant, text, &indexes) {
+                    Ok(value) => json_ok(value),
+                    Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+                }
+            }
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/accounts/import-local —— 参数化「从本机客户端登录态导入账号」
+/// （`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::accounts_import_local` **一一对应**（刻意不去重）。旧路由
+/// `/api/import-local`（WB）与 `/api/trae/accounts/import-local`（Trae）保留为别名。形状按
+/// `scope.product()` 分叉：WB 返回 `{ok, account}`，Trae 返回 `{userId, name, accounts}`。
+async fn api_accounts_import_local(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match scope.product() {
+        Product::Workbuddy => {
+            let region = match require_wb_region(scope) {
+                Ok(region) => region,
+                Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+            };
+            match account::import_local_for(region) {
+                Ok(acc) => json_ok(json!({ "ok": true, "account": acc })),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            }
+        }
+        Product::Trae => {
+            let variant = match require_trae_region(scope) {
+                Ok(region) => trae_variant_of_region(region),
+                Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+            };
+            match tokio::task::spawn_blocking(move || {
+                trae::handlers::import_local_account_for(variant)
+            })
+            .await
+            {
+                Ok(Ok(value)) => json_ok(value),
+                Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),
+                Err(error) => json_err(
+                    format!("导入本机账号失败: {error}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+            }
+        }
+    }
+}
+
+/// POST /api/data-dir/open —— 参数化「打开客户端数据目录」（`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::open_data_dir` **一一对应**（刻意不去重）。旧路由
+/// `/api/gateway/open-data-dir`（WB）与 `/api/trae/open-data-dir`（Trae）保留为别名。
+/// 两平台同形（`{ok,path}` 或结构化 `Unsupported`）。
+async fn api_open_data_dir(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match scope.product() {
+        Product::Workbuddy => match require_wb_region(scope) {
+            Ok(region) => match buddy_switch_core::modules::capability::open_workbuddy_data_dir(region)
+            {
+                Ok(value) => json_ok(value),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => match trae::handlers::open_data_dir(trae_variant_of_region(region)) {
+                Ok(value) => json_ok(value),
+                Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+            },
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/credits/query —— 参数化积分查询（`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::credits` **一一对应**（刻意不去重）。旧路由 `/api/credits`
+/// （WB）与 `/api/trae/credits`（Trae）保留为别名。形状按 `scope.product()` 分叉：
+/// WB 分支返回单账号 `CreditExpiry`（**必须**带 `accountId`），Trae 分支返回区域级
+/// `TraeCreditsOverview`（忽略 `accountId`）。
+async fn api_credits_query(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match scope.product() {
+        Product::Workbuddy => {
+            if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::Credits)
+            {
+                return json_err(error, StatusCode::FORBIDDEN);
+            }
+            let region = match require_wb_region(scope) {
+                Ok(region) => region,
+                Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+            };
+            let id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+            let Some(acc) = account::find_account_for(region, id) else {
+                return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
+            };
+            json_ok(credits::get_credit_expiry_for(region, &acc).await)
+        }
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => {
+                json_ok(trae::handlers::credits_overview_for(trae_variant_of_region(region)))
+            }
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
+}
+
+/// POST /api/checkin/status/query —— 参数化签到状态查询（`scope` 决定平台与区域）。
+///
+/// 与 `src-tauri/src/commands.rs::checkin_status` **一一对应**（刻意不去重）。旧路由
+/// `GET /api/checkin/status`（WB，**批量整端点**）与 `GET /api/trae/checkin/status`（Trae）
+/// 保留为别名。形状按 `scope.product()` 分叉：WB 分支返回单账号签到状态（**必须**带
+/// `accountId`），Trae 分支返回区域级摘要（忽略 `accountId`）。
+///
+/// ⚠️ 本 handler **不做批量** —— 它对齐的是**桌面端单账号**契约；webui 的批量语义仍由旧
+/// 路由 `api_checkin_status` 承担（见其文档）。
+async fn api_checkin_status_query(Json(body): Json<Value>) -> Response {
+    let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
+        Ok(scope) => scope,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match scope.product() {
+        Product::Workbuddy => {
+            let region = match require_wb_region(scope) {
+                Ok(region) => region,
+                Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+            };
+            let id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+            let Some(acc) = account::find_account_for(region, id) else {
+                return json_err("账号不存在".to_string(), StatusCode::BAD_REQUEST);
+            };
+            json_ok(checkin::get_checkin_status_for(region, &acc).await)
+        }
+        Product::Trae => match require_trae_region(scope) {
+            Ok(region) => json_ok(trae::handlers::checkin_status_for(trae_variant_of_region(region))),
+            Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+        },
+    }
 }
 
 /// 在系统文件管理器中打开目录（跨平台）。
@@ -414,12 +971,19 @@ async fn api_open_accounts_dir(Json(body): Json<Value>) -> Response {
     }
 }
 
+// ⚠️ 与 `src-tauri/src/commands.rs` 的 `get_codebuddy_cli_status` 等**同款接线**
+// （刻意不去重，见共享知识「同款实现散落两 crate」）。**表驱动**：本体是
+// `programs::*("codebuddy_cli")`（core `modules/programs.rs`），新增程序位无需改本文件。
+
 async fn api_codebuddy_cli_status() -> Response {
-    json_ok(codebuddy_cli::status())
+    match programs::status("codebuddy_cli") {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn api_codebuddy_cli_install_helper() -> Response {
-    match codebuddy_cli::install_helper() {
+    match programs::install_helper("codebuddy_cli") {
         Ok(result) => json_ok(result),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
@@ -427,14 +991,17 @@ async fn api_codebuddy_cli_install_helper() -> Response {
 
 async fn api_codebuddy_cli_switch(Json(body): Json<Value>) -> Response {
     let id = body.get("accountId").and_then(|v| v.as_str()).unwrap_or("");
-    match codebuddy_cli::set_active_account(id) {
+    match programs::switch("codebuddy_cli", id, None) {
         Ok(result) => json_ok(result),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }
 
 async fn api_codebuddy_cn_ide_status() -> Response {
-    json_ok(codebuddy_cn_ide::status())
+    match programs::status("codebuddy_cn_ide") {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 async fn api_codebuddy_cn_ide_switch(Json(body): Json<Value>) -> Response {
@@ -444,14 +1011,14 @@ async fn api_codebuddy_cn_ide_switch(Json(body): Json<Value>) -> Response {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let restart = body.get("restart").and_then(|v| v.as_bool()).unwrap_or(true);
-    match codebuddy_cn_ide::switch_account(account_id, restart) {
+    match programs::switch("codebuddy_cn_ide", account_id, Some(restart)) {
         Ok(v) => json_ok(v),
         Err(e) => json_err(e, StatusCode::BAD_REQUEST),
     }
 }
 
 async fn api_codebuddy_cn_ide_detect() -> Response {
-    match codebuddy_cn_ide::detect_current_account() {
+    match programs::detect("codebuddy_cn_ide") {
         Ok(v) => json_ok(v),
         Err(e) => json_err(e, StatusCode::BAD_REQUEST),
     }
@@ -592,11 +1159,121 @@ async fn api_import(Json(body): Json<Value>) -> Response {
     }
 }
 
+/// POST /api/backup/export —— 导出**全局备份** envelope（跨 4 作用域的账号 / 配置 / 网关）。
+///
+/// 与 `src-tauri/src/commands.rs::export_backup` **一一对应**（刻意不去重）。请求体为
+/// `{ selection: { scopes, includesCredentials, appSettings } }`；`includesCredentials=false`
+/// 时按 `CREDENTIAL_KEYS` 逐条剥离凭据（**备份文件里不得含凭据**）。
+async fn api_export_backup(Json(body): Json<Value>) -> Response {
+    // 兼容 `{ selection: {...} }` 与平铺两种载荷（与其余 handler 的容错口径一致）。
+    let selection_value = body.get("selection").cloned().unwrap_or(body);
+    let selection: backup::BackupSelection = match serde_json::from_value(selection_value) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return json_err(format!("导出参数不合法：{error}"), StatusCode::BAD_REQUEST)
+        }
+    };
+    match backup::export_backup(&selection) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/backup/import/preview —— 导入**预览**（**只读安全阀**，§1.7）。
+///
+/// 与 `src-tauri/src/commands.rs::preview_import_backup` **一一对应**（刻意不去重）。
+/// 请求体 `{ fileText, policy }`；`policy` 为空 ⇒ 默认保留本地（D16）。**不写盘**。
+async fn api_preview_import_backup(Json(body): Json<Value>) -> Response {
+    let file_text = body
+        .get("fileText")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let policy = body.get("policy").and_then(Value::as_str).unwrap_or("");
+    let policy = match export_import::ConflictPolicy::parse(policy) {
+        Ok(policy) => policy,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    match backup::preview_import_backup(&file_text, policy) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/backup/import —— 导入全局备份（先快照 → 逐 scope 合并 → 汇总）。
+///
+/// 请求体 `{ fileText, policy, selection }`；`selection` 缺省 ⇒ 全选（D14）。
+async fn api_import_backup(Json(body): Json<Value>) -> Response {
+    let file_text = body
+        .get("fileText")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let policy = body.get("policy").and_then(Value::as_str).unwrap_or("");
+    let policy = match export_import::ConflictPolicy::parse(policy) {
+        Ok(policy) => policy,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    let selection_value = body.get("selection").cloned().unwrap_or_else(|| json!({}));
+    let selection: backup::BackupSelection = match serde_json::from_value(selection_value) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return json_err(format!("导入参数不合法：{error}"), StatusCode::BAD_REQUEST)
+        }
+    };
+    match backup::import_backup(&file_text, policy, &selection) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// GET /api/backup/auto/list —— 列出自动备份 / 导入前快照（最新在前）。
+async fn api_list_auto_backups() -> Response {
+    match backup::list_auto_backups() {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/backup/auto/restore —— 从自动备份 / 导入前快照恢复（覆盖策略）。
+async fn api_restore_auto_backup(Json(body): Json<Value>) -> Response {
+    let file_name = body
+        .get("fileName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    match backup::restore_auto_backup(&file_name) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// GET /api/backup/auto/config —— 读取自动备份配置（**默认开**）。
+async fn api_get_auto_backup_config() -> Response {
+    json_ok(config::load_auto_backup_config())
+}
+
+/// POST /api/backup/auto/config —— 保存自动备份配置（关掉后不再产生新备份）。
+async fn api_save_auto_backup_config(Json(body): Json<Value>) -> Response {
+    // 兼容 `{ config: {...} }` 与平铺两种载荷（与其余 handler 的容错口径一致）。
+    let cfg = body.get("config").cloned().unwrap_or(body);
+    match config::save_auto_backup_config(&cfg) {
+        Ok(()) => json_ok(config::load_auto_backup_config()),
+        Err(error) => json_err(
+            format!("保存自动备份配置失败：{error}"),
+            StatusCode::BAD_REQUEST,
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OAuth 登录
 // ---------------------------------------------------------------------------
 
 async fn api_oauth_start(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::Oauth) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let region = parse_region(body.get("region").and_then(Value::as_str));
     match oauth::oauth_start_for(region).await {
         Ok(v) => json_ok(v),
@@ -675,6 +1352,7 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
         }
         *running = true;
         *SWITCH_PROGRESS.lock().unwrap() = Some("开始切换账号…".to_string());
+        *SWITCH_REGION.lock().unwrap() = Some(region);
     }
 
     let progress: switch::ProgressFn = Box::new(|msg| {
@@ -694,6 +1372,7 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
     .await;
 
     *SWITCH_RUNNING.lock().unwrap() = false;
+    *SWITCH_REGION.lock().unwrap() = None;
 
     match result {
         Ok(Ok(v)) => json_ok(v),
@@ -713,6 +1392,9 @@ async fn api_switch_progress() -> Response {
 // ---------------------------------------------------------------------------
 
 async fn api_sessions(RawQuery(query): RawQuery) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let region = parse_region(query_value(query.as_deref(), "region").as_deref());
     match session::current_user_uid_for(region) {
         Some(uid) => {
@@ -726,6 +1408,50 @@ async fn api_sessions(RawQuery(query): RawQuery) -> Response {
         }
         None => json_ok(json!({ "sessions": [], "current": null, "source": "empty" })),
     }
+}
+
+/// GET /api/sessions/replicas —— 只读：copy ledger 连通成「会话副本组」（按 region）。
+///
+/// 与 Tauri 侧 `commands::list_session_replicas` **同契约**（两宿主同步）。
+/// 只回 ledger 里确有的字段（`accountUid` / `sessionId` / `region`）；
+/// `title` / `updatedAt` / `hasHistory` 由前端 join 补齐（见 `session::list_replica_groups_for`）。
+async fn api_session_replicas(RawQuery(query): RawQuery) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
+    json_ok(session::list_replica_groups_for(region))
+}
+
+/// POST /api/sessions/fingerprints —— **会话内容指纹**（P8「组状态派生」的数据源）。
+///
+/// 与 Tauri 侧 `commands::session_fingerprints` **同契约**（两宿主同步）。
+/// 返回 `{ [sessionId]: SessionFingerprint | null }`；取不到的为 `null`（**不臆造**）。
+///
+/// ⚠️ **不许用 `updatedAt` 冒充「落后 / 最新」**（`P8-ARCH.md` §1.2：「时间新 ≠ 内容新」）。
+async fn api_session_fingerprints(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    let ids: Vec<String> = body
+        .get("sessionIds")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    for cid in ids {
+        let fingerprint = session::session_fingerprint_for(region, &cid);
+        out.insert(
+            cid,
+            serde_json::to_value(fingerprint).unwrap_or(Value::Null),
+        );
+    }
+    json_ok(Value::Object(out))
 }
 
 async fn api_copy_sessions(Json(body): Json<Value>) -> Response {
@@ -877,6 +1603,9 @@ fn checkin_status_item(account: &Value, mut status: Value) -> Value {
 }
 
 async fn api_credits(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::Credits) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let region = parse_region(body.get("region").and_then(Value::as_str));
     let id = body.get("accountId").and_then(|v| v.as_str()).unwrap_or("");
     let Some(acc) = account::find_account_for(region, id) else {
@@ -917,6 +1646,9 @@ async fn api_token_statistics(RawQuery(query): RawQuery) -> Response {
 }
 
 async fn api_checkin(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::Checkin) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let region = parse_region(body.get("region").and_then(Value::as_str));
     let id = body.get("accountId").and_then(|v| v.as_str()).unwrap_or("");
     let Some(acc) = account::find_account_for(region, id) else {
@@ -958,6 +1690,9 @@ async fn api_checkin_logs() -> Response {
 /// 上游能力时按「该功能独立降级」处理：前端按 region 账号 id 过滤后自然为空，
 /// 不影响同页其它功能。已知缺口，见发布报告。
 async fn api_travel_status() -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::Travel) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     travel::reconcile_due_travel(None).await;
     let items = account::load_accounts()
         .iter()
@@ -1095,6 +1830,9 @@ async fn api_gateway_config() -> Response {
 }
 
 async fn api_save_gateway_config(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::Gateway) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let submitted = body.get("config").cloned().unwrap_or(body);
     let config: GatewayConfig = match serde_json::from_value(submitted) {
         Ok(config) => config,
@@ -1117,6 +1855,29 @@ async fn api_save_gateway_config(Json(body): Json<Value>) -> Response {
         "running": addr.is_some(),
         "addr": addr,
     }))
+}
+
+/// GET /api/proxy/status —— P12 C 路（base URL 重定向）的**只读状态**。
+///
+/// ⚠️ 只反映**本地标记**（用户是否按引导设过），**应用不校验代理是否真的生效**。
+async fn api_proxy_status() -> Response {
+    json_ok(proxy::status_view())
+}
+
+/// POST /api/proxy/enable —— 记下「用户已按引导设置」的本地标记（**不改系统设置**）。
+async fn api_proxy_enable() -> Response {
+    match proxy::set_enabled(true) {
+        Ok(()) => json_ok(proxy::status_view()),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/proxy/disable —— **一键还原**：清标记（删文件，不留残留）。
+async fn api_proxy_disable() -> Response {
+    match proxy::set_enabled(false) {
+        Ok(()) => json_ok(proxy::status_view()),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
 }
 
 async fn api_gateway_status() -> Response {
@@ -1189,6 +1950,14 @@ async fn api_gateway_create_key(Json(body): Json<Value>) -> Response {
         .unwrap_or("未命名")
         .to_string();
     let (record, plaintext) = state.keys.create(name, region);
+    // ★ 「接入即识别」（P10 §1.6 / ✅ #6）：同桌面端 —— 创建 Key 成功后**后台探测**该 region
+    // （复用全仓唯一探测入口 `catalog_probe::probe_region`，它只用本 region 的凭据）。
+    // fire-and-forget：探测失败不得阻断接入（§3.17.1 规则 3）；服务端已在 tokio 上下文，
+    // 故用 `tokio::spawn`（桌面端因无该上下文改用 `tauri::async_runtime::spawn`）。
+    // 顺序不可颠倒：先落 Key、再触发探测。
+    tokio::spawn(async move {
+        let _ = buddy_switch_gateway::catalog_probe::probe_region(&state, region).await;
+    });
     json_ok(json!({ "ok": true, "key": plaintext, "record": record.masked() }))
 }
 
@@ -1269,6 +2038,48 @@ async fn api_gateway_save_strategy(Json(body): Json<Value>) -> Response {
         }
     }
     json_ok(json!({ "ok": true }))
+}
+
+/// GET /api/gateway/disabled-models —— 某 region 被用户禁用的模型 id 列表（P11）。
+///
+/// 读的是**进程内唯一**的禁用存储（[`buddy_switch_gateway::disabled_models::shared`]），
+/// 即 WB 网关 / Trae 网关两个出口此刻真正在用的那一份 —— 命令面与出口同源。
+async fn api_gateway_disabled_models(RawQuery(query): RawQuery) -> Response {
+    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
+    let store = buddy_switch_gateway::disabled_models::shared();
+    let disabled = store.read().await;
+    let ids: Vec<String> = disabled.get(region).iter().cloned().collect();
+    json_ok(json!({ "region": region.as_str(), "ids": ids }))
+}
+
+/// POST /api/gateway/disabled-models —— 置位 / 清位某 region 的一个模型（`{region, model_id, disabled}`）。
+///
+/// `set` 幂等：重复置位 / 清位不改集合、不落盘，`changed: false`。
+async fn api_gateway_set_model_disabled(Json(body): Json<Value>) -> Response {
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    let model_id = body.get("model_id").and_then(Value::as_str).unwrap_or("");
+    let disabled = body
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let store = buddy_switch_gateway::disabled_models::shared();
+    let changed = {
+        let mut guard = store.write().await;
+        let changed = guard.set(region, model_id, disabled);
+        if changed {
+            if let Err(error) = guard.save() {
+                return json_err(error, StatusCode::BAD_REQUEST);
+            }
+        }
+        changed
+    };
+    json_ok(json!({
+        "ok": true,
+        "region": region.as_str(),
+        "model_id": model_id.trim(),
+        "disabled": disabled,
+        "changed": changed,
+    }))
 }
 
 async fn api_gateway_logs() -> Response {
@@ -1484,6 +2295,9 @@ async fn api_trae_import_local(Json(body): Json<Value>) -> Response {
 /// 变体必须**透传到 core**：授权 URL 的设备身份、会话归属、成功后落库的账号库
 /// 全部由它决定；在这里丢弃它会让两条产品线的登录互相串号。
 async fn api_trae_oauth_start(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Trae, capability::Capability::Oauth) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let variant = trae::handlers::parse_variant_param(&body);
     match trae::handlers::oauth_login_start_for(variant).await {
         Ok(value) => json_ok(value),
@@ -1646,6 +2460,9 @@ async fn api_trae_group_op(Json(body): Json<Value>) -> Response {
 /// 变体从 `options.variant` 解析（与其他端点「顶层 `variant`」不同：签到的入参
 /// 本就整体包在 `options` 里，再套一层顶层字段会让两条通道的契约分叉）。
 async fn api_trae_checkin(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Trae, capability::Capability::Checkin) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let options = body.get("options").cloned().unwrap_or(body);
     let parsed = match trae::handlers::parse_checkin_options(&options) {
         Ok(parsed) => parsed,
@@ -1655,6 +2472,9 @@ async fn api_trae_checkin(Json(body): Json<Value>) -> Response {
 }
 
 async fn api_trae_refresh_credits(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Trae, capability::Capability::Credits) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let user_id = body.get("userId").and_then(Value::as_str);
     let variant = parse_trae_variant(body.get("variant").and_then(Value::as_str));
     match trae::handlers::refresh_credits_for(variant, user_id).await {
@@ -1783,6 +2603,9 @@ async fn api_trae_gateway_config() -> Response {
 }
 
 async fn api_save_trae_gateway_config(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Trae, capability::Capability::Gateway) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
     let submitted = body.get("config").cloned().unwrap_or(body);
     let config: buddy_switch_gateway::trae::TraeGatewayConfig =
         match serde_json::from_value(submitted) {
@@ -1830,7 +2653,18 @@ async fn api_trae_gateway_status(RawQuery(query): RawQuery) -> Response {
 /// 这里是 OpenAI `/v1/models` 形状的扁平去重清单。`variant` 缺失 / 未知 → 默认变体。
 async fn api_trae_gateway_models(RawQuery(query): RawQuery) -> Response {
     let variant = parse_trae_variant(query_value(query.as_deref(), "variant").as_deref());
-    json_ok(buddy_switch_gateway::trae::payload::models_response_for(variant))
+    // ★ 出口 ①（P11）：与 Trae 网关本体读**同一份** `disabled`（按 `region_of_variant` 键控），
+    //   否则「管理面看到的清单」与「网关实际暴露的清单」会不一致。
+    let disabled = {
+        let store = buddy_switch_gateway::disabled_models::shared();
+        let guard = store.read().await;
+        guard
+            .get(buddy_switch_gateway::trae::region_of_variant(variant))
+            .clone()
+    };
+    json_ok(buddy_switch_gateway::trae::payload::models_response_for(
+        variant, &disabled,
+    ))
 }
 
 /// GET /api/trae/gateway/client-models —— 客户端（**上游下发**）的模型清单。
@@ -1932,6 +2766,77 @@ async fn api_trae_clear_gateway_logs() -> Response {
     let state = crate::trae_gateway_host::shared_state();
     state.log.clear();
     json_ok(json!({ "ok": true }))
+}
+
+// ---------------------------------------------------------------------------
+// 桌面悬浮窗（P9 · 只读数据层）
+// ---------------------------------------------------------------------------
+//
+// 与 `src-tauri/src/commands.rs` 的 `companion_*` 一一对应（两宿主同步）。
+// ★ 只读红线：命令面**只有**读 / 显隐 / 聚焦，无任何写操作。
+// ★ 刷新全在前端 webview（20s 轮询 + 既有事件）⇒ 不新增 Rust 后台循环。
+
+/// 悬浮窗快照的 provider（**只读**，P9 §1.3）——与 Tauri 宿主**同一份数据域**：
+/// 只接由**现有**进度状态（`switch-progress`）推导出的「进行中操作」。
+///
+/// 无进行中操作 ⇒ 结构化空态（`source: "unavailable"` + `items: []`），**不造假**。
+fn companion_snapshot() -> companion_state::CompanionSnapshot {
+    let mut operations: Vec<companion_state::LiveOperation> = Vec::new();
+
+    let running = *SWITCH_RUNNING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if running {
+        let region = SWITCH_REGION
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or(Region::Cn);
+        let progress = SWITCH_PROGRESS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_default();
+        operations.push(companion_state::LiveOperation {
+            id: format!("workbuddy:{}:switch", region.as_str()),
+            source: process::region_app_stems(region)[0].to_string(),
+            title: progress,
+            hint: String::new(),
+            state: companion_state::CompanionState::Running,
+        });
+    }
+
+    companion_state::snapshot_from_operations(&operations, config::now_ms())
+}
+
+/// GET /api/companion/status —— 悬浮窗的**只读**快照（两宿主同源）。
+async fn api_companion_status() -> Response {
+    json_ok(json!(companion_snapshot()))
+}
+
+/// POST /api/companion/visibility —— 显隐悬浮窗。
+///
+/// webui 是**浏览器**，没有 Tauri 独立窗口 ⇒ 结构化「仅桌面端可用」（**不假装成功**）。
+async fn api_companion_set_visible() -> Response {
+    json_err(
+        "桌面悬浮窗仅在桌面端可用".to_string(),
+        StatusCode::BAD_REQUEST,
+    )
+}
+
+/// POST /api/companion/toggle —— 翻转可见性（webui 无此窗口，同上）。
+async fn api_companion_toggle() -> Response {
+    json_err(
+        "桌面悬浮窗仅在桌面端可用".to_string(),
+        StatusCode::BAD_REQUEST,
+    )
+}
+
+/// POST /api/companion/jump —— 聚焦来源客户端（webui 无悬浮窗入口，同上）。
+async fn api_companion_jump() -> Response {
+    json_err(
+        "桌面悬浮窗仅在桌面端可用".to_string(),
+        StatusCode::BAD_REQUEST,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -3651,6 +4556,47 @@ mod tests {
             account_ids(&emptied).is_empty(),
             "删除后 Global 库应为空：{emptied}"
         );
+    }
+
+    /// P5 T03：参数化命令（导出 / 导入 / 积分）的 `scope` 必须 fail-closed（未知 / 空 / 缺 ⇒ 400）。
+    ///
+    /// 与 `src-tauri/src/commands.rs` 的 `parameterized_scope_tests` **互为镜像**
+    /// （同款实现散落两 crate 是刻意不去重，见共享知识）。
+    ///
+    /// 可证伪：把某条 handler 的 `resolve_scope_param(...)` 换成 `unwrap_or(Scope::WbCn)`
+    /// 式回落，第一条断言立即变红 —— 那正是「拼错 `trae-glboal` 静默读写 `wb-cn` 的库」的缺陷形态。
+    #[tokio::test]
+    async fn parameterized_account_commands_reject_unknown_scope() {
+        let _guard = test_guard();
+        isolated_home();
+
+        for uri in [
+            "/api/accounts/export",
+            "/api/accounts/export-to-path",
+            "/api/accounts/import",
+            "/api/accounts/import-local",
+            "/api/data-dir/open",
+            "/api/credits/query",
+            "/api/checkin/status/query",
+        ] {
+            // 未知 / 拼错的作用域 ⇒ 400（`resolve_scope_param` 在落盘之前失败）。
+            let (status, body) = call_api(
+                Method::POST,
+                uri,
+                Some(json!({ "scope": "trae-glboal", "accountIds": [] })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+            assert_eq!(body["ok"], json!(false), "{uri}: {body}");
+            assert!(
+                body["error"].as_str().unwrap_or("").contains("wb-cn"),
+                "{uri} 的错误文案必须列出合法作用域: {body}"
+            );
+
+            // 缺 scope 同样 400（scope 是必填维度，缺它无从判断该读哪个库）。
+            let (status, body) = call_api(Method::POST, uri, Some(json!({}))).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} 缺 scope 必须 400: {body}");
+        }
     }
 }
 
