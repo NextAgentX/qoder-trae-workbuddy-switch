@@ -40,7 +40,7 @@
 | 目的地 + 能力门控 + Trae 空态 | `capabilities.sessionCopy` | ✅ 已有（`registry.ts`） | ✅ **T01 已落** |
 | **副本只读视图**（这份会话在哪些账号有副本） | copy ledger 的边（`source→target`） | ✅ 已有（**内部**，`session.rs:928`） | ✅ **T02 已落** |
 | 统一重启确认（§3.15.3） | 客户端运行态（**与会话数据无关**） | ✅ 已有 | ✅ **T03 已落** |
-| 组状态派生（`latest`/`behind`/`diverge`） | 每副本**相对共同旧版**的消息增量 | ✅ **已有**（2026-10-07 新增：`session_fingerprint_for` 从 jsonl 取 `line_count` + 逐行 `prefix_hashes`） | ✅ **已落**（`session-replicas.ts::deriveGroupStatus`，门禁第 220 条） |
+| 组状态派生（`latest`/`behind`/`diverge`） | 每副本**相对共同旧版**的消息增量 | ✅ **已有**（2026-10-07 新增：`session_fingerprint_for` 从 jsonl 取 `line_count` + 逐行 `prefix_hashes`） | ✅ **已落**（`session-replicas.ts::deriveGroupStatus`，门禁第 220 条）· ⚠️ **指纹必须先归一化自己的 `sessionId`**，见下方注 |
 | 关联图（共同旧版 + delta） | base 快照 + 每副本消息计数 | ✅ **已有**（同上，公共前缀 = 最长公共前缀） | ✅ **已落**（`commonPrefix` / `deltas` / `latestLineCount`，`session-replica-view.tsx` 渲染「共同旧版」行） |
 | 分歧处理（先选保留哪一份） | **内容级** diff + 逐条选择 UI | ❌ **无** | ⛔ **仍未做**（D20 后置；现状只渲染 `diverge` 徽章，**没有**「选保留哪一份」的交互） |
 | 安全同步（§3.15.4「增量追加」） | **内容级** append | ❌ **无**（现 `copy_sessions` 是**整会话新 id 复制**，非追加，`session.rs:647`） | ⛔ **仍未做** |
@@ -56,6 +56,17 @@
 > ⇒ 原文「ledger 值是字符串、无消息计数」这个**论据已失效**，不要再引用它来论证「状态做不了」。
 >
 > ⚠️ **不许用「时间」冒充「内容」**：`updatedAt` 只能表达「谁最近被改过」，**不能**表达「谁落后 N 条」（§3.15.2 明确「时间新不等于内容新」）。**任何**用 `updatedAt` 排序去渲染「落后 / 最新」的做法，都是 §3.10 第 1 条「图不能撒谎」的违反。
+
+> ★★ **2026-10-07 实测踩到的坑：指纹必须先把「本会话自己的 id」归一化。**
+> WorkBuddy 的会话 jsonl **几乎每一行都嵌着 `"sessionId":"<cid>"`** —— 实测一份 15 行的真实会话里
+> **14 行**含该 cid（唯一不含的是 `file-history-snapshot`）。而副本是**另一个 cid**
+> （复制时整份 `text.replace(cid, new_cid)`）。
+> ⇒ 若直接对**原始行**做 hash，两个**内容完全一致**的副本公共前缀恒为 0
+> ⇒ `deriveGroupStatus` 会把**每一个组都判成 `diverge`**（**假分歧**：明明一致却报「有分歧」，
+> 比不显示更坏）。
+> ⇒ 已在 `session_fingerprint_for` / `fingerprint_of_file` 里把 cid 换成
+> `SESSION_ID_PLACEHOLDER` 再 hash；护栏见 `fingerprint_ignores_the_replicas_own_session_id`。
+> **同一个坑对「增量同步」的行比较同样成立** —— 见 `append_delta_between_files`。
 
 ### 1.3 目的地 + 能力门控 + Trae 空态（对应 GAP §2.5 的 4 条边界断言）
 

@@ -393,12 +393,39 @@ pub struct SessionFingerprint {
 }
 
 /// 读一个会话的**内容指纹**；jsonl 不存在 / 不可读时返回 `None`（**fail-closed**）。
+/// 指纹里用来**替换「本会话自己的 id」**的固定占位符。
+///
+/// ## 为什么必须归一化（**实测发现的假分歧**）
+///
+/// WorkBuddy 的会话 jsonl **几乎每一行都嵌着 `"sessionId":"<cid>"`** ——
+/// 实测一份 15 行的真实会话里 **14 行**含该 cid（唯一不含的是 `file-history-snapshot`）。
+/// 而副本是**另一个 cid**（复制时整份 `text.replace(cid, new_cid)`）。
+///
+/// ⇒ 若直接对**原始行**做 hash，两个副本**永远没有公共前缀** ⇒
+/// `deriveGroupStatus` 会把**每一个组都判成 `diverge`**（**假分歧**）——
+/// 明明内容一致，却告诉用户「有分歧」，比不显示更坏（§3.10 第 1 条「图不能撒谎」）。
+///
+/// ⇒ hash 前把本会话的 cid 换成这个占位符，使指纹表达的是**内容**，而不是「谁的副本」。
+/// 占位符选得足够独特，避免与真实正文撞车。
+pub const SESSION_ID_PLACEHOLDER: &str = "\u{1f}buddy-switch-session-id\u{1f}";
+
 pub fn session_fingerprint_for(region: Region, cid: &str) -> Option<SessionFingerprint> {
     let path = find_project_jsonl_for(region, cid)?;
-    let text = std::fs::read_to_string(&path).ok()?;
+    fingerprint_of_file(&path, cid)
+}
+
+/// 文件级指纹（路径由调用方给出 ⇒ 单测只需临时文件，**不碰真实 home**）。
+pub fn fingerprint_of_file(path: &Path, cid: &str) -> Option<SessionFingerprint> {
+    let text = std::fs::read_to_string(path).ok()?;
+    // ★ 先归一化自己的 id，再逐行 hash —— 否则副本之间**永远**没有公共前缀。
+    let normalized = if cid.is_empty() {
+        text
+    } else {
+        text.replace(cid, SESSION_ID_PLACEHOLDER)
+    };
     let mut line_count = 0usize;
     let mut prefix_hashes: Vec<u64> = Vec::new();
-    for line in text.lines() {
+    for line in normalized.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -435,6 +462,146 @@ pub fn common_prefix_len(a: &SessionFingerprint, b: &SessionFingerprint) -> usiz
         .zip(b.prefix_hashes.iter())
         .take_while(|(x, y)| x == y)
         .count()
+}
+
+/// P8 安全同步（增量追加）的执行报告。
+///
+/// `appendedLines = 0` 表示「本来就一致」，**不是失败** —— 调用方据此区分
+/// 「无事可做」与「出错」（后者是 `Err`）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendDeltaReport {
+    /// 实际追加的行数（0 = 已一致，未写入任何字节）。
+    pub appended_lines: usize,
+    /// 追加前目标的完整行数（= 共同旧版条数）。
+    pub base_lines: usize,
+    /// 追加后目标应有的完整行数（= 源的行数）。
+    pub total_lines: usize,
+}
+
+/// ★ P8「安全同步」：把 `src` 里**目标还没有的尾部行**追加到 `dst`。
+///
+/// ## 语义（`PLAN.md` §3.15.4）
+///
+/// - **同步是加法**：只 `append`，**绝不删除 / 改写目标已有内容**。这是用户对
+///   「同步」最大的恐惧（被覆盖）⇒ 它是**硬约束**，不是实现细节。
+/// - **只处理「落后」**：目标的每一行必须与源**逐字相同**（即目标是源的**严格前缀**）。
+/// - **分歧 fail-closed**：公共前缀 < 目标行数 ⇒ 双方在共同旧版之后**各自改过**
+///   ⇒ **返回 `Err`，且一个字节都不写**。绝不「猜一个合并策略」。
+/// - **判据是内容，不是时间**：`P8-ARCH.md` §3.15.2「时间新 ≠ 内容新」——
+///   本函数**不看** `updatedAt` / mtime，只看行内容。
+///
+/// ## id 重写
+///
+/// 会话 jsonl 里嵌着对自己 id 的引用，而副本是**另一个 cid** ⇒ 追加的行必须把
+/// `src_cid` 换成 `dst_cid`。规则与 [`copy_session_to_user_cross`] 的整份复制**同源**
+/// （那边是 `text.replace(cid, &new_cid)`）—— 两处必须一致，否则「复制出的副本」
+/// 与「同步过去的增量」会写出两种 id 形态。
+///
+/// ## 为什么是「文件级」函数
+///
+/// 路径由调用方给出 ⇒ 单测只需两个临时文件，**不必**动 `BUDDY_SWITCH_HOME`。
+/// （无参全局路径函数 + 并行单测 = 假失败，本仓踩过四次。）
+pub fn append_delta_between_files(
+    src: &Path,
+    dst: &Path,
+    src_cid: &str,
+    dst_cid: &str,
+) -> Result<AppendDeltaReport, String> {
+    use std::io::Write;
+
+    if src == dst {
+        return Err("源与目标是同一个文件，拒绝同步".into());
+    }
+    let src_text = std::fs::read_to_string(src).map_err(|e| format!("读取源会话失败：{e}"))?;
+    let dst_text = std::fs::read_to_string(dst).map_err(|e| format!("读取目标会话失败：{e}"))?;
+
+    // ★ 比较前**必须**把源自己的 cid 换成目标的 cid（与 [`SESSION_ID_PLACEHOLDER`] 同源的
+    //   那个坑）：副本的每一行都带**各自的** `sessionId`，不归一化就永远「分歧」。
+    let src_normalized = if src_cid == dst_cid {
+        src_text.clone()
+    } else {
+        src_text.replace(src_cid, dst_cid)
+    };
+    let src_lines = logical_lines(&src_normalized);
+    let dst_lines = logical_lines(&dst_text);
+
+    let common = src_lines
+        .iter()
+        .zip(dst_lines.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    // ★ 分歧判据：**公共前缀 < 较短的一方** ⇒ 双方在共同旧版之后各自改过。
+    //   （注意不能写成 `< 目标行数`：目标比源长且源是其前缀时，那是「目标更新」，不是分歧。）
+    let shorter = src_lines.len().min(dst_lines.len());
+    if common < shorter {
+        return Err(format!(
+            "目标会话与源在共同旧版之后各自有改动（共同旧版 {common} 行，源 {} 行 / 目标 {} 行）⇒ 不做追加",
+            src_lines.len(),
+            dst_lines.len()
+        ));
+    }
+
+    let base_lines = dst_lines.len();
+    if base_lines >= src_lines.len() {
+        // 目标不比源少 ⇒ 已一致（或目标更新）⇒ 无事可做，且**不写任何字节**。
+        return Ok(AppendDeltaReport {
+            appended_lines: 0,
+            base_lines,
+            total_lines: base_lines,
+        });
+    }
+
+    // jsonl 是行式记录：追加块必须以 `\n` 收尾，否则下一次追加会与这一条粘成一行。
+    let mut delta = src_lines[base_lines..].join("\n");
+    delta.push('\n');
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dst)
+        .map_err(|e| format!("打开目标会话失败：{e}"))?;
+    // 目标末行若没有换行符，先补一个 —— 否则新记录会与旧记录粘成一行（JSON 解析即坏）。
+    if !dst_text.is_empty() && !dst_text.ends_with('\n') {
+        file.write_all(b"\n")
+            .map_err(|e| format!("写入目标会话失败：{e}"))?;
+    }
+    file.write_all(delta.as_bytes())
+        .map_err(|e| format!("写入目标会话失败：{e}"))?;
+
+    Ok(AppendDeltaReport {
+        appended_lines: src_lines.len() - base_lines,
+        base_lines,
+        total_lines: src_lines.len(),
+    })
+}
+
+/// 逻辑行：按 `\n` 切分，并丢掉「文件以换行结尾」产生的那一个空尾元素。
+///
+/// ⚠️ 不能用 `split_inclusive('\n')` 直接比较：末行有没有 `\n` 会让**同一行**看起来不同
+/// （`"a\n"` vs `"a"`）⇒ 会把「目标末行缺换行」误判成分歧。
+fn logical_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if matches!(lines.last(), Some(&"")) {
+        lines.pop();
+    }
+    lines
+}
+
+/// 按 region / cid 解析真实路径后执行 [`append_delta_between_files`]。
+///
+/// 两侧任一会话正文找不到 ⇒ `Err`（**fail-closed**：宁可不做，也不猜路径）。
+pub fn sync_session_replica_for(
+    source_region: Region,
+    source_cid: &str,
+    target_region: Region,
+    target_cid: &str,
+) -> Result<AppendDeltaReport, String> {
+    let src = find_project_jsonl_for(source_region, source_cid)
+        .ok_or_else(|| format!("找不到源会话正文（{source_cid}）"))?;
+    let dst = find_project_jsonl_for(target_region, target_cid)
+        .ok_or_else(|| format!("找不到目标会话正文（{target_cid}）"))?;
+    append_delta_between_files(&src, &dst, source_cid, target_cid)
 }
 
 /// jsonl 头部能拿到的最小元数据（cwd / 标题）。
@@ -1798,6 +1965,19 @@ mod tests {
     /// 这正是「跨版本不支持」时期最隐蔽的失败形态（不报错，只是没搬过去）。
     #[test]
     fn cross_region_jsonl_copy_lands_in_target_region_projects() {
+        // ⚠️ `session_data_dir` 是**无参全局路径函数**（每次调用都重读 `BUDDY_SWITCH_HOME`）。
+        //    本用例原先在断言两侧各求值一次 ⇒ 并行单测里只要有别的用例换了 home，
+        //    两次就会读到**两个不同的根** ⇒「单独跑绿、全量跑红」。
+        //    这正是本仓记过四次的「假失败」模式（确定性缺陷，不是竞态）。
+        //    ⇒ 用 `HomeOverrideGuard` 把 home **钉住**，两次求值必然同源。
+        //    ⚠️ 不要在这里再手动 `env_lock()` —— `set()` 内部已经取了，不可重入会自锁死。
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-session-paths-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
         let src = session_data_dir(Region::Cn)
             .join("projects")
             .join("ws")
@@ -1823,6 +2003,9 @@ mod tests {
             "跨版本必须换到目标版本目录"
         );
         assert_ne!(same, cross);
+
+        drop(_guard);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 账本读写往返：写入后能读回，且未命中项返回 None。
@@ -2716,5 +2899,207 @@ mod fingerprint_tests {
         let a = fp(10, vec![1, 2, 3]);
         let b = fp(2, vec![1, 2]);
         assert_eq!(common_prefix_len(&a, &b), 2, "不得超出较短的一方");
+    }
+
+    // ---------------------------------------------------------------- P8 安全同步
+
+    /// 建一个临时目录（会话同步用例专用；**不碰真实 home**）。
+    fn sync_tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-sync-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 正向：目标是源的**严格前缀** ⇒ 只追加差量，**且目标原有字节逐字不变**。
+    ///
+    /// 可证伪：把实现里的 `append(true)` 换成 `write(true)`（截断重写）即变红 ——
+    /// `starts_with(before)` 会失败。这正是「同步是加法」这条硬约束的护栏。
+    #[test]
+    fn sync_appends_only_the_delta_and_leaves_existing_bytes_untouched() {
+        let dir = sync_tmp_dir("append");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+
+        std::fs::write(&src, "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n{\"a\":4}\n").unwrap();
+        std::fs::write(&dst, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+        let before = std::fs::read(&dst).unwrap();
+
+        let report = append_delta_between_files(&src, &dst, "cid-a", "cid-a").unwrap();
+        assert_eq!(report.appended_lines, 2, "只该追加后 2 行");
+        assert_eq!(report.base_lines, 2);
+        assert_eq!(report.total_lines, 4);
+
+        let after = std::fs::read(&dst).unwrap();
+        assert!(
+            after.starts_with(&before),
+            "目标原有字节必须逐字不变（加法语义）"
+        );
+        assert_eq!(String::from_utf8(after).unwrap(), "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n{\"a\":4}\n");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ★★ 分歧必须 fail-closed：**报错，且一个字节都不写**。
+    ///
+    /// 这是本功能最重要的一条 —— 「猜一个合并策略」会静默毁掉用户数据。
+    /// 可证伪：删掉实现里 `if common < dst_lines.len()` 那个分支，本用例即红。
+    #[test]
+    fn sync_refuses_on_divergence_and_writes_nothing() {
+        let dir = sync_tmp_dir("diverge");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+
+        // 前 2 行相同，第 3 行**各自不同** ⇒ 有分歧。
+        std::fs::write(&src, "{\"a\":1}\n{\"a\":2}\nsrc-only\n").unwrap();
+        std::fs::write(&dst, "{\"a\":1}\n{\"a\":2}\ndst-only\n").unwrap();
+        let before = std::fs::read(&dst).unwrap();
+
+        let error = append_delta_between_files(&src, &dst, "cid-a", "cid-a")
+            .expect_err("有分歧时必须拒绝，不得猜合并策略");
+        assert!(error.contains("各自有改动"), "文案应指明是分歧：{error}");
+
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            before,
+            "拒绝时目标文件必须一个字节都没变"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 已一致 ⇒ 无事可做，`appendedLines = 0`，且**不写**。
+    ///
+    /// 同时覆盖「目标比源多」（目标更新）—— 那种情况同样不该写。
+    #[test]
+    fn sync_is_a_noop_when_target_is_not_behind() {
+        let dir = sync_tmp_dir("noop");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+
+        std::fs::write(&src, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+        std::fs::write(&dst, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+        let report = append_delta_between_files(&src, &dst, "cid-a", "cid-a").unwrap();
+        assert_eq!(report.appended_lines, 0, "已一致时不该追加");
+        assert_eq!(std::fs::read(&dst).unwrap(), b"{\"a\":1}\n{\"a\":2}\n");
+
+        // 目标比源多（目标更新）⇒ 同样是 0，且不截断目标。
+        std::fs::write(&src, "{\"a\":1}\n").unwrap();
+        let report = append_delta_between_files(&src, &dst, "cid-a", "cid-a").unwrap();
+        assert_eq!(report.appended_lines, 0, "目标不落后时不该追加");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"{\"a\":1}\n{\"a\":2}\n",
+            "目标更新时更不许动它"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 追加的行里要把**源 cid** 换成**目标 cid**，且**只改追加的那部分**。
+    ///
+    /// 可证伪：去掉实现里的 `delta.replace(src_cid, dst_cid)` 即变红；
+    /// 若改成对**整份文件**做 replace（而不是只对 delta），第一行也会被改写 ⇒ 红。
+    #[test]
+    fn sync_rewrites_source_cid_only_in_appended_lines() {
+        let dir = sync_tmp_dir("rewrite");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+
+        std::fs::write(&src, "{\"id\":\"SRC\"}\n{\"id\":\"SRC\",\"n\":2}\n").unwrap();
+        std::fs::write(&dst, "{\"id\":\"DST\"}\n").unwrap();
+
+        append_delta_between_files(&src, &dst, "SRC", "DST").unwrap();
+        assert_eq!(
+            String::from_utf8(std::fs::read(&dst).unwrap()).unwrap(),
+            "{\"id\":\"DST\"}\n{\"id\":\"DST\",\"n\":2}\n",
+            "追加行的 SRC 应改成 DST，且原有首行不受影响"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 目标末行没有换行符时，必须先补 `\n` —— 否则新记录与旧记录粘成一行，JSON 即坏。
+    ///
+    /// 可证伪：删掉实现里补 `\n` 的那段，断言里的行数/内容即红。
+    #[test]
+    fn sync_repairs_a_target_that_lacks_a_trailing_newline() {
+        let dir = sync_tmp_dir("nonl");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+
+        std::fs::write(&src, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+        std::fs::write(&dst, "{\"a\":1}").unwrap(); // ← 末行无换行
+
+        append_delta_between_files(&src, &dst, "cid-a", "cid-a").unwrap();
+        assert_eq!(
+            String::from_utf8(std::fs::read(&dst).unwrap()).unwrap(),
+            "{\"a\":1}\n{\"a\":2}\n",
+            "补上换行后应成为两条合法记录，而不是粘成一行"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 源 = 目标（同一路径）⇒ 直接拒绝，绝不自己追加给自己。
+    #[test]
+    fn sync_refuses_when_source_and_target_are_the_same_file() {
+        let dir = sync_tmp_dir("same");
+        let only = dir.join("only.jsonl");
+        std::fs::write(&only, "{\"a\":1}\n").unwrap();
+
+        let error = append_delta_between_files(&only, &only, "cid-a", "cid-a")
+            .expect_err("同一文件必须拒绝");
+        assert!(error.contains("同一个文件"), "文案应指明原因：{error}");
+        assert_eq!(std::fs::read(&only).unwrap(), b"{\"a\":1}\n");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ★★ 指纹必须**按内容**可比，不能把「各自的 sessionId」算进去。
+    ///
+    /// 现场（实测）：真实会话 jsonl 的**几乎每一行**都带 `"sessionId":"<cid>"` ——
+    /// 一份 15 行的会话里 14 行含该 cid。而副本是**另一个 cid**
+    /// （复制时整份 `text.replace(cid, new_cid)`）。
+    /// ⇒ 若按原始行 hash，两个**内容完全一致**的副本公共前缀恒为 0 ⇒
+    /// `deriveGroupStatus` 会把**每个组都判成 `diverge`**（假分歧）。
+    ///
+    /// 可证伪：把 `fingerprint_of_file` 里的 `text.replace(cid, SESSION_ID_PLACEHOLDER)`
+    /// 去掉（改回直接 hash 原始行），本用例即红。
+    #[test]
+    fn fingerprint_ignores_the_replicas_own_session_id() {
+        let dir = sync_tmp_dir("fp-id");
+        let a = dir.join("a.jsonl");
+        let b = dir.join("b.jsonl");
+        let cid_a = "aaaaaaaa-1111-2222-3333-444444444444";
+        let cid_b = "bbbbbbbb-5555-6666-7777-888888888888";
+
+        // 同一份内容，只有各自的 sessionId 不同（模拟「复制出来的副本」）。
+        let body = |cid: &str| {
+            format!(
+                "{{\"type\":\"message\",\"sessionId\":\"{cid}\",\"text\":\"hello\"}}\n\
+                 {{\"type\":\"message\",\"sessionId\":\"{cid}\",\"text\":\"world\"}}\n"
+            )
+        };
+        std::fs::write(&a, body(cid_a)).unwrap();
+        std::fs::write(&b, body(cid_b)).unwrap();
+
+        let fa = fingerprint_of_file(&a, cid_a).unwrap();
+        let fb = fingerprint_of_file(&b, cid_b).unwrap();
+        assert_eq!(fa.line_count, 2);
+        assert_eq!(
+            common_prefix_len(&fa, &fb),
+            2,
+            "内容一致的两个副本必须**整段**可比 —— 否则组状态恒为 diverge（假分歧）"
+        );
+
+        // 阳性对照：内容真的不同 ⇒ 必须**不**判成一致（证明上面的 2 不是因为「hash 恒等」）。
+        std::fs::write(&b, body(cid_b).replace("world", "WORLD")).unwrap();
+        let fb2 = fingerprint_of_file(&b, cid_b).unwrap();
+        assert_eq!(common_prefix_len(&fa, &fb2), 1, "内容变化必须被指纹看见");
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
