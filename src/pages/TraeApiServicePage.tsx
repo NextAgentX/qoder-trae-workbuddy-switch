@@ -36,6 +36,7 @@ import {
 } from "@/lib/trae-gateway";
 import { regionPrograms } from "@/lib/trae-variant-status";
 import type { TraeGatewayConfig, TraeGatewayLogEntry, TraeGatewayStatus, TraeModelSource } from "@/lib/trae-types";
+import { traeRegionOf } from "@/lib/trae-types";
 import { cn } from "@/lib/utils";
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useTraeVariant } from "@/lib/use-trae-variant";
@@ -487,6 +488,7 @@ export default function TraeApiServicePage() {
       {/* ---- 模型清单（按程序位读客户端缓存，可重新读取：见 TraeModelList 的模块头） ---- */}
       <TraeModelList
         sources={modelSources}
+        region={traeRegionOf(variant)}
         defaultModel={config.defaultModel}
         refreshing={refreshingModels}
         onRefresh={() => void onRefreshModels()}

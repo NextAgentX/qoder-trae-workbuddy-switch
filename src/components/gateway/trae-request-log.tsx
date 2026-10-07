@@ -1,7 +1,8 @@
-import { Eraser, Loader2 } from "lucide-react";
+import { Eraser, Loader2, ScrollText } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { DemoAction } from "@/components/demo-action";
 import { useT } from "@/lib/i18n";
 import type { TraeGatewayLogEntry } from "@/lib/trae-types";
@@ -61,9 +62,9 @@ export function TraeRequestLog({
       </div>
 
       {logs.length === 0 ? (
-        <p className="px-5 py-6 text-center text-sm text-muted-foreground">
-          {t("trae.gateway.log.empty")}
-        </p>
+        /* P3：空态改用全应用唯一的 `EmptyState`（§3.6）——
+           原来是「一行灰字」，与其它页面的空态形态不一致。 */
+        <EmptyState icon={ScrollText} title={t("trae.gateway.log.empty")} className="px-5 py-6" />
       ) : (
         <div className="max-h-80 overflow-y-auto">
           <table className="w-full text-sm">

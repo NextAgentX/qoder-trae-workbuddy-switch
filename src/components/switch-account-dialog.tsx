@@ -1,27 +1,81 @@
+/**
+ * 跨作用域迁移向导（P4 T04）—— **抽屉内的三步向导**。
+ *
+ * ## 为什么从「单页模态」改成「抽屉内三步向导」（`P4-MIGRATION-ARCH.md` §3.5）
+ *
+ * 改造前是**单页模态 `Dialog`**：来源版本 Tabs + 复制会话开关 + 记忆 / 连接器开关 +
+ * 三层会话树，**一步到底**。用户看不出「现在在配哪一段、还剩几步」，也**没有确认步**
+ * （迁移会写目标账号数据，不可逆）。原型要求「切换账号 = 抽屉内三步向导
+ * （目标与来源 → 迁移内容 → 确认）」。
+ *
+ * ## 抽屉而不是模态（§3.11 / 决策 #5）
+ *
+ * 用 Radix `Sheet`（`@radix-ui/react-dialog` 的侧滑封装）—— `role="dialog"` +
+ * `aria-modal` + **焦点陷阱** + `Esc` + 关闭后**焦点归还**都是它的默认能力，
+ * **不手写**（手写必然与 `ui/dialog.tsx` 漂移）。
+ *
+ * ## ★ 保留既有行为（不许因向导化而弄丢）
+ *
+ * - `doSwitch`：先 `migrateAccountData`（记忆 / 连接器）再 `switchAccount`（会话复制）；
+ * - **统一重启确认**（`RestartConfirmDialog`，§3.15.3）—— 点「执行切换」不直接执行；
+ * - **权限自愈**：结构化错误码 `permission.denied` ⇒ 每 2s 轮询授权状态并自动恢复；
+ * - 进度提示（桌面走 Tauri 事件、webui 走 HTTP 轮询）；
+ * - 「复制会话常开」的一次性初始化（`defaultsRef`）。
+ *
+ * ## 能力边界（§1.3 / §3.5 红线）
+ *
+ * 会话复制的来源 = 源 region 的**当前登录账号**（后端 `switchAccount` 无 `sourceAccountId`）；
+ * 跨产品（WB→Trae）会话复制**后端不支持** ⇒ 来源只列各作用域**当前账号**，
+ * 跨产品来源 **disabled + 原因**，**不写任何假承诺**。
+ */
+
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, ExternalLink, Folder, Loader2 } from "lucide-react";
+import { ExternalLink, Inbox, Loader2 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Separator } from "@/components/ui/separator";
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { accountIdentity } from "@/components/account-card";
+import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
+import { MigrationSummary } from "@/components/switch-account/migration-summary";
+import { SessionTree } from "@/components/switch-account/session-tree";
+import {
+  scopeLabel,
+  SourceAccountPicker,
+  type SourceOption,
+} from "@/components/switch-account/source-account-picker";
+import { WizardSteps, type WizardStep } from "@/components/switch-account/wizard-steps";
 import * as api from "@/lib/api";
 import { decodeError } from "@/lib/error-code";
+import { hasCapability } from "@/lib/platforms/registry";
 import { REGIONS, regionLabel } from "@/lib/region";
+import { SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
 import { useT, type Translate } from "@/lib/i18n";
+import {
+  buildSessionTree,
+  selectAll as selectAllInTree,
+  toggleDir,
+  toggleType,
+  treeSelectionStats,
+  type SessionDirNode,
+  type SessionTypeNode,
+} from "@/lib/session-tree";
 import type { AccountMeta, MigrateResult, Region, Session } from "@/lib/types";
+
+/** WorkBuddy 桌面客户端的显示名（商标，中英写法相同 ⇒ 不放进词表）。 */
+const WORKBUDDY_LABEL = "WorkBuddy";
 
 interface Props {
   open: boolean;
@@ -45,8 +99,8 @@ interface Props {
  * 「复制会话常开」的一次性初始化状态。
  *
  * 会话加载 effect 同时被 `sourceRegion` 变化触发，因此必须把「打开时套用默认值」
- * 与「每次重取会话都重来」区分开：否则用户手动取消勾选之后，只要切一下
- * 数据来源版本，勾选就会被悄悄恢复成全选。
+ * 与「每次重取会话都重来」区分开：否则用户手动取消勾选之后，只要切一下来源版本，
+ * 勾选就会被悄悄恢复成全选。
  */
 interface SwitchDefaults {
   /** 本次打开是否已经套用过默认值。 */
@@ -55,16 +109,24 @@ interface SwitchDefaults {
   selectAll: boolean;
 }
 
-/** 切换账号弹窗：可勾选当前账号的会话复制到目标账号（路径 B）。 */
-export function SwitchAccountDialog({ open, onOpenChange, account, onDone, region, copySessionsByDefault = false }: Props) {
+/** 迁移向导：WorkBuddy 桌面客户端的三步切换（目标与来源 → 迁移内容 → 确认）。 */
+export function SwitchAccountDialog({
+  open,
+  onOpenChange,
+  account,
+  onDone,
+  region,
+  copySessionsByDefault = false,
+}: Props) {
   const t = useT();
+  const [step, setStep] = useState<WizardStep>(1);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [copySessions, setCopySessions] = useState(false);
-  /** 把当前账号的长期记忆合并进目标账号（带去重）。 */
+  /** 把来源账号的长期记忆合并进目标账号（带去重）。 */
   const [migrateMemory, setMigrateMemory] = useState(false);
   /**
-   * 把当前账号的连接器配置合并进目标账号（带去重）。
+   * 把来源账号的连接器配置合并进目标账号（带去重）。
    *
    * 刻意与 `migrateMemory` 做成两个**平级**独立开关，而**不是**「主开关 + 两个子开关」：
    * 嵌套结构会引入「主开关开着、两个子项都关」的退化状态，需要额外为其定义语义；
@@ -72,12 +134,24 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
    */
   const [migrateConnectors, setMigrateConnectors] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  /** 展开的节点：任务 / 空间 / 文件夹。默认全部收起。 */
+  /** 展开的节点：类型 / 目录。默认全部展开（三层都可见）。 */
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  /**
+   * 统一重启确认框是否打开（P8 T03 / §3.15.3）。
+   *
+   * 切换 WorkBuddy 会**先关再开**，且可能**丢失未保存的文件** ⇒ 点「执行切换」不再直接执行，
+   * 而是先走**同一条**重启确认流程。真正的切换在 `RestartConfirmDialog` 的 `onConfirm` 里发生。
+   */
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [error, setError] = useState("");
   const [currentUid, setCurrentUid] = useState<string | null>(null);
   const [progress, setProgress] = useState("");
+  /* ★ 权限自愈的**自动重试**：记住用户上次选的 `restart`（它来自确认框回调、**不是 state**），
+     授权恢复后**自动重试那次切换** —— 原型 P3 要求「恢复即自动重试」，否则用户得手动再点一次。
+     ⚠️ `permissionRetriedRef` 保证**只重试一次**：否则重试又失败 ⇒ 又触发轮询 ⇒ **无限循环**。 */
+  const lastRestartRef = useRef<boolean | null>(null);
+  const permissionRetriedRef = useRef(false);
   /** 降级 / 异常提示（索引库不可读、扫描结果不完整）。普通场景为 null。 */
   const [sessionWarning, setSessionWarning] = useState<string | null>(null);
   /**
@@ -92,11 +166,22 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
    * 缺省等于目标 `region` —— 即同版本内切换，行为与改造前完全一致。
    */
   const [sourceRegion, setSourceRegion] = useState<Region>(region ?? "cn");
+  /** 「从其他作用域选择…」开关（原型 `wiz-cross`）。关时只列当前作用域。 */
+  const [crossScope, setCrossScope] = useState(false);
+  /** 各 region 的**当前登录账号**展示名（第 1 步「来源账号」用）。 */
+  const [scopeCurrent, setScopeCurrent] = useState<Record<Region, string | null>>({
+    cn: null,
+    global: null,
+  });
   const defaultsRef = useRef<SwitchDefaults>({ applied: false, selectAll: false });
 
   // 关闭时清掉本次打开的一次性状态，下次打开重新按配置初始化。
   useEffect(() => {
-    if (!open) defaultsRef.current = { applied: false, selectAll: false };
+    if (!open) {
+      defaultsRef.current = { applied: false, selectAll: false };
+      // 顺带关掉重启确认框：父抽屉被外部关掉时，别把它单独留在屏幕上。
+      setRestartConfirmOpen(false);
+    }
   }, [open]);
 
   // 监听后端切换进度：桌面端走 Tauri 事件，webui 走 HTTP 轮询
@@ -121,7 +206,7 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
   }, []);
 
   /**
-   * 打开弹窗时复位一次性状态 —— 其中包含「数据来源版本回到目标版本」。
+   * 打开抽屉时复位一次性状态 —— 其中包含「数据来源版本回到目标版本」与「回到第 1 步」。
    *
    * ★ **`sourceRegion` 绝不能出现在本 effect 的依赖里**：本 effect 会把来源版本重置成
    * 目标版本，一旦被 `sourceRegion` 触发，用户刚点的「国际版」会在下一帧被弹回
@@ -130,6 +215,8 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
    */
   useEffect(() => {
     if (!open) return;
+    setStep(1);
+    setCrossScope(false);
     setMigrateMemory(false);
     setMigrateConnectors(false);
     setSelected(new Set());
@@ -162,6 +249,9 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
         setCurrentUid(res.current);
         setSessionWarning(res.warning ?? null);
         setSessionSource(res.source ?? null);
+        // 默认全部展开：类型层与目录层一次可见，用户一眼看到「三层」结构。
+        const tree = buildSessionTree(res.sessions, t);
+        setExpanded(new Set(tree.flatMap((node) => [node.key, ...node.dirs.map((dir) => dir.key)])));
         // 「复制会话常开」：默认全选，用户仍可逐条取消。
         if (defaultsRef.current.selectAll) {
           defaultsRef.current.selectAll = false;
@@ -178,25 +268,93 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
       cancelled = true;
     };
     // 刻意**不**把 `copySessionsByDefault` 放进依赖：它决定的是「打开瞬间的初值」，
-    // 任何在弹窗开着时发生的值变化都不该反过来改动用户当前的选择。
+    // 任何在抽屉开着时发生的值变化都不该反过来改动用户当前的选择。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, account, sourceRegion]);
+
+  /**
+   * 取「各 region 当前登录账号」的展示名（第 1 步「来源账号」用）。
+   *
+   * 只读 `getStatus`：**来源账号 = 该 region 的当前登录账号**（§1.3 结论 1）——
+   * 因此这里**只**需要当前账号的名字，不需要账号库列表（也就不会出现「让用户任选账号」的误导）。
+   * 跨作用域开关打开时顺带取另一个 WB region；Trae 侧不可选，无需取名。
+   */
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const regions: Region[] = crossScope ? [...REGIONS] : [region ?? "cn"];
+    void Promise.all(
+      regions.map(async (r): Promise<[Region, string | null]> => {
+        try {
+          const status = await api.getStatus(r);
+          const name =
+            status.current?.nickname || status.current?.email || status.current?.uid || null;
+          return [r, name];
+        } catch {
+          return [r, null];
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setScopeCurrent((prev) => {
+        const next = { ...prev };
+        for (const [r, name] of entries) next[r] = name;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, crossScope, region]);
+
+  /* ── 派生值 ───────────────────────────────────────────────── */
+
+  const targetRegion: Region = region ?? "cn";
+  const crossRegion = sourceRegion !== targetRegion;
+  const tree = buildSessionTree(sessions, t);
+  const stats = treeSelectionStats(tree, selected);
+  const sessionsEmpty = !loadingSessions && sessions.length === 0;
+  const needsPermission = permissionDenied(error);
+  // 空列表的成因必须分开说，否则会把用户引向错误结论：
+  //   no-dir → 该版本的数据目录空了（客户端刚重装 / 重置）；empty → 该版本账号确实没有会话。
+  const sourceLabel = regionLabel(sourceRegion);
+  const copyHint = loadingSessions
+    ? t("wbAccounts.dialog.copyHintLoading")
+    : error && sessionsEmpty
+      ? t("wbAccounts.dialog.copyHintErrorEmpty")
+      : sessionsEmpty
+        ? currentUid
+          ? sessionSource === "no-dir"
+            ? t("wbAccounts.dialog.copyHintNoData", { region: sourceLabel })
+            : t("wbAccounts.dialog.copyHintEmptyCurrent", { region: sourceLabel })
+          : t("wbAccounts.dialog.copyHintNoCurrent")
+        : crossRegion
+          ? t("wbAccounts.dialog.copyHintCross", {
+              from: regionLabel(sourceRegion),
+              to: regionLabel(targetRegion),
+            })
+          : t("wbAccounts.dialog.copyHintSame");
+
+  const currentScope: Scope = scopeOf("workbuddy", targetRegion);
+  const candidateScopes: readonly Scope[] = crossScope ? SCOPES : [currentScope];
+  const sourceOptions: SourceOption[] = candidateScopes.map((scope) => {
+    const parts = scopeParts(scope);
+    return {
+      scope,
+      accountName: scopeCurrent[parts.region] ?? null,
+      supportsSessionCopy: hasCapability(parts.product, "sessionCopy"),
+    };
+  });
+  const selectedScope: Scope = scopeOf("workbuddy", sourceRegion);
+  const programLabel = t("wbAccounts.wizard.programWorkbuddy");
+
+  /* ── 交互 ─────────────────────────────────────────────────── */
 
   function toggleSession(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
-      return next;
-    });
-  }
-
-  function toggleFolder(ids: string[]) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      const allOn = ids.length > 0 && ids.every((id) => next.has(id));
-      if (allOn) ids.forEach((id) => next.delete(id));
-      else ids.forEach((id) => next.add(id));
       return next;
     });
   }
@@ -210,7 +368,41 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
     });
   }
 
-  async function doSwitch() {
+  function handleToggleType(node: SessionTypeNode) {
+    setSelected((prev) => toggleType(node, prev));
+  }
+
+  function handleToggleDir(node: SessionDirNode) {
+    setSelected((prev) => toggleDir(node, prev));
+  }
+
+  function handleSelectAll(on: boolean) {
+    setSelected(selectAllInTree(tree, on));
+  }
+
+  /** 选来源作用域：只接受支持会话复制的产品（跨产品来源已被禁用，这里再兜一层）。 */
+  function pickSource(scope: Scope) {
+    const parts = scopeParts(scope);
+    if (!hasCapability(parts.product, "sessionCopy")) return;
+    setSourceRegion(parts.region);
+  }
+
+  function toggleCross() {
+    const next = !crossScope;
+    setCrossScope(next);
+    // 关闭跨作用域时回到当前作用域 —— 否则会留下一个「看不见却仍生效」的来源（假状态）。
+    if (!next) setSourceRegion(targetRegion);
+  }
+
+  function goNext() {
+    setStep((prev) => (prev < 3 ? ((prev + 1) as WizardStep) : prev));
+  }
+
+  function goBack() {
+    setStep((prev) => (prev > 1 ? ((prev - 1) as WizardStep) : prev));
+  }
+
+  async function doSwitch(restart: boolean) {
     if (!account) return;
     setBusy(true);
     setProgress(t("wbAccounts.dialog.switchProgress"));
@@ -238,6 +430,9 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
       const res = await api.switchAccount({
         accountId: account.id,
         region,
+        // 由统一重启确认框决定（§3.15.3）：勾选时 true；取消勾选时 false
+        // （后端此时只写认证文件，不关不启 WorkBuddy —— 见 `switch.rs`）。
+        restart,
         // 只有「跨版本」时才显式带来源版本：同版本时它由后端缺省为目标 region，
         // 少传一个字段就少一处与后端默认值漂移的机会。
         sourceRegion: sourceRegion === region ? undefined : sourceRegion,
@@ -260,9 +455,12 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
       }
       if (res.backup) parts.push(t("wbAccounts.dialog.backup", { path: res.backup }));
 
-      const description = parts.length
-        ? parts.join(t("wbAccounts.dialog.listSeparator"))
-        : t("wbAccounts.dialog.switchedDefault");
+      // ★ 明确结果（§3.15.3）：把「是否重启」放在最前，再列迁移 / 复制细节 ——
+      // 用户取消勾选时，绝不能沿用「已重启」的说法（那是假承诺）。
+      const restartNote = restart
+        ? t("wbAccounts.dialog.switchedDefault")
+        : t("sessions.restart.resultNotRestarted", { client: WORKBUDDY_LABEL });
+      const description = [restartNote, ...parts].join(t("wbAccounts.dialog.listSeparator"));
       if (warnings.length) {
         // 部分迁移失败但未阻断切换：明确降级为警告，避免用户误以为全部成功。
         toast.warning(t("wbAccounts.dialog.switchedWarn", { name: nickname }), {
@@ -332,6 +530,13 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
           if (!cancelled) {
             setPermCheck(t("wbAccounts.dialog.permissionOk"));
             setError("");
+            /* ★ 授权恢复 ⇒ **自动重试上次的切换**（原型 P3 要求「恢复即自动重试」；
+               此前只清错误、不重试 ⇒ 用户还得手动再点一次，与文件头注释的描述不符）。
+               只重试**一次**（`permissionRetriedRef`），否则重试再失败 ⇒ 又进轮询 ⇒ **无限循环**。 */
+            if (!permissionRetriedRef.current && lastRestartRef.current !== null) {
+              permissionRetriedRef.current = true;
+              void doSwitch(lastRestartRef.current);
+            }
           }
           return;
         }
@@ -347,374 +552,300 @@ export function SwitchAccountDialog({ open, onOpenChange, account, onDone, regio
     };
   }, [error, t]);
 
-  const copyCount = copySessions ? selected.size : 0;
-  const targetRegion: Region = region ?? "cn";
-  const crossRegion = sourceRegion !== targetRegion;
-  const needsPermission = permissionDenied(error);
-  const sessionsEmpty = !loadingSessions && sessions.length === 0;
-  // 空列表的成因必须分开说，否则会把用户引向错误结论：
-  //   no-dir → 该版本的数据目录空了（客户端刚重装 / 重置）；empty → 该版本账号确实没有会话。
-  const sourceLabel = regionLabel(sourceRegion);
-  const copyHint = loadingSessions
-    ? t("wbAccounts.dialog.copyHintLoading")
-    : error && sessionsEmpty
-      ? t("wbAccounts.dialog.copyHintErrorEmpty")
-      : sessionsEmpty
-        ? currentUid
-          ? sessionSource === "no-dir"
-            ? t("wbAccounts.dialog.copyHintNoData", { region: sourceLabel })
-            : t("wbAccounts.dialog.copyHintEmptyCurrent", { region: sourceLabel })
-          : t("wbAccounts.dialog.copyHintNoCurrent")
-        : crossRegion
-          ? t("wbAccounts.dialog.copyHintCross", {
-              from: regionLabel(sourceRegion),
-              to: regionLabel(targetRegion),
-            })
-          : t("wbAccounts.dialog.copyHintSame");
+  const targetName =
+    account?.nickname || account?.email || account?.uid || t("wbAccounts.common.unknownAccount");
+  const sourceName = scopeCurrent[sourceRegion] ?? null;
+  const runDisabled = busy || (copySessions && selected.size === 0);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        showCloseButton={!busy}
-        className="flex max-h-[min(90vh,calc(100vh-2rem))] min-w-0 flex-col overflow-hidden"
-      >
-        <DialogHeader className="shrink-0">
-          <DialogTitle>{t("wbAccounts.dialog.switchTitle", { name: account?.nickname || account?.email || account?.uid || t("wbAccounts.common.unknownAccount") })}</DialogTitle>
-          <DialogDescription>
-            {t("wbAccounts.dialog.switchDesc")}
-          </DialogDescription>
-        </DialogHeader>
-
-        {busy && (
-          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 rounded-lg bg-background/85 backdrop-blur-sm">
-            <Loader2 className="size-8 animate-spin text-primary" />
-            <p className="text-sm font-medium">{progress || t("wbAccounts.dialog.switchProgress")}</p>
-            <p className="max-w-xs text-center text-xs text-muted-foreground">
-              {t("wbAccounts.dialog.switchProcessing")}
-            </p>
-          </div>
-        )}
-
-        <div className="min-h-0 space-y-3 overflow-x-hidden overflow-y-auto">
-          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium">{t("wbAccounts.dialog.sourceVersion")}</div>
-              <div className="text-xs text-muted-foreground">
-                {sourceRegion === targetRegion
-                  ? t("wbAccounts.dialog.sourceSame", { region: regionLabel(targetRegion) })
-                  : t("wbAccounts.dialog.sourceCross", {
-                      from: regionLabel(sourceRegion),
-                      to: regionLabel(targetRegion),
-                    })}
-              </div>
+    <>
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <SheetContent
+          showCloseButton={!busy}
+          className="flex w-full flex-col gap-0 sm:max-w-lg"
+          // 切换进行中不允许用遮罩 / Esc 关掉 —— 否则会留下「半途切换」的窗口。
+          onInteractOutside={(e) => {
+            if (busy) e.preventDefault();
+          }}
+          onEscapeKeyDown={(e) => {
+            if (busy) e.preventDefault();
+          }}
+        >
+          {busy && (
+            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-background/85 backdrop-blur-sm">
+              <Loader2 className="size-8 animate-spin text-primary" />
+              <p className="text-sm font-medium">
+                {progress || t("wbAccounts.dialog.switchProgress")}
+              </p>
+              <p className="max-w-xs text-center text-xs text-muted-foreground">
+                {t("wbAccounts.dialog.switchProcessing")}
+              </p>
             </div>
-            <Tabs
-              value={sourceRegion}
-              onValueChange={(next) => {
-                if (next === "cn" || next === "global") setSourceRegion(next);
-              }}
-            >
-              <TabsList className="h-auto" aria-label={t("wbAccounts.dialog.sourceVersionAria")}>
-                {REGIONS.map((r) => (
-                  <TabsTrigger key={r} value={r} className="whitespace-nowrap">
-                    {regionLabel(r)}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
+          )}
+
+          <SheetHeader className="shrink-0 gap-2">
+            <SheetTitle>{t("wbAccounts.dialog.switchTitle", { name: targetName })}</SheetTitle>
+            <SheetDescription>{t("wbAccounts.dialog.switchDesc")}</SheetDescription>
+            <div className="pt-1">
+              <WizardSteps step={step} />
+            </div>
+          </SheetHeader>
+
+          <div className="min-h-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto p-5">
+            {step === 1 && (
+              <SourceAccountPicker
+                options={sourceOptions}
+                selectedScope={selectedScope}
+                crossScope={crossScope}
+                programLabel={programLabel}
+                onPick={pickSource}
+                onToggleCross={toggleCross}
+              />
+            )}
+
+            {step === 2 && (
+              <>
+                <section className="space-y-2">
+                  <h4 className="text-sm font-medium">{t("wbAccounts.wizard.contentTitle")}</h4>
+                  <div className="space-y-1.5">
+                    <MigrateOption
+                      active={copySessions}
+                      disabled={loadingSessions || sessions.length === 0}
+                      dataAct="wiz-opt|sessions"
+                      title={t("wbAccounts.dialog.copySessions")}
+                      desc={copyHint}
+                      warn={sessionsEmpty}
+                      onToggle={() => setCopySessions((v) => !v)}
+                    />
+                    <MigrateOption
+                      active={migrateMemory}
+                      dataAct="wiz-opt|memory"
+                      title={t("wbAccounts.dialog.migrateMemory")}
+                      desc={
+                        crossRegion
+                          ? t("wbAccounts.dialog.migrateMemoryDescCross", {
+                              from: regionLabel(sourceRegion),
+                              to: regionLabel(targetRegion),
+                            })
+                          : t("wbAccounts.dialog.migrateMemoryDescSame")
+                      }
+                      onToggle={() => setMigrateMemory((v) => !v)}
+                    />
+                    <MigrateOption
+                      active={migrateConnectors}
+                      dataAct="wiz-opt|connectors"
+                      title={t("wbAccounts.dialog.migrateConnectors")}
+                      desc={
+                        crossRegion
+                          ? t("wbAccounts.dialog.migrateConnectorsDescCross", {
+                              from: regionLabel(sourceRegion),
+                              to: regionLabel(targetRegion),
+                            })
+                          : t("wbAccounts.dialog.migrateConnectorsDescSame")
+                      }
+                      onToggle={() => setMigrateConnectors((v) => !v)}
+                    />
+                  </div>
+                  {/* 降级警告：索引库不可读 / 不完整。仍允许勾选（降级扫描已列出
+                      projects 下的 jsonl），但必须明确告诉用户数据可能缺失。 */}
+                  {sessionWarning && (
+                    <div className="text-xs text-amber-700 dark:text-amber-400">
+                      {sessionWarning}
+                    </div>
+                  )}
+                </section>
+
+                {copySessions && (
+                  <section>
+                    {loadingSessions ? (
+                      /* 区块加载 ⇒ 骨架（不是「加载中」文字）。 */
+                      <div className="space-y-2" aria-busy="true">
+                        <Skeleton className="h-4 w-40" />
+                        <Skeleton className="h-8 w-full" />
+                        <Skeleton className="h-8 w-full" />
+                        <Skeleton className="h-8 w-5/6" />
+                      </div>
+                    ) : sessions.length === 0 ? (
+                      /* 空态四要素（含出口）：出口 = 「跳过会话复制」，即用户此刻能做的下一步。 */
+                      <EmptyState
+                        icon={Inbox}
+                        title={
+                          currentUid
+                            ? t("wbAccounts.dialog.noSessionsCurrent")
+                            : t("wbAccounts.dialog.noSessionsNoCurrent")
+                        }
+                        description={copyHint}
+                        action={
+                          <Button variant="outline" size="sm" onClick={() => setCopySessions(false)}>
+                            {t("wbAccounts.wizard.emptyExit")}
+                          </Button>
+                        }
+                      />
+                    ) : (
+                      <SessionTree
+                        tree={tree}
+                        selected={selected}
+                        expanded={expanded}
+                        stats={stats}
+                        onToggleSession={toggleSession}
+                        onToggleType={handleToggleType}
+                        onToggleDir={handleToggleDir}
+                        onToggleExpanded={toggleExpanded}
+                        onSelectAll={handleSelectAll}
+                      />
+                    )}
+                  </section>
+                )}
+              </>
+            )}
+
+            {step === 3 && account && (
+              <MigrationSummary
+                target={account}
+                targetIdentity={accountIdentity(account)}
+                sourceName={sourceName}
+                sourceScopeLabel={scopeLabel(selectedScope, t)}
+                programLabel={programLabel}
+                stats={stats}
+                migrate={{
+                  sessions: copySessions,
+                  memory: migrateMemory,
+                  connectors: migrateConnectors,
+                }}
+              />
+            )}
+
+            {error && (
+              <Alert
+                variant={needsPermission ? "warning" : "destructive"}
+                className="min-w-0 break-all"
+              >
+                <AlertDescription className="min-w-0 break-all">
+                  <div className="min-w-0 break-all">{error}</div>
+                  {needsPermission && (
+                    <div className="mt-2 space-y-2">
+                      <div className="rounded-md border bg-muted/60 p-3 text-xs text-muted-foreground">
+                        <p className="mb-1 font-medium text-foreground">
+                          {t("wbAccounts.dialog.permissionTitle")}
+                        </p>
+                        <ol className="list-decimal space-y-1 pl-4">
+                          <li>{t("wbAccounts.dialog.permissionStep1")}</li>
+                          <li>{t("wbAccounts.dialog.permissionStep2")}</li>
+                          <li>{t("wbAccounts.dialog.permissionStep3")}</li>
+                        </ol>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button variant="outline" size="sm" onClick={openPermissionSettings}>
+                          <ExternalLink />
+                          {t("wbAccounts.dialog.openFullDisk")}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void api.revealAppInFinder()}
+                        >
+                          {t("wbAccounts.dialog.showInFinder")}
+                        </Button>
+                        <Button variant="secondary" size="sm" onClick={runPermissionCheck}>
+                          {t("wbAccounts.dialog.checkNow")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {permCheck && <div className="mt-2 text-xs">{permCheck}</div>}
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
 
-          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium">{t("wbAccounts.dialog.copySessions")}</div>
-              <div
-                className={
-                  sessionsEmpty
-                    ? "text-xs text-amber-700 dark:text-amber-400"
-                    : "text-xs text-muted-foreground"
-                }
-              >
-                {copyHint}
-              </div>
-              {/* 降级警告：索引库不可读 / 不完整。仍允许勾选（降级扫描已列出
-                   projects 下的 jsonl），但必须明确告诉用户数据可能缺失。 */}
-              {sessionWarning && (
-                <div className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
-                  {sessionWarning}
-                </div>
+          <SheetFooter className="shrink-0">
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+                {t("wbAccounts.dialog.cancel")}
+              </Button>
+              <div className="flex-1" />
+              {step > 1 && (
+                <Button variant="outline" data-act="wiz-back" onClick={goBack} disabled={busy}>
+                  {t("wbAccounts.wizard.back")}
+                </Button>
+              )}
+              {step < 3 && (
+                <Button data-act="wiz-next" onClick={goNext} disabled={busy}>
+                  {t("wbAccounts.wizard.next")}
+                </Button>
+              )}
+              {/* ★ 不再直接切换：先走**统一重启确认**（§3.15.3），由确认框决定是否重启。 */}
+              {step === 3 && (
+                <Button
+                  data-act="wiz-run"
+                  onClick={() => setRestartConfirmOpen(true)}
+                  disabled={runDisabled}
+                >
+                  {busy ? <Loader2 className="animate-spin" /> : null}
+                  {busy ? t("wbAccounts.card.switching") : t("wbAccounts.wizard.run")}
+                </Button>
               )}
             </div>
-            <Switch
-              checked={copySessions}
-              onCheckedChange={setCopySessions}
-              disabled={loadingSessions || sessions.length === 0}
-            />
-          </div>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
 
-          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium">{t("wbAccounts.dialog.migrateMemory")}</div>
-              <div className="text-xs text-muted-foreground">
-                {crossRegion
-                  ? t("wbAccounts.dialog.migrateMemoryDescCross", {
-                      from: regionLabel(sourceRegion),
-                      to: regionLabel(targetRegion),
-                    })
-                  : t("wbAccounts.dialog.migrateMemoryDescSame")}
-              </div>
-            </div>
-            <Switch checked={migrateMemory} onCheckedChange={setMigrateMemory} />
-          </div>
-
-          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium">{t("wbAccounts.dialog.migrateConnectors")}</div>
-              <div className="text-xs text-muted-foreground">
-                {crossRegion
-                  ? t("wbAccounts.dialog.migrateConnectorsDescCross", {
-                      from: regionLabel(sourceRegion),
-                      to: regionLabel(targetRegion),
-                    })
-                  : t("wbAccounts.dialog.migrateConnectorsDescSame")}
-              </div>
-            </div>
-            <Switch checked={migrateConnectors} onCheckedChange={setMigrateConnectors} />
-          </div>
-
-          {copySessions && (
-            <>
-              <Separator />
-              <div className="max-h-[min(20rem,45vh)] overflow-y-auto pr-1">
-                {loadingSessions ? (
-                  <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
-                    <Loader2 className="animate-spin" /> {t("wbAccounts.dialog.loadingSessions")}
-                  </div>
-                ) : sessions.length === 0 ? (
-                  <p className="py-4 text-center text-sm text-muted-foreground">
-                    {currentUid
-                      ? t("wbAccounts.dialog.noSessionsCurrent")
-                      : t("wbAccounts.dialog.noSessionsNoCurrent")}
-                  </p>
-                ) : (
-                  buildSessionTree(sessions, t).map((kind) => {
-                    const kindOpen = expanded.has(kind.key);
-                    const kindSel = selectionState(kind.sessions, selected);
-                    return (
-                      <div key={kind.key} className="mb-0.5">
-                        <div className="sticky top-0 z-10 flex items-center gap-1.5 rounded-md bg-background px-1.5 py-1">
-                          <TreeCheckbox
-                            allOn={kindSel.allOn}
-                            someOn={kindSel.someOn}
-                            onChange={() => toggleFolder(kind.sessions.map((s) => s.id))}
-                            ariaLabel={t("wbAccounts.dialog.selectKind", { label: kind.label })}
-                          />
-                          <button
-                            type="button"
-                            className="flex min-w-0 flex-1 items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-accent/50"
-                            onClick={() => toggleExpanded(kind.key)}
-                            aria-expanded={kindOpen}
-                            aria-label={t(
-                              kindOpen ? "wbAccounts.dialog.collapse" : "wbAccounts.dialog.expand",
-                              { label: kind.label },
-                            )}
-                          >
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                              {kind.label}
-                              <span className="ml-1 font-normal text-muted-foreground">
-                                ({kind.count})
-                              </span>
-                            </span>
-                            {kindOpen ? (
-                              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                            )}
-                          </button>
-                        </div>
-                        {kindOpen && kind.key === "task" &&
-                          kind.sessions.map((s) => (
-                            <SessionPickRow
-                              key={s.id}
-                              session={s}
-                              checked={selected.has(s.id)}
-                              indentClass="pl-7"
-                              onToggle={() => toggleSession(s.id)}
-                            />
-                          ))}
-                        {kindOpen &&
-                          kind.folders?.map((folder) => {
-                            const folderOpen = expanded.has(folder.key);
-                            const folderSel = selectionState(folder.sessions, selected);
-                            return (
-                              <div key={folder.key}>
-                                <div className="flex items-center gap-1.5 px-1.5 py-0.5 pl-7">
-                                  <TreeCheckbox
-                                    allOn={folderSel.allOn}
-                                    someOn={folderSel.someOn}
-                                    onChange={() => toggleFolder(folder.sessions.map((s) => s.id))}
-                                    ariaLabel={t("wbAccounts.dialog.selectFolder", { label: folder.label })}
-                                  />
-                                  <button
-                                    type="button"
-                                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent/50"
-                                    onClick={() => toggleExpanded(folder.key)}
-                                    aria-expanded={folderOpen}
-                                    aria-label={t(folderOpen ? "wbAccounts.dialog.collapseFolder" : "wbAccounts.dialog.expandFolder", { label: folder.label })}
-                                  >
-                                    <Folder className="size-3.5 shrink-0 text-muted-foreground" />
-                                    <span className="min-w-0 flex-1 truncate text-sm">
-                                      {folder.label}
-                                    </span>
-                                    {folderOpen ? (
-                                      <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                                    ) : (
-                                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                                    )}
-                                  </button>
-                                </div>
-                                {folderOpen &&
-                                  folder.sessions.map((s) => (
-                                    <SessionPickRow
-                                      key={s.id}
-                                      session={s}
-                                      checked={selected.has(s.id)}
-                                      indentClass="pl-12"
-                                      onToggle={() => toggleSession(s.id)}
-                                    />
-                                  ))}
-                              </div>
-                            );
-                          })}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </>
-          )}
-
-          {error && (
-            <Alert variant={needsPermission ? "warning" : "destructive"} className="min-w-0 break-all">
-              <AlertDescription className="min-w-0 break-all">
-                <div className="min-w-0 break-all">{error}</div>
-                {needsPermission && (
-                  <div className="mt-2 space-y-2">
-                    <div className="rounded-md border bg-muted/60 p-3 text-xs text-muted-foreground">
-                      <p className="mb-1 font-medium text-foreground">{t("wbAccounts.dialog.permissionTitle")}</p>
-                      <ol className="list-decimal space-y-1 pl-4">
-                        <li>{t("wbAccounts.dialog.permissionStep1")}</li>
-                        <li>{t("wbAccounts.dialog.permissionStep2")}</li>
-                        <li>{t("wbAccounts.dialog.permissionStep3")}</li>
-                      </ol>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button variant="outline" size="sm" onClick={openPermissionSettings}>
-                        <ExternalLink />
-                        {t("wbAccounts.dialog.openFullDisk")}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void api.revealAppInFinder()}
-                      >
-                        {t("wbAccounts.dialog.showInFinder")}
-                      </Button>
-                      <Button variant="secondary" size="sm" onClick={runPermissionCheck}>
-                        {t("wbAccounts.dialog.checkNow")}
-                      </Button>
-                    </div>
-                  </div>
-                )}
-                {permCheck && <div className="mt-2 text-xs">{permCheck}</div>}
-              </AlertDescription>
-            </Alert>
-          )}
-        </div>
-
-        <DialogFooter className="shrink-0">
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
-            {t("wbAccounts.dialog.cancel")}
-          </Button>
-          <Button onClick={doSwitch} disabled={busy || (copySessions && copyCount === 0)}>
-            {busy ? t("wbAccounts.card.switching") : t("wbAccounts.dialog.confirmSwitch")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      {/* 统一重启确认（P8 T03）：WorkBuddy 桌面是「需重启」客户端 ⇒ `isCli = false`。
+          真正的切换在 `onConfirm` 里发生（先关本框，再由本抽屉的遮罩显示进度）。 */}
+      <RestartConfirmDialog
+        open={restartConfirmOpen}
+        onOpenChange={setRestartConfirmOpen}
+        clientLabel={WORKBUDDY_LABEL}
+        isCli={false}
+        onConfirm={(restart) => {
+          setRestartConfirmOpen(false);
+          // ★ 记住这次的选择 + 重置「已自动重试」标记 ⇒ 授权恢复后可自动重试这一回。
+          lastRestartRef.current = restart;
+          permissionRetriedRef.current = false;
+          void doSwitch(restart);
+        }}
+      />
+    </>
   );
 }
 
-type FolderGroup = { key: string; label: string; sessions: Session[] };
-type KindGroup = {
-  key: "task" | "space";
-  label: string;
-  count: number;
-  sessions: Session[];
-  folders?: FolderGroup[];
-};
-
-function selectionState(sessions: Session[], selected: Set<string>) {
-  const ids = sessions.map((s) => s.id);
-  const n = ids.filter((id) => selected.has(id)).length;
-  return { allOn: n === ids.length && ids.length > 0, someOn: n > 0 && n < ids.length };
-}
-
-function TreeCheckbox({
-  allOn,
-  someOn,
-  onChange,
-  ariaLabel,
-}: {
-  allOn: boolean;
-  someOn: boolean;
-  onChange: () => void;
-  ariaLabel: string;
-}) {
-  return (
-    <input
-      type="checkbox"
-      className="size-3.5 shrink-0 accent-primary"
-      checked={allOn}
-      ref={(el) => {
-        if (el) el.indeterminate = someOn;
-      }}
-      onChange={onChange}
-      aria-label={ariaLabel}
-    />
-  );
-}
-
-function SessionPickRow({
-  session,
-  checked,
-  indentClass,
+/** 一个「迁移内容」平级开关（会话 / 记忆 / 连接器）。 */
+function MigrateOption({
+  active,
+  disabled = false,
+  title,
+  desc,
+  warn = false,
+  dataAct,
   onToggle,
 }: {
-  session: Session;
-  checked: boolean;
-  indentClass: string;
+  active: boolean;
+  disabled?: boolean;
+  title: string;
+  desc: string;
+  warn?: boolean;
+  dataAct: string;
   onToggle: () => void;
 }) {
-  const t = useT();
   return (
-    <label
-      className={`flex cursor-pointer items-center gap-2.5 rounded-md py-1.5 pr-2 hover:bg-accent/50 ${indentClass}`}
-    >
-      <input
-        type="checkbox"
-        className="size-3.5 shrink-0 accent-primary"
-        checked={checked}
-        onChange={onToggle}
+    <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium">{title}</div>
+        <div
+          className={
+            warn ? "text-xs text-amber-700 dark:text-amber-400" : "text-xs text-muted-foreground"
+          }
+        >
+          {desc}
+        </div>
+      </div>
+      <Switch
+        checked={active}
+        onCheckedChange={() => onToggle()}
+        disabled={disabled}
+        data-act={dataAct}
       />
-      <span className="min-w-0 flex-1 truncate text-sm" title={session.title}>
-        {session.title}
-      </span>
-      {session.hasHistory && (
-        <Badge variant="outline" className="shrink-0 text-[10px]">
-          {t("wbAccounts.dialog.hasBody")}
-        </Badge>
-      )}
-    </label>
+    </div>
   );
 }
 
@@ -771,59 +902,4 @@ function summarizeMigration(mig: MigrateResult, warnings: string[], t: Translate
   }
 
   return parts;
-}
-
-/** WorkBuddy 侧栏文件夹名：cwd 最后一段。 */
-function sessionFolderLabel(cwd: string, t: Translate): string {
-  const normalized = cwd.trim().replace(/[\\/]+$/, "");
-  if (!normalized) return t("wbAccounts.dialog.ungrouped");
-  const parts = normalized.split(/[\\/]/);
-  return parts[parts.length - 1] || normalized;
-}
-
-/** 按工作目录分组，文件夹顺序跟会话一样按最近活动排。 */
-function groupSessionsByFolder(sessions: Session[], t: Translate): FolderGroup[] {
-  const groups = new Map<string, Session[]>();
-  const order: string[] = [];
-  for (const session of sessions) {
-    const key = session.cwd.trim() || "__none__";
-    let list = groups.get(key);
-    if (!list) {
-      list = [];
-      groups.set(key, list);
-      order.push(key);
-    }
-    list.push(session);
-  }
-  return order.map((key) => ({
-    key,
-    label: key === "__none__" ? t("wbAccounts.dialog.ungrouped") : sessionFolderLabel(key, t),
-    sessions: groups.get(key) ?? [],
-  }));
-}
-
-/** 对齐 WorkBuddy 侧栏：任务（playground）平铺，空间按文件夹分组。 */
-function buildSessionTree(sessions: Session[], t: Translate): KindGroup[] {
-  const tasks = sessions.filter((s) => s.isPlayground);
-  const spaces = sessions.filter((s) => !s.isPlayground);
-  const groups: KindGroup[] = [];
-  if (tasks.length > 0) {
-    groups.push({
-      key: "task",
-      label: t("wbAccounts.dialog.task"),
-      count: tasks.length,
-      sessions: tasks,
-    });
-  }
-  if (spaces.length > 0) {
-    const folders = groupSessionsByFolder(spaces, t);
-    groups.push({
-      key: "space",
-      label: t("wbAccounts.dialog.space"),
-      count: folders.length,
-      sessions: spaces,
-      folders,
-    });
-  }
-  return groups;
 }

@@ -20,7 +20,9 @@ export const en = {
   "product.switchAria": "Switch product",
   "product.navAria": "{product} navigation",
 
+  "nav.overview": "Overview",
   "nav.accounts": "Accounts",
+  "nav.usage": "Usage",
   "nav.tokenStats": "Token usage",
   "nav.credits": "Credits",
   "nav.apiService": "API service",
@@ -30,6 +32,50 @@ export const en = {
   "sidebar.running": "{product} running",
   "sidebar.notRunning": "{product} not running",
   "sidebar.update": "Update",
+
+  // ---- Command palette (⌘K, P6 §3.7) ----
+  "palette.entry": "Search or jump",
+  "palette.title": "Search or jump",
+  "palette.description": "Search accounts, pages, and actions across scopes; press Enter to go.",
+  "palette.aria": "Command palette",
+  "palette.placeholder": "Search accounts, pages, or actions…",
+  "palette.loading": "Loading accounts…",
+  "palette.results": "{count} results",
+  "palette.empty.title": "No matches",
+  "palette.empty.description": "Try a different keyword, or clear the search to see everything.",
+  "palette.empty.clear": "Clear search",
+  "palette.group.page": "Pages",
+  "palette.group.scope": "Scopes",
+  "palette.group.account": "Accounts",
+  "palette.group.action": "Actions",
+  "palette.scope.current": "Current",
+  "palette.account.inScope": "in {scope}",
+  "palette.action.refresh": "Refresh current scope",
+  "palette.action.addAccount": "Add account",
+  "palette.action.openDataDir": "Open data folder",
+
+  // ---- Keyboard shortcuts settings (P6 §3.1) ----
+  "shortcuts.settings.title": "Keyboard shortcuts",
+  "shortcuts.settings.label": "Enable scope shortcuts",
+  "shortcuts.settings.description": "Use {mod} + 1…{n} to switch directly to a scope.",
+  "shortcuts.settings.degraded": "More than {limit} scopes are available, so number shortcuts are disabled.",
+
+  // ---- First-run hint (P6 §1.5) ----
+  "firstRun.title": "Quick start",
+  "firstRun.openPalette": "Press {shortcut} to open the command palette and search across scopes.",
+  "firstRun.scopeShortcut": "Press {shortcut} to switch directly to a scope.",
+  "firstRun.listSearch": "Press / on the accounts page to focus search.",
+  "firstRun.dismiss": "Got it",
+
+  // ---- Undo toast (P6 T04 §1.4) ----
+  // Deletion is a soft delete (the account moves to the recycle bin) => "can undo".
+  // Never "permanently deleted" (that is the `recycleBin.purge` semantics), and never
+  // imply that a timeout means permanent deletion — the account stays in the recycle bin.
+  "undo.deletedTitle": "Deleted — can undo",
+  "undo.batchTitle": "{n} accounts deleted — can undo",
+  "undo.action": "Undo",
+  "undo.undone": "Restored",
+  "undo.failedTitle": "Undo failed",
 
   // ---- General settings (app-level settings dialog) ----
   "appSettings.title": "General settings",
@@ -81,6 +127,24 @@ export const en = {
   "appSettings.update.foundDetail": "Version v{latest} is available (current v{current})",
   "appSettings.update.upToDate": "You are on the latest version v{current}",
   "appSettings.update.installNow": "Update now",
+
+  // ---- Settings sub-nav (P7 §3.9: 9 items, the 9th is "Backup & restore") ----
+  "settings.subnav.aria": "Settings sections",
+  "settings.subnav.general": "General",
+  "settings.subnav.account": "Accounts & sign-in",
+  "settings.subnav.checkin": "Check-in & credits",
+  "settings.subnav.gateway": "Gateway",
+  "settings.subnav.schedule": "Scheduled tasks",
+  "settings.subnav.client": "Client",
+  "settings.subnav.diagnostics": "Permissions & diagnostics",
+  "settings.subnav.logs": "Logs",
+  "settings.subnav.backup": "Backup & restore",
+
+  // ---- Settings "Logs" section (WorkBuddy has no standalone runtime log) ----
+  "settings.logs.emptyTitle": "No runtime log in this section",
+  "settings.logs.emptyBody":
+    "WorkBuddy runtime logs live on the gateway page; this section is the settings and backup entry point.",
+  "settings.logs.emptyAction": "Open gateway settings",
 
   // ---- Shared fallbacks ----
   "common.unknownError": "Unknown error",

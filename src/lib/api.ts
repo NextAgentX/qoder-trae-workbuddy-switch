@@ -6,7 +6,10 @@ import type {
   AccountStrategyMap,
   ApiKeyRecord,
   AppStatus,
+  AutoBackupConfig,
+  AutoBackupEntry,
   AutoRotateConfig,
+  BackupConflictPolicy,
   CatalogSnapshot,
   CodeBuddyCliInstallResult,
   CodeBuddyCliStatus,
@@ -26,10 +29,13 @@ import type {
   GatewayLogEntry,
   GatewayStatus,
   GithubConfig,
+  ImportPreview,
   ImportPreviewAccount,
   ImportResult,
+  ImportSummary,
   OAuthPollResult,
   OAuthStartResult,
+  ProxyStatus,
   Region,
   RegionFilter,
   RotateLog,
@@ -37,8 +43,11 @@ import type {
   ScheduleConfig,
   ScheduleRunResult,
   Session,
+  SessionFingerprint,
+  SessionReplicaResponse,
   SwitchConfig,
   SwitchResult,
+  TrashList,
   TravelConfig,
   TravelStatus,
   UpdateInfo,
@@ -48,6 +57,10 @@ import { displayText } from "./display-text";
 import { localizeCodedStrings, localizeError } from "./error-code";
 import { t } from "./i18n";
 import { screenshotDemoResponse } from "./screenshot-demo";
+// P5 T03：参数化命令需要把「平台 + 区域」拼成 `scope`（值导入，非类型）。
+import { scopeOf } from "./scope";
+import type { Scope } from "./scope";
+import { traeRegionOf } from "./trae-types";
 import type {
   TraeAccount,
   TraeAccountsOverview,
@@ -79,6 +92,9 @@ import type {
   TraeVariantId,
   TraeVariantsStatus,
 } from "./trae-types";
+// P9 · 悬浮窗只读快照的类型（**type-only**：`companion.ts` 反向引用本模块的 `call`，
+// 用 `import type` 把运行期依赖收成单向，避免循环导入）。
+import type { CompanionSnapshot } from "./companion";
 
 /**
  * 双通道适配层：
@@ -108,16 +124,24 @@ const API_BASE =
     : window.location.origin;
 
 const DEMO_READ_COMMANDS = new Set([
-  "get_status", "get_accounts", "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_checkin_status",
+  "get_status", "get_accounts",
+  // P5 T03 · 参数化只读命令（前端改调它，故演示模式必须有对应数据）。
+  "accounts_list",
+  "credits",
+  "checkin_status",
+  "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_checkin_status",
   "get_credit_expiry", "get_credit_statistics", "get_auto_checkin_config",
   "get_token_statistics",
   "get_checkin_logs", "get_auto_rotate_config", "rotate_status", "get_rotate_logs",
   "get_github_config", "check_update", "get_launch_at_login_enabled", "switch_progress",
   "get_travel_status", "get_auto_travel_config", "get_schedule_config",
   "get_switch_config",
+  // P8 T02 · 会话页两个只读命令：演示站必须能渲染副本视图（否则 build:demo 报错）。
+  // `list_sessions` 是**既有**命令，这里补进演示面 —— 会话页要用它 join 标题 / updatedAt。
+  "list_sessions", "list_session_replicas",
   // API 网关只读命令（演示站需返回虚构数据，否则 build:demo 报错）
   "get_gateway_config", "gateway_status", "list_api_keys", "get_gateway_models",
-  "get_account_strategy", "get_gateway_logs",
+  "get_account_strategy", "get_disabled_models", "get_gateway_logs",
   // Trae 分区只读命令（演示站需返回虚构数据，否则 build:demo 报错）。
   // 只登记**只读**命令：写操作（签到 / 增删账号 / 切换 / 重置设备…）一律不进这里，
   // 由 `DemoAction` 包裹后在演示模式下统一提示不可操作。
@@ -127,6 +151,13 @@ const DEMO_READ_COMMANDS = new Set([
   "get_trae_settings", "get_trae_gateway_config", "trae_gateway_status",
   "get_trae_gateway_models", "get_trae_client_models", "list_trae_api_keys",
   "get_trae_gateway_logs",
+  // P9 · 悬浮窗只读快照（演示站需返回虚构数据，否则 build:demo 报错）。
+  // ⚠️ 只登记**只读**命令：`companion_set_visible` / `companion_toggle` / `companion_jump`
+  // 是显隐 / 聚焦（非只读），一律不进这里。
+  "companion_status",
+  // P7 全局备份**只读**命令（导出 / 自动备份列表 / 自动备份配置）。
+  // 预览 / 导入 / 恢复 / 保存配置是**动作**，一律不进这里（由页面侧处理不可用）。
+  "export_backup", "list_auto_backups", "get_auto_backup_config",
 ]);
 
 export function isDemoMode(): boolean {
@@ -158,6 +189,34 @@ type Route = { method: "GET" | "POST"; path: string };
 const ROUTES: Record<string, Route> = {
   get_status: { method: "GET", path: "/api/status" },
   get_accounts: { method: "GET", path: "/api/accounts" },
+  // P5 T03 · 参数化命令（`scope` 决定平台与区域）。旧路由保留为别名（见 ALIASES）。
+  accounts_list: { method: "GET", path: "/api/accounts/list" },
+  account_remark: { method: "POST", path: "/api/accounts/remark" },
+  account_delete: { method: "POST", path: "/api/accounts/delete" },
+  // P5 §2.7 · 回收站 4 命令（**全新命令**，非参数化、无别名）。`scope` 决定平台与区域，
+  // 从而决定读 / 写哪个 `*.trash.<region>.json`；非法 scope ⇒ 后端 4xx（fail-closed）。
+  account_trash_list: { method: "GET", path: "/api/accounts/trash" },
+  account_restore: { method: "POST", path: "/api/accounts/trash/restore" },
+  account_purge: { method: "POST", path: "/api/accounts/trash/purge" },
+  account_trash_clear: { method: "POST", path: "/api/accounts/trash/clear" },
+  // 账号导出 / 导入（区域纯）：`scope` 决定平台与区域；旧路由保留为别名（见 ALIASES）。
+  accounts_export: { method: "POST", path: "/api/accounts/export" },
+  accounts_export_to_path: { method: "POST", path: "/api/accounts/export-to-path" },
+  accounts_import: { method: "POST", path: "/api/accounts/import" },
+  // 从本机客户端登录态导入账号（区域纯）：`scope` 决定平台与区域；旧路由 `import_local`（WB）
+  // / `trae_import_local_account`（Trae）保留为别名（见 ALIASES）。名字**不**沿用 §2.3 的
+  // `import_local`（与 WB 旧命令同名），改取 `accounts_import_local`（与 `accounts_import` 同族）。
+  accounts_import_local: { method: "POST", path: "/api/accounts/import-local" },
+  // 打开客户端数据目录（只读路径）：`scope` 决定平台与区域；旧路由 `open_workbuddy_data_dir`
+  // / `open_trae_data_dir` 保留为别名（见 ALIASES）。
+  open_data_dir: { method: "POST", path: "/api/data-dir/open" },
+  // 积分（区域纯）：`scope` 决定平台与区域；旧路由 `get_credit_expiry` / `get_trae_credits`
+  // 保留为别名（见 ALIASES）。
+  credits: { method: "POST", path: "/api/credits/query" },
+  // 签到状态（区域纯）：`scope` 决定平台与区域；旧路由 `get_checkin_status`（WB，**批量**）
+  // / `get_trae_checkin_status`（Trae）保留为别名（见 ALIASES）。本路由对齐**桌面端单账号**
+  // 契约，webui 的批量语义仍走旧 `GET /api/checkin/status`。
+  checkin_status: { method: "POST", path: "/api/checkin/status/query" },
   get_codebuddy_cli_status: { method: "GET", path: "/api/codebuddy-cli/status" },
   install_codebuddy_cli_helper: { method: "POST", path: "/api/codebuddy-cli/install-helper" },
   switch_codebuddy_cli_account: { method: "POST", path: "/api/codebuddy-cli/switch" },
@@ -173,8 +232,21 @@ const ROUTES: Record<string, Route> = {
   export_accounts_to_path: { method: "POST", path: "/api/export-accounts-to-path" },
   preview_import_accounts: { method: "POST", path: "/api/import/preview" },
   import_accounts: { method: "POST", path: "/api/import" },
+  // P7 T01 · 全局备份导出（跨 4 作用域；凭据按 CREDENTIAL_KEYS 剥离）。
+  export_backup: { method: "POST", path: "/api/backup/export" },
+  // P7 T02 · 全局备份导入（预览 / 导入 / 自动备份 / 恢复 / 配置）。
+  preview_import_backup: { method: "POST", path: "/api/backup/import/preview" },
+  import_backup: { method: "POST", path: "/api/backup/import" },
+  list_auto_backups: { method: "GET", path: "/api/backup/auto/list" },
+  restore_auto_backup: { method: "POST", path: "/api/backup/auto/restore" },
+  get_auto_backup_config: { method: "GET", path: "/api/backup/auto/config" },
+  save_auto_backup_config: { method: "POST", path: "/api/backup/auto/config" },
   switch_account: { method: "POST", path: "/api/switch" },
   list_sessions: { method: "GET", path: "/api/sessions" },
+  // P8 T02 · 只读：copy ledger 连通成「会话副本组」（两宿主同步）。
+  list_session_replicas: { method: "GET", path: "/api/sessions/replicas" },
+  // P8 · 会话内容指纹（组状态派生的数据源）—— **POST**：批量传 sessionIds。
+  session_fingerprints: { method: "POST", path: "/api/sessions/fingerprints" },
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
   migrate_account_data: { method: "POST", path: "/api/migrate/account" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
@@ -209,6 +281,10 @@ const ROUTES: Record<string, Route> = {
   get_gateway_config: { method: "GET", path: "/api/gateway/config" },
   save_gateway_config: { method: "POST", path: "/api/gateway/config" },
   gateway_status: { method: "GET", path: "/api/gateway/status" },
+  // P12 · C 路（base URL 重定向）—— **默认关**，应用只记"用户已按引导设置"的本地标记。
+  proxy_status: { method: "GET", path: "/api/proxy/status" },
+  proxy_enable: { method: "POST", path: "/api/proxy/enable" },
+  proxy_disable: { method: "POST", path: "/api/proxy/disable" },
   // 打开 WorkBuddy 客户端数据目录（非 Windows 返回结构化 Unsupported）。
   open_workbuddy_data_dir: { method: "POST", path: "/api/gateway/open-data-dir" },
   list_api_keys: { method: "GET", path: "/api/gateway/keys" },
@@ -219,6 +295,9 @@ const ROUTES: Record<string, Route> = {
   refresh_gateway_models: { method: "POST", path: "/api/gateway/models/refresh" },
   get_account_strategy: { method: "GET", path: "/api/gateway/strategy" },
   save_account_strategy: { method: "POST", path: "/api/gateway/strategy" },
+  // 模型禁用偏好（P11）：GET 列表 / POST 置位·清位，同一路径两种方法（与 `/api/gateway/strategy` 同构）。
+  get_disabled_models: { method: "GET", path: "/api/gateway/disabled-models" },
+  set_model_disabled: { method: "POST", path: "/api/gateway/disabled-models" },
   get_gateway_logs: { method: "GET", path: "/api/gateway/logs" },
   clear_gateway_logs: { method: "POST", path: "/api/gateway/logs/clear" },
 
@@ -283,6 +362,75 @@ const ROUTES: Record<string, Route> = {
   trae_launch_client: { method: "POST", path: "/api/trae/launch-client" },
   get_trae_gateway_logs: { method: "GET", path: "/api/trae/gateway/logs" },
   clear_trae_gateway_logs: { method: "POST", path: "/api/trae/gateway/logs/clear" },
+  // ---- 桌面悬浮窗（P9 · 只读 + 显隐 + 聚焦；与 src-tauri commands.rs / server api.rs 一一对应）----
+  companion_status: { method: "GET", path: "/api/companion/status" },
+  companion_set_visible: { method: "POST", path: "/api/companion/visibility" },
+  companion_toggle: { method: "POST", path: "/api/companion/toggle" },
+  companion_jump: { method: "POST", path: "/api/companion/jump" },
+};
+
+/**
+ * 旧命令名 → 新命令名（**别名表**）—— 命令面参数化（P5）的配套，机器可读。
+ *
+ * ## 为什么需要它（而不是把旧命令「豁免」掉）
+ *
+ * 参数化后前端改调新名（如 `accounts_list`），旧 `ROUTES["get_accounts"]` 就没有任何
+ * `call()` 引用了 —— 按 `check-api-contract.cjs` 第 3 条会被判**死路由**。但旧命令
+ * **必须保留**（别名转发 + 可回滚）。本表把「旧名 → 新名」**显式声明**出来：第 3 条据此
+ * 认定「有 `call()` 引用**或**是本表的键」才算活路由，并额外要求**值**（新名）自身是活命令
+ * —— 别名链断了仍会报，而不是像「无条件豁免集」那样悄悄腐烂。
+ *
+ * ## 两条硬约束（写别名转发时遵守）
+ *
+ * 1. **别名必须硬编码自己的 scope**：旧 `checkin(id)` 恒为 WB 当前 region、旧
+ *    `trae_checkin(...)` 恒为 Trae 当前 region；**不接受**「由调用方决定」或「按本机活跃
+ *    客户端推断」。
+ * 2. 禁止 `platform::detected_variant()` / `detect_data_dir()` 进任何写路径（由门禁第 10 条
+ *    扫描 `commands.rs` / `api.rs` 兜住）。
+ *
+ * ⚠️ **当前为空是刻意的**：T03（命令面参数化）之前没有参数化命令，也就没有别名。
+ * 不要为了「让表非空」去提前参数化任何命令。
+ */
+export const ALIASES: Record<string, string> = {
+  // ── P5 T03 · 账号类参数化命令（旧名 → 新名）─────────────────────────────
+  // 旧命令保留：桌面端仍在 `generate_handler!` 登记、webui 仍保留旧路由、前端仍可回退。
+  // 值（新名）必须自身是活命令（第 3b 条据此防止别名链断裂）。
+  get_accounts: "accounts_list",
+  get_trae_accounts: "accounts_list",
+  set_account_remark: "account_remark",
+  trae_set_account_remark: "account_remark",
+  delete_account: "account_delete",
+  trae_delete_account: "account_delete",
+  // ── P5 T03 · 账号导出 / 导入参数化命令（旧名 → 新名）─────────────────────
+  // 导出 / 导入是**区域纯**的（只按区域读写账号库，不触碰客户端 / 程序位），故可折叠到
+  // `scope`。旧命令保留（桌面端仍登记、webui 仍路由、前端仍可回退）。
+  export_accounts: "accounts_export",
+  trae_export_accounts: "accounts_export",
+  export_accounts_to_path: "accounts_export_to_path",
+  trae_export_accounts_to_path: "accounts_export_to_path",
+  import_accounts: "accounts_import",
+  trae_import_accounts: "accounts_import",
+  // ── P5 T03 · 积分参数化命令（旧名 → 新名）─────────────────────────────────
+  // 积分是**区域纯**的（只按区域读账号库 / 积分缓存，不触碰客户端 / 程序位），故可折叠到
+  // `scope`。旧命令保留（桌面端仍登记、webui 仍路由、前端仍可回退）。
+  get_credit_expiry: "credits",
+  get_trae_credits: "credits",
+  // ── P5 T03 · 签到状态参数化命令（旧名 → 新名）─────────────────────────────
+  // 签到状态是**区域纯**的（只按区域读账号库 / 签到缓存，不触碰客户端 / 程序位），故可折叠
+  // 到 `scope`。旧命令保留（桌面端仍登记、webui 仍路由、前端仍可回退）。
+  // ⚠️ webui 的 `get_checkin_status` 是**批量整端点**（`getCheckinStatusMap` 依赖它），
+  // 参数化命令 [`checkin_status`] 只对齐**桌面端单账号**契约 —— 两者语义差异刻意保留。
+  get_checkin_status: "checkin_status",
+  get_trae_checkin_status: "checkin_status",
+  // ── P5 T03 · 从本机客户端导入账号参数化命令（旧名 → 新名）─────────────────
+  // **只读**客户端登录态、按 `scope` 写区域账号库 ⇒ 区域纯。名字取 `accounts_import_local`
+  // （`import_local` 与 WB 旧命令同名，`generate_handler!` 不允许重名）。
+  import_local: "accounts_import_local",
+  trae_import_local_account: "accounts_import_local",
+  // ── P5 T03 · 打开数据目录参数化命令（旧名 → 新名）─────────────────────────
+  // **只读**客户端数据目录路径并交文件管理器打开，**不写**程序位状态 ⇒ 区域纯。
+  open_workbuddy_data_dir: "open_data_dir",
+  open_trae_data_dir: "open_data_dir",
 };
 
 function queryString(args?: Record<string, unknown>): string {
@@ -396,9 +544,11 @@ export function getStatus(region?: Region): Promise<AppStatus> {
 }
 
 export function getAccounts(region?: Region): Promise<{ accounts: AccountMeta[] }> {
+  // P5 T03：改调参数化命令 `accounts_list`（`scope` 决定平台与区域）。旧 `get_accounts`
+  // 保留为别名（见 `ALIASES`），桌面端仍登记、webui 仍路由。
   return call<{ accounts: AccountMeta[] }>(
-    "get_accounts",
-    region ? { region } : undefined,
+    "accounts_list",
+    { scope: scopeOf("workbuddy", region ?? "cn") },
   ).then((result) => ({
     ...result,
     accounts: (result.accounts ?? []).map(normalizeAccountMeta),
@@ -451,7 +601,35 @@ export function detectCodebuddyCnIdeAccount(): Promise<{
 
 
 export function deleteAccount(accountId: string, region?: Region): Promise<{ ok: boolean }> {
-  return call("delete_account", { accountId, ...regionArg(region) });
+  return call("account_delete", { scope: scopeOf("workbuddy", region ?? "cn"), accountId });
+}
+
+// ---------------------------------------------------------------------------
+// P5 §2.7 · 回收站 4 命令（**全新命令**，非参数化、无别名）
+// ---------------------------------------------------------------------------
+//
+// 与既有「平台专属 wrapper」不同：回收站对 WB / Trae **同构**（列 / 恢复 / 永久删除 / 清空），
+// 且**按 scope 隔离**（`wb-cn` 与 `trae-global` 互不可见）。故这里统一收 `Scope`，由调用方
+// （账号页工具栏）传入**当前作用域**。scope 非法时后端 4xx（fail-closed，§2.7 硬约束 1）。
+
+/** 读取某作用域的回收站（按删除时间倒序，最新在前）。 */
+export function accountTrashList(scope: Scope): Promise<TrashList> {
+  return call<TrashList>("account_trash_list", { scope });
+}
+
+/** 从回收站恢复账号（`key` 取自 `TrashEntry.key`）。 */
+export function accountRestore(scope: Scope, key: string): Promise<{ ok: boolean }> {
+  return call("account_restore", { scope, key });
+}
+
+/** 永久删除回收站条目（**唯一不可逆步**，调用方须先走 danger 二次确认 Dialog）。 */
+export function accountPurge(scope: Scope, key: string): Promise<{ ok: boolean }> {
+  return call("account_purge", { scope, key });
+}
+
+/** 清空某作用域回收站（**不可逆**），返回被删除的条数（供二次确认明示条数）。 */
+export function accountTrashClear(scope: Scope): Promise<{ ok: boolean; removed: number }> {
+  return call("account_trash_clear", { scope });
 }
 
 export function oauthStart(region?: Region): Promise<OAuthStartResult> {
@@ -465,14 +643,17 @@ export function oauthStatus(loginId: string, region?: Region): Promise<OAuthPoll
 }
 
 export function importLocal(region?: Region): Promise<{ ok: boolean; account: AccountMeta }> {
-  return call<{ ok: boolean; account: AccountMeta }>(
-    "import_local",
-    region ? { region } : undefined,
-  ).then((result) => ({ ...result, account: normalizeAccountMeta(result.account) }));
+  // P5 T03：改调参数化命令 `accounts_import_local`（`scope` 决定平台与区域）。旧 `import_local`
+  // 保留为别名（见 `ALIASES`），桌面端仍登记、webui 仍路由。
+  return call<{ ok: boolean; account: AccountMeta }>("accounts_import_local", {
+    scope: scopeOf("workbuddy", region ?? "cn"),
+  }).then((result) => ({ ...result, account: normalizeAccountMeta(result.account) }));
 }
 
 export function exportAccounts(accountIds: string[], region?: Region): Promise<{ ok: boolean; accounts: AccountRecord[] }> {
-  return call("export_accounts", { accountIds, ...regionArg(region) });
+  // P5 T03：改调参数化命令 `accounts_export`（`scope` 决定平台与区域）。旧 `export_accounts`
+  // 保留为别名（见 `ALIASES`），桌面端仍登记、webui 仍路由。
+  return call("accounts_export", { scope: scopeOf("workbuddy", region ?? "cn"), accountIds });
 }
 
 /** 桌面端：把完整记录写入用户选择的路径（系统保存对话框产物）。 */
@@ -481,7 +662,12 @@ export function exportAccountsToPath(
   path: string,
   region?: Region,
 ): Promise<{ ok: boolean; path: string }> {
-  return call("export_accounts_to_path", { accountIds, path, ...regionArg(region) });
+  // P5 T03：改调参数化命令 `accounts_export_to_path`。旧 `export_accounts_to_path` 保留为别名。
+  return call("accounts_export_to_path", {
+    scope: scopeOf("workbuddy", region ?? "cn"),
+    accountIds,
+    path,
+  });
 }
 
 export function previewImportAccounts(
@@ -492,7 +678,96 @@ export function previewImportAccounts(
 }
 
 export function importAccounts(fileText: string, indexes: number[], region?: Region): Promise<ImportResult> {
-  return call("import_accounts", { fileText, indexes, ...regionArg(region) });
+  // P5 T03：改调参数化命令 `accounts_import`。旧 `import_accounts` 保留为别名。
+  return call("accounts_import", { scope: scopeOf("workbuddy", region ?? "cn"), fileText, indexes });
+}
+
+/**
+ * 导出勾选（三态：scope 头 + 账号 / 配置 / 网关三个分区）。
+ *
+ * 与后端 `backup::BackupSelection` 同源（camelCase）。`scopes` 缺某作用域即该作用域
+ * 默认全选（D14）；`includesCredentials` 默认关（D15）。
+ */
+export interface BackupSelectionState {
+  scopes: Partial<Record<Scope, { accounts: boolean; config: boolean; gateway: boolean }>>;
+  includesCredentials: boolean;
+  /** `appSettings` 的 localStorage 段（语言 / 外观 / 紧凑模式 / 上次作用域）；缺省即不含。 */
+  appSettings?: Record<string, unknown>;
+}
+
+/** 备份 envelope（导出产物；字段与后端 `backup.rs` 同源）。 */
+export interface BackupEnvelope {
+  kind: string;
+  formatVersion: number;
+  appVersion: string;
+  exportedAt: string;
+  includesCredentials: boolean;
+  scopes: Record<string, Record<string, unknown>>;
+  appSettings: Record<string, unknown>;
+}
+
+/**
+ * ★ P7 T01：导出**全局备份** envelope（跨 4 作用域的账号 / 配置 / 网关）。
+ *
+ * ## 文案红线（§1.3 / §3.5）
+ *
+ * **不得**写「备份完整」；必须写「凭据不含在内，导入后需重新登录」——信封剥离后本就
+ * 不完整，说「完整」即假承诺。凭据开关默认关（D15）。
+ *
+ * ## 凭据
+ *
+ * 后端按 `CREDENTIAL_KEYS` 逐条剥离凭据（备份文件里不得含凭据）；`includesCredentials`
+ * 为 `false` 时账号导入后需重新登录。
+ */
+export function exportBackup(selection: BackupSelectionState): Promise<BackupEnvelope> {
+  return call<BackupEnvelope>("export_backup", { selection });
+}
+
+/**
+ * ★ P7 T02：导入**预览**（**只读安全阀**）—— 逐 scope 计数 + 需重新登录数 + 覆盖配置项。
+ *
+ * **不写盘**：预览只 dry-run 合并，绝不改动本地数据（§1.7）。`policy` 决定「覆盖计数」与
+ * 「将被覆盖的配置项」的口径（`keepLocal` 下不覆盖任何配置项）。
+ */
+export function previewImportBackup(
+  fileText: string,
+  policy: BackupConflictPolicy,
+): Promise<ImportPreview> {
+  return call<ImportPreview>("preview_import_backup", { fileText, policy });
+}
+
+/**
+ * ★ P7 T02：导入全局备份（**先快照** → 逐 scope 合并 → 汇总）。
+ *
+ * 默认冲突策略**保留本地**（D16）⇒ 连导两次第二次全「跳过」（幂等）。结果走**部分失败态**
+ * （`failed` / `retryable` + 可展开明细），**不许**只提示「导入完成」（§3.5 文案红线）。
+ */
+export function importBackup(
+  fileText: string,
+  policy: BackupConflictPolicy,
+  selection: BackupSelectionState,
+): Promise<ImportSummary> {
+  return call<ImportSummary>("import_backup", { fileText, policy, selection });
+}
+
+/** P7 T02：列出自动备份 / 导入前快照（最新在前）。 */
+export function listAutoBackups(): Promise<{ backups: AutoBackupEntry[] }> {
+  return call<{ backups: AutoBackupEntry[] }>("list_auto_backups");
+}
+
+/** P7 T02：从自动备份 / 导入前快照**恢复**（覆盖策略；恢复本身也可撤销）。 */
+export function restoreAutoBackup(fileName: string): Promise<ImportSummary> {
+  return call<ImportSummary>("restore_auto_backup", { fileName });
+}
+
+/** P7 T02：读取自动备份配置（**默认开**、可在设置里关掉，§7 #7）。 */
+export function getAutoBackupConfig(): Promise<AutoBackupConfig> {
+  return call<AutoBackupConfig>("get_auto_backup_config");
+}
+
+/** P7 T02：保存自动备份配置（关掉后不再产生新备份，已产生的保留）。 */
+export function saveAutoBackupConfig(config: AutoBackupConfig): Promise<AutoBackupConfig> {
+  return call<AutoBackupConfig>("save_auto_backup_config", { config });
 }
 
 export function switchAccount(args: {
@@ -518,9 +793,11 @@ export function setAccountRemark(
   remark: string,
   region?: Region,
 ): Promise<AccountMeta> {
-  return call<AccountMeta>("set_account_remark", { accountId, remark, ...regionArg(region) }).then(
-    normalizeAccountMeta,
-  );
+  return call<AccountMeta>("account_remark", {
+    scope: scopeOf("workbuddy", region ?? "cn"),
+    accountId,
+    remark,
+  }).then(normalizeAccountMeta);
 }
 
 /** 读取账号切换与账号列表展示配置（全局单份）。 */
@@ -553,6 +830,36 @@ export function listSessions(region?: Region): Promise<{
   warning?: string | null;
 }> {
   return call("list_sessions", region ? { region } : undefined);
+}
+
+/**
+ * ★ P8 T02：只读「会话副本组」——把 copy ledger 连通成跨账号副本归属。
+ *
+ * 数据源是**内部去重账本**被提升为产品语义（见后端 `session::list_replica_groups_for` 的
+ * 函数头注释）⇒ **只读当前 region**（P8 ✅ #2）。返回值**只含 ledger 里确有的字段**
+ * （`accountUid` / `sessionId` / `region`）；`title` / `updatedAt` / `hasHistory`
+ * 由 store 用 {@link listSessions} / 账号 store join 补齐。
+ *
+ * ⚠️ **不得**用 `updatedAt` 派生「落后 / 分叉」状态（§3.15.2「时间新 ≠ 内容新」）。
+ */
+export function listSessionReplicas(region?: Region): Promise<SessionReplicaResponse> {
+  return call("list_session_replicas", region ? { region } : undefined);
+}
+
+/**
+ * P8 · **会话内容指纹**（批量）—— 「组状态派生」的数据源。
+ *
+ * 返回 `{ [sessionId]: { lineCount, prefixHashes } | null }`。
+ * ⇒ 两副本的**公共前缀长度** = 「共同旧版」的条数；`lineCount - 公共前缀` = 各自的增量。
+ *
+ * ⚠️ 这是**内容级**判据 —— **不得**用 `updatedAt` 派生「落后 / 分叉」
+ * （`P8-ARCH.md` §1.2：「时间新 ≠ 内容新」）。
+ */
+export function sessionFingerprints(
+  sessionIds: string[],
+  region?: Region,
+): Promise<Record<string, SessionFingerprint | null>> {
+  return call("session_fingerprints", { sessionIds, ...(region ? { region } : {}) });
 }
 
 export function copySessions(
@@ -668,10 +975,20 @@ export async function getCheckinStatus(accountId: string, region?: Region): Prom
     }>("get_checkin_status", region ? { region } : undefined);
     const one = all.accounts.find((a) => a.accountId === accountId);
     return one
-      ? { ok: one.ok, todayCheckedIn: one.todayCheckedIn, error: one.error, raw: one.raw }
+      ? {
+          ok: one.ok,
+          todayCheckedIn: one.todayCheckedIn,
+          error: one.error,
+          // ★ B5：webui 走**批量旧路由**，其条目可能尚未带这些字段 ⇒ 从 `raw` 兜底解析
+          //   （与桌面端**同一份**解析逻辑，避免两宿主展示不一致）。
+          ...checkinCreditsOf(one),
+          raw: one.raw,
+        }
       : { ok: false, todayCheckedIn: false, error: t("shared.api.accountNotFound") };
   }
-  return call("get_checkin_status", { accountId, ...regionArg(region) });
+  // P5 T03：改调参数化命令 `checkin_status`（`scope` 决定平台与区域）。旧 `get_checkin_status`
+  // 保留为别名（见 `ALIASES`）；webui 分支仍走**批量**旧路由（见上方）。
+  return call("checkin_status", { scope: scopeOf("workbuddy", region ?? "cn"), accountId });
 }
 
 /** 单个账号的签到状态条目。 */
@@ -679,8 +996,59 @@ export type CheckinStatusEntry = {
   ok: boolean;
   todayCheckedIn: boolean;
   error?: string;
+  /**
+   * ★ B5：上游的**积分数据**（此前只透传 `raw`，前端无从展示「逐条 +N」）。
+   *
+   * ⚠️ 字段名来自**实测响应**（`checkin-activity-status`），不是推测：
+   * `daily_credit` / `today_credit` / `total_credits` / `streak_days` / `checkin_dates`。
+   */
+  dailyCredit?: number | null;
+  todayCredit?: number | null;
+  totalCredits?: number | null;
+  streakDays?: number | null;
+  streakBonusCredit?: number | null;
+  /** 已签到的日期（倒序，如 `["2026-10-07", …]`）。 */
+  checkinDates?: string[] | null;
   raw?: unknown;
 };
+
+/**
+ * 从签到条目里取**积分数据**（★ B5）。
+ *
+ * ⚠️ **两个来源都要认**：
+ * ① 后端**显式提取**的字段（桌面端 `checkin_status`，已改）；
+ * ② 上游原始 `raw`（webui 的批量旧路由，或后端尚未升级）—— **字段名同源**。
+ * ⇒ 两宿主展示一致，且**后端升级前也能用**（不会因为漏改一处就显示空白）。
+ */
+export function checkinCreditsOf(entry: {
+  dailyCredit?: number | null;
+  todayCredit?: number | null;
+  totalCredits?: number | null;
+  streakDays?: number | null;
+  streakBonusCredit?: number | null;
+  checkinDates?: string[] | null;
+  raw?: unknown;
+}): Pick<
+  CheckinStatusEntry,
+  "dailyCredit" | "todayCredit" | "totalCredits" | "streakDays" | "streakBonusCredit" | "checkinDates"
+> {
+  const raw = (entry.raw ?? {}) as Record<string, unknown>;
+  const num = (a: unknown, b: unknown): number | null =>
+    typeof a === "number" ? a : typeof b === "number" ? b : null;
+  const dates = Array.isArray(entry.checkinDates)
+    ? entry.checkinDates
+    : Array.isArray(raw.checkin_dates)
+      ? (raw.checkin_dates as string[])
+      : null;
+  return {
+    dailyCredit: num(entry.dailyCredit, raw.daily_credit),
+    todayCredit: num(entry.todayCredit, raw.today_credit),
+    totalCredits: num(entry.totalCredits, raw.total_credits),
+    streakDays: num(entry.streakDays, raw.streak_days),
+    streakBonusCredit: num(entry.streakBonusCredit, raw.streak_bonus_credit),
+    checkinDates: dates,
+  };
+}
 
 /**
  * **批量**查询多个账号的今日签到状态（`accountId → 条目`；失败/未命中的账号不出现在结果里）。
@@ -731,9 +1099,9 @@ export async function getCheckinStatusMap(
   await Promise.all(
     accountIds.map(async (accountId) => {
       try {
-        map[accountId] = await call<CheckinStatusEntry>("get_checkin_status", {
+        map[accountId] = await call<CheckinStatusEntry>("checkin_status", {
+          scope: scopeOf("workbuddy", region ?? "cn"),
           accountId,
-          ...regionArg(region),
         });
       } catch {
         // 单个失败不拖垮整批：调用方按「未命中」处理（保留原值）。
@@ -744,7 +1112,9 @@ export async function getCheckinStatusMap(
 }
 
 export function getCreditExpiry(accountId: string, region?: Region): Promise<CreditExpiry> {
-  return call("get_credit_expiry", { accountId, ...regionArg(region) });
+  // P5 T03：改调参数化命令 `credits`（`scope` 决定平台与区域）。旧 `get_credit_expiry`
+  // 保留为别名（见 `ALIASES`），桌面端仍登记、webui 仍路由。
+  return call("credits", { scope: scopeOf("workbuddy", region ?? "cn"), accountId });
 }
 
 export function getCreditStatistics(refresh = false, region?: RegionFilter): Promise<CreditStatistics> {
@@ -937,6 +1307,26 @@ export function gatewayStatus(): Promise<GatewayStatus> {
 }
 
 /**
+ * P12 · C 路（base URL 重定向）的**只读状态**（含引导信息）。
+ *
+ * ⚠️ `verified` **恒为 `false`** —— 应用**不校验**代理是否真的生效，只反映本地标记。
+ * 前端文案必须如实（不许暗示"已验证生效"，见 `P12-ARCH.md` T04 补充 §①）。
+ */
+export function proxyStatus(): Promise<ProxyStatus> {
+  return call("proxy_status");
+}
+
+/** 记下「用户已按引导设置」的本地标记（**不改任何系统设置** —— T02 定的是引导式）。 */
+export function proxyEnable(): Promise<ProxyStatus> {
+  return call("proxy_enable");
+}
+
+/** **一键还原**：清标记（删文件，**不留残留**）。 */
+export function proxyDisable(): Promise<ProxyStatus> {
+  return call("proxy_disable");
+}
+
+/**
  * 打开 **WorkBuddy 客户端**的数据目录（在文件管理器中）。
  *
  * 返回形状与 Trae 侧的 [`openTraeDataDir`] 同构：成功 `{ok, path, region}`，
@@ -951,7 +1341,9 @@ export function openWorkbuddyDataDir(region?: Region): Promise<{
   supportedOn?: string;
   reason?: string;
 }> {
-  return call("open_workbuddy_data_dir", regionArg(region));
+  // P5 T03：改调参数化命令 `open_data_dir`（`scope` 决定平台与区域）。旧 `open_workbuddy_data_dir`
+  // 保留为别名（见 `ALIASES`）。
+  return call("open_data_dir", { scope: scopeOf("workbuddy", region ?? "cn") });
 }
 
 export function listApiKeys(): Promise<{ keys: ApiKeyRecord[] }> {
@@ -987,6 +1379,32 @@ export function saveAccountStrategy(region: Region, strategy: AccountStrategy): 
     region,
     strategy: strategy as unknown as Record<string, unknown>,
   });
+}
+
+/**
+ * 读取某 region 被用户禁用的模型 id 列表（P11）。
+ *
+ * 后端读的是**进程内唯一**的禁用存储 —— 与 `/v1/models` 过滤（出口 ①）、
+ * 调用拒绝（出口 ②）是同一份数据，因此这里看到的禁用集合就是两个出口真正在用的那份。
+ *
+ * 形状 `{ region, ids }`；`ids` 为空即「该 region 没有禁用任何模型」（默认全开，D27）。
+ */
+export function getDisabledModels(region: Region): Promise<{ region: Region; ids: string[] }> {
+  return call("get_disabled_models", { region });
+}
+
+/**
+ * 置位 / 清位某 region 的一个模型（P11）—— 禁用（`disabled=true`）/ 启用（`false`）。
+ *
+ * 后端幂等：重复置位 / 清位返回 `changed: false` 且不落盘。
+ * `region` 按**后端 region 粒度**传（`cn` / `global`）—— 两个出口都按 region 键控（决策 #4）。
+ */
+export function setModelDisabled(
+  region: Region,
+  modelId: string,
+  disabled: boolean,
+): Promise<{ ok: boolean; region: Region; model_id: string; disabled: boolean; changed: boolean }> {
+  return call("set_model_disabled", { region, modelId, disabled });
 }
 
 export function getGatewayLogs(): Promise<{ logs: GatewayLogEntry[] }> {
@@ -1109,19 +1527,36 @@ export function getTraeCapabilities(): Promise<TraeCapabilities> {
   return call("get_trae_capabilities");
 }
 
-/** 账号 + 分组 + 计数（`variant` 决定读哪个账号库）。 */
+/** 账号 + 分组 + 计数（`variant` 决定读哪个区域库）。
+ *
+ * P5 T03：改调参数化命令 `accounts_list`；`variant` 先按**区域**折叠成 `scope`
+ * （Trae 账号数据是**区域纯**的：区域内两条程序位共用同一本库）。
+ */
 export function getTraeAccounts(variant?: TraeVariantId | null): Promise<TraeAccountsOverview> {
-  return call("get_trae_accounts", variantArgs(variant));
+  /* P5 T03：参数化命令 `accounts_list` 只认 `scope`（平台 + 区域），
+     所以要把 Trae 的 `variant`（区域 × 程序位）先**折叠成区域** —— 账号数据是区域纯的。
+     ⚠️ `?? "cn"` 与 WorkBuddy 侧同款（那边是 `region ?? "cn"`）：调用方不传时落国内库。
+     这不是「猜」，而是**两平台一致的既有默认**；真实调用方（两个 Trae 页面）都会显式传 variant。 */
+  return call("accounts_list", { scope: scopeOf("trae", traeRegionOf(variant ?? "cn")) });
 }
 
-/** 最近一次签到摘要与冷却明细（`variant` 决定读哪条产品线的数据）。 */
+/** 最近一次签到摘要与冷却明细（`variant` 决定读哪条产品线的数据）。
+ *
+ * P5 T03：改调参数化命令 `checkin_status`；`variant` 先按**区域**折叠成 `scope`
+ * （签到数据是**区域纯**的：区域内两条程序位共用同一份签到缓存）。
+ * 旧 `get_trae_checkin_status` 保留为别名（见 `ALIASES`）。
+ */
 export function getTraeCheckinStatus(variant?: TraeVariantId | null): Promise<TraeCheckinStatus> {
-  return call("get_trae_checkin_status", variantArgs(variant));
+  return call("checkin_status", { scope: scopeOf("trae", traeRegionOf(variant ?? "cn")) });
 }
 
-/** 剩余积分、签到明细与每日趋势（`variant` 决定读哪条产品线的数据）。 */
+/** 剩余积分、签到明细与每日趋势（`variant` 决定读哪条产品线的数据）。
+ *
+ * P5 T03：改调参数化命令 `credits`；`variant` 先按**区域**折叠成 `scope`
+ * （积分数据是**区域纯**的：区域内两条程序位共用同一份积分缓存）。
+ */
 export function getTraeCredits(variant?: TraeVariantId | null): Promise<TraeCreditsOverview> {
-  return call("get_trae_credits", variantArgs(variant));
+  return call("credits", { scope: scopeOf("trae", traeRegionOf(variant ?? "cn")) });
 }
 
 /**
@@ -1240,7 +1675,9 @@ export function traeImportLocalAccount(variant?: TraeVariantId | null): Promise<
   name: string;
   accounts: TraeAccount[];
 }> {
-  return call("trae_import_local_account", variantArgs(variant));
+  // P5 T03：改调参数化命令 `accounts_import_local`；`variant` 先按**区域**折叠成 `scope`。
+  // 旧 `trae_import_local_account` 保留为别名（见 `ALIASES`）。
+  return call("accounts_import_local", { scope: scopeOf("trae", traeRegionOf(variant ?? "cn")) });
 }
 
 // ---------------------------------------------------------------------------
@@ -1297,7 +1734,12 @@ export function traeExportAccounts(
   userIds: string[],
   variant?: TraeVariantId | null,
 ): Promise<{ accounts: TraeExportRecord[] }> {
-  return call("trae_export_accounts", { userIds, variant: variant ?? null });
+  // P5 T03：改调参数化命令 `accounts_export`；`variant` 先按**区域**折叠成 `scope`
+  // （导出只按区域读账号库，不触碰客户端 / 程序位）。旧 `trae_export_accounts` 保留为别名。
+  return call("accounts_export", {
+    scope: scopeOf("trae", traeRegionOf(variant ?? "cn")),
+    accountIds: userIds,
+  });
 }
 
 /** 桌面端：把完整记录写入用户选择的路径（系统保存对话框产物）。 */
@@ -1306,7 +1748,12 @@ export function traeExportAccountsToPath(
   path: string,
   variant?: TraeVariantId | null,
 ): Promise<{ path: string; count: number }> {
-  return call("trae_export_accounts_to_path", { userIds, path, variant: variant ?? null });
+  // P5 T03：改调参数化命令 `accounts_export_to_path`（同上，按区域折叠）。
+  return call("accounts_export_to_path", {
+    scope: scopeOf("trae", traeRegionOf(variant ?? "cn")),
+    accountIds: userIds,
+    path,
+  });
 }
 
 /** 解析导入文件并回传脱敏预览（不含 JWT 明文，只报有无）。 */
@@ -1320,7 +1767,12 @@ export function traeImportAccounts(
   indexes: number[],
   variant?: TraeVariantId | null,
 ): Promise<{ imported: number; skipped: number; overwritten: number; accounts: TraeAccount[] }> {
-  return call("trae_import_accounts", { fileText, indexes, variant: variant ?? null });
+  // P5 T03：改调参数化命令 `accounts_import`（按区域折叠 `variant`）。旧命令保留为别名。
+  return call("accounts_import", {
+    scope: scopeOf("trae", traeRegionOf(variant ?? "cn")),
+    fileText,
+    indexes,
+  });
 }
 
 /** 分组操作：`create` / `update` / `delete` / `move`。 */
@@ -1571,7 +2023,9 @@ export function deleteTraeApiKey(id: string): Promise<{ ok: boolean }> {
 export function openTraeDataDir(
   variant?: TraeVariantId | null,
 ): Promise<{ ok?: boolean; path?: string }> {
-  return call("open_trae_data_dir", variantArgs(variant));
+  // P5 T03：改调参数化命令 `open_data_dir`；`variant` 先按**区域**折叠成 `scope`。
+  // 旧 `open_trae_data_dir` 保留为别名（见 `ALIASES`）。
+  return call("open_data_dir", { scope: scopeOf("trae", traeRegionOf(variant ?? "cn")) });
 }
 
 /**
@@ -1595,6 +2049,42 @@ export function getTraeGatewayLogs(): Promise<unknown> {
 /** 清空网关请求日志。 */
 export function clearTraeGatewayLogs(): Promise<{ ok: boolean }> {
   return call("clear_trae_gateway_logs");
+}
+
+// ---------------------------------------------------------------------------
+// 桌面悬浮窗（P9 · 只读 + 显隐 + 聚焦）
+// ---------------------------------------------------------------------------
+//
+// ★ 只读红线（`PLAN §3.16`）：命令面**只有**读 / 显隐 / 聚焦，**无任何写操作**。
+//   尤其 `companionJump` **不切账号、不导航主窗口** —— 它只「把你带到来源客户端」。
+//
+// ★ 悬浮窗本体是**桌面端**的独立窗口：webui（浏览器）没有它，`set_visible` /
+//   `toggle` / `jump` 在 webui 会返回结构化「仅桌面端可用」。故这三条**不**进
+//   `DEMO_READ_COMMANDS`（演示模式统一提示不可操作）。
+
+/** 读取悬浮窗的**只读**快照（app 级聚合，无 scope 参数）。 */
+export function companionStatus(): Promise<CompanionSnapshot> {
+  return call<CompanionSnapshot>("companion_status");
+}
+
+/** 显示 / 隐藏悬浮窗（可见性的**唯一收敛点**：侧栏图标 / 托盘 / 窗口内关闭按钮都走它）。 */
+export function companionSetVisible(visible: boolean): Promise<void> {
+  return call<void>("companion_set_visible", { visible });
+}
+
+/** 翻转悬浮窗可见性，返回翻转**之后**的状态。 */
+export function companionToggle(): Promise<boolean> {
+  return call<boolean>("companion_toggle");
+}
+
+/**
+ * 聚焦 / 唤起**来源客户端**（P9 ✅ #1）。
+ *
+ * ★ **不切账号、不导航主窗口、不删改任何数据**。来源客户端未运行 ⇒ 后端返回
+ * **可理解的错误**，调用方须渲染成明确反馈（**不静默失败**）。
+ */
+export function companionJump(id: string): Promise<void> {
+  return call<void>("companion_jump", { id });
 }
 
 export type { TraeGatewayLogEntry, TraeGatewayStatus };

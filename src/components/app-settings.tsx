@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw, Save, Settings2 } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
@@ -20,6 +20,9 @@ import { Switch } from "@/components/ui/switch";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import * as api from "@/lib/api";
 import { isLocale, setLocale, useLocale, useT } from "@/lib/i18n";
+import { SCOPES } from "@/lib/scope";
+import { planScopeShortcuts, SCOPE_SHORTCUT_LIMIT } from "@/lib/scope-shortcuts";
+import { useShortcutsEnabled } from "@/lib/shortcut-preference";
 import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
 import type { GithubConfig, UpdateInfo } from "@/lib/types";
 import { GITHUB_RELEASE_URL, GITHUB_REPOSITORY_URL, openReleaseUrl } from "@/lib/update";
@@ -418,6 +421,60 @@ function LanguageCard() {
 }
 
 /**
+ * 键盘快捷键（P6 §3.1）：作用域快捷键「可关闭」开关。
+ *
+ * ## 为什么降级时**不显示开关**
+ *
+ * 快捷键在「作用域 > 5 个」时降级为不绑定（`planScopeShortcuts`）。此时**没有可开启之物**
+ * —— 再摆一个开关就是假控件（§1.7）。因此 `reason === "too-many"` 时改为一句说明，
+ * 与快捷键的真实绑定状态**同源**（都读 `planScopeShortcuts` 的结果）。
+ *
+ * ## 为什么这是**应用级**设置
+ *
+ * 数字快捷键作用于整个应用的全局键（不区分 WorkBuddy / Trae），与主题 / 语言同类，
+ * 因此放在共享的 `AppSettingsGroups` 里，两个产品分区走同一份实现。
+ */
+function ShortcutsCard() {
+  const t = useT();
+  const [enabled, setEnabled] = useShortcutsEnabled();
+  const plan = useMemo(() => planScopeShortcuts({ scopes: SCOPES, enabled }), [enabled]);
+  const isMac = typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
+  const label = t("shortcuts.settings.label");
+  // 降级（作用域超过上限）⇒ 无可开启之物，不显示开关。
+  const degradedByCount = plan.reason === "too-many";
+
+  return (
+    <SettingsGroup id="settings-shortcuts" title={t("shortcuts.settings.title")}>
+      <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          className="border-b-0"
+          label={label}
+          description={
+            degradedByCount
+              ? t("shortcuts.settings.degraded", { limit: SCOPE_SHORTCUT_LIMIT })
+              : t("shortcuts.settings.description", {
+                  mod: isMac ? "⌘" : "Ctrl",
+                  n: SCOPES.length,
+                })
+          }
+          htmlFor="shortcuts-enabled"
+          operational
+        >
+          {degradedByCount ? null : (
+            <Switch
+              id="shortcuts-enabled"
+              checked={enabled}
+              onCheckedChange={(value) => setEnabled(value)}
+              aria-label={label}
+            />
+          )}
+        </SettingsFieldRow>
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/**
  * 四个应用级设置块，**门禁与原先设置页逐条对齐**。
  *
  * 门禁必须留在这里而不是交给调用方：本模块同时被侧栏（常驻）与设置页引用，
@@ -431,6 +488,7 @@ export function AppSettingsGroups() {
     <>
       <LanguageCard />
       <AppearanceCard />
+      <ShortcutsCard />
       {api.isDesktop() || api.isDemoMode() ? <StartupCard /> : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard />}
     </>

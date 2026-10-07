@@ -5,21 +5,45 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { copyText } from "@/lib/clipboard";
-import { useT, type Translate } from "@/lib/i18n";
+import {
+  GATEWAY_PROTOCOLS,
+  accessTools,
+  gatewaySnippet,
+  protocolOf,
+  type GatewayProtocolKey,
+} from "@/lib/gateway-snippets";
+import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type { ApiKeyRecord, Region } from "@/lib/types";
 import { useGatewayStore } from "@/stores/gateway";
 
-const TOOLS = [
-  { key: "cursor", label: "Cursor" },
-  { key: "cline", label: "Cline" },
-  { key: "continue", label: "Continue" },
-  { key: "claude-code", label: "Claude Code" },
-  { key: "openwebui", label: "OpenWebUI" },
-  { key: "cherry", label: "Cherry Studio" },
-] as const;
-
-type ToolKey = (typeof TOOLS)[number]["key"];
+/**
+ * 接入说明（P11 §1.7）—— **协议 Tab × 工具 Tab** 两段式。
+ *
+ * ## 为什么从「一个工具 Tab」升级为「协议 × 工具」两段式
+ *
+ * 协议（OpenAI 兼容 / Anthropic 兼容）是**端点属性**，不是模型属性 —— 同一个模型两种协议
+ * 都支持。但**端点路径**与**认证头**由协议决定：Anthropic 用 `x-api-key`、OpenAI 用
+ * `Authorization: Bearer`。把协议做成**第一段 Tab**，认证头就**不可能给错**（给错 = 用户配不通）。
+ * 只留一个工具 Tab 时，协议差异无处安放 —— 那正是改造前的缺陷。
+ *
+ * ## 工具清单：只列能确认的客户端
+ *
+ * `codex` / `claude-code` / `opencode` 是**能确认**的；未确认的一律走 `generic`
+ * （协议 + 通用参数 + 以其官方文档为准）—— **不编造配置片段**（编错的配置比没有说明更糟）。
+ * 工具清单硬编码在 `lib/gateway-snippets`（D28），本组件只负责渲染与取数。
+ *
+ * ## 示例模型取 `available && !disabled` 的第一个
+ *
+ * 别拿一个被禁用的模型当例子（用户照抄会扑空）。WB 的上游清单里即 `available = true`
+ * （§1.3），因此这里取**第一个**模型；`disabled` 的过滤在 P11 的 T02 落地后接入
+ * （本任务与 T01/T02 无耦合，故不引用尚未存在的 `disabled` 状态）。
+ *
+ * ## 版本由页面传入（受控）
+ *
+ * 版本（国内版 / 国际版）在**页头唯一入口**切换，本组件只按传入的版本取对应 Key
+ * （`representativeKey`）。
+ */
 
 /** 取该 region 第一个启用中的 Key 前缀；无启用中的 Key 时返回 null，由渲染处给出占位提示。 */
 function representativeKey(keys: ApiKeyRecord[], region: Region): string | null {
@@ -27,67 +51,6 @@ function representativeKey(keys: ApiKeyRecord[], region: Region): string | null 
   return active ? `${active.prefix}…` : null;
 }
 
-/**
- * 生成可粘贴的配置片段。
- *
- * `t` 只负责「字段标签 + 值里的自然语言」；片段里的键名（`apiProvider`、
- * `ANTHROPIC_BASE_URL` 等）与工具自身的固定文案（`Cursor → Settings → …`）
- * 一律保持英文 —— 它们是外部工具读取的契约，翻译了反而会粘贴失败。
- */
-function snippetFor(t: Translate, tool: ToolKey, baseUrl: string, rootUrl: string, key: string): string {
-  switch (tool) {
-    case "cursor":
-      return [
-        "Cursor → Settings → Models → OpenAI API Key",
-        "",
-        `Override OpenAI Base URL: ${baseUrl}`,
-        `API Key:  ${key}`,
-        `Model:    ${t("wbStats.gateway.snippet.modelPick")}`,
-      ].join("\n");
-    case "cline":
-      return JSON.stringify(
-        {
-          apiProvider: "openai",
-          openAiBaseUrl: baseUrl,
-          openAiApiKey: key,
-          openAiModelId: "GLM-5.3",
-        },
-        null,
-        2,
-      );
-    case "continue":
-      return [
-        "models:",
-        "  - name: WorkBuddy",
-        "    provider: openai",
-        "    model: GLM-5.3",
-        `    apiBase: ${baseUrl}`,
-        `    apiKey: ${key}`,
-      ].join("\n");
-    case "claude-code":
-      return [`export ANTHROPIC_BASE_URL=${rootUrl}`, `export ANTHROPIC_AUTH_TOKEN=${key}`].join("\n");
-    case "openwebui":
-      return [`Base URL: ${baseUrl}`, `API Key:  ${key}`].join("\n");
-    case "cherry":
-      return [
-        `${t("wbStats.gateway.snippet.apiBase")}: ${baseUrl}`,
-        `${t("wbStats.gateway.snippet.apiKey")}: ${key}`,
-        `${t("wbStats.gateway.snippet.modelPickPlain")}: ${t("wbStats.gateway.snippet.modelPick")}`,
-      ].join("\n");
-    default:
-      return "";
-  }
-}
-
-/**
- * 接入指引 Tabs（Cursor / Cline / Continue / Claude Code / OpenWebUI / Cherry Studio），带复制按钮（P0-9）。
- *
- * ## 版本由页面传入（受控）
- *
- * 改造前这里自带一个「国内版 Key / 国际版 Key」的 Tabs，与页面上的接入地址、
- * 账号池、模型清单各切各的。现在与 Trae 侧一致：版本在**页头唯一入口**切换，
- * 本组件只按传入的版本取对应 Key（`representativeKey`）。
- */
 export function IntegrationGuide({
   baseUrl,
   region,
@@ -99,12 +62,21 @@ export function IntegrationGuide({
 }) {
   const t = useT();
   const keys = useGatewayStore((s) => s.keys);
-  const [tool, setTool] = useState<ToolKey>("cursor");
+  /* 模型名从网关 store 取 —— **修掉了原来硬编码 `GLM-5.3` 的缺陷**
+     （模型一换，生成的片段就是错的）。取不到时给**占位**，不编造一个看起来可用的模型名。 */
+  const catalog = useGatewayStore((s) => s.models[region]);
+  const [protocol, setProtocol] = useState<GatewayProtocolKey>("openai");
+  const [tool, setTool] = useState("codex");
   const [copied, setCopied] = useState(false);
+
+  const tools = accessTools(t, protocol);
+  /* 切协议后原工具可能不在新协议下（如 `codex` 不在 Anthropic 侧）⇒ 回落该协议的第一个工具。 */
+  const activeTool = tools.some((item) => item.key === tool) ? tool : tools[0].key;
 
   const rootUrl = baseUrl.replace(/\/v1\/?$/, "");
   const key = representativeKey(keys, region) ?? t("wbStats.gateway.noKeyHint");
-  const snippet = snippetFor(t, tool, baseUrl, rootUrl, key);
+  const model = catalog?.models[0]?.id ?? t("shared.gateway.snippet.modelPlaceholder");
+  const snippet = gatewaySnippet({ t, protocol, tool: activeTool, baseUrl, rootUrl, key, model });
 
   async function onCopy() {
     await copyText(snippet, t("wbStats.gateway.codeCopied"));
@@ -125,23 +97,50 @@ export function IntegrationGuide({
         </div>
       </div>
 
-      <Tabs value={tool} onValueChange={(value) => setTool(value as ToolKey)}>
+      {/* 第一段：协议 —— 决定端点路径与认证头 */}
+      <Tabs value={protocol} onValueChange={(value) => setProtocol(value as GatewayProtocolKey)}>
         <div className="border-b border-border/60 px-5 py-2">
+          <TabsList>
+            {GATEWAY_PROTOCOLS.map((item) => (
+              <TabsTrigger key={item.key} value={item.key} data-act={`gw-api|${item.key}`}>
+                {t(item.labelKey)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </div>
+      </Tabs>
+
+      {/* 第二段：工具 —— 该协议下的已知客户端 */}
+      <Tabs value={activeTool} onValueChange={setTool}>
+        <div className="px-5 py-2">
           <TabsList className="flex-wrap">
-            {TOOLS.map((item) => (
-              <TabsTrigger key={item.key} value={item.key}>
+            {tools.map((item) => (
+              <TabsTrigger key={item.key} value={item.key} data-act={`gw-tool|${item.key}`}>
                 {item.label}
               </TabsTrigger>
             ))}
           </TabsList>
         </div>
-        <div className="px-5 py-4">
+        <div className="px-5 pb-4">
           <pre className="min-w-0 overflow-x-auto rounded-lg border border-border bg-muted/40 p-4 font-mono text-xs leading-6">
             {snippet}
           </pre>
+          {/* 端点说明：两种协议**都已支持**（§3.18.2，含流式）—— 只说事实，不承诺模型可用。 */}
           <p className="mt-2 text-xs text-muted-foreground">
-            {t("wbStats.gateway.streamNote")}
+            {t("shared.gateway.access.endpointNote", {
+              openai: protocolOf("openai").endpoint,
+              anthropic: protocolOf("anthropic").endpoint,
+            })}
           </p>
+          {/* 认证头：由**协议**决定（Anthropic → x-api-key；OpenAI → Bearer）。 */}
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("shared.gateway.access.authNote", { header: protocolOf(protocol).authHeader })}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">{t("wbStats.gateway.streamNote")}</p>
+          {/* 自动发现说明（P10 §1.7）：模型清单由客户端从 `/v1/models` 自动读取，
+              用户**不需要**在片段里手填模型名 —— 片段里的 `Model:` 只是「契约字段」，
+              不是「必须自己查」的东西。只说事实，不承诺「清单里的模型一定可用」（§3.17.3 陷阱 3）。 */}
+          <p className="mt-1 text-xs text-muted-foreground">{t("wbStats.gateway.autoDiscover")}</p>
         </div>
       </Tabs>
     </Card>

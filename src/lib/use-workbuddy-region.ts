@@ -1,13 +1,8 @@
-import { useCallback, useMemo } from "react";
-import { useSearchParams } from "react-router-dom";
-
 import type { Region } from "@/lib/types";
-
-/** 承载**版本**的 URL 查询参数名。 */
-const REGION_PARAM = "region";
+import { useScope } from "@/lib/use-scope";
 
 /**
- * 当前正在查看的 WorkBuddy **版本**（国内版 / 国际版），由 URL 承载。
+ * 当前正在查看的 WorkBuddy **区域**（国内版 / 国际版），由 URL 承载。
  *
  * ## 为什么要有它（2026-09-30 用户报障：两个模块的版本交互不一致）
  *
@@ -16,53 +11,31 @@ const REGION_PARAM = "region";
  * **页面级单一区域**（`?line=` + 页头切换器，各区块跟随）。同一个产品里的两个页面
  * 用两套心智模型，用户每切一次页面都要重新找「版本在哪切」。
  *
- * 现在统一到 Trae 的模式：**页面持有唯一版本，各区块跟随，子组件不再自带选择器**。
+ * 现在统一到 Trae 的模式：**页面持有唯一区域，各区块跟随，子组件不再自带选择器**。
  *
  * ## 为什么不放 React state / 全局 store
  *
  * 与 `useTraeVariant` 同一理由：放 state 里会**刷新即丢**、
- * 链接不可分享、浏览器前进/后退与页面状态分歧。放进查询串后，版本成为**路由状态的一部分**，
+ * 链接不可分享、浏览器前进/后退与页面状态分歧。放进查询串后，区域成为**路由状态的一部分**，
  * 上述三条自然消解。
  *
- * ## 参数名为什么是 `region` 而不是复用 Trae 的 `line`
+ * ## ⚠️ P1 起：本 hook 是 `useScope` 的**薄封装**
  *
- * 两个页面是不同路由（`/api-service` 与 `/trae/api-service`），参数互不干扰；
- * 但各自的语义不同（WorkBuddy 是**版本**，Trae 是**区域 + 程序位**），
- * 分开命名可避免「一个页面里的 `?line=` 与另一个页面的 `?line=` 含义不同」这种串味。
+ * 原来它自带一套 URL 读写逻辑；P1 把「当前区域」统一到 `useScope`
+ * （**URL 优先 + localStorage 记忆**）之后，本 hook 只固定「平台 = workbuddy」这一个入参。
  *
- * ## 取值与别名
+ * **保留它**而不是让调用点直接改用 `useScope("workbuddy")`，是为了**不动既有调用点**：
+ * 本文件的行为变化全部来自 `useScope`，调用方零改动即可获得
+ * 「账号页切国际版 → 进统计页仍是国际版」的修复。
  *
- * - `cn`（默认，**不写进 URL**）：国内版。
- * - `global`：国际版；`intl` / `international` 视为同义（与 Trae 侧的宽容规则一致）。
- * - 未知值一律回落国内版。
+ * ## 参数名与取值
+ *
+ * 参数名 `region`（不是 Trae 的 `line`）—— 两个页面是不同路由，参数互不干扰；
+ * 但语义不同（WorkBuddy 是**区域**，Trae 是**区域 + 程序位**），分开命名避免串味。
+ *
+ * 取值：`cn`（默认，**不写进 URL**）/ `global`（`intl` / `international` 同义）。
+ * 未知值一律回落国内版（宽容规则与 Trae 侧一致）。
  */
 export function useWorkbuddyRegion(): [Region, (next: Region) => void] {
-  const [params, setParams] = useSearchParams();
-
-  const region = useMemo<Region>(() => {
-    const raw = (params.get(REGION_PARAM) ?? "").trim().toLowerCase();
-    return raw === "global" || raw === "intl" || raw === "international" ? "global" : "cn";
-  }, [params]);
-
-  const setRegion = useCallback(
-    (next: Region) => {
-      setParams(
-        (prev) => {
-          const draft = new URLSearchParams(prev);
-          if (next === "cn") {
-            // 默认版本**不写进 URL**：让「默认」与「显式指定」产生同一个 URL，
-            // 避免两条看起来不同的链接其实等价、也避免默认值污染可读性。
-            draft.delete(REGION_PARAM);
-          } else {
-            draft.set(REGION_PARAM, next);
-          }
-          return draft;
-        },
-        { replace: true },
-      );
-    },
-    [setParams],
-  );
-
-  return [region, setRegion];
+  return useScope("workbuddy");
 }

@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { DemoAction } from "@/components/demo-action";
 import {
   Dialog,
@@ -19,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { traeRegionLabelOf, traeVariantLabel } from "@/lib/trae-types";
 import { allPrograms } from "@/lib/trae-variant-status";
@@ -76,12 +78,7 @@ function programLabelOf(variant: TraeVariantId): string {
     ?? traeVariantLabel(variant);
 }
 
-function formatDate(ts: number): string {
-  if (!ts) return "—";
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return "—";
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
+/* P3：本地 `formatDate` 已移到 `@/lib/format`（本版是更健壮的那个，被取为基准）。 */
 
 /**
  * Trae 多 Key 列表 + 创建 / 吊销 / 删除（对齐 WorkBuddy `gateway/api-key-table.tsx` 骨架）。
@@ -227,7 +224,7 @@ export function TraeApiKeyTable({
             {t("trae.gateway.key.loading")}
           </p>
         ) : keys.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">{t("trae.gateway.key.empty")}</p>
+          <EmptyState icon={KeyRound} title={t("trae.gateway.key.empty")} className="py-4" />
         ) : (
           <div className="min-w-0 overflow-x-auto">
             <table className="w-full min-w-[640px] text-left text-sm">

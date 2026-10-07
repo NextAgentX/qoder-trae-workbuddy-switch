@@ -31,6 +31,9 @@ export const zh = {
   "trae.page.accounts.actionClearCooldown": "清除冷却",
   "trae.page.accounts.actionThaw": "解除冷却",
   "trae.page.accounts.actionDelete": "删除账号",
+  // P4：最小批量条的动作标签（走 actionDone / actionFailed 组合）。
+  "trae.page.accounts.actionBatchCheckin": "批量签到",
+  "trae.page.accounts.actionRefreshCredits": "刷新积分",
   // 备注单独一套提示（不走 actionDone）：保存与清空是两件不同的事，
   // 统一成「编辑备注完成」会让「我到底是删掉了还是写上了」看不出来。
   "trae.page.accounts.remarkSaved": "备注已保存",
@@ -102,8 +105,28 @@ export const zh = {
   "trae.page.accounts.allAccounts": "全部账号（{count}）",
   "trae.page.accounts.ungrouped": "未分组（{count}）",
   "trae.page.accounts.groupItem": "{name}（{count}）",
-  "trae.page.accounts.groupEmpty": "该分组下没有账号，换个分组看看。",
   "trae.page.accounts.fallbackGroup": "分组",
+  // P4 工具栏：排序 / 分组选项（由 `availableSorts` / `availableGroups` 数据驱动，不摆假选项）
+  "trae.page.accounts.toolbar.sort.priority": "积分优先级",
+  "trae.page.accounts.toolbar.sort.name": "名称",
+  "trae.page.accounts.toolbar.sort.expiry": "到期时间",
+  "trae.page.accounts.toolbar.group.none": "不分组",
+  "trae.page.accounts.toolbar.group.program": "按程序位",
+  "trae.page.accounts.toolbar.group.status": "按状态",
+  "trae.page.accounts.toolbar.group.group": "按自定义组",
+  "trae.page.accounts.toolbar.statusBucket.normal": "正常",
+  "trae.page.accounts.toolbar.statusBucket.notCheckedIn": "今日未签到",
+  "trae.page.accounts.toolbar.statusBucket.expired": "凭据过期",
+  "trae.page.accounts.toolbar.statusBucket.cooling": "冷却中",
+  "trae.page.accounts.toolbar.programBucket.unbound": "未绑定程序位",
+  "trae.page.accounts.toolbar.groupBucket.default": "未分组",
+  // P4 表格列头
+  "trae.page.accounts.table.account": "账号",
+  "trae.page.accounts.table.status": "状态",
+  "trae.page.accounts.table.credits": "积分",
+  "trae.page.accounts.table.expiry": "到期",
+  "trae.page.accounts.table.programs": "程序位",
+  "trae.page.accounts.table.current": "当前",
   "trae.page.accounts.autoCheckin": "自动签到",
   "trae.page.accounts.autoCheckinSaving": "正在保存自动签到设置",
   "trae.page.accounts.skipChecked": "跳过已签到",
@@ -143,7 +166,7 @@ export const zh = {
   "trae.page.accounts.importDone": "导入完成",
   "trae.page.accounts.importSummary": "新增 {added} · 覆盖 {overwritten} · 跳过 {skipped}",
   "trae.page.accounts.deleteTitle": "删除账号",
-  "trae.page.accounts.deleteBody": "确定删除账号「{name}」？登录态快照会保留，可在「设置 → 登录态快照」中单独清理。此操作不可撤销。",
+  "trae.page.accounts.deleteBody": "确定删除账号「{name}」？登录态快照会保留，可在「设置 → 登录态快照」中单独清理。删除后可在回收站恢复。",
   "trae.page.accounts.cancel": "取消",
   "trae.page.accounts.delete": "删除",
   // 账号名与 userId 都取不到时（记录损坏 / 刚被删除）的兜底显示名。
@@ -196,7 +219,8 @@ export const zh = {
   "trae.page.settings.unknown": "未知",
   "trae.page.settings.running": "运行中",
   "trae.page.settings.notRunning": "未运行",
-  "trae.page.settings.loading": "加载中…",
+  /* `trae.page.settings.loading` 已删除（P3）：文字型加载态改用 `<Skeleton>` 占位，
+     键不再被引用 —— 按本仓约定（`zh.ts` 头注释第 3 条）「只有真正被引用的键才留下」。 */
   "trae.page.settings.actionDone": "{label}完成",
   "trae.page.settings.actionFailed": "{label}失败",
 

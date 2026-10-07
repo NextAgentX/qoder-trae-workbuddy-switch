@@ -12,7 +12,9 @@ export const zh = {
   "product.switchAria": "切换产品",
   "product.navAria": "{product} 导航",
 
+  "nav.overview": "概览",
   "nav.accounts": "账号管理",
+  "nav.usage": "用量",
   "nav.tokenStats": "Token 统计",
   "nav.credits": "积分统计",
   "nav.apiService": "API 服务",
@@ -22,6 +24,50 @@ export const zh = {
   "sidebar.running": "{product} 运行中",
   "sidebar.notRunning": "{product} 未运行",
   "sidebar.update": "更新",
+
+  // ---- 命令面板（⌘K，P6 §3.7）----
+  "palette.entry": "搜索或跳转",
+  "palette.title": "搜索或跳转",
+  "palette.description": "跨作用域搜索账号、页面与动作，回车直达。",
+  "palette.aria": "命令面板",
+  "palette.placeholder": "搜索账号、页面或动作…",
+  "palette.loading": "正在加载账号…",
+  "palette.results": "{count} 个结果",
+  "palette.empty.title": "没有匹配项",
+  "palette.empty.description": "换个关键词试试，或清空搜索查看全部。",
+  "palette.empty.clear": "清空搜索",
+  "palette.group.page": "页面",
+  "palette.group.scope": "作用域",
+  "palette.group.account": "账号",
+  "palette.group.action": "动作",
+  "palette.scope.current": "当前",
+  "palette.account.inScope": "在 {scope} 中",
+  "palette.action.refresh": "刷新当前作用域",
+  "palette.action.addAccount": "新增账号",
+  "palette.action.openDataDir": "打开数据目录",
+
+  // ---- 键盘快捷键设置（P6 §3.1）----
+  "shortcuts.settings.title": "键盘快捷键",
+  "shortcuts.settings.label": "启用作用域快捷键",
+  "shortcuts.settings.description": "用 {mod} + 1…{n} 直接切换到对应作用域。",
+  "shortcuts.settings.degraded": "当前作用域超过 {limit} 个，已停用数字快捷键。",
+
+  // ---- 首次引导（P6 §1.5）----
+  "firstRun.title": "快速上手",
+  "firstRun.openPalette": "按 {shortcut} 打开命令面板，跨作用域搜索并跳转。",
+  "firstRun.scopeShortcut": "按 {shortcut} 直接切换到对应作用域。",
+  "firstRun.listSearch": "在账号页按 / 聚焦搜索框。",
+  "firstRun.dismiss": "知道了",
+
+  // ---- 撤销 toast（P6 T04 §1.4）----
+  // ★ 删除是**软删除**（账号进回收站，可恢复）⇒ 文案写「可撤销」；**不写**「已永久删除」
+  //   （那是 `recycleBin.purge` 的语义）。超时只是 toast 消失，账号**仍在回收站**，
+  //   故文案**不得**暗示「过期即永久删除」（那会让用户以为没救了）。
+  "undo.deletedTitle": "已删除，可撤销",
+  "undo.batchTitle": "已删除 {n} 个账号，可撤销",
+  "undo.action": "撤销",
+  "undo.undone": "已恢复",
+  "undo.failedTitle": "撤销失败",
 
   // ---- 通用设置（应用级设置弹层）----
   "appSettings.title": "通用设置",
@@ -67,6 +113,24 @@ export const zh = {
   "appSettings.update.foundDetail": "发现新版本 v{latest}（当前 v{current}）",
   "appSettings.update.upToDate": "已是最新版本 v{current}",
   "appSettings.update.installNow": "立即升级",
+
+  // ---- 设置页子导航（P7 §3.9：9 项，第 9 项「备份与恢复」）----
+  // 应用级导航，与 appSettings 同域（§5：应用级放 shell，备份功能放 backup）。
+  "settings.subnav.aria": "设置分区",
+  "settings.subnav.general": "通用",
+  "settings.subnav.account": "账号与登录",
+  "settings.subnav.checkin": "签到与积分",
+  "settings.subnav.gateway": "网关",
+  "settings.subnav.schedule": "计划任务",
+  "settings.subnav.client": "客户端",
+  "settings.subnav.diagnostics": "权限与诊断",
+  "settings.subnav.logs": "日志",
+  "settings.subnav.backup": "备份与恢复",
+
+  // ---- 设置页「日志」分区（WorkBuddy 无独立运行日志，给空态 + 出口）----
+  "settings.logs.emptyTitle": "本分区暂无运行日志",
+  "settings.logs.emptyBody": "WorkBuddy 分区的运行日志在网关页可见；这里是设置与备份入口。",
+  "settings.logs.emptyAction": "查看网关设置",
 
   // ---- 通用兜底 ----
   "common.unknownError": "未知错误",

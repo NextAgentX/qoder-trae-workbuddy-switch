@@ -37,23 +37,26 @@ export const zh = {
   "trae.gateway.models.summary": "共 {count} 个 · 默认 {model}",
   "trae.gateway.models.note": "清单读自 Trae 客户端的本地缓存（上游下发），客户端刷新后这里会跟着变；网关对外清单（/v1/models）按 API Key 的归属程序位取，两条程序位的内容不同。",
   "trae.gateway.models.empty": "暂无模型数据。",
+  "trae.gateway.models.emptyDesc": "客户端未启动 / 未登录 / 尚未拉取清单时这里为空；在客户端刷新模型列表后点「重新读取」即可。",
   "trae.gateway.models.refresh": "重新读取",
+  "trae.gateway.models.scanning": "读取中…",
   "trae.gateway.models.program": "选择目标客户端",
   "trae.gateway.models.programTip": "读取【{label}】客户端的模型清单",
-  "trae.gateway.models.source": "来源",
+  /* 来源徽标（两级，**不**统一成 WB 的三级 —— 机制不同，统一会让 UI 撒谎，见 P10 待明确 #3）。
+     徽标前的「来源」标签走 `shared.gateway.sourceBar.sourceLabel`。 */
   "trae.gateway.models.sourceCache": "客户端缓存",
   "trae.gateway.models.sourceMissing": "未读取",
-  "trae.gateway.models.readAt": "读取于 {time}",
+  /* 兜底原因（后端 `note` 缺失时用）：契约 `kind !== "live"` ⇒ 原因恒非空。
+     「客户端缓存」也**不是**实时，故同样要说明它读自哪里。 */
+  "trae.gateway.models.reasonCache": "读取自客户端本地缓存（上游下发），非上游实时",
+  "trae.gateway.models.reasonMissing": "尚未从客户端读取到清单",
   "trae.gateway.models.readFrom": "读取自 {label} 客户端",
   "trae.gateway.models.gatewayCount": "网关对外 {count} 个",
   "trae.gateway.models.gatewayCountFor": "网关对外 {count} 个（{program}）",
-  "trae.gateway.models.groupCount": "{count} 个",
-  "trae.gateway.models.badgeDefault": "默认",
-  "trae.gateway.models.badgeNew": "新",
-  "trae.gateway.models.badgeBeta": "Beta",
-  "trae.gateway.models.badgeCustom": "自定义",
-  "trae.gateway.models.badgeNotServed": "网关不提供",
-  "trae.gateway.models.context": "上下文 {tokens}",
+  /* P11：分组 chips 改为**表格**（列集 = 模型 / 上游状态 / 网关暴露），下列键随之作废并删除：
+     `groupCount`（分组标题）、`badgeDefault` / `badgeNew` / `badgeBeta` / `badgeCustom`
+     （模型徽标）、`badgeNotServed`（旧「网关不提供」标记 —— 现由**上游状态列**承担）、
+     `context`（上下文窗口，原在悬停提示里）。 */
 
   // =====================================================================
   // gateway/trae-request-log.tsx —— 请求日志
@@ -76,10 +79,10 @@ export const zh = {
   "trae.gateway.guide.copied": "代码已复制",
   "trae.gateway.guide.noKey": "sk-trae-…（请先在上方创建 Key）",
   "trae.gateway.guide.streamNote": "Trae 上游只支持流式；请求 `stream: false` 时由本网关在本地聚合后一次性返回，首字节延迟较长。",
+  /* 自动发现说明（P10 §1.7）：与 WB 侧同构 —— 外部客户端会从本网关的 `/v1/models` 自动读清单。 */
+  "trae.gateway.guide.autoDiscover": "客户端会自动从 `/v1/models` 读取模型清单，不需要手填模型名；若你的工具不支持自动发现，从「模型」页复制即可。",
   // 可复制配置片段里的字段标签（给外部工具粘贴用）
-  "trae.gateway.guide.snippet.apiBase": "API 地址",
-  "trae.gateway.guide.snippet.apiKey": "API 密钥",
-  "trae.gateway.guide.snippet.model": "模型",
+  /* P3：`trae.gateway.guide.snippet.*` 已删除 —— 字段标签统一到 `shared.gateway.snippet.*`。 */
 
   // =====================================================================
   // 账号池卡已**两侧共用**（`gateway/account-pool-card.tsx`），文案随之迁到

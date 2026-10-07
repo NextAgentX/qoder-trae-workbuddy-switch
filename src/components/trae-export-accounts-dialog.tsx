@@ -3,6 +3,7 @@ import { Download, FolderOpen, Loader2 } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
   Dialog,
   DialogContent,
@@ -156,7 +157,7 @@ export function TraeExportAccountsDialog({ open, onOpenChange, accounts, variant
         </Alert>
 
         {accounts.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">{t("trae.comp.export.empty")}</p>
+          <EmptyState icon={Download} title={t("trae.comp.export.empty")} className="py-4" />
         ) : (
           <>
             <div className="flex items-center justify-between text-sm">

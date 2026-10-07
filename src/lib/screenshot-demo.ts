@@ -1,8 +1,9 @@
 import type {
-  AccountMeta, AccountStrategyMap, ApiKeyRecord, AppStatus, AutoRotateConfig, CatalogSnapshot,
+  AccountMeta, AccountStrategyMap, ApiKeyRecord, AppStatus, AutoBackupConfig, AutoBackupEntry, AutoRotateConfig, CatalogSnapshot,
   CheckinConfig, CheckinLog, CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry,
   CreditOfficialUsageModel, CreditStatistics, GatewayConfig, GatewayLogEntry, GatewayPoolAccount,
   GatewayStatus, GithubConfig, Region, RotateLog, RotateStatus, ScheduleConfig, TokenStatistics,
+  Session, SessionReplicaResponse,
   TokenStatsGroup, TokenStatsSource,
   TokenStatsTotals, TravelConfig, TravelStatus,
 } from "./types";
@@ -26,6 +27,7 @@ import type {
 import { demoModeEnabled } from "./demo-mode";
 import { t } from "./i18n";
 import type { TranslationKey } from "@/locales/zh";
+import type { CompanionSnapshot } from "./companion";
 
 export const screenshotDemoEnabled = demoModeEnabled;
 
@@ -669,6 +671,51 @@ function demoGatewayLogs(): GatewayLogEntry[] {
     { ts: atLocalTime(0, 17, 7), endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: t("shared.demo.account.a"), model: "DeepSeek-V4-Pro", status: 200, latencyMs: 2400, promptTokens: 2100, completionTokens: 900, stream: true },
     { ts: atLocalTime(0, 17, 2), endpoint: "/v1/messages", method: "POST", region: "global", account: t("shared.demo.account.b"), model: "Claude-Sonnet-4.5", status: 429, latencyMs: 300, promptTokens: null, completionTokens: null, stream: true },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// 会话工作台（P8 T02 · 演示数据，只读）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 两个 case 的 **uid / sessionId 必须自洽**：`list_session_replicas` 的副本 uid 指向
+// `accountSeeds` 的 uid（`demo-user-001` …），会话 id 指向 `list_sessions` 的会话行 ——
+// 否则演示站的「账号显示名 / 标题」会落兜底，把 join 的缺陷藏起来。
+
+/** 演示：当前账号的会话行（供会话页 join 标题 / `updatedAt` / `hasHistory`）。 */
+function demoSessions(): Session[] {
+  return [
+    { id: "demo-session-1", title: t("shared.demo.session.replicaAlpha"), cwd: "/demo/projects/alpha", updatedAt: atLocalTime(0, 15, 20), hasHistory: true, isPlayground: false },
+    { id: "demo-session-2", title: t("shared.demo.session.replicaBeta"), cwd: "/demo/projects/beta", updatedAt: atLocalTime(1, 9, 5), hasHistory: false, isPlayground: false },
+  ];
+}
+
+/**
+ * 演示：copy ledger 连通出的副本组。
+ *
+ * 形状与后端 `session::list_replica_groups_for` **逐字段一致**（只回
+ * `accountUid` / `sessionId` / `region` + `source`）—— 演示站与真机走同一套归一化逻辑，
+ * 形状不一致会让「演示好看、真机崩」在打包后才暴露。
+ */
+function demoSessionReplicas(): SessionReplicaResponse {
+  return {
+    groups: [
+      {
+        key: "demo-user-001\u001fdemo-session-1",
+        replicas: [
+          { accountUid: "demo-user-001", sessionId: "demo-session-1", region: "cn" },
+          { accountUid: "demo-user-002", sessionId: "demo-session-1-copy", region: "cn" },
+        ],
+      },
+      {
+        key: "demo-user-001\u001fdemo-session-2",
+        replicas: [
+          { accountUid: "demo-user-001", sessionId: "demo-session-2", region: "cn" },
+          { accountUid: "demo-user-003", sessionId: "demo-session-2-copy", region: "cn" },
+        ],
+      },
+    ],
+    source: "ledger",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,6 +1426,43 @@ function demoTraeLogs(args?: Record<string, unknown>): TraeLogsResponse {
   };
 }
 
+/**
+ * 全局备份导出（演示）。
+ *
+ * 形状与 `backup.rs` 的 envelope **同源**（`kind` / `formatVersion` / `exportedAt` /
+ * `includesCredentials` / 按 scope 分组的 `scopes` / `appSettings`）。
+ *
+ * ⚠️ **刻意不含任何凭据键**：演示文件也必须满足红线（文件里搜 `access_token` ⇒ 0 命中），
+ * 否则演示站会把「默认不含凭据」这件事演成反例。
+ */
+function demoBackupEnvelope(): unknown {
+  return {
+    kind: "buddy-switch-backup",
+    formatVersion: 1,
+    appVersion: "2026.10.1",
+    exportedAt: new Date().toISOString(),
+    includesCredentials: false,
+    scopes: Object.fromEntries(
+      ["wb-cn", "wb-global", "trae-cn", "trae-global"].map((scope) => [
+        scope,
+        { accounts: [], config: {}, gateway: { keys: [], models: [], pool: [] } },
+      ]),
+    ),
+    appSettings: { "buddy-switch.language": "zh", "buddy-switch.theme": "system" },
+  };
+}
+
+/** 自动备份 / 导入前快照（演示，最新在前）。 */
+function demoAutoBackups(): { backups: AutoBackupEntry[] } {
+  return {
+    backups: [
+      { fileName: "pre-import-2026-10-04-0912.json", path: "/demo/buddy-switch/backups/pre-import-2026-10-04-0912.json", sizeBytes: 184_320, modifiedAt: atLocalTime(0, 9, 12), kind: "preImport" },
+      { fileName: "auto-backup-2026-10-04-0300.json", path: "/demo/buddy-switch/backups/auto-backup-2026-10-04-0300.json", sizeBytes: 176_128, modifiedAt: atLocalTime(0, 3, 0), kind: "auto" },
+      { fileName: "auto-backup-2026-10-03-0300.json", path: "/demo/buddy-switch/backups/auto-backup-2026-10-03-0300.json", sizeBytes: 174_080, modifiedAt: atLocalTime(1, 3, 0), kind: "auto" },
+    ],
+  };
+}
+
 /** Read-only demo response provider. It never reads or mutates real user data. */
 export function screenshotDemoResponse(command: string, args?: Record<string, unknown>): unknown {
   const demoAccounts = hydratedAccounts();
@@ -1391,6 +1475,29 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
   switch (command) {
     case "get_status": return demoRegionStatus(args?.region === "global" ? "global" : "cn");
     case "get_accounts": return { accounts: demoAccounts };
+    /* P5 T03：`accounts_list` 是 WorkBuddy / Trae **共用**的参数化命令（靠 `scope` 区分平台），
+       所以演示数据也必须按 scope 分 —— 否则 Trae 页面在演示模式下会拿到 WB 的账号
+       （那是最难发现的一类假通过：页面有数据、只是数据是错的）。 */
+    case "accounts_list": {
+      const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "");
+      return scope.startsWith("trae") ? demoTraeAccounts() : { accounts: demoAccounts };
+    }
+    /* P5 T03：`credits` 是 WorkBuddy / Trae **共用**的参数化命令（靠 `scope` 区分平台），
+       演示数据也必须按 scope 分 —— 否则 Trae 页面在演示模式下会拿到 WB 的积分形状。 */
+    case "credits": {
+      const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "");
+      return scope.startsWith("trae")
+        ? demoTraeCredits()
+        : creditExpiry(String(args?.accountId ?? ""));
+    }
+    /* P5 T03：`checkin_status` 是 WorkBuddy / Trae **共用**的参数化命令（靠 `scope` 区分平台），
+       演示数据也必须按 scope 分 —— 否则 Trae 页面在演示模式下会拿到 WB 的单账号签到形状。 */
+    case "checkin_status": {
+      const scope = String((args as { scope?: unknown } | undefined)?.scope ?? "");
+      return scope.startsWith("trae")
+        ? demoTraeCheckinStatus()
+        : { ok: true, todayCheckedIn: true };
+    }
     case "get_codebuddy_cli_status": return cliStatus;
     case "get_codebuddy_cn_ide_status": return {
       installed: true,
@@ -1445,11 +1552,23 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     case "check_update": return { ok: true, current: "2026.9.16", latest: "2026.9.17", latestTag: "v2026.9.17", hasUpdate: true, releaseName: t("shared.demo.updateTitle"), releaseUrl: "https://github.com/NextAgentX/trae-workbuddy-switch/releases/tag/v2026.9.17" };
     case "get_launch_at_login_enabled": return true;
     case "switch_progress": return { running: false, progress: null };
+    /* P8 T02 · 会话页两个只读命令。`list_session_replicas` 形状与后端逐字段一致；
+       `list_sessions` 是既有命令，补进演示面以便会话页 join 标题 / updatedAt。 */
+    case "list_sessions":
+      return { sessions: demoSessions(), current: "demo-user-001", source: "db" };
+    case "list_session_replicas":
+      return demoSessionReplicas();
     case "get_gateway_config": return demoGatewayConfig();
     case "gateway_status": return demoGatewayStatus();
     case "list_api_keys": return { keys: demoApiKeys() };
     case "get_gateway_models": return demoCatalog(args?.region === "global" ? "global" : "cn");
     case "get_account_strategy": return demoStrategyMap();
+    /* P11：禁用偏好只读命令。演示数据**如实为空**（默认全开，D27）——
+       截图里若凭空标出「已禁用」会误导用户以为装上就有模型被关掉。 */
+    case "get_disabled_models": return {
+      region: args?.region === "global" ? "global" : "cn",
+      ids: [],
+    };
     case "get_gateway_logs": return { logs: demoGatewayLogs() };
     // ---- Trae 分区（只读；写操作不进这里，由 DemoAction 统一拦截）----
     case "get_trae_env": return demoTraeEnv();
@@ -1469,6 +1588,22 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     case "get_trae_client_models": return demoTraeClientModels(args);
     case "list_trae_api_keys": return demoTraeApiKeys();
     case "get_trae_gateway_logs": return demoTraeGatewayLogs();
+    /* P9 · 悬浮窗**只读**快照。
+       ⚠️ 演示数据**如实**反映「本期只接已有数据源的来源」：演示时没有进行中的操作 ⇒
+       **结构化空态**（`items: []` + `source: "unavailable"`），由 T03 渲染空态四要素。
+       **绝不**为「看起来丰富」塞演示行（P9 §1.3 / §6 R7）——真实 provider 同款
+       （见 `src-tauri/src/commands.rs::companion_snapshot`）。 */
+    case "companion_status": return {
+      items: [],
+      source: "unavailable",
+      updated_at: Date.now(),
+    } satisfies CompanionSnapshot;
+    /* P7 全局备份：只登记**只读**命令（导出 / 预览 / 导入 / 恢复是动作，不进演示只读面 ——
+       由页面侧的错误提示处理）。`get_auto_backup_config` **如实返回默认开**（§7 #7），
+       否则截图会误导成「装上就是关着的」。 */
+    case "export_backup": return demoBackupEnvelope();
+    case "list_auto_backups": return demoAutoBackups();
+    case "get_auto_backup_config": return { enabled: true } satisfies AutoBackupConfig;
     default: throw new Error(t("shared.demo.error.missingReadOnly", { command }));
   }
 }

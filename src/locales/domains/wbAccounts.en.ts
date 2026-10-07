@@ -96,6 +96,15 @@ export const en = {
   "wbAccounts.card.currentWorkbuddy": "WorkBuddy current account",
   "wbAccounts.card.currentIde": "CodeBuddy IDE current account",
   "wbAccounts.card.currentCli": "CodeBuddy CLI current account",
+  // P5 §2.5: program-slot display names — targeted by `ProgramSpec.label_key` in core `modules/programs.rs`.
+  "wbAccounts.program.codebuddyCli": "CodeBuddy CLI",
+  "wbAccounts.program.codebuddyCnIde": "CodeBuddy CN IDE",
+  "wbAccounts.program.vscodeCnInject": "VS Code CodeBuddy extension",
+  // ⚠️ **Planned (not supported yet)** — must say "not supported yet", **NOT** "client not detected"
+  //    (the latter sends users to install something that still won't work).
+  "wbAccounts.program.plannedVscode": "VS Code CodeBuddy extension",
+  "wbAccounts.program.plannedJetbrains": "JetBrains CodeBuddy extension",
+  "wbAccounts.program.plannedHint": "Not supported yet",
   "wbAccounts.card.unnamed": "Unnamed account",
   "wbAccounts.card.checkedIn": "Checked in",
   "wbAccounts.card.notCheckedIn": "Not checked in",
@@ -119,10 +128,11 @@ export const en = {
   "wbAccounts.card.setCurrentCli": "Set as CodeBuddy CLI current account",
   "wbAccounts.card.switchingCli": "Switching CodeBuddy CLI current account",
   "wbAccounts.card.connectCliFirst": "Connect CodeBuddy CLI first",
-  "wbAccounts.card.remarkPlaceholder": "e.g. DS4.1 quota · unlocks 10/03",
-  "wbAccounts.card.remarkAria": "{name}'s remark",
-  "wbAccounts.card.editRemarkAria": "Edit {name}'s remark",
-  "wbAccounts.card.addRemark": "Add remark",
+  // P4: remark editor moved to the shared drawer; only the card entry point stays.
+  "wbAccounts.card.viewDetail": "View details",
+  "wbAccounts.card.selectAria": "Select account {name}",
+  "wbAccounts.card.guideIdeSetting": "CodeBuddy IDE not detected — click to configure the IDE path in settings",
+  "wbAccounts.card.guideCliSetting": "CodeBuddy CLI not connected — click to finish setup in settings",
   "wbAccounts.card.loadingCredits": "Loading credits…",
   "wbAccounts.card.waitingCredits": "Waiting for credit data…",
   "wbAccounts.card.creditFailed": "Failed to load credits",
@@ -137,18 +147,23 @@ export const en = {
   "wbAccounts.card.resourceTitle": "{name} · {remaining} / {total} left · {expiry}",
   "wbAccounts.card.creditsUnit": "{n} credits",
   "wbAccounts.card.noCredits": "No credits available",
-  "wbAccounts.card.viewAllPacks": "View all credit packs",
   "wbAccounts.card.setCurrent": "Set as current",
   "wbAccounts.card.switching": "Switching…",
   "wbAccounts.card.cliCurrent": "CLI current",
-  "wbAccounts.card.allPacksTitle": "All credit packs",
-  "wbAccounts.card.allPacksDesc": "{name} · {n} credit packs total",
-  "wbAccounts.card.noResourcePacks": "No resource packs to show.",
-  "wbAccounts.card.unnamedPack": "Unnamed resource pack",
+  // P4: pack details moved from the in-card dialog to the shared drawer.
   "wbAccounts.card.expired": "Expired",
   "wbAccounts.card.expiresIn7": "Expires within 7 days",
   "wbAccounts.card.expiresOn": "Expires {date}",
   "wbAccounts.card.used": "Used {n}",
+
+  // ---- Detail drawer sections (assembled by AccountsPage) ----
+  "wbAccounts.detail.section.account": "Account",
+  "wbAccounts.detail.email": "Email",
+  "wbAccounts.detail.uid": "UID",
+  "wbAccounts.detail.id": "Account ID",
+  "wbAccounts.detail.tokenExpiry": "Token expiry",
+  "wbAccounts.detail.expired": "Expired",
+  "wbAccounts.detail.checkedIn": "Checked in today",
 
   // ---- Switch account dialog ----
   "wbAccounts.dialog.switchTitle": "Switch to \"{name}\"",
@@ -157,9 +172,6 @@ export const en = {
   "wbAccounts.dialog.migrateProgress": "Migrating account data…",
   "wbAccounts.dialog.listSeparator": "; ",
   "wbAccounts.dialog.switchProcessing": "Processing, please don't close this window",
-  "wbAccounts.dialog.sourceVersion": "Data source version",
-  "wbAccounts.dialog.sourceSame": "Same as target ({region}); moving within the same version",
-  "wbAccounts.dialog.sourceCross": "Move from {from}'s signed-in account to {to}",
   "wbAccounts.dialog.copySessions": "Copy sessions to target account",
   "wbAccounts.dialog.copyHintLoading": "Loading sessions…",
   "wbAccounts.dialog.copyHintErrorEmpty": "Can't load the session list; copying is unavailable",
@@ -174,7 +186,6 @@ export const en = {
   "wbAccounts.dialog.migrateConnectors": "Migrate connector config",
   "wbAccounts.dialog.migrateConnectorsDescSame": "Merge the current account's connector config into the target account; recursively merge same-named entries, dedupe duplicates, and auto-back up the original before overwriting",
   "wbAccounts.dialog.migrateConnectorsDescCross": "Merge {from}'s current account connector config into {to}'s target account; recursively merge same-named entries, dedupe duplicates, and auto-back up the original before overwriting",
-  "wbAccounts.dialog.sourceVersionAria": "Data source version",
   "wbAccounts.dialog.loadingSessions": "Loading sessions…",
   "wbAccounts.dialog.noSessionsCurrent": "Current account has no sessions",
   "wbAccounts.dialog.noSessionsNoCurrent": "No signed-in account detected; can't list sessions",
@@ -184,8 +195,6 @@ export const en = {
   "wbAccounts.dialog.selectFolder": "Select folder {label}",
   "wbAccounts.dialog.collapseFolder": "Collapse folder {label}",
   "wbAccounts.dialog.expandFolder": "Expand folder {label}",
-  "wbAccounts.dialog.task": "Tasks",
-  "wbAccounts.dialog.space": "Spaces",
   "wbAccounts.dialog.ungrouped": "Ungrouped",
   "wbAccounts.dialog.hasBody": "Has content",
   "wbAccounts.dialog.permissionTitle": "How to grant access (3 steps):",
@@ -214,6 +223,55 @@ export const en = {
   "wbAccounts.dialog.switchedDefault": "WorkBuddy restarted as the target account.",
   "wbAccounts.dialog.copiedSessions": "Copied {n} sessions",
   "wbAccounts.dialog.skippedSessions": "Skipped {n} existing copies",
+
+  // ---- Switch account: cross-scope migration wizard (P4 · 3-step wizard in a sheet) ----
+  // ⚠️ State the capability boundary honestly (§1.3 / §3.5 red line): cross-product
+  //    (WB→Trae) session copy is NOT supported by the backend ⇒ cross-product sources are
+  //    disabled with a reason; NEVER claim "WB→Trae now works".
+  "wbAccounts.wizard.stepsAria": "Migration steps",
+  "wbAccounts.wizard.stepTarget": "Target & source",
+  "wbAccounts.wizard.stepContent": "What to migrate",
+  "wbAccounts.wizard.stepConfirm": "Confirm",
+  // This wizard only switches the WorkBuddy desktop client ⇒ the program is a single value.
+  "wbAccounts.wizard.programLabel": "Target program",
+  "wbAccounts.wizard.programWorkbuddy": "WorkBuddy desktop",
+  // Step 1: source account (only each scope's current account, §1.3 conclusion 1).
+  "wbAccounts.wizard.sourceTitle": "Where to migrate content from?",
+  "wbAccounts.wizard.sourceDesc": "Defaults to the currently signed-in account.",
+  "wbAccounts.wizard.crossShow": "Choose from another scope…",
+  "wbAccounts.wizard.crossHide": "Only this scope",
+  "wbAccounts.wizard.sourceCurrent": "Signed-in account",
+  "wbAccounts.wizard.sourceBadge": "Source",
+  "wbAccounts.wizard.sourceUnsupported": "This platform doesn't support session copy (session copy relies on WorkBuddy's session store and cloud ownership)",
+  "wbAccounts.wizard.sourceUnsupportedBadge": "Session copy unsupported",
+  // Step 2: what to migrate (sessions / memory / connectors, sibling switches) + the tree.
+  "wbAccounts.wizard.contentTitle": "What else to migrate?",
+  "wbAccounts.wizard.treeTitle": "Select sessions to copy",
+  "wbAccounts.wizard.treeCount": "{n} / {m} selected",
+  "wbAccounts.wizard.treeSelectAll": "Select all",
+  "wbAccounts.wizard.treeSelectNone": "Select none",
+  "wbAccounts.wizard.typeConversation": "Conversations",
+  "wbAccounts.wizard.typeWorkspace": "Workspaces",
+  // Empty-state exit for the session tree (what the user can do when there are no sessions).
+  "wbAccounts.wizard.emptyExit": "Skip session copy",
+  // Step 3: confirmation (honest summary + impact + irreversible notice).
+  "wbAccounts.wizard.confirmTarget": "Target account",
+  "wbAccounts.wizard.confirmSource": "Source account",
+  "wbAccounts.wizard.confirmProgram": "Program",
+  "wbAccounts.wizard.confirmContent": "What to migrate",
+  "wbAccounts.wizard.confirmSessions": "Sessions ({n} sessions / {d} folders selected)",
+  "wbAccounts.wizard.confirmNoSessions": "Sessions (none selected)",
+  "wbAccounts.wizard.confirmMemory": "Memory",
+  "wbAccounts.wizard.confirmConnectors": "Connectors",
+  "wbAccounts.wizard.confirmNone": "Nothing",
+  "wbAccounts.wizard.contentSeparator": ", ",
+  "wbAccounts.wizard.impact": "Impact",
+  "wbAccounts.wizard.impactText": "The client will restart; unsaved editor content may be lost.",
+  "wbAccounts.wizard.irreversible": "Migration writes to the target account's data; this cannot be undone.",
+  // Navigation.
+  "wbAccounts.wizard.back": "Back",
+  "wbAccounts.wizard.next": "Next",
+  "wbAccounts.wizard.run": "Switch",
 
   // ---- Import accounts dialog ----
   "wbAccounts.dialog.importTitle": "Import accounts",
@@ -255,7 +313,7 @@ export const en = {
 
   // ---- Delete account confirm ----
   "wbAccounts.dialog.deleteTitle": "Delete account",
-  "wbAccounts.dialog.deleteDesc": "Delete account \"{name}\"? This cannot be undone.",
+  "wbAccounts.dialog.deleteDesc": "Delete account \"{name}\"? You can restore it from the recycle bin.",
   "wbAccounts.dialog.deleteConfirm": "Delete",
 
   // ---- Connect / upgrade CLI confirm ----
@@ -282,7 +340,6 @@ export const en = {
   "wbAccounts.toast.importSuccess": "Import successful",
   "wbAccounts.toast.importOverwrite": "(overwrote {n})",
   "wbAccounts.toast.importDetail": "Imported {imported} account(s){overwrite}, skipped {skipped}. The token may have expired; you may need to sign in again after switching.",
-  "wbAccounts.toast.deleted": "Account deleted",
   "wbAccounts.toast.deleteFail": "Failed to delete",
   "wbAccounts.toast.checkinSuccess": "Check-in successful",
   "wbAccounts.toast.checkedInToday": "Already checked in today",
@@ -293,6 +350,7 @@ export const en = {
   "wbAccounts.toast.checkinBatchSuccess": "{n} checked in",
   "wbAccounts.toast.checkinBatchAlready": "{n} already checked in",
   "wbAccounts.toast.checkinBatchFailed": "{n} failed",
+  "wbAccounts.toast.checkinRetryFailed": "Retry failed only",
   "wbAccounts.toast.checkinNone": "No accounts need check-in",
   "wbAccounts.toast.checkinFailBatch": "Check-in failed",
   "wbAccounts.toast.checkinDone": "Check-in complete",
@@ -312,6 +370,26 @@ export const en = {
   "wbAccounts.toast.remarkSaved": "Remark saved",
   "wbAccounts.toast.remarkCleared": "Remark cleared",
   "wbAccounts.toast.remarkSaveFail": "Failed to save remark",
-  "wbAccounts.page.loadingAccounts": "Loading accounts…",
+  "wbAccounts.toast.guideIdeSetting": "Configure the CodeBuddy IDE path on the Settings page",
+  "wbAccounts.toast.guideCliSetting": "Finish CodeBuddy CLI setup on the Settings page",
   "wbAccounts.page.accounts": "Accounts",
+
+  // ---- P4 toolbar / table (WorkBuddy-specific data: option labels + column headers) ----
+  "wbAccounts.toolbar.sort.priority": "Credit priority",
+  "wbAccounts.toolbar.sort.name": "Name",
+  "wbAccounts.toolbar.sort.expiry": "Expiry",
+  "wbAccounts.toolbar.group.none": "No grouping",
+  "wbAccounts.toolbar.group.program": "By program",
+  "wbAccounts.toolbar.group.status": "By status",
+  "wbAccounts.toolbar.statusBucket.normal": "Normal",
+  "wbAccounts.toolbar.statusBucket.notCheckedIn": "Not checked in today",
+  "wbAccounts.toolbar.statusBucket.expired": "Credentials expired",
+  "wbAccounts.toolbar.statusBucket.needsRelogin": "Sign-in required",
+  "wbAccounts.toolbar.programBucket.unbound": "No program bound",
+  "wbAccounts.table.account": "Account",
+  "wbAccounts.table.status": "Status",
+  "wbAccounts.table.credits": "Credits",
+  "wbAccounts.table.expiry": "Expiry",
+  "wbAccounts.table.programs": "Programs",
+  "wbAccounts.table.current": "Current",
 };

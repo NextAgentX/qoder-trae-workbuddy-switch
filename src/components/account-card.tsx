@@ -1,17 +1,11 @@
-import { ArrowRight, Check, CircleCheck, Clock3, Coins, Ellipsis, Loader2, Pencil, PlaneTakeoff, QrCode, RefreshCw, Sparkles, Star, StickyNote, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Ban, Check, CircleCheck, Clock3, Coins, Ellipsis, Info, Loader2, PlaneTakeoff, QrCode, RefreshCw, Sparkles, Star, StickyNote, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+// P0 · 程序位表（含「计划新增 / 尚未支持」态）—— 展示侧镜像，与后端 `programs.rs` 逐字对齐。
+import { PLANNED_PROGRAMS } from "@/lib/platforms/registry";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { DemoAction } from "@/components/demo-action";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyMark } from "@/components/product-marks";
@@ -21,6 +15,24 @@ import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
 import type { AccountMeta, CreditExpiry, CreditResource, TravelStatus } from "@/lib/types";
+
+/**
+ * WorkBuddy 账号卡片。
+ *
+ * ## P4 卡片瘦身（PLAN §3.3）
+ *
+ * 详情（备注编辑、全部积分包）**已迁入共享抽屉**（`account-detail-drawer.tsx`），
+ * 卡片只剩「允许的可点区」：**勾选框 / 程序位行 / 更多菜单**。
+ * 移出的是**两类**交互 —— 备注就地编辑与资源包展开；其余（程序位、菜单、加密凭据
+ * 错误态的扫码 CTA）按 §3.3 保留。
+ *
+ * ## 为什么程序位行只定义一处
+ *
+ * 紧凑模式与宽松模式各需要一种排布（图标化 / 带文字），但它们**是同一行**。
+ * 改造前紧凑头部与宽松页脚各写一遍、共 6 枚 `<Button>`，静态计数看起来像 6 个可点区
+ * —— 于是这里收敛成**单个 `programRow` 变量**，两个布局引用同一个定义，
+ * 可点区口径不再被重复计数污染（PLAN §3.3）。
+ */
 
 const AVATAR_TONES = [
   "bg-emerald-100 text-emerald-800",
@@ -43,23 +55,16 @@ export function avatarTone(name: string) {
   return AVATAR_TONES[hash % AVATAR_TONES.length];
 }
 
-function formatCredits(value: number): string {
+export function formatCredits(value: number): string {
   if (!Number.isFinite(value)) return "—";
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
 
-function formatCreditExpiry(ts: number | null, t: Translate): string {
+export function formatCreditExpiry(ts: number | null, t: Translate): string {
   if (!ts) return t("wbAccounts.card.forever");
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return t("wbAccounts.card.forever");
   return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function formatFullDate(ts: number | null): string {
-  if (!ts) return "—";
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
 }
 
 function formatCreditUpdatedAt(ts: number | undefined): string {
@@ -87,7 +92,7 @@ function creditResources(credit?: CreditExpiry): CreditResource[] {
     .map(({ resource }) => resource);
 }
 
-function accountIdentity(account: AccountMeta): string {
+export function accountIdentity(account: AccountMeta): string {
   // 先归一再看：脏值（对象）会让下面的 `split` 直接抛 TypeError，
   // 而渲染期的 TypeError 会顺着错误边界外的路径把整棵树带走（issue #2）。
   const email = displayText(account.email);
@@ -173,20 +178,15 @@ function travelChip(status: TravelStatus | undefined) {
   }
 }
 
+/** 未检测到的程序位引导目标（对应设置页里的子项）。 */
+export type GuideTarget = "ide" | "cli";
+
 interface Props {
   account: AccountMeta;
   onDelete: (a: AccountMeta) => void;
   onCheckin?: (a: AccountMeta) => void;
   onRefresh?: (a: AccountMeta) => void;
   onSwitch?: (a: AccountMeta) => void;
-  /**
-   * 保存备注；返回 `true` 表示已写回（编辑器才会收起）。
-   *
-   * 由页面提供而不由卡片自己调 `api`：写回后要刷新整个账号列表，
-   * 而卡片手里没有列表状态。返回布尔值而不是抛异常，是为了失败时
-   * **保持编辑态**让用户能改完重试，而不是把半截输入丢掉。
-   */
-  onSaveRemark?: (a: AccountMeta, remark: string) => Promise<boolean>;
   todayCheckedIn?: boolean;
   /** 今日旅行状态（undefined=查询中/未知，不渲染标签） */
   travelStatus?: TravelStatus;
@@ -217,6 +217,21 @@ interface Props {
    *（弹窗由页面持有），所以走回调。
    */
   onAddPlaintextAccount?: () => void;
+  /**
+   * 未检测到的程序位（IDE / CLI）点击后**引导到设置**对应子项（PLAN §3.3 规则 1）。
+   *
+   * 为什么不就地禁用：一枚点不动的灰按钮**不告诉用户下一步做什么**；
+   * 引导到设置页才能让「未检测到」变成可解决的问题。
+   */
+  onGuideToSetting?: (target: GuideTarget) => void;
+  /** 是否被勾选（批量操作）。 */
+  selected?: boolean;
+  /** 切换勾选。 */
+  onToggleSelect?: (a: AccountMeta) => void;
+  /** 打开详情抽屉（抽屉状态由页面持有）。 */
+  onOpenDetail?: (a: AccountMeta) => void;
+  /** 「更多 → 编辑备注」：打开抽屉并进入编辑态。 */
+  onEditRemark?: (a: AccountMeta) => void;
   featuresDisabled?: boolean;
   /** 紧凑模式：头部缩成一条、按钮图标化、无 footer */
   compact?: boolean;
@@ -252,98 +267,23 @@ function ProductCurrentState({ product, compact = false }: { product: "workbuddy
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch, onSaveRemark, todayCheckedIn, travelStatus, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, onAddPlaintextAccount, featuresDisabled = true, compact = false }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, onEditRemark, featuresDisabled = true, compact = false }: Props) {
   const t = useT();
-  const [resourcesOpen, setResourcesOpen] = useState(false);
-  const [remarkEditing, setRemarkEditing] = useState(false);
-  const [remarkDraft, setRemarkDraft] = useState("");
-  const [remarkSaving, setRemarkSaving] = useState(false);
-  const remarkInputRef = useRef<HTMLInputElement | null>(null);
-  /**
-   * 取消编辑时置位，用来抵掉紧随其后的那次 blur。
-   *
-   * 编辑态结束时输入框会被卸载，浏览器/React 可能仍补发一次 blur；
-   * 不拦的话「按 Esc 取消」会被那次 blur 反向提交成一次保存。
-   */
-  const skipCommitRef = useRef(false);
-  /**
-   * 从「更多操作」菜单进入备注编辑时置位，用来**取消这一次菜单关闭的焦点归还**。
-   *
-   * Radix 菜单关闭时会把焦点还给触发按钮（`onCloseAutoFocus` 的默认行为，且发生在
-   * 关闭动画之后 —— 实测约 150ms）。而编辑框那时**已经拿到焦点**，焦点被顶掉会补发
-   * 一次 `onBlur`，被当成「用户点了别处」提交一次（草稿与已保存值相同 ⇒ 直接退出编辑态），
-   * 表现为**编辑框闪一下就没了**。
-   *
-   * 只在「本次关闭确实是为了进入编辑态」时拦截，其他菜单项（刷新 Token / 删除账号）
-   * 仍按 Radix 默认行为把焦点还给触发按钮。
-   */
-  const keepRemarkFocusRef = useRef(false);
   /**
    * 兜底归一（第三道闸）。
    *
    * 后端与 `lib/api.ts` 都已归一，但本组件是**纯展示**的，也可能被 demo 数据、
-   * 测试或未来的新调用方直接喂进来。而 `name` / `remark` 会**直接当 React 子节点
-   * 渲染** —— 对象会让 React 抛错并卸载整棵树 ⇒ 窗口一片白（issue #2）。
+   * 测试或未来的新调用方直接喂进来。而 `name` 会**直接当 React 子节点渲染** ——
+   * 对象会让 React 抛错并卸载整棵树 ⇒ 窗口一片白（issue #2）。
    * 宁可显示「未命名账号」，也不能崩。
    */
   const name = displayText(account.nickname) || displayText(account.uid) || t("wbAccounts.card.unnamed");
   const expired = typeof account.expiresAt === "number" && account.expiresAt < Date.now();
-  const remark = displayText(account.remark)?.trim() || "";
   const identity = accountIdentity(account);
-
-  useEffect(() => {
-    if (!remarkEditing) return;
-    // 等 DOM 提交后再聚焦。从菜单进入时菜单关闭还会再跑一次焦点归还，
-    // 那一次已由 `onCloseAutoFocus` 拦掉（见 keepRemarkFocusRef）。
-    const timer = window.setTimeout(() => remarkInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(timer);
-  }, [remarkEditing]);
-
-  /** 进入备注编辑态；返回 `true` 表示确实进入了（调用方据此决定要不要拦焦点）。 */
-  function beginRemarkEdit(): boolean {
-    if (featuresDisabled || !onSaveRemark || remarkSaving) return false;
-    skipCommitRef.current = false;
-    setRemarkDraft(remark);
-    setRemarkEditing(true);
-    return true;
-  }
-
-  function cancelRemarkEdit() {
-    // 取消即丢弃草稿：下次进入编辑态重新从已保存值起算，不留半截输入。
-    skipCommitRef.current = true;
-    setRemarkEditing(false);
-    setRemarkDraft("");
-  }
-
-  async function commitRemark() {
-    if (skipCommitRef.current) {
-      skipCommitRef.current = false;
-      return;
-    }
-    if (!onSaveRemark || remarkSaving) return;
-    if (remarkDraft.trim() === remark) {
-      cancelRemarkEdit();
-      return;
-    }
-    setRemarkSaving(true);
-    const saved = await onSaveRemark(account, remarkDraft);
-    setRemarkSaving(false);
-    if (saved) setRemarkEditing(false);
-  }
   const avatarClass = avatarTone(name);
   const resources = creditResources(credit);
   const visibleResources = resources.slice(0, 2);
   const expiringAmount = credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
-  /** 弹窗内展示还有剩余的资源包（已用完的隐藏），按到期时间升序 */
-  const allResources = (credit?.resources ?? [])
-    .filter((resource) => resource.remaining > 0)
-    .map((resource, index) => ({ resource, index }))
-    .sort((left, right) => {
-      const leftExpiry = left.resource.expireAt ?? Number.POSITIVE_INFINITY;
-      const rightExpiry = right.resource.expireAt ?? Number.POSITIVE_INFINITY;
-      return leftExpiry === rightExpiry ? left.index - right.index : leftExpiry - rightExpiry;
-    })
-    .map(({ resource }) => resource);
 
   const activeProductCount = [workbuddyActive, codebuddyCliActive, codebuddyCnIdeActive].filter(Boolean).length;
 
@@ -368,9 +308,143 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
     </>
   );
 
+  /* 程序位行（**单一定义**，紧凑头部与宽松页脚共用 —— 见文件头）。 */
+  const btnSize = compact ? ("icon" as const) : ("sm" as const);
+  const btnClass = compact ? "size-7 rounded-lg" : "h-7 rounded-full px-2.5 pr-3.5 text-xs";
+  const markSize = compact ? 15 : 18;
+  const switchLabel = (label: string) => (compact ? null : <span>{label}</span>);
+
+  // WorkBuddy 主程序位：当前账号 → 角标；演示模式 → DemoAction；其余 → 切换按钮。
+  const workbuddyControl = workbuddyActive ? (
+    <ProductCurrentState product="workbuddy" compact />
+  ) : demoModeEnabled ? (
+    <DemoAction>
+      <Button variant="outline" size={btnSize} className={btnClass} aria-label={t("wbAccounts.card.setCurrentWorkbuddy")}>
+        <WorkBuddyMark size={markSize} />
+        {switchLabel(t("wbAccounts.card.setCurrent"))}
+      </Button>
+    </DemoAction>
+  ) : (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size={btnSize} className={btnClass} disabled={featuresDisabled || !onSwitch} onClick={() => onSwitch?.(account)} aria-label={t("wbAccounts.card.setCurrentWorkbuddy")}>
+          <WorkBuddyMark size={markSize} />
+          {switchLabel(t("wbAccounts.card.setCurrent"))}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.card.setCurrentWorkbuddyRestart")}</TooltipContent>
+    </Tooltip>
+  );
+
+  // CodeBuddy IDE：未检测到 → **引导设置**（不摆一枚点不动的灰按钮）。
+  const ideControl = codebuddyCnIdeActive ? (
+    <ProductCurrentState product="codebuddy-cn" compact />
+  ) : codebuddyCnIdeAvailable ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size={btnSize} className={btnClass} disabled={featuresDisabled || !onSwitchCodebuddyCnIde || codebuddyCnIdeBusy} onClick={() => onSwitchCodebuddyCnIde?.(account)} aria-label={codebuddyCnIdeLoading ? t("wbAccounts.card.switchingIde") : t("wbAccounts.card.switchIde")} aria-busy={codebuddyCnIdeLoading}>
+          {codebuddyCnIdeLoading ? <Loader2 className={compact ? "size-3.5 animate-spin" : "size-4 animate-spin"} /> : <CodeBuddyCnIdeMark size={markSize} />}
+          {switchLabel(codebuddyCnIdeLoading ? t("wbAccounts.card.switching") : "IDE")}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.card.switchIdeRestart")}</TooltipContent>
+    </Tooltip>
+  ) : (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size={btnSize} className={cn(btnClass, "text-muted-foreground")} disabled={featuresDisabled || !onGuideToSetting} onClick={() => onGuideToSetting?.("ide")} aria-label={t("wbAccounts.card.guideIdeSetting")}>
+          <CodeBuddyCnIdeMark size={markSize} />
+          {switchLabel("IDE")}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.card.guideIdeSetting")}</TooltipContent>
+    </Tooltip>
+  );
+
+  // CodeBuddy CLI：未接入 → **引导设置**（同上）。
+  const cliControl = codebuddyCliActive ? (
+    <ProductCurrentState product="codebuddy" compact />
+  ) : codebuddyCliConfigured ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size={btnSize} className={btnClass} disabled={featuresDisabled || !onSwitchCodebuddyCli || codebuddyCliBusy} onClick={() => onSwitchCodebuddyCli?.(account)} aria-label={codebuddyCliLoading ? t("wbAccounts.card.switchingCli") : t("wbAccounts.card.setCurrentCli")} aria-busy={codebuddyCliLoading}>
+          {codebuddyCliLoading ? <Loader2 className={compact ? "size-3.5 animate-spin" : "size-4 animate-spin"} /> : <CodeBuddyMark size={markSize} />}
+          {switchLabel(codebuddyCliLoading ? t("wbAccounts.card.switching") : t("wbAccounts.card.cliCurrent"))}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.card.setCurrentCli")}</TooltipContent>
+    </Tooltip>
+  ) : (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="outline" size={btnSize} className={cn(btnClass, "text-muted-foreground")} disabled={featuresDisabled || !onGuideToSetting} onClick={() => onGuideToSetting?.("cli")} aria-label={t("wbAccounts.card.guideCliSetting")}>
+          <CodeBuddyMark size={markSize} />
+          {switchLabel(t("wbAccounts.card.cliCurrent"))}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.card.guideCliSetting")}</TooltipContent>
+    </Tooltip>
+  );
+
+  /* ★ 计划新增（**尚未支持**）的程序位 —— **必须渲染**（原型断言 `verify-behaviors.cjs:1297-1299`：
+     「注册表声明了 planned 的程序位，卡片上却没有对应样式」⇒ 红）。
+     ⚠️ 说明必须是「尚未支持」，**不许**用「未检测到客户端」——
+     后者会**引导用户去装，而装了也没用**（`:1302` 反向禁止这条措辞）。 */
+  const plannedControls = PLANNED_PROGRAMS.map((p) => (
+    <Tooltip key={p.id}>
+      <TooltipTrigger asChild>
+        <Button
+          variant="outline"
+          size={btnSize}
+          className={cn(btnClass, "cursor-not-allowed opacity-50")}
+          disabled
+          data-program-planned={p.id}
+          aria-label={`${t(p.labelKey)}（${t("wbAccounts.program.plannedHint")}）`}
+        >
+          <Ban className={compact ? "size-3.5" : "size-4"} />
+          {switchLabel(t(p.labelKey))}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.program.plannedHint")}</TooltipContent>
+    </Tooltip>
+  ));
+
+  const programRow = (
+    <div className="flex shrink-0 items-center gap-1">
+      {workbuddyControl}
+      {ideControl}
+      {cliControl}
+      {plannedControls}
+    </div>
+  );
+
+  const checkbox = (
+    <Checkbox
+      checked={selected}
+      onCheckedChange={() => onToggleSelect?.(account)}
+      disabled={!onToggleSelect}
+      aria-label={t("wbAccounts.card.selectAria", { name })}
+      className={compact ? "size-4" : "size-[18px]"}
+    />
+  );
+
   return (
     <TooltipProvider>
-      <article className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,.025),0_10px_28px_rgba(15,23,42,.035)] transition-shadow hover:shadow-[0_2px_4px_rgba(15,23,42,.04),0_14px_34px_rgba(15,23,42,.055)]">
+      <article
+        /* ★ P1-5 键盘可达：**卡片本身可 Tab 聚焦**（此前只有内部勾选框可聚焦）。
+           ⚠️ 可聚焦元素**必须有用途**，否则是无障碍反模式（WCAG 2.4.3「可聚焦但无操作」）⇒
+           Enter / Space 打开详情，与菜单里的「查看详情」同义（无 onOpenDetail 时不拦按键）。 */
+        tabIndex={0}
+        role="article"
+        onKeyDown={(e) => {
+          if (!onOpenDetail) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpenDetail(account);
+          }
+        }}
+        className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,.025),0_10px_28px_rgba(15,23,42,.035)] transition-shadow hover:shadow-[0_2px_4px_rgba(15,23,42,.04),0_14px_34px_rgba(15,23,42,.055)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+      >
       <header
         className={cn(
           "relative flex items-center border-b border-border",
@@ -412,31 +486,23 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
                   <Ellipsis />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                className="w-40"
-                onCloseAutoFocus={(event) => {
-                  if (!keepRemarkFocusRef.current) return;
-                  keepRemarkFocusRef.current = false;
-                  // 焦点留给刚渲染出来的备注输入框，别还给触发按钮（见 keepRemarkFocusRef）。
-                  event.preventDefault();
-                }}
-              >
+              <DropdownMenuContent align="end" className="w-40">
+                <DropdownMenuItem disabled={!onOpenDetail} onSelect={() => onOpenDetail?.(account)}>
+                  <Info />{t("wbAccounts.card.viewDetail")}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem disabled={featuresDisabled || !onRefresh} onSelect={() => onRefresh?.(account)}>
                   <RefreshCw />{t("wbAccounts.card.refreshToken")}
                 </DropdownMenuItem>
-                {todayCheckedIn === false && (
+                {/* ★ F5：**过期 / 需重登**账号不给「手动签到」——token 已失效，签到必失败；
+                    批量签到也按同一口径把这类账号算「结构性失败」。
+                    ⚠️ 缺这个门控就是「两处口径自相矛盾」（卡片给入口、批量却当失败）。 */}
+                {todayCheckedIn === false && !expired && !account.needsRelogin && (
                   <DropdownMenuItem disabled={featuresDisabled || !onCheckin} onSelect={() => onCheckin?.(account)}>
                     <CircleCheck />{t("wbAccounts.card.manualCheckin")}
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem
-                  disabled={featuresDisabled || !onSaveRemark}
-                  onSelect={() => {
-                    // 见 keepRemarkFocusRef：这一次菜单关闭不要把焦点抢回去。
-                    keepRemarkFocusRef.current = beginRemarkEdit();
-                  }}
-                >
+                <DropdownMenuItem disabled={featuresDisabled || !onEditRemark} onSelect={() => onEditRemark?.(account)}>
                   <StickyNote />{t("wbAccounts.card.editRemark")}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
@@ -449,86 +515,15 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
         </div>
 
         {compact ? (
-          <div className="relative z-10 flex w-full min-w-0 items-center gap-2 pr-10">
+          <div className="relative z-10 flex w-full min-w-0 items-center gap-2.5 pr-10">
+            {checkbox}
             <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
             <div className="hidden shrink-0 items-center gap-1 min-[420px]:flex">{statusChips}</div>
-            <div className="ml-auto flex shrink-0 items-center gap-1">
-              {workbuddyActive ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="relative inline-flex size-7 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
-                      <WorkBuddyMark size={15} />
-                      <span className="absolute -right-1 -top-1 flex size-3.5 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                        <Check className="size-2.5" strokeWidth={3} />
-                      </span>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{t("wbAccounts.card.currentWorkbuddy")}</TooltipContent>
-                </Tooltip>
-              ) : demoModeEnabled ? (
-                <DemoAction>
-                  <Button variant="outline" size="icon" className="size-7 rounded-lg" aria-label={t("wbAccounts.card.setCurrentWorkbuddy")}>
-                    <WorkBuddyMark size={15} />
-                  </Button>
-                </DemoAction>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="size-7 rounded-lg" disabled={featuresDisabled || !onSwitch} onClick={() => onSwitch?.(account)} aria-label={t("wbAccounts.card.setCurrentWorkbuddy")}>
-                      <WorkBuddyMark size={15} />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{t("wbAccounts.card.setCurrentWorkbuddyRestart")}</TooltipContent>
-                </Tooltip>
-              )}
-              {codebuddyCnIdeActive ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="relative inline-flex size-7 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
-                      <CodeBuddyCnIdeMark size={15} />
-                      <span className="absolute -right-1 -top-1 flex size-3.5 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                        <Check className="size-2.5" strokeWidth={3} />
-                      </span>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{t("wbAccounts.card.currentIde")}</TooltipContent>
-                </Tooltip>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="relative size-7 rounded-lg" disabled={featuresDisabled || !codebuddyCnIdeAvailable || !onSwitchCodebuddyCnIde || codebuddyCnIdeBusy} onClick={() => onSwitchCodebuddyCnIde?.(account)} aria-label={codebuddyCnIdeLoading ? t("wbAccounts.card.switchingIde") : t("wbAccounts.card.switchIde")} aria-busy={codebuddyCnIdeLoading}>
-                      {codebuddyCnIdeLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CodeBuddyCnIdeMark size={15} />}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{codebuddyCnIdeAvailable ? t("wbAccounts.card.switchIdeRestart") : t("wbAccounts.card.ideNotDetected")}</TooltipContent>
-                </Tooltip>
-              )}
-              {codebuddyCliActive ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="relative inline-flex size-7 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
-                      <CodeBuddyMark size={15} />
-                      <span className="absolute -right-1 -top-1 flex size-3.5 items-center justify-center rounded-full bg-primary text-primary-foreground">
-                        <Check className="size-2.5" strokeWidth={3} />
-                      </span>
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{t("wbAccounts.card.currentCli")}</TooltipContent>
-                </Tooltip>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button variant="outline" size="icon" className="size-7 rounded-lg" disabled={featuresDisabled || !codebuddyCliConfigured || !onSwitchCodebuddyCli || codebuddyCliBusy} onClick={() => onSwitchCodebuddyCli?.(account)} aria-label={codebuddyCliLoading ? t("wbAccounts.card.switchingCli") : t("wbAccounts.card.setCurrentCli")} aria-busy={codebuddyCliLoading}>
-                      {codebuddyCliLoading ? <Loader2 className="size-3.5 animate-spin" /> : <CodeBuddyMark size={15} />}
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{codebuddyCliConfigured ? t("wbAccounts.card.setCurrentCli") : t("wbAccounts.card.connectCliFirst")}</TooltipContent>
-                </Tooltip>
-              )}
-            </div>
+            <div className="ml-auto">{programRow}</div>
           </div>
         ) : (
           <div className={cn("relative z-10 flex w-full min-w-0 items-center gap-3", workbuddyActive || codebuddyCliActive ? "pr-[112px]" : "pr-10")}>
+            {checkbox}
             <div className={cn("flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold ring-4 ring-white/65", avatarClass)}>{name.charAt(0).toUpperCase()}</div>
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-sm font-semibold leading-5" title={name}>{name}</h3>
@@ -540,61 +535,6 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
       </header>
 
       <section className={cn("flex min-w-0 flex-1 flex-col", compact ? "px-3.5 pb-3 pt-3" : "px-5 pb-4 pt-4")}>
-        {/* 备注就地编辑。
-            紧凑模式**只在有备注或正在编辑时**渲染这一行 —— 那里本来就是为了多塞几张卡，
-            给每张卡都加一条空占位行等于白送纵向空间。
-            普通模式的空态常显（弱化色）而不是藏进 hover：备注的价值就在于「我记得要看它」，
-            藏起来等于没人会用。 */}
-        {remarkEditing ? (
-          <Input
-            ref={remarkInputRef}
-            value={remarkDraft}
-            disabled={remarkSaving}
-            onChange={(event) => setRemarkDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void commitRemark();
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                cancelRemarkEdit();
-              }
-            }}
-            onBlur={() => void commitRemark()}
-            maxLength={80}
-            placeholder={t("wbAccounts.card.remarkPlaceholder")}
-            spellCheck={false}
-            autoComplete="off"
-            aria-label={t("wbAccounts.card.remarkAria", { name })}
-            className={cn("mb-3 h-7 w-full text-xs", compact && "mb-2")}
-          />
-        ) : remark ? (
-          <button
-            type="button"
-            onClick={beginRemarkEdit}
-            disabled={featuresDisabled || !onSaveRemark}
-            title={remark}
-            aria-label={t("wbAccounts.card.editRemarkAria", { name })}
-            className={cn(
-              "-mx-1 mb-3 flex w-[calc(100%+0.5rem)] min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-[11px] leading-4 text-foreground/80 transition-colors hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-              compact && "mb-2",
-            )}
-          >
-            <StickyNote className="size-3.5 shrink-0 stroke-[1.75] text-muted-foreground" aria-hidden="true" />
-            <span className="min-w-0 flex-1 truncate">{remark}</span>
-          </button>
-        ) : compact ? null : (
-          <button
-            type="button"
-            onClick={beginRemarkEdit}
-            disabled={featuresDisabled || !onSaveRemark}
-            className="-mx-1 mb-3 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded-md px-1 text-left text-[11px] leading-4 text-muted-foreground/70 transition-colors hover:bg-foreground/[0.04] hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-          >
-            <Pencil className="size-3 shrink-0" aria-hidden="true" />
-            {t("wbAccounts.card.addRemark")}
-          </button>
-        )}
-
         {creditLoading ? (
           <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{t("wbAccounts.card.loadingCredits")}</div>
         ) : !credit ? (
@@ -606,6 +546,9 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
            * 截成 `…` 等于把出路一起截掉 —— 2026-09-24 用户截图里就是这种形态。
            *
            * 判据用结果自带的 `reason`（后端契约常量），**不解析文案**。
+           *
+           * ⚠️ 这条错误态 CTA 是 §3.6 权限/错误态的**行内出口**，**不是**常规可点区 ——
+           * 它随错误态一起保留，不计入「≤4」的口径（PLAN §3.3 的保留例外）。
            */
           credit.reason === ENCRYPTED_CREDENTIAL_REASON ? (
             <div className="min-w-0 py-3 text-sm text-destructive">
@@ -645,7 +588,7 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
             <div className={cn("text-[11px] font-medium text-muted-foreground", compact ? "mt-3" : "mt-4")}>{t("wbAccounts.card.expiringSoonTitle")}</div>
             <div className={cn(compact ? "mt-1.5 space-y-2" : "mt-2 space-y-2.5")}>
               {visibleResources.length > 0 ? visibleResources.map((resource, index) => {
-                const resourceName = resource.packageName || resource.packageCode || t("wbAccounts.card.creditPackFallback");
+                const resourceName = displayText(resource.packageName) || displayText(resource.packageCode) || t("wbAccounts.card.creditPackFallback");
                 const ratio = resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
                 return (
                   <div key={`${resource.packageCode ?? "resource"}-${resource.expireAt ?? "none"}-${index}`} className="min-w-0" title={t("wbAccounts.card.resourceTitle", { name: resourceName, remaining: formatCredits(resource.remaining), total: formatCredits(resource.total), expiry: formatCreditExpiry(resource.expireAt, t) })}>
@@ -661,101 +604,16 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
                 );
               }) : <div className="py-1 text-[11px] text-muted-foreground">{t("wbAccounts.card.noCredits")}</div>}
             </div>
-
-            {resources.length > 2 && (
-              <button type="button" className={cn("inline-flex w-fit items-center gap-1.5 font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30", compact ? "mt-2 text-[11px]" : "mt-3 text-xs")} onClick={() => setResourcesOpen(true)}>
-                {t("wbAccounts.card.viewAllPacks")}
-                <ArrowRight className="size-3.5" />
-              </button>
-            )}
           </>
         )}
       </section>
 
       {!compact && (
         <footer className="flex flex-wrap items-center gap-2.5 border-t px-5 py-2.5">
-          {workbuddyActive ? <ProductCurrentState product="workbuddy" compact /> : demoModeEnabled ? (
-            <DemoAction>
-              <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" aria-label={t("wbAccounts.card.setCurrentWorkbuddy")}>
-                <WorkBuddyMark size={18} /><span>{t("wbAccounts.card.setCurrent")}</span>
-              </Button>
-            </DemoAction>
-          ) : (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" disabled={featuresDisabled || !onSwitch} onClick={() => onSwitch?.(account)} aria-label={t("wbAccounts.card.setCurrentWorkbuddy")}>
-                  <WorkBuddyMark size={18} /><span>{t("wbAccounts.card.setCurrent")}</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{t("wbAccounts.card.setCurrentWorkbuddyRestart")}</TooltipContent>
-            </Tooltip>
-          )}
-          {codebuddyCnIdeActive ? <ProductCurrentState product="codebuddy-cn" compact /> : (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" disabled={featuresDisabled || !codebuddyCnIdeAvailable || !onSwitchCodebuddyCnIde || codebuddyCnIdeBusy} onClick={() => onSwitchCodebuddyCnIde?.(account)} aria-label={codebuddyCnIdeLoading ? t("wbAccounts.card.switchingIde") : t("wbAccounts.card.switchIde")} aria-busy={codebuddyCnIdeLoading}>
-                  {codebuddyCnIdeLoading ? <Loader2 className="size-4 animate-spin" /> : <CodeBuddyCnIdeMark size={18} />}<span>{codebuddyCnIdeLoading ? t("wbAccounts.card.switching") : "IDE"}</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{codebuddyCnIdeAvailable ? t("wbAccounts.card.switchIdeRestart") : t("wbAccounts.card.ideNotDetected")}</TooltipContent>
-            </Tooltip>
-          )}
-          {codebuddyCliActive ? <ProductCurrentState product="codebuddy" compact /> : (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" disabled={featuresDisabled || !codebuddyCliConfigured || !onSwitchCodebuddyCli || codebuddyCliBusy} onClick={() => onSwitchCodebuddyCli?.(account)} aria-label={codebuddyCliLoading ? t("wbAccounts.card.switchingCli") : t("wbAccounts.card.setCurrentCli")} aria-busy={codebuddyCliLoading}>
-                  {codebuddyCliLoading ? <Loader2 className="size-4 animate-spin" /> : <CodeBuddyMark size={18} />}<span>{codebuddyCliLoading ? t("wbAccounts.card.switching") : t("wbAccounts.card.cliCurrent")}</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{codebuddyCliConfigured ? t("wbAccounts.card.setCurrentCli") : t("wbAccounts.card.connectCliFirst")}</TooltipContent>
-            </Tooltip>
-          )}
+          {programRow}
         </footer>
       )}
       </article>
-
-      <Dialog open={resourcesOpen} onOpenChange={setResourcesOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("wbAccounts.card.allPacksTitle")}</DialogTitle>
-            <DialogDescription>{t("wbAccounts.card.allPacksDesc", { name, n: allResources.length })}</DialogDescription>
-          </DialogHeader>
-          {allResources.length === 0 ? (
-            <div className="px-1 py-6 text-center text-sm text-muted-foreground">{t("wbAccounts.card.noResourcePacks")}</div>
-          ) : (
-            <div className="max-h-[60vh] min-w-0 overflow-y-auto divide-y divide-border/60">
-              {allResources.map((resource, index) => {
-                const ratio = resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0;
-                return (
-                  <div key={`${resource.packageCode || resource.packageName || "resource"}-${index}`} className="min-w-0 py-3 first:pt-0 last:pb-0">
-                    <div className="flex min-w-0 items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{resource.packageName || resource.packageCode || t("wbAccounts.card.unnamedPack")}</div>
-                        <div className="mt-1 text-[11px] text-muted-foreground">
-                          {resource.expired
-                            ? t("wbAccounts.card.expired")
-                            : resource.expiringSoon
-                              ? t("wbAccounts.card.expiresIn7")
-                              : resource.expireAt
-                                ? t("wbAccounts.card.expiresOn", { date: formatFullDate(resource.expireAt) })
-                                : t("wbAccounts.card.forever")}
-                        </div>
-                      </div>
-                      <div className="shrink-0 text-right text-xs">
-                        <div className="font-medium">{formatCredits(resource.remaining)} / {formatCredits(resource.total)}</div>
-                        <div className="mt-1 text-[11px] text-muted-foreground">{t("wbAccounts.card.used", { n: formatCredits(resource.used) })}</div>
-                      </div>
-                    </div>
-                    <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                      <div className={cn("h-full rounded-full", resource.expired ? "bg-destructive/60" : resource.expiringSoon ? "bg-orange-500/80" : "bg-primary/75")} style={{ width: `${ratio}%` }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
     </TooltipProvider>
   );
 }

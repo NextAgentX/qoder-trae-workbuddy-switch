@@ -29,23 +29,22 @@ export const en = {
   "trae.gateway.models.summary": "{count} total · default {model}",
   "trae.gateway.models.note": "This list is read from the Trae client's local cache (pushed by upstream), so it follows the client's refresh; the exposed list (/v1/models) follows the API key's owned client, and the two clients differ.",
   "trae.gateway.models.empty": "No model data yet.",
+  "trae.gateway.models.emptyDesc": "This is empty when the client has not started, is not signed in, or has not fetched a list yet; after refreshing the client's model list, click \"Reload\".",
   "trae.gateway.models.refresh": "Reload",
+  "trae.gateway.models.scanning": "Reading…",
   "trae.gateway.models.program": "Select target client",
   "trae.gateway.models.programTip": "Read the model list of the {label} client",
-  "trae.gateway.models.source": "Source",
+  /* Source badge (two levels — deliberately NOT unified into WB's three levels:
+     the mechanism differs, and unifying would make the UI lie; see P10 open item #3). */
   "trae.gateway.models.sourceCache": "Client cache",
   "trae.gateway.models.sourceMissing": "Not loaded",
-  "trae.gateway.models.readAt": "Read at {time}",
+  /* Fallback reasons (used when the backend `note` is missing) — contract: reason is always non-empty. */
+  "trae.gateway.models.reasonCache": "Read from the client's local cache (pushed by upstream), not live from upstream",
+  "trae.gateway.models.reasonMissing": "No list has been read from the client yet",
   "trae.gateway.models.readFrom": "Read from the {label} client",
   "trae.gateway.models.gatewayCount": "{count} exposed by gateway",
   "trae.gateway.models.gatewayCountFor": "{count} exposed by gateway ({program})",
-  "trae.gateway.models.groupCount": "{count}",
-  "trae.gateway.models.badgeDefault": "Default",
-  "trae.gateway.models.badgeNew": "New",
-  "trae.gateway.models.badgeBeta": "Beta",
-  "trae.gateway.models.badgeCustom": "Custom",
-  "trae.gateway.models.badgeNotServed": "Not served",
-  "trae.gateway.models.context": "Context {tokens}",
+  /* P11: group chips became a table; these keys are dropped (see traeGateway.zh.ts). */
 
   // =====================================================================
   // gateway/trae-request-log.tsx —— request log
@@ -68,10 +67,9 @@ export const en = {
   "trae.gateway.guide.copied": "Code copied",
   "trae.gateway.guide.noKey": "sk-trae-… (create a key above first)",
   "trae.gateway.guide.streamNote": "The Trae upstream only supports streaming; when a request sets `stream: false`, this gateway aggregates locally and returns it at once, with longer first-byte latency.",
+  "trae.gateway.guide.autoDiscover": "The client reads the model list from `/v1/models` automatically — you do not need to fill in model names; if your tool does not support auto-discovery, copy one from the \"Models\" page.",
   // Field labels inside the copyable snippet
-  "trae.gateway.guide.snippet.apiBase": "API Base URL",
-  "trae.gateway.guide.snippet.apiKey": "API Key",
-  "trae.gateway.guide.snippet.model": "Model",
+  /* P3: `trae.gateway.guide.snippet.*` removed — labels are now shared. */
 
   // =====================================================================
   // The account pool card is now **shared by both sides**

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   CircleCheck,
   FolderOpen,
@@ -6,13 +7,19 @@ import {
   Play,
   RefreshCw,
   Save,
+  ScrollText,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { SettingsFieldRow, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
+// P7 T03：设置页子导航（9 项）+「备份与恢复」分区 + 通用设置分组（与侧栏弹层共用）。
+import { SETTINGS_SUBNAV, SettingsSubnav, type SettingsSubnavId } from "@/components/settings/settings-subnav";
+import { BackupSection } from "@/components/settings/backup-section";
+import { AppSettingsGroups } from "@/components/app-settings";
 // 小时表编辑器与 Trae 设置页**共用同一份实现**（校验规则属于规则，不属于版式）。
 import { HoursEditor } from "@/components/schedule-hours-editor";
 import { Input } from "@/components/ui/input";
@@ -1199,32 +1206,93 @@ function ScheduleCard() {
 }
 
 /**
- * 设置页：**产品级**设置。
+ * 设置页：**产品级**设置（P7 起改为 **9 项子导航**，§3.9）。
  *
- * 只放依赖本产品上下文的块（版本与账号库、权限检测、网关、签到、排程、CLI 轮换）。
+ * ## 为什么从「一屏长滚动」改成子导航
  *
- * 应用级的三块（外观 / 开机自启 / 自动更新）已抽到 `@/components/app-settings`，
- * 入口固定在侧栏底部、**版本号上方** —— 那是两个产品分区唯一共用的位置。
+ * 现状是 7 张卡纵向堆叠（Trae 侧 10 组），用户找一项设置要滚很久、且看不出「还有哪些类」。
+ * 子导航先把**有哪几类**摆出来，再按类展示 —— 与 Trae 设置页共用同一套分区名。
+ *
+ * ## 9 项与内容的对应（WB 侧）
+ *
+ * | 子导航 | 内容 |
+ * |:---|:---|
+ * | 通用 | 应用级设置（外观 / 语言 / 快捷键 / 启动 / 更新，与侧栏弹层同一份实现） |
+ * | 账号与登录 | 版本与账号库路径、切换行为 |
+ * | 签到与积分 | 自动签到 + 日志 |
+ * | 网关 | 网关配置 |
+ * | 计划任务 | 六类定时任务排程 |
+ * | 客户端 | CodeBuddy CLI 自动轮换 |
+ * | 权限与诊断 | 认证文件写权限自检 |
+ * | 日志 | WorkBuddy 无独立运行日志 ⇒ **空态 + 出口**（§3.6 四要素） |
+ * | 备份与恢复 | 全局备份（P7 新增，第 9 项） |
+ *
+ * ⚠️ 「客户端 / 日志」是 **Trae 侧**的子项（PLAN §3.9）；WB 侧没有对应内容时**不硬塞**
+ * （§3.4 规则 1：无数据不渲染），而是给一个**说明原因 + 有出口**的空态。
  */
 export default function SettingsPage() {
   const t = useT();
+  /* ★ P0-4a：`section` 的**初始值从 URL 读**（`?section=diagnostics`）——
+     否则「未检测到程序位 → 去设置」只能落到设置页**首页**，到不了「权限与诊断」子项
+     （原型断言 `P0-4a` 要求点了之后能跳到「权限与诊断」）。
+     ⚠️ 必须**校验合法性**：非法值 fail-closed 回 "general"，不把任意串塞进 state。 */
+  const [searchParams] = useSearchParams();
+  const [section, setSection] = useState<SettingsSubnavId>(() => {
+    const raw = searchParams.get("section");
+    return SETTINGS_SUBNAV.some((i) => i.id === raw) ? (raw as SettingsSubnavId) : "general";
+  });
+
   return (
-    <div className="mx-auto min-w-0 w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
-      <header className="mb-10 sm:mb-12">
+    <div className="mx-auto min-w-0 w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
+      <header className="mb-6 sm:mb-8">
         <h1 className="text-2xl font-semibold tracking-tight">{t("wbSettings.page.title")}</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           {t("wbSettings.page.subtitle")}
         </p>
       </header>
 
-      <div className="min-w-0 space-y-12">
-        <VersionAccountsCard />
-        <SwitchBehaviorCard />
-        <PermissionCheckCard />
-        <GatewaySettingsCard />
-        <AutoCheckinCard />
-        <ScheduleCard />
-        <AutoRotateCard />
+      <div className="flex min-w-0 flex-col gap-6 lg:flex-row lg:gap-8">
+        <SettingsSubnav
+          active={section}
+          onSelect={setSection}
+          className="lg:w-44 lg:shrink-0"
+        />
+
+        <div className="min-w-0 flex-1 space-y-10">
+          {section === "general" && <AppSettingsGroups />}
+
+          {section === "account" && (
+            <>
+              <VersionAccountsCard />
+              <SwitchBehaviorCard />
+            </>
+          )}
+
+          {section === "checkin" && <AutoCheckinCard />}
+
+          {section === "gateway" && <GatewaySettingsCard />}
+
+          {section === "schedule" && <ScheduleCard />}
+
+          {section === "client" && <AutoRotateCard />}
+
+          {section === "diagnostics" && <PermissionCheckCard />}
+
+          {section === "logs" && (
+            <EmptyState
+              icon={ScrollText}
+              title={t("settings.logs.emptyTitle")}
+              description={t("settings.logs.emptyBody")}
+              action={
+                <Button variant="outline" size="sm" onClick={() => setSection("gateway")}>
+                  {t("settings.logs.emptyAction")}
+                </Button>
+              }
+            />
+          )}
+
+          {section === "backup" && <BackupSection />}
+        </div>
       </div>
     </div>
   );

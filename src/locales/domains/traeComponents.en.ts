@@ -61,20 +61,20 @@ export const en = {
   "trae.comp.card.switch.aria": "Switch to {label}",
   "trae.comp.card.switch.ariaBusy": "Switching to {label}",
   "trae.comp.card.switch.busy": "Switching…",
+  // P4: cross-region program buttons are visible but not directly switchable.
+  "trae.comp.card.switch.regionHint": "Switch to the {region} region first",
+  "trae.comp.card.switch.guideRegion": "Switch to the {region} region",
 
   // ---- Action menu ----
   "trae.comp.card.manage.aria": "Manage account {name}",
   "trae.comp.card.manage.title": "More account actions",
+  "trae.comp.card.selectAria": "Select account {name}",
   "trae.comp.card.menu.save": "Save login state",
   "trae.comp.card.menu.refreshJwt": "Refresh JWT",
   "trae.comp.card.menu.checkin": "Check in manually",
   "trae.comp.card.menu.thaw": "Clear cooldown",
   "trae.comp.card.menu.remark": "Edit remark",
   "trae.comp.card.menu.delete": "Delete account",
-  "trae.comp.card.remark.placeholder": "e.g. DS4.1 quota · unlocks 10/03",
-  "trae.comp.card.remark.aria": "{name}'s remark",
-  "trae.comp.card.remark.editAria": "Edit {name}'s remark",
-  "trae.comp.card.remark.add": "Add remark",
 
   // ---- Credits section ----
   "trae.comp.card.credits.remaining": "Credits left",
@@ -86,29 +86,35 @@ export const en = {
   "trae.comp.card.package.tip": "{name} · {remaining} / {total} left · {expiry}",
   "trae.comp.card.package.remaining": "{credits} credits",
   "trae.comp.card.package.empty": "No credits available",
+  // P4: "used / expiry" text for the drawer `DetailPack` (mirrors the WorkBuddy drawer).
+  "trae.comp.card.package.used": "Used {n}",
+  "trae.comp.card.package.expired": "Expired",
+  "trae.comp.card.package.expiringSoon": "Expires within 7 days",
 
-  // ---- Footer buttons ----
-  "trae.comp.card.action.saving": "Saving…",
+  // ---- Action explanations (used as menu-item titles) ----
+  // P4: the footer "Save login state" / "Refresh JWT" buttons moved back into the menu;
+  // their explanations live on as menu-item titles so the "why disabled" is not lost.
   "trae.comp.card.action.saveTip": "Save the client's current login state under this account (used to restore when switching); the client will be closed and reopened first",
   "trae.comp.card.action.saveNoLogin": "This account is not signed in on any Trae client — sign in on the client first, then save",
-  "trae.comp.card.action.refreshing": "Refreshing…",
   "trae.comp.card.action.refreshJwtTip": "Exchange the refresh token for a new JWT",
   "trae.comp.card.footer.updatedAt": "Updated {time}",
   "trae.comp.card.footer.noUpdate": "No update time recorded",
   "trae.comp.card.footer.updatedTip": "Last time this account was updated in the local account library",
 
-  // ---- Details dialog ----
+  // ---- Detail drawer sections (assembled by TraeAccountsPage) ----
+  "trae.comp.card.detail.section.account": "Account",
+  "trae.comp.card.detail.section.credits": "Credits",
+  "trae.comp.card.detail.section.credential": "Credential",
+
+  // ---- Details (P4: carried by the shared drawer `account-detail-drawer.tsx`) ----
   "trae.comp.card.detail.open": "View account details",
-  "trae.comp.card.detail.title": "Account details",
   "trae.comp.card.detail.subtitle": "{name} · UID {uid}",
   "trae.comp.card.detail.accountId": "Account ID",
-  "trae.comp.card.detail.enabledPrograms": "Enabled programs",
   "trae.comp.card.detail.creditsExpiry": "Credits expiry",
   "trae.comp.card.detail.jwtStatus": "JWT status",
   "trae.comp.card.detail.jwtAutoRefresh": "Auto-refresh JWT",
   "trae.comp.card.detail.deviceId": "Device ID",
   "trae.comp.card.detail.cooldown": "Cooldown",
-  "trae.comp.card.detail.ungrouped": "Ungrouped",
   "trae.comp.card.detail.none": "None",
   "trae.comp.card.detail.notQueried": "Not fetched",
   "trae.comp.card.detail.jwtAutoOn": "Enabled",

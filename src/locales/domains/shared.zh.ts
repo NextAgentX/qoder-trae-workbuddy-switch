@@ -25,7 +25,10 @@ export const zh = {
   "shared.region.filter.all": "合并",
 
   // ---- 统计范围切换条（region-bar.tsx） ----
-  "shared.region.scope.aria": "统计范围",
+  /* P3：`shared.region.scope.aria` 已删除（区域选择器上移到侧栏）。
+     页面内只剩「合并」这个**视图参数**开关。 */
+  "shared.region.combine.aria": "合并国内版与国际版查看",
+  "shared.region.combine.label": "合并国内版与国际版",
 
   // ---- 网关账号池状态（gateway.ts —— WorkBuddy 与 Trae **共用**同一张卡）----
   // ⚠️ `expired` 只有 Trae 侧会产出：WorkBuddy 池不存积分有效期，没有判据就不展示。
@@ -37,6 +40,74 @@ export const zh = {
 
   // ---- 网关账号池卡（components/gateway/account-pool-card.tsx，两侧共用）----
   "shared.gateway.pool.title": "账号池",
+  /* P3：接入片段的**字段标签**统一在这里（原来 WB 与 Trae 各有一套）。
+     ⚠️ 只有**自然语言标签**放这儿；片段里的键名（`apiProvider` 等）是外部工具读取的
+     契约，保持英文硬编码，翻译了会粘贴失败。 */
+  /* P11：`snippet.apiBase` / `snippet.apiKey` 两条已删除 —— 用它们的 `cherry` 片段随
+     工具清单调整而移除（新工具集见下方 `shared.gateway.access.*`）。`Base URL` / `API Key`
+     是通用参数名（英文契约），直接硬编码在片段里，不入词表。 */
+  "shared.gateway.snippet.model": "模型",
+  /* 模型清单还没加载时用占位 —— **不编造**一个看起来可用的模型名。 */
+  "shared.gateway.snippet.modelPlaceholder": "请在模型列表中选择",
+
+  // =====================================================================
+  // ---- 接入说明（P11 §1.7）—— 协议 × 工具，两平台共用 ----
+  // =====================================================================
+  // ⚠️ 片段里的**键名**（`ANTHROPIC_BASE_URL` / `base_url` / `env_key` …）是外部工具读取的
+  //    契约，保持英文硬编码；这里只放**自然语言标签**与**协议元数据的展示名**。
+  "shared.gateway.access.protocol.openai": "OpenAI 兼容",
+  "shared.gateway.access.protocol.anthropic": "Anthropic 兼容",
+  "shared.gateway.access.tool.genericOpenai": "其它 OpenAI 兼容工具",
+  "shared.gateway.access.tool.genericAnthropic": "其它 Anthropic 兼容工具",
+  // 端点说明：两种协议**都已支持**（§3.18.2）；`{openai}` / `{anthropic}` 是**英文端点契约**。
+  "shared.gateway.access.endpointNote":
+    "协议端点：{openai}（OpenAI）· {anthropic}（Anthropic）—— 两者都已支持，含流式。",
+  "shared.gateway.access.authHeaderLabel": "认证头",
+  "shared.gateway.access.authNote": "认证头：{header}",
+  // Codex（OpenAI 协议）—— 片段里的键名（`base_url` / `env_key`）保持英文。
+  "shared.gateway.access.codex.title": "Codex（OpenAI 协议）—— 自定义 model_provider",
+  "shared.gateway.access.codex.envKeyNote": "环境变量名；值填你的 Key",
+  "shared.gateway.access.codex.docNote": "其余字段以 Codex 官方文档为准",
+  // opencode —— 片段里的键名（`baseURL` / `apiKey`）保持英文。
+  "shared.gateway.access.opencode.title": "opencode —— provider 配置",
+  "shared.gateway.access.opencode.docNote": "字段名以 opencode 官方文档为准",
+  // generic 的模型行提示：`{url}` 是**英文端点契约**（`…/v1/models`）。
+  "shared.gateway.access.generic.modelHint": "从 GET {url} 自动发现",
+  /* 模型清单「来源条」的**共享文案**（components/gateway/catalog-source-bar.tsx，两侧共用壳）。
+     ⚠️ 只放**两平台同形**的部分：「来源」标签 / 上次识别 / 计数 / 自动识别提示 / 相对时间单位。
+     来源**词汇**与按钮文案由调用方注入（WB 三级 / Trae「客户端缓存 / 未读取」）—— 词汇不同不硬统一。 */
+  "shared.gateway.sourceBar.sourceLabel": "来源",
+  "shared.gateway.sourceBar.identifiedAt": "上次识别 {time}",
+  "shared.gateway.sourceBar.neverIdentified": "尚未识别过",
+  /* ⚠️ 计数只说「已识别」，**禁止**「N 个模型可用」—— HTTP 200 ≠ 模型可用（§3.17.3 陷阱 3 / D24）。 */
+  "shared.gateway.sourceBar.count": "已识别 {n} 个模型",
+  "shared.gateway.sourceBar.autoHint": "接入后自动识别，无需手填模型名",
+  "shared.gateway.sourceBar.justNow": "刚刚",
+  "shared.gateway.sourceBar.minutesAgo": "{n} 分钟前",
+  "shared.gateway.sourceBar.hoursAgo": "{n} 小时前",
+  "shared.gateway.sourceBar.daysAgo": "{n} 天前",
+  /* 模型表格（P11 §1.6）—— components/gateway/model-table.tsx，**两平台共用**。
+     列集 = 模型 / 上游状态 / 网关暴露；**无归属列**（决策 #1）、**无协议列**（决策 #2）。
+     ⚠️ 「上游状态」列只可能在 Trae 侧出现（WB 的 `available` 恒 true ⇒ 不渲染该列，决策 #3），
+        但文案仍放共享域：它是**共用壳**的一部分，由调用方按 `showUpstream` 决定是否渲染。 */
+  "shared.gateway.models.colModel": "模型",
+  "shared.gateway.models.colUpstream": "上游状态",
+  "shared.gateway.models.colExposed": "网关暴露",
+  "shared.gateway.models.upstreamAvailable": "可用",
+  "shared.gateway.models.upstreamUnavailable": "不可用",
+  "shared.gateway.models.exposed": "已暴露",
+  "shared.gateway.models.disabled": "已禁用",
+  "shared.gateway.models.disable": "禁用",
+  "shared.gateway.models.enable": "启用",
+  /* 计数 = `available && !disabled`，与出口 ①（`/v1/models` 过滤）**同源**。 */
+  "shared.gateway.models.count": "当前暴露 {served} / {total} 个",
+  /* ★ 两个出口同时生效 —— 禁用**必须**两个出口都改，否则是假开关（§3.18.1）：
+     只说「已从清单移除」会让用户以为调用还能过；必须把「直接调用也会被拒」一并说清。 */
+  "shared.gateway.models.twoExits":
+    "禁用的模型不会出现在 `/v1/models`，直接调用也会被拒绝并说明原因 —— 两个出口同时生效，否则禁用就是假开关。",
+  "shared.gateway.models.disabledToast": "已禁用「{name}」",
+  "shared.gateway.models.enabledToast": "已启用「{name}」",
+  "shared.gateway.models.toggleFail": "操作失败",
   "shared.gateway.pool.totalRequests": "累计请求 {count}",
   "shared.gateway.pool.tile.available": "可路由",
   "shared.gateway.pool.tile.cooling": "冷却中",
@@ -58,6 +129,45 @@ export const zh = {
   // ---- 剪贴板（clipboard.ts） ----
   "shared.clipboard.copied": "已复制",
   "shared.clipboard.failed": "复制失败，请手动选择后复制",
+
+  // =====================================================================
+  // ---- 桌面悬浮窗（components/companion/*，独立窗口）----
+  // =====================================================================
+  // 悬浮窗是**独立 webview**（`?window=companion`，见 `main.tsx` 的入口分流），
+  // 与主窗口共用同一份词表。四态文案 / 只读脚注 / 空态 / 无障碍标签由 T03 补；
+  // T01 只放骨架**实际引用**的标题键（本仓没有「未使用键」检查，多余键会静默腐坏）。
+  "shared.companion.title": "会话状态",
+  // 侧栏左下角入口（`App.tsx` 的 `CompanionToggle`）：tooltip + 无障碍标签。
+  // 它与托盘菜单项是**同一开关的两面**（都经 `companion_set_visible` 收敛），故与托盘同名。
+  "shared.companion.entry": "会话悬浮窗",
+  // 头部徽标：仅当有「待确认」项时出现（计数由快照数据决定，前端不臆断）。
+  "shared.companion.badge.waiting": "{count} 待确认",
+  // 只读脚注：三件事——只读、点击语义、标题默认隐藏的原因。
+  "shared.companion.footnote": "只读 · 点击回到原会话 · 标题悬停显示",
+  // 窗口内关闭按钮（关闭 = 隐藏，可从侧栏 / 托盘重开）。
+  "shared.companion.close": "隐藏悬浮窗",
+  // 四态文案（与后端 `CompanionState` 的 lowercase 序列化一一对应）。
+  "shared.companion.state.running": "运行中",
+  "shared.companion.state.waiting": "待确认",
+  "shared.companion.state.done": "已完成",
+  "shared.companion.state.failed": "失败",
+  // ★ 无障碍描述：**脱敏**——只报来源 / 状态 / 时间，**不含标题**
+  //（标题是敏感字段，默认不进 DOM；不能因为读屏就把明文塞回去，见 P9 ✅ #3）。
+  "shared.companion.row.aria": "{source} · {state} · {hint}",
+  // 悬停信息卡的两个字段标签（标题本身即信息卡主体，不设标签）。
+  "shared.companion.info.source": "来源",
+  "shared.companion.info.time": "时间",
+  // 点击条目后的**明确反馈**（不静默失败；来源未运行 ⇒ 可读错误）。
+  "shared.companion.jump.ok": "已聚焦「{source}」",
+  "shared.companion.jump.failed": "无法聚焦来源：{message}",
+  // 空态四要素（含出口「刷新」）——只读刷新，与轮询走同一条路径。
+  "shared.companion.empty.title": "暂无会话",
+  "shared.companion.empty.description": "在客户端发起任务后，状态会显示在这里。",
+  "shared.companion.empty.refresh": "刷新",
+  // 读取失败的空态（区别于「确实没有会话」）。
+  "shared.companion.error.title": "读取会话状态失败",
+  // 首次加载的读屏提示（视觉上是骨架屏）。
+  "shared.companion.loading": "正在读取会话状态",
 
   // ---- 演示模式遮罩（demo-action.tsx） ----
   "shared.demo.unavailable": "演示模式下不可操作",
@@ -99,6 +209,9 @@ export const zh = {
   "shared.demo.session.agentAcp": "设计 Agent 与 ACP 管理设置",
   "shared.demo.session.characterAudio": "补全角色成语双音频",
   "shared.demo.session.accountCard": "统一账号卡片视觉和交互",
+  // P8 T02 · 会话副本视图的演示会话标题（`list_sessions` / `list_session_replicas` 两个 case 共用）。
+  "shared.demo.session.replicaAlpha": "重构会话副本视图的归属计算",
+  "shared.demo.session.replicaBeta": "统一跨账号会话的复制入口",
   // ---- 模型目录 ----
   "shared.demo.catalog.limitedFree": "限时免费",
   "shared.demo.catalog.promo": "促销",
@@ -193,4 +306,82 @@ export const zh = {
   "shared.punct.period": "。",
   "shared.punct.openParen": "（",
   "shared.punct.closeParen": "）",
+
+  // =====================================================================
+  // ---- 账号详情抽屉（components/account-detail-drawer.tsx，两平台共用）----
+  // =====================================================================
+  // 抽屉是**共享壳**：平台差异由调用方装配成 sections / packs / programs 注入，
+  // 因此抽屉自身的文案（标题 / 备注 / 只读程序位 / 加载）放这里，不各写一份。
+  "shared.drawer.close": "关闭",
+  "shared.drawer.loading": "正在加载详情…",
+  // 备注区（就地编辑）—— 语义与卡片时代的备注编辑器一致，只是搬进了抽屉。
+  "shared.drawer.remark.title": "备注",
+  "shared.drawer.remark.placeholder": "例如：DS4.1 额度 · 10/03 解禁",
+  "shared.drawer.remark.aria": "{name} 的备注",
+  "shared.drawer.remark.editAria": "编辑 {name} 的备注",
+  "shared.drawer.remark.add": "添加备注",
+  // 积分 / 资源包区块：文本已由调用方格式化，抽屉只负责排版。
+  "shared.drawer.packs.title": "积分 / 资源包",
+  // 只读程序位徽标（**不是**切换控件）—— 抽屉里不允许出现第二个「看起来能切」的控件。
+  // ★ B5：签到积分（字段来自**上游实测响应**；`+N` 的 N 取 `today_credit` / `daily_credit`）。
+  "shared.drawer.checkin.title": "签到",
+  "shared.drawer.checkin.today": "今日签到",
+  "shared.drawer.checkin.streak": "已连签 {n} 天",
+  "shared.drawer.checkin.total": "累计 {n} 积分",
+  "shared.drawer.programs.title": "程序位（只读）",
+  "shared.drawer.program.current": "当前账号",
+  "shared.drawer.program.installed": "已安装",
+  "shared.drawer.program.noDataDir": "无数据目录",
+  "shared.drawer.program.missing": "未检测到",
+  // 详情区块全空时的空态（四要素里的 title / description；出口由调用方以 ReactNode 注入）。
+  "shared.drawer.empty.title": "暂无详情",
+  "shared.drawer.empty.description": "该账号暂时没有可展示的详情；可重新检测后再试。",
+
+  // =====================================================================
+  // ---- 最小批量操作条（components/account-batch-bar.tsx，两平台共用）----
+  // =====================================================================
+  // §3.3 的「勾选 + 批量」本期只做**最小形态**：计数 + 三个动作 + 清除。
+  "shared.batch.selected": "已选 {n} 项",
+  "shared.batch.checkin": "批量签到",
+  "shared.batch.refresh": "刷新",
+  "shared.batch.delete": "删除",
+  "shared.batch.clear": "清除选择",
+  "shared.batch.deleteTitle": "批量删除账号",
+  "shared.batch.deleteDesc": "确定删除选中的 {n} 个账号？删除后可在回收站恢复。",
+  "shared.batch.confirm": "删除",
+  "shared.batch.cancel": "取消",
+
+  // =====================================================================
+  // ---- 账号列表工具栏（components/account-toolbar.tsx，两平台共用）----
+  // =====================================================================
+  // 工具栏是**共享壳**：四个核心控件（搜索 / 排序 / 分组 / 视图）结构相同，
+  // 平台差异由调用方以 options / children 注入，因此壳自身的文案放这里。
+  "shared.toolbar.searchPlaceholder": "搜索账号…",
+  "shared.toolbar.searchAria": "搜索账号",
+  "shared.toolbar.sortAria": "排序方式",
+  "shared.toolbar.groupAria": "分组方式",
+  "shared.toolbar.viewAria": "切换卡片 / 表格视图",
+  "shared.toolbar.viewCard": "卡片",
+  "shared.toolbar.viewTable": "表格",
+  // 窄窗（< 900px）下表格不可读 ⇒ 按钮**禁用并说明原因**（不是隐藏，隐藏会让用户以为没有表格）。
+  "shared.toolbar.viewTableDisabled": "窗口太窄，表格视图不可用；请加宽窗口后重试",
+  "shared.toolbar.selectAll": "全选",
+  "shared.toolbar.deselectAll": "取消全选",
+
+  // =====================================================================
+  // ---- 账号列表空态（两种，绝不混用 —— §3.4 规则 3）----
+  // =====================================================================
+  // 混用会让用户以为**数据丢了**：明明是「被筛没了」，却显示「还没有账号」。
+  "shared.list.empty.none": "还没有账号",
+  "shared.list.empty.noneDesc": "添加或从本机导入账号后，即可在这里管理。",
+  "shared.list.empty.filtered": "没有符合条件的账号",
+  "shared.list.empty.filteredDesc": "换个关键词，或清除筛选后查看全部账号。",
+  "shared.list.empty.clearFilters": "清除筛选",
+
+  // =====================================================================
+  // ---- 账号表格（components/account-table.tsx，两平台共用）----
+  // =====================================================================
+  "shared.table.selectAllAria": "全选当前列表",
+  "shared.table.selectRowAria": "选择 {name}",
+  "shared.table.openRowAria": "打开 {name} 的详情",
 } as const;

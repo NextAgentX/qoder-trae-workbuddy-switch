@@ -70,20 +70,21 @@ export const zh = {
   "trae.comp.card.switch.aria": "切换到 {label}",
   "trae.comp.card.switch.ariaBusy": "正在切换到 {label}",
   "trae.comp.card.switch.busy": "切换中…",
+  // P4：跨区域程序位**可见但不可直接切换**（账号库按区域分家，跨库切换会被后端守卫拒绝，
+  // 而那句拒绝用户看不懂）⇒ 点击引导「先切到该区域」。
+  "trae.comp.card.switch.regionHint": "需先切到{region}区域",
+  "trae.comp.card.switch.guideRegion": "切换到{region}区域",
 
   // ---- 操作菜单 ----
   "trae.comp.card.manage.aria": "管理账号 {name}",
   "trae.comp.card.manage.title": "更多账号操作",
+  "trae.comp.card.selectAria": "选择账号 {name}",
   "trae.comp.card.menu.save": "保存登录态",
   "trae.comp.card.menu.refreshJwt": "刷新 JWT",
   "trae.comp.card.menu.checkin": "手动签到",
   "trae.comp.card.menu.thaw": "解除冷却",
   "trae.comp.card.menu.remark": "编辑备注",
   "trae.comp.card.menu.delete": "删除账号",
-  "trae.comp.card.remark.placeholder": "例如：DS4.1 额度 · 10/03 解禁",
-  "trae.comp.card.remark.aria": "{name} 的备注",
-  "trae.comp.card.remark.editAria": "编辑 {name} 的备注",
-  "trae.comp.card.remark.add": "添加备注",
 
   // ---- 积分区 ----
   "trae.comp.card.credits.remaining": "剩余积分",
@@ -95,33 +96,39 @@ export const zh = {
   "trae.comp.card.package.tip": "{name} · 剩余 {remaining} / {total} · {expiry}",
   "trae.comp.card.package.remaining": "{credits} 积分",
   "trae.comp.card.package.empty": "暂无可用积分",
+  // P4：抽屉 `DetailPack` 的「已用 / 到期」文本（与 WorkBuddy 抽屉同形，各平台自持文案）。
+  "trae.comp.card.package.used": "已用 {n}",
+  "trae.comp.card.package.expired": "已到期",
+  "trae.comp.card.package.expiringSoon": "7 天内到期",
 
-  // ---- 页脚按钮 ----
-  "trae.comp.card.action.saving": "保存中…",
+  // ---- 操作说明（作为「更多」菜单项的 `title`）----
+  // P4：卡片瘦身把页脚的「保存登录态 / 刷新 JWT」两枚按钮收回菜单（菜单本就有同名项），
+  // 原来的说明文案改挂在菜单项的 `title` 上 —— 不可用时的**原因**不能一起丢掉。
   // ★ 必须说明「会先关客户端」：备份是文件拷贝，客户端运行时 Cookie / leveldb / SQLite WAL
   //   被独占锁定，此时拷出来的快照是坏的（切过去会变成未登录）。用户得知道客户端会重启一次。
   "trae.comp.card.action.saveTip": "把客户端此刻的登录态保存到该账号名下（切换时用它恢复）；会先关闭并重新打开客户端",
   // 保存的目标只能是「该账号此刻登录着的那个程序位」—— 一个都没有时后端守卫也会拒绝，
   // 所以就地禁用并说明，别让用户点了再吃一句看不懂的拒绝。
   "trae.comp.card.action.saveNoLogin": "该账号当前没有登录在任何 Trae 客户端上 —— 先在客户端里登录它，再保存",
-  "trae.comp.card.action.refreshing": "刷新中…",
   "trae.comp.card.action.refreshJwtTip": "用 refresh token 换一份新的 JWT",
   "trae.comp.card.footer.updatedAt": "{time} 更新",
   "trae.comp.card.footer.noUpdate": "未记录更新时间",
   "trae.comp.card.footer.updatedTip": "该账号在本地账号库中的最近更新时间",
 
-  // ---- 详情弹窗 ----
+  // ---- 详情抽屉的信息区块（由 TraeAccountsPage 装配后注入）----
+  "trae.comp.card.detail.section.account": "账号信息",
+  "trae.comp.card.detail.section.credits": "积分",
+  "trae.comp.card.detail.section.credential": "凭据",
+
+  // ---- 详情（P4 起由共享抽屉 `account-detail-drawer.tsx` 承载）----
   "trae.comp.card.detail.open": "查看账号详情",
-  "trae.comp.card.detail.title": "账号详情",
   "trae.comp.card.detail.subtitle": "{name} · UID {uid}",
   "trae.comp.card.detail.accountId": "账号 ID",
-  "trae.comp.card.detail.enabledPrograms": "已启用的程序",
   "trae.comp.card.detail.creditsExpiry": "积分到期",
   "trae.comp.card.detail.jwtStatus": "JWT 状态",
   "trae.comp.card.detail.jwtAutoRefresh": "自动刷新 JWT",
   "trae.comp.card.detail.deviceId": "设备标识",
   "trae.comp.card.detail.cooldown": "冷却",
-  "trae.comp.card.detail.ungrouped": "未分组",
   "trae.comp.card.detail.none": "无",
   "trae.comp.card.detail.notQueried": "未查询",
   "trae.comp.card.detail.jwtAutoOn": "已开启",

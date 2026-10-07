@@ -1,26 +1,17 @@
-import { ArrowRight, Check, CircleCheck, CircleSlash, Clock3, Coins, Ellipsis, KeyRound, Loader2, Pencil, Plug, Save, Sparkles, StickyNote, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Check, CircleCheck, CircleSlash, Clock3, Coins, Ellipsis, Info, KeyRound, Loader2, Plug, Save, Sparkles, StickyNote, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { DemoAction } from "@/components/demo-action";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { avatarTone } from "@/components/account-card";
 import { TraeMark, TraeVariantMark } from "@/components/product-marks";
 import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
-import type { TranslationKey } from "@/locales/zh";
 import { cn } from "@/lib/utils";
-import type { TraeAccount, TraeJwtStatus, TraeVariantId } from "@/lib/trae-types";
+import type { TraeAccount, TraeJwtStatus, TraeRegionId, TraeVariantId } from "@/lib/trae-types";
 
 const chipClass = "rounded-md px-1.5 py-0 text-[11px] font-medium";
 
@@ -63,7 +54,8 @@ export function jwtBadge(status: TraeJwtStatus, hours: number | null, t: Transla
   }
 }
 
-function formatCredits(value: number | null): string {
+/** 数字 → 千分位字符串（`null` / 非有限值回落 `—`）。导出给账号页装配 `DetailPack` 复用，避免两处格式化漂移。 */
+export function formatCredits(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
@@ -78,17 +70,14 @@ function formatExpiryShort(seconds: number | null, t: Translate): string {
   return t("trae.comp.card.expiry.short", { date: `${mm}/${dd}` });
 }
 
-/** Unix 秒 → `YYYY/MM/DD`。 */
-function formatFullDate(seconds: number | null): string {
-  if (!seconds) return "—";
-  const date = new Date(seconds * 1000);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
-}
-
 /** 到期语气：临期 / 已过期用琥珀，其余用次要前景色（语义色走 class，不写裸色值）。 */
 function expiryTone(expired: boolean, expiringSoon: boolean): string {
   return expired || expiringSoon ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground";
+}
+
+/** 区域展示名（用于跨区域程序位的**消歧**）。 */
+function regionLabelOf(region: TraeRegionId, t: Translate): string {
+  return region === "global" ? t("shared.region.version.global") : t("shared.region.version.cn");
 }
 
 /**
@@ -105,6 +94,15 @@ function expiryTone(expired: boolean, expiringSoon: boolean): string {
  * 「卡片右上角那排图标 = 把这个账号挂到哪个客户端上」之后，两个分区行为一致。
  */
 export interface TraeProgram {
+  /**
+   * 程序位所属**区域**。
+   *
+   * ★ 跨区域常显后**必须**带上：`TraeProgramStatus.program` 只有 2 个取值
+   * （`trae_work` / `trae_code`，不含区域），跨区域会重复；去重后又会丢失
+   * 「该写哪个客户端」。`variant` 是切换目标（区域限定），`region` 用于**消歧与语义**。
+   */
+  region: TraeRegionId;
+  /** 切换目标（区域限定，后端 `TraeProgramStatus.variant`）—— 真正喂给 `traeSwitchAccount` 的值。 */
   variant: TraeVariantId;
   /** 展示名（`Trae Work` / `Trae CN`），取自后端 `variantLabel`。 */
   label: string;
@@ -135,12 +133,20 @@ interface Props {
   /** 是否为**当前管理的这条产品线**的当前账号（头部高亮 + 幽灵 logo 用它）。 */
   current?: boolean;
   /**
-   * 该账号可启用的 Trae 程序（本机检测到的每条产品线一枚）。
+   * 该账号可启用的 Trae 程序（**跨全部区域**，每个 `(region, program)` 一条）。
    *
    * 未传或为空时不渲染任何程序控件——这比渲染一枚「Trae」通用按钮诚实：
    * 后者在两条线并存时根本无法表达「点下去是挂到哪条线上」。
    */
   programs?: TraeProgram[];
+  /**
+   * **当前页面所在的区域**（`cn` / `global`）。
+   *
+   * 用来判定「哪些程序位跨区域」：跨区域按钮**可见但不可直接切换** ——
+   * 账号库按区域分家，跨库直接切会被后端切换 / 保存守卫拒绝，而那句拒绝用户看不懂
+   * （PLAN §3.3）。点击改为**引导切换区域**（`onSwitchRegion`）。
+   */
+  currentRegion?: TraeRegionId;
   /** 紧凑模式：头部缩成一条、按钮图标化、无 footer */
   compact?: boolean;
   /** 当前正在执行的动作 key（`switch-<uid>@<变体>` / `save-<uid>` / …）。 */
@@ -151,20 +157,25 @@ interface Props {
   featuresDisabled?: boolean;
   /** 把该账号挂到指定 Trae 程序上（会重启该程序）。 */
   onSwitchTo?: (account: TraeAccount, variant: TraeVariantId) => void;
+  /**
+   * 跨区域程序位被点击时，**引导用户先切到该区域**（改页面的 `?line=`）。
+   *
+   * 不实现「跨区域直接切换」：那会被后端守卫拒绝，且报错用户看不懂。
+   */
+  onSwitchRegion?: (region: TraeRegionId) => void;
   /** 单账号签到。 */
   onCheckin?: (account: TraeAccount) => void;
   onSaveLogin: (account: TraeAccount) => void;
   onRefreshJwt: (account: TraeAccount) => void;
   onClearCooldown: (account: TraeAccount) => void;
   onDelete: (account: TraeAccount) => void;
-  /**
-   * 保存备注；返回 `true` 表示已写回（编辑器才会收起）。
-   *
-   * 与 WorkBuddy 卡片同名同义：由页面提供而不由卡片自己调 `api` —— 写回后要
-   * 刷新整个账号列表，而卡片手里没有列表状态。返回布尔值而不是抛异常，
-   * 是为了失败时**保持编辑态**让用户能改完重试，而不是把半截输入丢掉。
-   */
-  onSaveRemark?: (account: TraeAccount, remark: string) => Promise<boolean>;
+  /** 是否被勾选（批量操作）。 */
+  selected?: boolean;
+  onToggleSelect?: (account: TraeAccount) => void;
+  /** 打开详情抽屉（抽屉状态由页面持有）。 */
+  onOpenDetail?: (account: TraeAccount) => void;
+  /** 「更多 → 编辑备注」：打开抽屉并进入编辑态。 */
+  onEditRemark?: (account: TraeAccount) => void;
 }
 
 /**
@@ -174,10 +185,16 @@ interface Props {
  * 同样的紧凑模式断点、同样的「当前账号」角标与操作菜单），差异只在数据源：
  * Trae 的额度单位是积分、登录凭据是 JWT、切换动作是重启 Trae 客户端。
  *
+ * ## P4 卡片瘦身
+ *
+ * 详情（备注编辑、账号明细）**已迁入共享抽屉**，页脚的「保存登录态 / 刷新 JWT」
+ * 两枚按钮收回「更多」菜单（菜单本就有同名项，其说明挂在菜单项的 `title` 上）。
+ * 卡片常规可点区只剩：**勾选框 / 程序位行 / 更多菜单**。
+ *
  * ## 「挂到哪个程序上」= WorkBuddy 卡片的那排工具按钮
  *
  * WorkBuddy 卡片右上角是三枚工具按钮（WorkBuddy / CodeBuddy IDE / CodeBuddy CLI），
- * Trae 侧就是 {@link TraeProgram} 每枚按钮对应一条 Trae 产品线。**两条产品线各判各的
+ * Trae 侧就是 {@link TraeProgram} 每枚按钮对应一条 Trae 产品线。**每条产品线各判各的
  * 「当前账号」**：同一个 Trae 账号完全可以同时是 Trae Work 的当前账号与 Trae CN 的
  * 非当前账号，因此每枚按钮必须独立取状态，不能由卡片的 `current` 一刀切。
  */
@@ -186,20 +203,25 @@ export function TraeAccountCard({
   groupName,
   current = false,
   programs = [],
+  currentRegion = "cn",
   compact = false,
   busy = null,
   switchBusy = false,
   featuresDisabled = false,
   onSwitchTo,
+  onSwitchRegion,
   onCheckin,
   onSaveLogin,
   onRefreshJwt,
   onClearCooldown,
   onDelete,
-  onSaveRemark,
+  selected = false,
+  onToggleSelect,
+  onOpenDetail,
+  onEditRemark,
 }: Props) {
   const t = useT();
-  const name = account.name || `UID · ${account.userId}`;
+  const name = displayText(account.name) || `UID · ${account.userId}`;
   const badge = jwtBadge(account.jwtStatus, account.jwtExpHours, t);
   // 忙状态 key 带上变体（`switch-<uid>@<变体>`）：同一账号可能在切另一条线，
   // 只按 uid 判定会把「切 Trae CN 中」的转圈画到 Trae Work 的按钮上。
@@ -213,102 +235,6 @@ export function TraeAccountCard({
   const checkingIn = busy === `checkin-${account.userId}`;
   const deleting = busy === `delete-${account.userId}`;
   const hasCredits = account.remainingCredits !== null;
-  const [detailOpen, setDetailOpen] = useState(false);
-  const [remarkEditing, setRemarkEditing] = useState(false);
-  const [remarkDraft, setRemarkDraft] = useState("");
-  const [remarkSaving, setRemarkSaving] = useState(false);
-  const remarkInputRef = useRef<HTMLInputElement | null>(null);
-  /**
-   * 取消编辑时置位，用来抵掉紧随其后的那次 blur。
-   *
-   * 编辑态结束时输入框会被卸载，浏览器/React 可能仍补发一次 blur；
-   * 不拦的话「按 Esc 取消」会被那次 blur 反向提交成一次保存。
-   */
-  const skipCommitRef = useRef(false);
-  /**
-   * 从「更多操作」菜单进入备注编辑时置位，用来**取消这一次菜单关闭的焦点归还**。
-   *
-   * Radix 菜单关闭时会把焦点还给触发按钮（发生在关闭动画之后，实测约 150ms），
-   * 而编辑框那时**已经拿到焦点** —— 焦点被顶掉会补发一次 `onBlur`，被当成
-   * 「用户点了别处」提交一次，表现为**编辑框闪一下就没了**。
-   *
-   * 只在「本次关闭确实是为了进入编辑态」时拦截；其他菜单项仍按 Radix 默认行为
-   * 把焦点还给触发按钮。（与 `account-card.tsx` 同款处理，两边必须一致。）
-   */
-  const keepRemarkFocusRef = useRef(false);
-  /**
-   * 兜底归一（副闸）。
-   *
-   * 后端 `account_view` 透出的就是我们自己账号库里的值，正常是 `string | null`；
-   * 但账号库是**用户可见、可手改**的文件，而 `remark` 会被直接当 React 子节点渲染
-   * —— 一个对象就能让 React 卸载整棵树 ⇒ 窗口一片白（issue #2）。
-   * 宁可显示成「没有备注」，也不能崩。
-   */
-  const remark = displayText(account.remark)?.trim() || "";
-
-  useEffect(() => {
-    if (!remarkEditing) return;
-    // 等 DOM 提交后再聚焦；从菜单进入时那次焦点归还已由 `onCloseAutoFocus` 拦掉。
-    const timer = window.setTimeout(() => remarkInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(timer);
-  }, [remarkEditing]);
-
-  /** 进入备注编辑态；返回 `true` 表示确实进入了（调用方据此决定要不要拦焦点）。 */
-  function beginRemarkEdit(): boolean {
-    if (featuresDisabled || !onSaveRemark || remarkSaving) return false;
-    skipCommitRef.current = false;
-    setRemarkDraft(remark);
-    setRemarkEditing(true);
-    return true;
-  }
-
-  function cancelRemarkEdit() {
-    // 取消即丢弃草稿：下次进入编辑态重新从已保存值起算，不留半截输入。
-    skipCommitRef.current = true;
-    setRemarkEditing(false);
-    setRemarkDraft("");
-  }
-
-  async function commitRemark() {
-    if (skipCommitRef.current) {
-      skipCommitRef.current = false;
-      return;
-    }
-    if (!onSaveRemark || remarkSaving) return;
-    if (remarkDraft.trim() === remark) {
-      cancelRemarkEdit();
-      return;
-    }
-    setRemarkSaving(true);
-    const saved = await onSaveRemark(account, remarkDraft);
-    setRemarkSaving(false);
-    if (saved) setRemarkEditing(false);
-  }
-
-  /**
-   * 正文行列表。
-   *
-   * 与 WorkBuddy 卡片正文的「标签 / 值」两列行同构（`grid-cols-[auto_minmax(0,1fr)]`），
-   * 但**不搬 WorkBuddy 的字段**：Trae 没有积分包（package）粒度数据，
-   * 因此这里放的是 Trae 真实持有的账号属性——设备、JWT 到期、加入时间、最近更新。
-   */
-  const detailRows: { labelKey: TranslationKey; value: string; title?: string }[] = [
-    { labelKey: "trae.comp.card.label.device", value: account.deviceIdMasked || "—" },
-    {
-      labelKey: "trae.comp.card.label.jwtExpiry",
-      value: account.jwtExpTimestamp ? shortTime(account.jwtExpTimestamp) : t("trae.comp.card.jwt.unparsable"),
-      title: badge.text,
-    },
-    {
-      labelKey: "trae.comp.card.label.addedAt",
-      value: account.addedAt ? formatFullDate(Math.floor(new Date(account.addedAt).getTime() / 1000)) : "—",
-    },
-    {
-      labelKey: "trae.comp.card.label.updatedAt",
-      value: account.updatedAt ? shortTime(Math.floor(new Date(account.updatedAt).getTime() / 1000)) : "—",
-    },
-    ...(groupName ? [{ labelKey: "trae.comp.card.label.group" as TranslationKey, value: groupName }] : []),
-  ];
 
   /**
    * 「近期到期」要展示的积分包：只取**还有剩余**的包，按最早到期排序，最多 3 条。
@@ -379,12 +305,15 @@ export function TraeAccountCard({
    * 三种不可用/可用形态互斥，顺序即优先级：没装 → 装了但没数据目录 → 可切。
    * 「装了但没数据目录」这一支此前缺失，于是那种按钮被当成可切（报障来源）。
    */
-  const switchTooltip = (program: TraeProgram) =>
-    !program.installed
-      ? t("trae.comp.card.switch.missing", { label: program.label })
+  const switchTooltip = (program: TraeProgram) => {
+    // 同 `programControl`：`program.label` 未归一（可能是对象），取不到时回落程序位标识。
+    const label = displayText(program.label) || program.variant;
+    return !program.installed
+      ? t("trae.comp.card.switch.missing", { label })
       : program.hasDataDir
-        ? t("trae.comp.card.switch.tip", { label: program.label })
-        : t("trae.comp.card.switch.noDataDir", { label: program.label });
+        ? t("trae.comp.card.switch.tip", { label })
+        : t("trae.comp.card.switch.noDataDir", { label });
+  };
 
   /**
    * 「保存登录态」是否可用：**该账号必须此刻正登录在某个程序上**。
@@ -399,21 +328,29 @@ export function TraeAccountCard({
   /**
    * 单个程序的控件。
    *
-   * 三种形态与 WorkBuddy 卡片逐一对齐：
+   * 形态与 WorkBuddy 卡片逐一对齐，另加**跨区域**一支：
    * - **当前账号** → 角标（不可点，`role="status"`），WorkBuddy 同位置同形态；
+   * - **跨区域** → 可见但**不可直接切换**，点击引导「先切到该区域」（PLAN §3.3）；
    * - **演示模式** → 包一层 `DemoAction`（控件保持可见可聚焦，点击只解释为什么不可用）；
    * - **其余** → 切换按钮，未安装 / 有并发切换 / 缺回调时禁用，理由写进 tooltip。
    */
   function programControl(program: TraeProgram) {
     const busyHere = switchingVariant === program.variant;
+    const key = `${program.region}:${program.variant}`;
+    const crossRegion = program.region !== currentRegion;
+    // `program.label` 来自后端（`TraeProgramStatus.variantLabel`），类型声明是 `string`
+    // 但运行时可能是对象 ⇒ 直接当 React 子节点会卸载整棵树（白屏）。取不到时回落到
+    // **程序位标识**（`variant`），不编造展示名。下面所有用到 label 的地方（子节点 /
+    // `title` / `aria-label` 插值）统一走这一个归一值，避免漏网。
+    const label = displayText(program.label) || program.variant;
 
     if (program.current) {
       return compact ? (
-        <Tooltip key={program.variant}>
+        <Tooltip key={key}>
           <TooltipTrigger asChild>
             <span
               role="status"
-              aria-label={t("trae.comp.card.currentOf", { label: program.label })}
+              aria-label={t("trae.comp.card.currentOf", { label })}
               className="relative inline-flex size-7 items-center justify-center rounded-lg border border-primary/25 bg-primary/10 text-primary"
             >
               <TraeVariantMark variant={program.variant} size={15} />
@@ -422,21 +359,62 @@ export function TraeAccountCard({
               </span>
             </span>
           </TooltipTrigger>
-          <TooltipContent side="top">{t("trae.comp.card.currentOf", { label: program.label })}</TooltipContent>
+          <TooltipContent side="top">{t("trae.comp.card.currentOf", { label })}</TooltipContent>
         </Tooltip>
       ) : (
-        <Tooltip key={program.variant}>
+        <Tooltip key={key}>
           <TooltipTrigger asChild>
             <span
               role="status"
-              aria-label={t("trae.comp.card.currentOf", { label: program.label })}
+              aria-label={t("trae.comp.card.currentOf", { label })}
               className="inline-flex h-7 items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-2.5 text-xs text-primary shadow-[inset_0_1px_0_rgba(255,255,255,.8)]"
             >
               <TraeVariantMark variant={program.variant} size={18} />
               <Check className="size-3.5" strokeWidth={2.25} />
             </span>
           </TooltipTrigger>
-          <TooltipContent side="top">{t("trae.comp.card.currentOf", { label: program.label })}</TooltipContent>
+          <TooltipContent side="top">{t("trae.comp.card.currentOf", { label })}</TooltipContent>
+        </Tooltip>
+      );
+    }
+
+    // 跨区域：可见但**不直接切换**，点击引导「先切到该区域」。同名按钮必须消歧。
+    if (crossRegion) {
+      const regionLabel = regionLabelOf(program.region, t);
+      const hint = t("trae.comp.card.switch.regionHint", { region: regionLabel });
+      const button = compact ? (
+        <Button
+          variant="outline"
+          size="icon"
+          className="size-7 rounded-lg text-muted-foreground"
+          disabled={featuresDisabled || !onSwitchRegion}
+          onClick={() => onSwitchRegion?.(program.region)}
+          aria-label={hint}
+        >
+          <TraeVariantMark variant={program.variant} size={15} />
+        </Button>
+      ) : (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 rounded-full px-2.5 pr-3 text-xs text-muted-foreground"
+          disabled={featuresDisabled || !onSwitchRegion}
+          onClick={() => onSwitchRegion?.(program.region)}
+          aria-label={hint}
+        >
+          <TraeVariantMark variant={program.variant} size={18} />
+          <span>{label}</span>
+          <span className="rounded bg-muted px-1 text-[10px] font-medium">{regionLabel}</span>
+        </Button>
+      );
+      return featuresDisabled ? (
+        <DemoAction key={key}>{button}</DemoAction>
+      ) : (
+        <Tooltip key={key}>
+          <TooltipTrigger asChild>
+            <span className="inline-flex">{button}</span>
+          </TooltipTrigger>
+          <TooltipContent side="top">{hint}</TooltipContent>
         </Tooltip>
       );
     }
@@ -448,7 +426,7 @@ export function TraeAccountCard({
         className="size-7 rounded-lg"
         disabled={featuresDisabled || switchBusy || !program.installed || !program.hasDataDir || !onSwitchTo}
         onClick={() => onSwitchTo?.(account, program.variant)}
-        aria-label={busyHere ? t("trae.comp.card.switch.ariaBusy", { label: program.label }) : t("trae.comp.card.switch.aria", { label: program.label })}
+        aria-label={busyHere ? t("trae.comp.card.switch.ariaBusy", { label }) : t("trae.comp.card.switch.aria", { label })}
         aria-busy={busyHere}
       >
         {busyHere ? <Loader2 className="size-3.5 animate-spin" /> : <TraeVariantMark variant={program.variant} size={15} />}
@@ -460,18 +438,18 @@ export function TraeAccountCard({
         className="h-7 rounded-full px-2.5 pr-3.5 text-xs"
         disabled={featuresDisabled || switchBusy || !program.installed || !program.hasDataDir || !onSwitchTo}
         onClick={() => onSwitchTo?.(account, program.variant)}
-        aria-label={busyHere ? t("trae.comp.card.switch.ariaBusy", { label: program.label }) : t("trae.comp.card.switch.aria", { label: program.label })}
+        aria-label={busyHere ? t("trae.comp.card.switch.ariaBusy", { label }) : t("trae.comp.card.switch.aria", { label })}
         aria-busy={busyHere}
       >
         {busyHere ? <Loader2 className="size-4 animate-spin" /> : <TraeVariantMark variant={program.variant} size={18} />}
-        <span>{busyHere ? t("trae.comp.card.switch.busy") : program.label}</span>
+        <span>{busyHere ? t("trae.comp.card.switch.busy") : label}</span>
       </Button>
     );
 
     return featuresDisabled ? (
-      <DemoAction key={program.variant}>{button}</DemoAction>
+      <DemoAction key={key}>{button}</DemoAction>
     ) : (
-      <Tooltip key={program.variant}>
+      <Tooltip key={key}>
         <TooltipTrigger asChild>
           <span className="inline-flex">{button}</span>
         </TooltipTrigger>
@@ -489,21 +467,20 @@ export function TraeAccountCard({
           <Ellipsis />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        className="w-44"
-        onCloseAutoFocus={(event) => {
-          if (!keepRemarkFocusRef.current) return;
-          keepRemarkFocusRef.current = false;
-          // 焦点留给刚渲染出来的备注输入框，别还给触发按钮（见 keepRemarkFocusRef）。
-          event.preventDefault();
-        }}
-      >
-        <DropdownMenuItem disabled={featuresDisabled || saving || !canSaveLogin} onSelect={() => onSaveLogin(account)}>
+      <DropdownMenuContent align="end" className="w-44">
+        <DropdownMenuItem disabled={!onOpenDetail} onSelect={() => onOpenDetail?.(account)}>
+          <Info />{t("trae.comp.card.detail.open")}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          disabled={featuresDisabled || saving || !canSaveLogin}
+          onSelect={() => onSaveLogin(account)}
+          title={canSaveLogin ? t("trae.comp.card.action.saveTip") : t("trae.comp.card.action.saveNoLogin")}
+        >
           <Save />{t("trae.comp.card.menu.save")}
         </DropdownMenuItem>
         {account.hasRefreshToken && (
-          <DropdownMenuItem disabled={featuresDisabled || refreshingJwt} onSelect={() => onRefreshJwt(account)}>
+          <DropdownMenuItem disabled={featuresDisabled || refreshingJwt} onSelect={() => onRefreshJwt(account)} title={t("trae.comp.card.action.refreshJwtTip")}>
             <KeyRound />{t("trae.comp.card.menu.refreshJwt")}
           </DropdownMenuItem>
         )}
@@ -520,13 +497,7 @@ export function TraeAccountCard({
             <CircleSlash />{t("trae.comp.card.menu.thaw")}
           </DropdownMenuItem>
         )}
-        <DropdownMenuItem
-          disabled={featuresDisabled || !onSaveRemark}
-          onSelect={() => {
-            // 见 keepRemarkFocusRef：这一次菜单关闭不要把焦点抢回去。
-            keepRemarkFocusRef.current = beginRemarkEdit();
-          }}
-        >
+        <DropdownMenuItem disabled={featuresDisabled || !onEditRemark} onSelect={() => onEditRemark?.(account)}>
           <StickyNote />{t("trae.comp.card.menu.remark")}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
@@ -539,6 +510,16 @@ export function TraeAccountCard({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+
+  const checkbox = (
+    <Checkbox
+      checked={selected}
+      onCheckedChange={() => onToggleSelect?.(account)}
+      disabled={!onToggleSelect}
+      aria-label={t("trae.comp.card.selectAria", { name })}
+      className={compact ? "size-4" : "size-[18px]"}
+    />
   );
 
   return (
@@ -575,13 +556,15 @@ export function TraeAccountCard({
           </div>
 
           {compact ? (
-            <div className="relative z-10 flex w-full min-w-0 items-center gap-2 pr-10">
+            <div className="relative z-10 flex w-full min-w-0 items-center gap-2.5 pr-10">
+              {checkbox}
               <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
               <div className="hidden min-w-0 overflow-hidden shrink-0 items-center gap-1 min-[420px]:flex">{statusChips}</div>
               <div className="ml-auto flex shrink-0 items-center gap-1">{programControls}</div>
             </div>
           ) : (
             <div className="relative z-10 flex w-full min-w-0 items-center gap-3 pr-[112px]">
+              {checkbox}
               <div className={cn("flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold ring-4 ring-white/65", avatarTone(name))}>
                 {name.charAt(0).toUpperCase()}
               </div>
@@ -597,60 +580,6 @@ export function TraeAccountCard({
         </header>
 
         <section className={cn("flex min-w-0 flex-1 flex-col", compact ? "px-3.5 pb-3 pt-3" : "px-5 pb-4 pt-4")}>
-          {/* 备注就地编辑 —— 与 WorkBuddy 卡片逐段同形（`account-card.tsx`）：
-              紧凑模式**只在有备注或正在编辑时**渲染这一行（那里本来就是为了多塞几张卡，
-              给每张卡都加一条空占位行等于白送纵向空间）；普通模式的空态常显（弱化色）
-              而不是藏进 hover —— 备注的价值就在于「我记得要看它」。 */}
-          {remarkEditing ? (
-            <Input
-              ref={remarkInputRef}
-              value={remarkDraft}
-              disabled={remarkSaving}
-              onChange={(event) => setRemarkDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void commitRemark();
-                } else if (event.key === "Escape") {
-                  event.preventDefault();
-                  cancelRemarkEdit();
-                }
-              }}
-              onBlur={() => void commitRemark()}
-              maxLength={80}
-              placeholder={t("trae.comp.card.remark.placeholder")}
-              spellCheck={false}
-              autoComplete="off"
-              aria-label={t("trae.comp.card.remark.aria", { name })}
-              className={cn("mb-3 h-7 w-full text-xs", compact && "mb-2")}
-            />
-          ) : remark ? (
-            <button
-              type="button"
-              onClick={beginRemarkEdit}
-              disabled={featuresDisabled || !onSaveRemark}
-              title={remark}
-              aria-label={t("trae.comp.card.remark.editAria", { name })}
-              className={cn(
-                "-mx-1 mb-3 flex w-[calc(100%+0.5rem)] min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-[11px] leading-4 text-foreground/80 transition-colors hover:bg-foreground/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
-                compact && "mb-2",
-              )}
-            >
-              <StickyNote className="size-3.5 shrink-0 stroke-[1.75] text-muted-foreground" aria-hidden="true" />
-              <span className="min-w-0 flex-1 truncate">{remark}</span>
-            </button>
-          ) : compact ? null : (
-            <button
-              type="button"
-              onClick={beginRemarkEdit}
-              disabled={featuresDisabled || !onSaveRemark}
-              className="-mx-1 mb-3 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded-md px-1 text-left text-[11px] leading-4 text-muted-foreground/70 transition-colors hover:bg-foreground/[0.04] hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-            >
-              <Pencil className="size-3 shrink-0" aria-hidden="true" />
-              {t("trae.comp.card.remark.add")}
-            </button>
-          )}
-
           {/* 大数字行：与 WorkBuddy 卡片同一位置、同一字号层级与图标用法。 */}
           <div className="flex items-baseline gap-x-3 gap-y-1">
             <span className="flex items-center gap-1.5">
@@ -702,7 +631,7 @@ export function TraeAccountCard({
           <div className={cn(compact ? "mt-1.5 space-y-2" : "mt-2 space-y-2.5")}>
             {visiblePackages.length > 0 ? (
               visiblePackages.map((item, index) => {
-                const packageName = item.packageName || item.packageCode || t("trae.comp.card.package.fallback");
+                const packageName = displayText(item.packageName) || displayText(item.packageCode) || t("trae.comp.card.package.fallback");
                 const ratio = item.total > 0 ? Math.min(100, Math.max(0, (item.remaining / item.total) * 100)) : 0;
                 return (
                   <div
@@ -737,89 +666,12 @@ export function TraeAccountCard({
               <div className="py-1 text-[11px] text-muted-foreground">{t("trae.comp.card.package.empty")}</div>
             )}
           </div>
-
-          {/* 账号信息：Trae 真实持有的账号属性行（设备 / JWT 到期 / 加入时间 / 最近更新）。 */}
-          <div className={cn("text-[11px] font-medium text-muted-foreground", compact ? "mt-3" : "mt-4")}>{t("trae.comp.card.section.info")}</div>
-          <div className={cn(compact ? "mt-1.5 space-y-1.5" : "mt-2 space-y-2")}>
-            {detailRows.map((row) => (
-              <div
-                key={row.labelKey}
-                className={cn("grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-3", compact ? "text-[11px]" : "text-xs")}
-              >
-                <span className="shrink-0 text-muted-foreground">{t(row.labelKey)}</span>
-                <span className="min-w-0 truncate text-right font-mono tabular-nums text-foreground/80" title={row.title ?? row.value}>
-                  {row.value}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          {/* 「查看全部」链接位：WorkBuddy 是积分包明细弹窗；Trae 放登录态与凭据明细。 */}
-          <button
-            type="button"
-            className={cn(
-              "inline-flex w-fit items-center gap-1.5 font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30",
-              compact ? "mt-2 text-[11px]" : "mt-3 text-xs",
-            )}
-            onClick={() => setDetailOpen(true)}
-          >
-            {t("trae.comp.card.detail.open")}
-            <ArrowRight className="size-3.5" />
-          </button>
         </section>
 
         {!compact && (
           <footer className="flex flex-wrap items-center gap-2.5 border-t px-5 py-2.5">
-            {/* 程序切换位：与 WorkBuddy 卡片页脚的三枚工具按钮同位同形。 */}
+            {/* 程序切换位：与 WorkBuddy 卡片页脚的工具按钮同位同形。 */}
             {programControls}
-
-            {featuresDisabled ? (
-              <DemoAction>
-                <Button variant="outline" size="sm" className="h-7 rounded-full px-2.5 pr-3.5 text-xs" aria-label={t("trae.comp.card.menu.save")}>
-                  <Save className="size-4" /><span>{t("trae.comp.card.menu.save")}</span>
-                </Button>
-              </DemoAction>
-            ) : (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 pr-3.5 text-xs"
-                    disabled={saving || !canSaveLogin}
-                    onClick={() => onSaveLogin(account)}
-                    aria-busy={saving}
-                  >
-                    {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
-                    <span>{saving ? t("trae.comp.card.action.saving") : t("trae.comp.card.menu.save")}</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  {canSaveLogin
-                    ? t("trae.comp.card.action.saveTip")
-                    : t("trae.comp.card.action.saveNoLogin")}
-                </TooltipContent>
-              </Tooltip>
-            )}
-
-            {account.hasRefreshToken && !featuresDisabled && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 rounded-full px-2.5 pr-3.5 text-xs"
-                    disabled={refreshingJwt}
-                    onClick={() => onRefreshJwt(account)}
-                    aria-busy={refreshingJwt}
-                  >
-                    {refreshingJwt ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
-                    <span>{refreshingJwt ? t("trae.comp.card.action.refreshing") : t("trae.comp.card.menu.refreshJwt")}</span>
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="top">{t("trae.comp.card.action.refreshJwtTip")}</TooltipContent>
-              </Tooltip>
-            )}
 
             <Tooltip>
               <TooltipTrigger asChild>
@@ -835,50 +687,6 @@ export function TraeAccountCard({
           </footer>
         )}
       </article>
-
-      {/* 账号详情弹窗：对应 WorkBuddy 卡片的「全部积分包」Dialog。
-          Trae 没有包粒度数据，因此换成本账号的全部凭据与状态字段，
-          把卡片上被截断的信息完整列出来。 */}
-      <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("trae.comp.card.detail.title")}</DialogTitle>
-            <DialogDescription>
-              {t("trae.comp.card.detail.subtitle", { name, uid: account.userId })}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="max-h-[60vh] min-w-0 space-y-3 overflow-y-auto">
-            {(
-              [
-                { labelKey: "trae.comp.card.detail.accountId", value: account.userId },
-                { labelKey: "trae.comp.card.label.group", value: groupName ?? t("trae.comp.card.detail.ungrouped") },
-                {
-                  labelKey: "trae.comp.card.detail.enabledPrograms",
-                  value:
-                    programs
-                      .filter((program) => program.current)
-                      .map((program) => program.label)
-                      .join(" / ") || t("trae.comp.card.detail.none"),
-                },
-                { labelKey: "trae.comp.card.credits.remaining", value: account.remainingCredits === null ? t("trae.comp.card.detail.notQueried") : formatCredits(account.remainingCredits) },
-                { labelKey: "trae.comp.card.detail.creditsExpiry", value: account.creditsExpireAt ? formatFullDate(account.creditsExpireAt) : t("trae.comp.card.expiry.permanent") },
-                { labelKey: "trae.comp.card.detail.jwtStatus", value: badge.text },
-                { labelKey: "trae.comp.card.label.jwtExpiry", value: account.jwtExpTimestamp ? `${formatFullDate(account.jwtExpTimestamp)} ${shortTime(account.jwtExpTimestamp).slice(-5)}` : t("trae.comp.card.jwt.unparsable") },
-                { labelKey: "trae.comp.card.detail.jwtAutoRefresh", value: account.hasRefreshToken ? (account.jwtAutoRefresh ? t("trae.comp.card.detail.jwtAutoOn") : t("trae.comp.card.detail.jwtAutoOff")) : t("trae.comp.card.detail.noRefreshToken") },
-                { labelKey: "trae.comp.card.detail.deviceId", value: account.deviceIdMasked || "—" },
-                { labelKey: "trae.comp.card.label.addedAt", value: account.addedAt ? formatFullDate(Math.floor(new Date(account.addedAt).getTime() / 1000)) : "—" },
-                { labelKey: "trae.comp.card.label.updatedAt", value: account.updatedAt ? shortTime(Math.floor(new Date(account.updatedAt).getTime() / 1000)) : "—" },
-                { labelKey: "trae.comp.card.detail.cooldown", value: account.cooldownType ? `${account.cooldownType}${account.cooldownUntil ? t("trae.comp.card.cooldown.until", { time: shortTime(account.cooldownUntil) }) : ""}` : t("trae.comp.card.detail.none") },
-              ] as { labelKey: TranslationKey; value: string }[]
-            ).map((row) => (
-              <div key={row.labelKey} className="min-w-0">
-                <div className="text-[11px] text-muted-foreground">{t(row.labelKey)}</div>
-                <div className="mt-0.5 break-all font-mono text-xs text-foreground/90">{row.value}</div>
-              </div>
-            ))}
-          </div>
-        </DialogContent>
-      </Dialog>
     </TooltipProvider>
   );
 }

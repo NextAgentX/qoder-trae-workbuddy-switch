@@ -6,6 +6,9 @@ import { ApiKeyTable } from "@/components/gateway/api-key-table";
 import { AccountPoolCard, AUTO_OPTION, WB_POOL_TILES } from "@/components/gateway/account-pool-card";
 import { IntegrationGuide } from "@/components/gateway/integration-guide";
 import { ModelList } from "@/components/gateway/model-list";
+// P12 · 请求代理面板（**C 路：base URL 重定向**）—— 默认关，应用只记"用户已按引导设置"。
+// ⚠️ 只接 WB 侧：C 路本期不做 Trae（`proxy.rs` 的 `PROXY_GATEWAY_BASE` 只覆盖 WB 网关端口）。
+import { ProxyPanel } from "@/components/gateway/proxy-panel";
 import { RequestLog } from "@/components/gateway/request-log";
 import { WorkbuddyRegionSwitch } from "@/components/workbuddy-region-switch";
 import { DemoAction } from "@/components/demo-action";
@@ -22,6 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -304,6 +308,9 @@ export default function ApiServicePage() {
       <RegionPoolCard region={region} />
       <ModelList region={region} className="mb-6" />
       <IntegrationGuide baseUrl={baseUrl} region={region} className="mb-6" />
+      {/* P12 · 请求代理（**默认关**）：放在接入说明之后 —— 它是"进阶能力"，
+          且面板里必须**同时**给出风险与不劫持声明（原型断言 2）。 */}
+      <ProxyPanel />
       <RequestLog />
 
       {/* 非回环监听风险确认 */}
@@ -326,10 +333,14 @@ export default function ApiServicePage() {
         </DialogContent>
       </Dialog>
 
+      {/* §3.6 状态语言：`loading` 由 `loadAll()` 驱动（进页面时并发拉配置 / 状态 / Keys /
+          模型，内容还没到），属**区块首次加载** ⇒ 用 `<Skeleton>` 占位，**不是**文字型
+          「加载中」+ `<Loader2>`（后者是**按钮操作中**态，见上方 `saving` / `openingDir`）。 */}
       {loading && (
-        <div className="mt-6 flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="animate-spin" />
-          {t("wbStats.gateway.loadingData")}
+        <div className="mt-6 space-y-2" aria-busy="true">
+          <Skeleton className="h-4 w-40" />
+          <Skeleton className="h-4 w-64" />
+          <Skeleton className="h-4 w-52" />
         </div>
       )}
     </div>

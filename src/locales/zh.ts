@@ -1,3 +1,7 @@
+import { zh as backup } from "./domains/backup.zh";
+import { zh as recycleBin } from "./domains/recycleBin.zh";
+import { zh as proxy } from "./domains/proxy.zh";
+import { zh as sessions } from "./domains/sessions.zh";
 import { zh as shell } from "./domains/shell.zh";
 import { zh as shared } from "./domains/shared.zh";
 import { zh as traeComponents } from "./domains/traeComponents.zh";
@@ -5,6 +9,7 @@ import { zh as traeGateway } from "./domains/traeGateway.zh";
 import { zh as traePages } from "./domains/traePages.zh";
 import { zh as traeStats } from "./domains/traeStats.zh";
 import { zh as wbAccounts } from "./domains/wbAccounts.zh";
+import { zh as wbOverview } from "./domains/wbOverview.zh";
 import { zh as wbSettings } from "./domains/wbSettings.zh";
 import { zh as wbStats } from "./domains/wbStats.zh";
 
@@ -29,14 +34,19 @@ import { zh as wbStats } from "./domains/wbStats.zh";
  */
 export const zh = {
   ...shell,
+  ...backup,
   ...shared,
   ...wbSettings,
   ...wbAccounts,
+  ...wbOverview,
   ...wbStats,
   ...traePages,
   ...traeStats,
   ...traeComponents,
   ...traeGateway,
+  ...sessions,
+  ...recycleBin,
+  ...proxy,
 } as const;
 
 /** 词表键。`en.ts` 以它为 `Partial` 的上界，故英文侧拼错键名会编译报错。 */

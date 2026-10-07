@@ -46,6 +46,16 @@ interface GatewayState {
   status: GatewayStatus | null;
   keys: ApiKeyRecord[];
   models: Record<Region, CatalogSnapshot | null>;
+  /**
+   * 每个 region 被用户**禁用**的模型 id 集合（P11）。
+   *
+   * 它是**用户偏好**（§2.7，不进 `capabilities`），与后端 `/v1/models` 过滤（出口 ①）、
+   * 调用拒绝（出口 ②）**同源** —— 后端读的是同一份存储（`gateway_disabled_models.json`），
+   * 故这里看到的禁用集合就是两个出口真正在用的那份。
+   *
+   * ⚠️ 用 `Set` 是为了 O(1) 命中；更新时**必须换一个新 `Set`**（zustand 靠引用变化触发重渲染）。
+   */
+  disabled: Record<Region, Set<string>>;
   strategies: Record<Region, AccountStrategyView>;
   logs: GatewayLogEntry[];
   loading: boolean;
@@ -62,6 +72,10 @@ interface GatewayState {
   deleteKey: (id: string) => Promise<void>;
   loadModels: (region: Region) => Promise<void>;
   refreshModels: (region: Region) => Promise<void>;
+  /** 读取某 region 的禁用模型集合（P11）。 */
+  loadDisabled: (region: Region) => Promise<void>;
+  /** 置位 / 清位某 region 的一个模型（禁用 / 启用）—— 后端幂等。 */
+  setModelDisabled: (region: Region, modelId: string, disabled: boolean) => Promise<void>;
   loadStrategies: () => Promise<void>;
   saveStrategy: (region: Region, strategy: AccountStrategy) => Promise<void>;
   loadLogs: () => Promise<void>;
@@ -75,6 +89,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   status: null,
   keys: [],
   models: { cn: null, global: null },
+  // 默认全开（D27）：新 scope 的 `disabled` 初始为空，不替用户做决定。
+  disabled: { cn: new Set<string>(), global: new Set<string>() },
   strategies: defaultStrategies(),
   logs: [],
   loading: false,
@@ -126,6 +142,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
     } else {
       await get().loadKeys();
     }
+    // ★ 「接入即识别」（P10 §1.6 / T03）：创建 Key 后**顺手拉一次**该 region 快照。
+    // 后端在 create_api_key 成功后 fire-and-forget 探测（可能此刻尚未完成），故这里只是
+    // **best-effort**：拿到的是「当前」快照（探测已写 live 就是实时，否则仍是缓存 / 内置）。
+    // 真正的定论发生在下次 `loadModels`（进入模型页 / 手动「重新识别」）—— 与 §3.7 时序一致。
+    // 失败静默：`loadModels` 内部已 catch（绝不 reject），不会污染「Key 已创建」的成功语义。
+    await get().loadModels(region);
     return result;
   },
 
@@ -151,6 +173,26 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
   async refreshModels(region) {
     const snapshot = await api.refreshGatewayModels(region);
     set((s) => ({ models: { ...s.models, [region]: snapshot } }));
+  },
+
+  async loadDisabled(region) {
+    try {
+      const { ids } = await api.getDisabledModels(region);
+      set((s) => ({ disabled: { ...s.disabled, [region]: new Set(ids ?? []) } }));
+    } catch (e) {
+      set({ error: api.asError(e) });
+    }
+  },
+
+  async setModelDisabled(region, modelId, disabled) {
+    // 先落库（后端幂等），成功后再更新内存 —— 失败时集合保持不变，行不会「假装切了」。
+    await api.setModelDisabled(region, modelId, disabled);
+    set((s) => {
+      const next = new Set(s.disabled[region]);
+      if (disabled) next.add(modelId);
+      else next.delete(modelId);
+      return { disabled: { ...s.disabled, [region]: next } };
+    });
   },
 
   async loadStrategies() {
@@ -192,6 +234,8 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         get().loadLogs(),
         get().loadModels("cn"),
         get().loadModels("global"),
+        get().loadDisabled("cn"),
+        get().loadDisabled("global"),
       ]);
       set({ lastLoadedAt: Date.now() });
     } finally {

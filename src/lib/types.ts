@@ -1,5 +1,8 @@
 // 与 Rust 后端命令返回结构对齐的类型定义（对照 server.py 各 API 响应）
 
+// P11：模型行视图带「归属作用域」字段（`Scope`），故引入类型（`import type` 编译期擦除）。
+import type { Scope } from "./scope";
+
 /** 目标版本：cn=国内版（WorkBuddy），global=国际版（WorkBuddy AI）。缺省一律按 "cn" 处理。 */
 export type Region = "cn" | "global";
 
@@ -91,6 +94,37 @@ export interface AccountRecord {
   [key: string]: unknown;
 }
 
+/**
+ * 回收站条目（P5 §2.7）—— 线上形态（camelCase）。
+ *
+ * `key` 是恢复 / 永久删除要回传给后端的账号标识：WorkBuddy 侧优先 `id`、其次 `uid`
+ * （两者都能命中后端 `id|uid` 谓词）；Trae 侧为 `userId`。`expiresAt` 用于渲染到期时间。
+ */
+export interface TrashEntry {
+  /** 恢复 / 永久删除的回传键（WB：`id` 优先、`uid` 兜底；Trae：`userId`）。 */
+  key: string;
+  /** WorkBuddy 侧账号 `id`（Trae 侧为 `undefined`）。 */
+  id?: string | null;
+  /** WorkBuddy 侧账号 `uid`（Trae 侧为 `undefined`）。 */
+  uid?: string | null;
+  /** Trae 侧账号 `userId`（WorkBuddy 侧为 `undefined`）。 */
+  userId?: string | null;
+  /** 展示名（可能为空串 —— 渲染时必须走 `displayText` 兜底，不得留白屏）。 */
+  name: string;
+  /** 删除时间（ms）。 */
+  deletedAt: number;
+  /** 到期时间（ms）= `deletedAt + 30 天`。 */
+  expiresAt: number;
+  /** 来源作用域（`wb-cn` / `wb-global` / `trae-cn` / `trae-global`）。 */
+  originScope: string;
+}
+
+/** 回收站列表响应（P5 §2.7）：`scope` + 条目（按删除时间倒序，最新在前）。 */
+export interface TrashList {
+  scope: string;
+  entries: TrashEntry[];
+}
+
 /** 导入文件账号的脱敏预览（不含 token）。 */
 export interface ImportPreviewAccount {
   index: number;
@@ -116,6 +150,35 @@ export interface Session {
   hasHistory: boolean;
   /** WorkBuddy playground（侧栏「任务」）；缺省视为空间会话。 */
   isPlayground?: boolean;
+}
+
+/**
+ * 一份会话在某个账号里的副本（= copy ledger 的一条边的**一端**）—— P8 T02。
+ *
+ * ⚠️ **字段归属**（本项目已两次踩坑）：`title` / `updatedAt` / `hasHistory` 属于
+ * `list_sessions` 的会话行，**不属于** ledger 边；ledger 只给 `accountUid` / `sessionId`
+ * / `region`（见 `session::list_replica_groups_for`）。别混。
+ */
+export interface SessionReplica {
+  /** 副本所属账号 uid（ledger 的 source_uid / target_uid）。 */
+  accountUid: string;
+  /** 该账号里的会话 id（复制生成的新 id，或源会话 id）。 */
+  sessionId: string;
+  /** 副本所在 region（本期恒为**当前 region**，跨 region 边不引入，P8 ✅ #2）。 */
+  region: Region;
+}
+
+/** 一份会话的跨账号副本组（由 ledger 边连通而成）。 */
+export interface SessionReplicaGroup {
+  /** 稳定组键（用于 React key 与抽屉定位）。 */
+  key: string;
+  replicas: SessionReplica[];
+}
+
+/** `list_session_replicas` 的返回（`source: "empty"` = 无可用登记 ⇒ 结构化空态）。 */
+export interface SessionReplicaResponse {
+  groups: SessionReplicaGroup[];
+  source: "ledger" | "empty";
 }
 
 export interface CopyResult {
@@ -718,6 +781,53 @@ export interface CatalogSnapshot {
   note?: string | null;
 }
 
+/**
+ * 模型行（P11 §3.4）= 上游清单（**派生** `available`）∪ 用户偏好（**存储** `disabled`）。
+ *
+ * ## 两个维度正交（P11 的灵魂）
+ *
+ * - `available` 是**上游事实**（这个模型事实上能不能调），**派生、不落库**：
+ *   WorkBuddy 侧「在清单里即 `true`」（无「非可服务」概念）；
+ *   Trae 侧 = 「该模型 ∈ 网关对外清单（`servable_entries`）」。
+ * - `disabled` 是**用户偏好**（用户主动把它从暴露清单里拿掉），来自后端独立存储
+ *   （按 region 分家，与 `/v1/models` 过滤、调用拒绝**同源**）。
+ *
+ * 两者**不得压成一个字段** —— 压了之后「上游不可用」与「你自己禁用了」就分不清
+ * （四组合：可用·启用 / 可用·禁用 / 不可用·启用 / 不可用·禁用）。
+ *
+ * ⚠️ **不新增 `available` 到 `CatalogModel`**：它是派生，落库会引入第二份真相。
+ */
+export interface GatewayModelRow {
+  /** 模型 id（调用时真正要传的名字）。 */
+  id: string;
+  /** 展示名。 */
+  name: string;
+  /** 归属作用域。**UI 只渲染当前 region（决策 #1）⇒ 不渲染「归属」列**；
+   *  保留字段供按 region 键控与未来跨 scope 渲染。 */
+  scope: Scope;
+  /** 上游事实：能不能调（**派生**，不落库）。WB 恒 `true`；Trae = ∈ servable_entries。 */
+  available: boolean;
+  /** 用户偏好：是否被禁用（来自后端存储）。 */
+  disabled: boolean;
+}
+
+/**
+ * 暴露计数：`available && !disabled` —— 与出口 ①（`GET /v1/models`）**同源**。
+ *
+ * 出口 ① 的语义是「**可用的**模型清单」：不可服务（`available=false`）与被禁用的
+ * 都**不出现**。因此这里算的 `served` 就是外部客户端在 `/v1/models` 实际会看到的条数。
+ *
+ * ⚠️ 口径**只能有一处**：本函数是唯一实现，两个模型页（WB / Trae）都调它 ——
+ * 页面里各写一份 `filter(...).length` 就是「计数与出口 ① 会漂移」的种子。
+ */
+export function servedCount(rows: GatewayModelRow[]): { served: number; total: number } {
+  let served = 0;
+  for (const row of rows) {
+    if (row.available && !row.disabled) served += 1;
+  }
+  return { served, total: rows.length };
+}
+
 /** 账号选择策略（按 region 各自独立配置）。 */
 export type AccountStrategy =
   | { kind: "current" }
@@ -749,5 +859,99 @@ export interface GatewayLogEntry {
   promptTokens?: number | null;
   completionTokens?: number | null;
   stream: boolean;
+}
+
+// ── P7 全局备份：导入预览 / 结果 / 自动备份（与后端 `backup.rs` 同源）─────────────
+
+/**
+ * 冲突策略：命中同 uid 时怎么办（与后端 `ConflictPolicy` 同源）。
+ *
+ * ⚠️ 本期 UI **只给三种批量策略**（§7 #5）：`keepLocal`（默认，D16）/ `overwrite` /
+ * `keepBoth`。后端枚举里还有一个 `Ask`（逐条询问），但**不渲染**入口 ⇒ 用户侧恒取默认。
+ */
+export type BackupConflictPolicy = "keepLocal" | "overwrite" | "keepBoth";
+
+/** 导入预览的逐 scope 行（`rejected` = 未知 scope 被整体拒绝，fail-closed）。 */
+export interface ImportPreviewScopeRow {
+  scope: string;
+  added: number;
+  overwritten: number;
+  skipped: number;
+  conflicts: number;
+  /** 未知 scope ⇒ 该分区整体拒绝（不静默跳过、不回落，§1.6）。 */
+  rejected?: boolean;
+  error?: string;
+}
+
+/** 导入预览（**不落盘**；供安全阀展示，§1.7）。 */
+export interface ImportPreview {
+  formatVersion: number;
+  exportedAt: string;
+  includesCredentials: boolean;
+  scopes: ImportPreviewScopeRow[];
+  /** 将被覆盖的配置项（签到 / 旅行 / 轮换 / 切换）。 */
+  configOverwrites: string[];
+  /** 不含凭据 ⇒ 需重新登录的账号数（断言）。 */
+  needRelogin: number;
+}
+
+/** 导入结果（部分失败态：失败计数 + 可重试 + 快照路径）。 */
+export interface ImportSummary {
+  perScope: ImportPreviewScopeRow[];
+  failed: number;
+  retryable: number;
+  /** 导入前强制快照的路径（D18；可「从自动备份恢复」）。 */
+  snapshotPath: string;
+}
+
+/** 自动备份 / 导入前快照的一条记录。 */
+export interface AutoBackupEntry {
+  fileName: string;
+  path: string;
+  sizeBytes: number;
+  modifiedAt: number;
+  kind: "auto" | "preImport" | "other";
+}
+
+/** 自动备份配置（**默认开**；可在设置里关掉，§7 #7）。 */
+export interface AutoBackupConfig {
+  enabled: boolean;
+}
+
+/**
+ * P8 · 一个会话的**内容指纹**（组状态派生的数据源）。
+ *
+ * ⚠️ 这是**内容级**判据 —— **不得**用 `updatedAt` 派生「落后 / 分叉」
+ * （`P8-ARCH.md` §1.2：「时间新 ≠ 内容新」）。
+ */
+export interface SessionFingerprint {
+  /** **完整**行数（≈ 消息数：jsonl 每行一条 `type:"message"`）。 */
+  lineCount: number;
+  /** 前 N 行（后端上限 512）的逐行 hash —— **不含正文**，仅用于算公共前缀。 */
+  prefixHashes: number[];
+}
+
+/**
+ * P12 · C 路（base URL 重定向）的状态视图。
+ *
+ * ⚠️ `verified` **恒为 `false`** —— 应用**不校验**代理是否真的生效（只反映本地标记）。
+ * `mode` 在 C 路是 `"c-redirect"`（**不是「中间人」**，不许含糊）。
+ */
+export interface ProxyStatus {
+  enabled: boolean;
+  /** 恒 `false`：应用**不校验**（前端文案必须如实，不许暗示"已验证生效"）。 */
+  verified: boolean;
+  mode: "c-redirect";
+  /** 网关本机基址（C 路让客户端 `endpoint` 指向它）。 */
+  gatewayBase: string;
+  /** 白名单域（兜底行是「其它全部域名 → 直连」）。 */
+  domains: string[];
+  /**
+   * 网关**实际转发**的业务路径前缀（P12 T03）—— 与网关 404 判定**同一份来源**。
+   * ⚠️ 它**不是**给用户看的"域名表"，而是**诊断信息**（说明网关到底认哪些路径）。
+   */
+  bizPaths: string[];
+  /** 要引导用户设置的**客户端设置键**（应用**只显示**，由用户手动设）。 */
+  setting: { key: string; value: string };
 }
 

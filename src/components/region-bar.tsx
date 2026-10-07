@@ -1,52 +1,57 @@
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Switch } from "@/components/ui/switch";
 import { useT } from "@/lib/i18n";
-import { REGION_FILTERS, regionFilterLabel } from "@/lib/region";
-import type { RegionFilter } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface RegionBarProps {
-  /** 当前查询范围（cn / global / all）。 */
-  value: RegionFilter;
-  onChange: (next: RegionFilter) => void;
+  /**
+   * 是否**合并**两个区域查看。
+   *
+   * ⚠️ 这是**布尔**而不是 `RegionFilter` —— 见下方说明：区域不在这里选。
+   */
+  value: boolean;
+  onChange: (next: boolean) => void;
   /** 重新取数中：控件保持可点，仅禁用并给出无障碍提示。 */
   disabled?: boolean;
-  /** 无障碍标签，便于区分多个页面上的同款控件。 */
-  ariaLabel?: string;
   className?: string;
 }
 
-function isRegionFilter(value: string): value is RegionFilter {
-  return value === "cn" || value === "global" || value === "all";
-}
-
 /**
- * 页面级范围切换条（层级 1）：决定「数据源是什么」，全页共享。
- * 文案统一走 `regionFilterLabel`（cn→国内版 / global→国际版 / all→合并）。
+ * 合并态开关（**视图参数**，不是作用域）。
+ *
+ * ## 为什么从「三选一」变成「一个开关」
+ *
+ * 改造前这里渲染 `cn / global / all` 三个 Tab。但 **区域已经上移到侧栏**
+ * （`ScopeSwitch`，P2）—— 页面里再放一个区域选择器，就有了**两个「看起来能切」的控件**，
+ * 用户不确定哪个生效（§3.1 的纪律）。
+ *
+ * ## 为什么 `all` 留下
+ *
+ * 因为它**不是作用域**。判据（VOCABULARY 第 1 节）：
+ *
+ * > 换一个值，会不会导致「取的是**另一份数据**」？会 ⇒ 作用域；不会 ⇒ 视图参数。
+ *
+ * `cn → global` 换的是**数据源**（作用域，归侧栏）；
+ * `单区 → all` 换的是**同一份数据的呈现方式**（把两个区域合起来看）⇒ **视图参数**，留在页内。
+ *
+ * 这也与 `useScope` 的分工一致：它只管 `cn` / `global`，**不管 `all`**。
  */
-export function RegionBar({ value, onChange, disabled, ariaLabel, className }: RegionBarProps) {
+export function RegionBar({ value, onChange, disabled, className }: RegionBarProps) {
   const t = useT();
   return (
-    <Tabs
-      className={cn("min-w-0 gap-0", className)}
-      value={value}
-      onValueChange={(next) => {
-        if (!isRegionFilter(next)) return;
-        onChange(next);
-      }}
+    <label
+      className={cn(
+        "flex min-w-0 items-center gap-2 text-xs text-muted-foreground",
+        disabled && "opacity-60",
+        className,
+      )}
     >
-      <TabsList className="h-auto max-w-full flex-wrap" aria-label={ariaLabel ?? t("shared.region.scope.aria")}>
-        {REGION_FILTERS.map((filter) => (
-          <TabsTrigger
-            key={filter}
-            className="max-w-full whitespace-normal"
-            value={filter}
-            disabled={disabled}
-            aria-busy={disabled && value === filter}
-          >
-            {regionFilterLabel(filter)}
-          </TabsTrigger>
-        ))}
-      </TabsList>
-    </Tabs>
+      <Switch
+        checked={value}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        aria-label={t("shared.region.combine.aria")}
+      />
+      <span className="truncate">{t("shared.region.combine.label")}</span>
+    </label>
   );
 }

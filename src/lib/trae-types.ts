@@ -60,6 +60,11 @@ export type TraeProgramId = "trae_work" | "trae_code";
 /**
  * 发给后端的「目标」标识 —— **区域与程序位共用一个字段**（后端宽容解析）。
  *
+ * @deprecated P5 §2.6：`variant` 一词双义（既指区域、又指程序位），是 VOCABULARY §4 里
+ * 最要命的混淆。**新代码不得再引入 `TraeVariantId`**，请改用两根正交轴：
+ * {@link TraeRegionId}（持久化：账号库 / 端点）+ {@link TraeProgramId}（执行：写哪个客户端）。
+ * 现有引用待逐段迁移（截至 2026-10-05 前端仍有 12 文件 81 处，故暂不能删除本类型）。
+ *
  * `trae_work` / `trae_cn` 是改造前的产品线标识，现在表示**国内区域下的两个程序位**
  * （`trae_work`＝TraeWork 客户端、`trae_cn`＝TraeCode 客户端）。保留它们是为了：
  * 账号类接口按区域取库（两者都落国内库），而切换/快照类接口能据此确定**客户端**。
@@ -149,6 +154,47 @@ export function traeRegionLabelOf(variant: TraeVariantId): string {
       return t("shared.region.version.cn");
     default:
       return traeVariantLabel(variant);
+  }
+}
+
+/**
+ * `TraeVariantId` → **区域标识**（P5 T03）。
+ *
+ * ## 为什么需要它
+ *
+ * P5 把命令面按 `scope` 参数化，而 `scope` 是 `${平台}-${区域}` —— **只认区域**。
+ * 但 Trae 侧的调用方手上常常只有一个 `TraeVariantId`（它把「区域 × 程序位」合成了一个字段，
+ * 见类型注释），所以需要一个**明确的**「变体 → 区域」映射出口。
+ *
+ * ## 与 {@link traeRegionLabelOf} 的关系
+ *
+ * 两者是**同一套映射的两种输出**：那个返回展示名（给界面），本函数返回区域标识（给 scope）。
+ * ⚠️ 故意分成两个函数、而不是「返回标识再翻译」：调用方要的是不同的东西，
+ * 让每个调用点各写一遍 `.map(...)` 只会让映射散开。
+ *
+ * ## 为什么 `default` 抛错而不是猜
+ *
+ * `TraeVariantId` 是**闭合联合** ⇒ 上面已覆盖全部取值，`default` 在类型层面不可达。
+ * 留 `never` 检查是让**将来新增变体时编译期就报错**，而不是静默落进某个默认区域 ——
+ * 那会把登录态 / 账号库写进**错的区域**（`traeRegionLabelOf` 的注释也强调过「不猜」）。
+ */
+export function traeRegionOf(variant: TraeVariantId): TraeRegionId {
+  switch (variant) {
+    case "global":
+    // 国际版 TraeCode 也落国际区域（它与 `global` 是同一区域的两条程序）。
+    case "global_trae_code":
+      return "global";
+    case "cn":
+    // `trae_work` / `trae_cn` 是改造前的产品线标识，两者**都是国内构建**。
+    case "trae_work":
+    case "trae_cn":
+    // `TraeProgramId` 的 `trae_code`：程序位不含区域，按其归属的国内库处理。
+    case "trae_code":
+      return "cn";
+    default: {
+      const exhaustive: never = variant;
+      throw new Error(`未知的 TraeVariantId：${String(exhaustive)}`);
+    }
   }
 }
 

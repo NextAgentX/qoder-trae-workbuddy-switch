@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   AlertTriangle,
@@ -10,19 +11,28 @@ import {
   QrCode,
   RefreshCw,
   Rows3,
+  SearchX,
   Terminal,
+  Trash2,
+  UserPlus,
 } from "lucide-react";
 
-import { AccountCard } from "@/components/account-card";
+import { AccountCard, accountIdentity, avatarTone, formatCredits, formatCreditExpiry, type GuideTarget } from "@/components/account-card";
+import { AccountBatchBar } from "@/components/account-batch-bar";
+import { AccountTable, type AccountColumn } from "@/components/account-table";
+import { AccountToolbar, type ToolbarOption } from "@/components/account-toolbar";
+import { AccountDetailDrawer, type DetailPack, type DetailProgramBadge, type DetailSection } from "@/components/account-detail-drawer";
 import { DemoAction } from "@/components/demo-action";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyMark } from "@/components/product-marks";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { VariantSwitch, type VariantSwitchItem } from "@/components/variant-switch";
 import {
   Dialog,
@@ -35,11 +45,30 @@ import {
 import { ExportAccountsDialog } from "@/components/export-accounts-dialog";
 import { ImportAccountsDialog } from "@/components/import-accounts-dialog";
 import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
+import { RecycleBinSheet } from "@/components/recycle-bin-sheet";
+import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
 import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import * as api from "@/lib/api";
+// ★ B5：`checkinCreditsOf` 是**值**（从条目/raw 里取积分字段），`CheckinStatusEntry` 是**类型**。
+import { checkinCreditsOf } from "@/lib/api";
+import type { CheckinStatusEntry } from "@/lib/api";
+import { accountSearchText } from "@/lib/account-search";
+import {
+  filterAccounts,
+  groupAccounts,
+  hasActiveFilter,
+  sortAccounts,
+  type AccountComparator,
+  type AccountGroupKey,
+  type AccountListConfig,
+  type AccountSortKey,
+  type AccountViewMode,
+} from "@/lib/account-list-view";
 import { copyText } from "@/lib/clipboard";
 import { displayText } from "@/lib/display-text";
+import { formatDate } from "@/lib/format";
 import { REGIONS, regionDescriptor } from "@/lib/region";
+import { scopeOf } from "@/lib/scope";
 import type {
   AccountMeta,
   AppStatus,
@@ -55,8 +84,11 @@ import type {
 import { cn } from "@/lib/utils";
 import { useCompactMode } from "@/lib/use-compact-mode";
 import { useDocumentVisible } from "@/lib/use-document-visible";
+import { useMediaQuery } from "@/lib/use-media-query";
+import { useScope } from "@/lib/use-scope";
 import { useAccountsStore } from "@/stores/accounts";
 import { useT, type Translate } from "@/lib/i18n";
+import { showUndoToast } from "@/lib/undo-toast";
 
 function expiringSoonAmount(credit?: CreditExpiry): number {
   return credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
@@ -191,7 +223,9 @@ function useRegionSwitchItems(): VariantSwitchItem[] {
 }
 
 export default function AccountsPage() {
-  const [activeRegion, setActiveRegion] = useState<Region>("cn");
+  /* P1：区域统一走 `useScope`（URL 优先 + localStorage 记忆），不再用组件 state。
+     原实现是 `useState<Region>("cn")` —— 刷新即丢，且与统计页互不通信（§1.2 诊断）。 */
+  const [activeRegion, setActiveRegion] = useScope("workbuddy");
   const fetchAllRegions = useAccountsStore((s) => s.fetchAllRegions);
   const regionItems = useRegionSwitchItems();
   const t = useT();
@@ -247,6 +281,16 @@ function RegionPanel({ region }: { region: Region }) {
   const [exportOpen, setExportOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [switchAccount, setSwitchAccount] = useState<AccountMeta | null>(null);
+  /**
+   * 待确认的客户端切换目标（P8 T03 / §3.15.3）。
+   *
+   * **所有**客户端切换都走**同一条**确认流程：`isCli` 决定走「CLI 例外」文案（不重开、当前
+   * CLI 会话会中断）还是「需重启」文案（默认勾选自动重开 + 未保存文件风险）。
+   *
+   * ⚠️ **同一功能在不同客户端行为不一致是缺陷** —— 用户会发现「为什么切 CLI 会提醒、切 IDE
+   * 不提醒」，然后**不再相信这个提醒**。故 IDE 与 CLI 共用本状态、共用同一个确认框。
+   */
+  const [restartConfirm, setRestartConfirm] = useState<{ account: AccountMeta; isCli: boolean } | null>(null);
   const [importing, setImporting] = useState(false);
   const [autoCheckinConfig, setAutoCheckinConfig] = useState<CheckinConfig | null>(null);
   const [autoCheckinSaving, setAutoCheckinSaving] = useState(false);
@@ -275,11 +319,307 @@ function RegionPanel({ region }: { region: Region }) {
   const [installConfirmOpen, setInstallConfirmOpen] = useState(false);
   /** 删除账号确认目标（null=关闭） */
   const [deleteTarget, setDeleteTarget] = useState<AccountMeta | null>(null);
+  /** 回收站抽屉开关（P5 §2.7.1：按**当前作用域**过滤，入口在工具栏）。 */
+  const [recycleOpen, setRecycleOpen] = useState(false);
   /** 区域不匹配详情展开 */
   const [mismatchDetailOpen, setMismatchDetailOpen] = useState(false);
   /** 紧凑模式：卡片更小、同屏更多列；默认开启，偏好由 `useCompactMode` 统一持久化 */
   const [compact, toggleCompact] = useCompactMode();
+  /**
+   * P4 工具栏：搜索 / 排序 / 分组 / 视图。
+   *
+   * 四项都是**页面私有 `useState`**（`PLAN §2.1 L3` / `DECISIONS.md` D1）：不进 URL、
+   * 不进 store、不碰作用域，且**不持久化**（决策 #2 —— 视图参数是临时的，持久化会让
+   * 「为什么我的排序怪怪的」变成谜题）。唯一预留的 `?q=` 种子属 P6，本轮**不接线**（决策 #1）。
+   */
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<AccountSortKey>("priority");
+  const [group, setGroup] = useState<AccountGroupKey>("none");
+  const [view, setView] = useState<AccountViewMode>("card");
+  /** < 900px 强制卡片视图（`§3.12`）；断点只在 `useMediaQuery` 一处判断，不散落常量。 */
+  const tableEnabled = useMediaQuery("(min-width: 900px)");
+  const effectiveView: AccountViewMode = tableEnabled ? view : "card";
+  const searchRef = useRef<HTMLInputElement>(null);
   const t = useT();
+  const navigate = useNavigate();
+
+  /** `/` 键聚焦搜索框（`§3.4`）；在输入框 / 文本域 / 可编辑区里打字时不劫持。 */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  /**
+   * P6：命令面板跳过来的 **`?q=` 一次性种子**（§1.8）。
+   *
+   * 面板搜到**别的作用域**的账号时，回车会跳到本页并带上 `q`。这里**读一次**播种页内
+   * 搜索 state，随后 `replace` 清掉参数 —— 此后 URL 不再承载 `q`，视图参数留在页内
+   * （§2.1 L3）。用 `seededRef` 保证只读一次（StrictMode 双调用 / 后续 URL 变化都不会重播）。
+   */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const seedAppliedRef = useRef(false);
+  useEffect(() => {
+    if (seedAppliedRef.current) return;
+    seedAppliedRef.current = true;
+    const seed = searchParams.get("q");
+    if (!seed) return;
+    setQuery(seed);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("q");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [searchParams, setSearchParams]);
+
+  /**
+   * P4：详情抽屉 + 最小批量选择。
+   *
+   * 抽屉状态由**页面**持有（卡片只发 `onOpenDetail`）—— 抽屉需要「这个账号的全部明细」，
+   * 而那些数据（积分包、签到态、程序位）只有页面手里齐全。
+   *
+   * `detailAutoEditRemark` 区分两个入口：点「查看详情」只打开抽屉；点「更多 → 编辑备注」
+   * 打开抽屉并**直接进入编辑态**（`autoEditRemark`）。
+   */
+  const [detailAccount, setDetailAccount] = useState<AccountMeta | null>(null);
+  /**
+   * ★ B5：抽屉里的**签到积分详情**（按账号 id 缓存）。
+   *
+   * ⚠️ 与 `checkinMap`（只记「是否已签到」）**不是一回事**：这里要的是
+   * `daily_credit` / `streak_days` / `checkin_dates` 等**上游实测字段**。
+   */
+  const [checkinDetailMap, setCheckinDetailMap] = useState<Record<string, CheckinStatusEntry>>({});
+  const [detailAutoEditRemark, setDetailAutoEditRemark] = useState(false);
+  /**
+   * ★ 跨作用域选择集按 **(scope, id)** 键控（P5 §2.5 第 (4) 条）。
+   *
+   * 键里带上 scope：切作用域后旧键自然失配 ⇒ `targets` 恒为 0，**不会**用 A 作用域的 id
+   * 去打 B 作用域的库（或静默空转）。P4 已在 `region` 变化时清空（见下方 effect），
+   * 这里是**键控层面**的加固 —— 即便哪天清空 effect 被误删，键控本身仍能挡住跨作用域误操作。
+   */
+  const scope = scopeOf("workbuddy", region);
+  const selectionKey = (id: string) => `${scope}:${id}`;
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+
+  function toggleSelect(account: AccountMeta) {
+    const key = selectionKey(account.id);
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedKeys(new Set());
+  }
+
+  /**
+   * P4：区域变化时清空勾选。
+   *
+   * `selectedKeys` 是**组件 state**，而切区域时 `<RegionPanel>` 只换 `region` prop、
+   * **不 remount** ⇒ 选择集会跨区域残留：批量条仍显示「已选 N」，但
+   * `targets = accounts.filter(selectedKeys)` 恒为 0 ⇒ 点动作**静默无操作**。
+   *
+   * 为什么用 effect 而不是在切换处清：P3 已定「页面内不该有能力切区域」，
+   * 不能为了清选择去接管区域 setter；监听 `region` 变化是唯一不越界的方式。
+   */
+  useEffect(() => {
+    setSelectedKeys(new Set());
+  }, [region]);
+
+  function openDetail(account: AccountMeta) {
+    setDetailAutoEditRemark(false);
+    setDetailAccount(account);
+    // ★ B5：顺带查一次**签到详情**（抽屉要显示「+100」+ 连签天数 + 日期列表）。
+    //   此前只在批量接口里取了「是否已签到」，**详情从没查过** ⇒ 抽屉无从展示。
+    void api
+      .getCheckinStatus(account.id, region)
+      .then((entry) => setCheckinDetailMap((prev) => ({ ...prev, [account.id]: entry })))
+      .catch(() => {
+        /* 查询失败不阻断抽屉：签到区**不渲染**即可（不摆空数据）。 */
+      });
+  }
+
+  function openRemark(account: AccountMeta) {
+    setDetailAutoEditRemark(true);
+    setDetailAccount(account);
+  }
+
+  /**
+   * 未检测到的程序位（IDE / CLI）点击 → 引导到设置页对应子项。
+   *
+   * 为什么不就地处理：IDE 路径与 CLI 接入都是**设置页**的能力，页面里没有第二处入口；
+   * 给一句 toast + 跳过去，才能让「未检测到」变成可解决的问题（PLAN §3.3 规则 1）。
+   */
+  function onGuideToSetting(target: GuideTarget) {
+    toast.info(
+      target === "ide" ? t("wbAccounts.toast.guideIdeSetting") : t("wbAccounts.toast.guideCliSetting"),
+    );
+    /* ★ P0-4a：必须带**子项锚点** ⇒ 直接落到「权限与诊断」（`PermissionCheckCard`），
+       而不是设置页首页（那样用户还得自己找子项，原型断言 `P0-4a` 明确要求"跳到权限与诊断"）。 */
+    navigate(`/s/${scopeOf("workbuddy", region)}/settings?section=diagnostics`);
+  }
+
+  /**
+   * 对一组账号跑签到（**全量批签与「只重试失败项」共用这一条路径**）。
+   * 返回**失败 id 清单**，供 toast 的 action 复用 —— 原型 P1-2 要求部分失败态**可只重试失败项**。
+   */
+  async function runCheckinFor(ids: string[]) {
+    let ok = 0;
+    let already = 0;
+    const failedIds: string[] = [];
+    for (const id of ids) {
+      try {
+        const res = await api.checkin(id, region);
+        if (res.result === "success") ok += 1;
+        else if (res.result === "already") already += 1;
+        else failedIds.push(id);
+      } catch {
+        failedIds.push(id);
+      }
+    }
+    const next = await fetchTodayCheckinMap(ids, region);
+    if (Object.keys(next).length > 0) setCheckinMap((prev) => ({ ...prev, ...next }));
+    await refreshCredits(ids, { region });
+    void reconcileAccounts(region);
+    return { ok, already, failedIds };
+  }
+
+  /**
+   * 批量签到：逐个走**单账号**接口（与单卡菜单同一路径）。
+   * ★ 部分失败时**把失败项留在 toast 的 action 里** ⇒ 用户可「只重试失败项」，
+   *   不必把已成功的再跑一遍（原型 P1-2：部分失败态不能只给一句 toast 就完事）。
+   * @param ids 省略 = 对当前勾选项跑；传入 = 只对这批（重试路径）。
+   */
+  async function batchCheckin(ids?: string[]) {
+    if (batchBusy) return;
+    const targetIds =
+      ids ?? accounts.filter((a) => selectedKeys.has(selectionKey(a.id))).map((a) => a.id);
+    if (targetIds.length === 0) return;
+    setBatchBusy(true);
+    try {
+      const { ok, already, failedIds } = await runCheckinFor(targetIds);
+      const parts: string[] = [];
+      if (ok > 0) parts.push(t("wbAccounts.toast.checkinBatchSuccess", { n: ok }));
+      if (already > 0) parts.push(t("wbAccounts.toast.checkinBatchAlready", { n: already }));
+      if (failedIds.length > 0) {
+        parts.push(t("wbAccounts.toast.checkinBatchFailed", { n: failedIds.length }));
+      }
+      const summary =
+        parts.length > 0 ? parts.join(t("shared.punct.comma")) : t("wbAccounts.toast.checkinNone");
+      /* ★ 有失败 ⇒ 给「只重试失败项」出口（否则用户只能把成功的一起重跑）。 */
+      const retryAction =
+        failedIds.length > 0
+          ? {
+              label: t("wbAccounts.toast.checkinRetryFailed"),
+              onClick: () => void batchCheckin(failedIds),
+            }
+          : undefined;
+      if (failedIds.length === targetIds.length) {
+        toast.error(t("wbAccounts.toast.checkinFailBatch"), { description: summary, action: retryAction });
+      } else {
+        toast.success(t("wbAccounts.toast.checkinDone"), { description: summary, action: retryAction });
+      }
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  /** 批量刷新积分 + 旅行状态（只针对已勾选账号）。 */
+  async function batchRefresh() {
+    if (batchBusy) return;
+    const ids = accounts.filter((a) => selectedKeys.has(selectionKey(a.id))).map((a) => a.id);
+    if (ids.length === 0) return;
+    setBatchBusy(true);
+    try {
+      await refreshCredits(ids, { region });
+      await loadTravelMap(ids);
+      toast.success(t("wbAccounts.toast.creditsRefreshed"));
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  /** 账号的撤销 toast 副标题（过 `displayText` 白屏防线；全空则不显示副标题）。 */
+  function accountUndoLabel(account: AccountMeta): string | undefined {
+    return displayText(account.nickname) || displayText(account.email) || displayText(account.id) || undefined;
+  }
+
+  /**
+   * 删除成功后弹「已删除 · 撤销」（P6 T04 §1.4）。
+   *
+   * ★ 撤销必须**真的能撤销**：删除是软删除（账号进回收站，P5 §2.7），撤销就是把账号从
+   * 回收站移回 live —— 走 `api.accountRestore`（**与回收站同一命令**，不另写恢复逻辑）。
+   * 恢复后 `reconcileAccounts` 重取列表，否则用户「撤销了却看不到账号回来」。
+   *
+   * 连续删多个时每条 toast 各自独立（`showUndoToast` 内部**不传固定 id**）。
+   */
+  function offerUndo(keys: readonly string[], description?: string) {
+    showUndoToast({
+      title: keys.length === 1 ? t("undo.deletedTitle") : t("undo.batchTitle", { n: keys.length }),
+      description,
+      undoLabel: t("undo.action"),
+      undoneTitle: t("undo.undone"),
+      undo: async () => {
+        // 逐个恢复：一个失败不阻断其余；全部尝试后再刷新，最后把首个错误抛出（不静默）。
+        let firstError: unknown = null;
+        for (const key of keys) {
+          try {
+            await api.accountRestore(scope, key);
+          } catch (e) {
+            if (!firstError) firstError = e;
+          }
+        }
+        await reconcileAccounts(region);
+        if (firstError) throw firstError;
+      },
+    });
+  }
+
+  /** 批量删除（先确认）。逐个删除，任一个失败不阻断其余。 */
+  async function batchDelete() {
+    if (batchBusy) return;
+    const targets = accounts.filter((a) => selectedKeys.has(selectionKey(a.id)));
+    setBatchDeleteOpen(false);
+    if (targets.length === 0) return;
+    setBatchBusy(true);
+    try {
+      const deleted: AccountMeta[] = [];
+      let failed = 0;
+      for (const a of targets) {
+        try {
+          await deleteAccountStore(a.id, region);
+          deleted.push(a);
+        } catch {
+          failed += 1;
+        }
+      }
+      if (failed > 0) toast.error(t("wbAccounts.toast.deleteFail"), { description: `${failed}` });
+      clearSelection();
+      if (deleted.length > 0) {
+        offerUndo(
+          deleted.map((a) => a.id),
+          deleted.length === 1 ? accountUndoLabel(deleted[0]) : undefined,
+        );
+      }
+    } finally {
+      setBatchBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -560,7 +900,8 @@ function RegionPanel({ region }: { region: Region }) {
     setDeleteTarget(null);
     try {
       await deleteAccountStore(a.id, region);
-      toast.success(t("wbAccounts.toast.deleted"));
+      // 软删除成功 ⇒ 弹「已删除 · 撤销」（撤销走 account_restore，与回收站同一命令）。
+      offerUndo([a.id], accountUndoLabel(a));
     } catch (e) {
       toast.error(t("wbAccounts.toast.deleteFail"), { description: api.asError(e) });
     }
@@ -653,7 +994,14 @@ function RegionPanel({ region }: { region: Region }) {
     }
   }
 
-  async function onSwitchCodebuddyCli(account: AccountMeta) {
+  /** 点「切换 CLI」：先走**统一重启确认**（CLI 例外 —— 不重开，但当前 CLI 会话会中断）。 */
+  function onSwitchCodebuddyCli(account: AccountMeta) {
+    if (codebuddyCliSwitchingId !== null) return;
+    setRestartConfirm({ account, isCli: true });
+  }
+
+  /** 用户在确认框里点了「仍要切换」后，真正执行 CLI 切换。 */
+  async function doSwitchCodebuddyCli(account: AccountMeta) {
     if (codebuddyCliSwitchingId !== null) return;
     setCodebuddyCliSwitchingId(account.id);
     const toastId = toast.loading(t("wbAccounts.toast.switchCliLoading"), {
@@ -676,14 +1024,26 @@ function RegionPanel({ region }: { region: Region }) {
     }
   }
 
-  async function onSwitchCodebuddyCnIde(account: AccountMeta) {
+  /** 点「切换到 CodeBuddy IDE」：先走**统一重启确认**（IDE 需重启，默认勾选自动重开）。 */
+  function onSwitchCodebuddyCnIde(account: AccountMeta) {
+    if (codebuddyCnIdeSwitchingId !== null) return;
+    setRestartConfirm({ account, isCli: false });
+  }
+
+  /** 用户在确认框里点了确认后，真正执行 IDE 切换（`restart` 由确认框决定）。 */
+  async function doSwitchCodebuddyCnIde(account: AccountMeta, restart: boolean) {
     if (codebuddyCnIdeSwitchingId !== null) return;
     setCodebuddyCnIdeSwitchingId(account.id);
     const toastId = toast.loading(t("wbAccounts.toast.switchIdeLoading"), {
-      description: t("wbAccounts.toast.switchIdeLoadingDesc"),
+      // 取消勾选「自动重开」时**不得**说「并重启」—— 那是假承诺（§3.5）。
+      description: restart
+        ? t("wbAccounts.toast.switchIdeLoadingDesc")
+        : t("sessions.restart.switchingNoRestart", {
+            client: t("wbAccounts.program.codebuddyCnIde"),
+          }),
     });
     try {
-      const result = await api.switchCodebuddyCnIdeAccount(account.id, true);
+      const result = await api.switchCodebuddyCnIdeAccount(account.id, restart);
       await refreshCodebuddyCnIdeStatus();
       toast.success(t("wbAccounts.toast.switchIdeUpdated"), {
         id: toastId,
@@ -746,45 +1106,6 @@ function RegionPanel({ region }: { region: Region }) {
     accounts.length > 0 &&
     accounts.every((account) => Boolean(creditMap[account.id]) && !creditLoadingMap[account.id]);
 
-  /**
-   * 列表顺序：**积分优先级为基准**（快过期 / 建议优先的靠前）。
-   *
-   * `pin_current_account` 打开时，把当前登录账号整体提到第一位。这是**显式覆盖**
-   * 而不是往比较函数里插一条分支：置顶与积分排序是同一根轴的两端
-   * （「该切到谁」vs「正在用谁」），插进比较函数会让两者互相打架，
-   * 结果取决于哪条规则先命中 —— 那种「有时候置顶、有时候不置顶」最难排查。
-   * 覆盖之后其余账号的相对顺序完全不动，⭐「建议优先」徽章也照旧渲染，
-   * 因此打开这项设置**不会让用户丢掉原有信息**，只是改变了第一条。
-   */
-  const orderedAccounts = (() => {
-    const base = creditOrderingReady
-      ? accounts
-          .map((account, index) => ({ account, index }))
-          .sort((left, right) => {
-            const leftCredit = creditMap[left.account.id];
-            const rightCredit = creditMap[right.account.id];
-            const rankDifference = creditPriorityRank(leftCredit) - creditPriorityRank(rightCredit);
-            if (rankDifference !== 0) return rankDifference;
-
-            const leftExpiry = soonestRelevantExpiry(leftCredit);
-            const rightExpiry = soonestRelevantExpiry(rightCredit);
-            if (leftExpiry !== rightExpiry) return leftExpiry - rightExpiry;
-
-            const amountDifference = expiringSoonAmount(rightCredit) - expiringSoonAmount(leftCredit);
-            if (amountDifference !== 0) return amountDifference;
-            return left.index - right.index;
-          })
-          .map(({ account }) => account)
-      : accounts;
-
-    if (!switchConfig?.pin_current_account) return base;
-    const pinned = base.find((account) => isWorkbuddyCurrent(account, current));
-    if (!pinned || base[0]?.id === pinned.id) return base;
-    return [pinned, ...base.filter((account) => account.id !== pinned.id)];
-  })();
-  const priorityAccountId = creditOrderingReady
-    ? orderedAccounts.find((account) => hasExpiringSoonCredits(creditMap[account.id]))?.id
-    : undefined;
   const cliCurrentAccountId = codebuddyCli?.activeAccountId;
   // 归一同 `presenceText`：这个值会进 `t()` 的插值（徽标 tooltip 的「当前账号：…」）。
   const workbuddyCurrentName = current
@@ -801,6 +1122,276 @@ function RegionPanel({ region }: { region: Region }) {
     ? codebuddyCnIde.activeAccountName || t("wbAccounts.common.notDetected")
     : t("wbAccounts.common.notInstalled");
   const codebuddyUsesSettingsEnv = codebuddyCli?.authMode === "settings-env";
+
+  /** 账号展示名（表格 / 无障碍标签共用；过 `displayText` 归一，防脏值白屏）。 */
+  const wbAccountName = (account: AccountMeta): string =>
+    displayText(account.nickname) ||
+    displayText(account.email) ||
+    displayText(account.uid) ||
+    displayText(account.id) ||
+    t("wbAccounts.card.unnamed");
+
+  /**
+   * 列表视图配置 —— 平台差异**全部以数据表达**（`P4-TOOLBAR-ARCH §3.1`）。
+   *
+   * 共享组件不写平台判断，只按本配置渲染。排序比较器与置顶的语义与改造前逐条对齐：
+   * - `priority` = 现状写死的「积分优先级」（快过期 / 建议优先靠前）；`creditOrderingReady`
+   *   为假时返回 0 ⇒ 稳定排序保持原序（与旧实现的 `: accounts` 分支等价）；
+   * - `name` / `expiry` 是新增键；
+   * - **无 `recent`**（决策 #3：`AccountMeta` 无 `lastUsed`，不摆假选项）。
+   */
+  const listConfig = useMemo<AccountListConfig<AccountMeta>>(() => {
+    const priorityComparator: AccountComparator<AccountMeta> = (left, right) => {
+      const leftCredit = creditMap[left.id];
+      const rightCredit = creditMap[right.id];
+      const rankDifference = creditPriorityRank(leftCredit) - creditPriorityRank(rightCredit);
+      if (rankDifference !== 0) return rankDifference;
+      const leftExpiry = soonestRelevantExpiry(leftCredit);
+      const rightExpiry = soonestRelevantExpiry(rightCredit);
+      if (leftExpiry !== rightExpiry) return leftExpiry - rightExpiry;
+      return expiringSoonAmount(rightCredit) - expiringSoonAmount(leftCredit);
+    };
+    const nameComparator: AccountComparator<AccountMeta> = (left, right) =>
+      wbAccountName(left).localeCompare(wbAccountName(right), undefined, { numeric: true, sensitivity: "base" });
+    const expiryComparator: AccountComparator<AccountMeta> = (left, right) =>
+      (left.expiresAt ?? Number.POSITIVE_INFINITY) - (right.expiresAt ?? Number.POSITIVE_INFINITY);
+    return {
+      searchText: (account) =>
+        accountSearchText({
+          name: displayText(account.nickname),
+          email: displayText(account.email),
+          uid: displayText(account.uid),
+          remark: displayText(account.remark),
+        }),
+      comparators: {
+        priority: creditOrderingReady ? priorityComparator : () => 0,
+        name: nameComparator,
+        expiry: expiryComparator,
+      },
+      /**
+       * `pin_current_account` 打开时把当前登录账号整体提到第一位。
+       *
+       * 这是**显式覆盖**而不是往比较函数里插一条分支：置顶与积分排序是同一根轴的两端
+       * （「该切到谁」vs「正在用谁」），插进比较函数会让两者互相打架，结果取决于哪条规则
+       * 先命中 —— 那种「有时候置顶、有时候不置顶」最难排查。覆盖之后其余账号的相对顺序
+       * 完全不动，⭐「建议优先」徽章也照旧渲染。
+       */
+      pinFirst: switchConfig?.pin_current_account
+        ? (rows) => {
+            const pinned = rows.find((account) => isWorkbuddyCurrent(account, current));
+            if (!pinned || rows[0]?.id === pinned.id) return rows;
+            return [pinned, ...rows.filter((account) => account.id !== pinned.id)];
+          }
+        : undefined,
+      bucketKey: (account, key) => {
+        if (key === "program") {
+          const labels: string[] = [];
+          if (isWorkbuddyCurrent(account, current)) labels.push("WorkBuddy");
+          if (account.id === cnIdeCurrentAccountId) labels.push("CodeBuddy IDE");
+          if (account.id === cliCurrentAccountId) labels.push("CodeBuddy CLI");
+          return labels.length > 0 ? labels.join(" + ") : t("wbAccounts.toolbar.programBucket.unbound");
+        }
+        if (key === "status") {
+          if (account.needsRelogin) return t("wbAccounts.toolbar.statusBucket.needsRelogin");
+          if (typeof account.expiresAt === "number" && account.expiresAt < Date.now()) {
+            return t("wbAccounts.toolbar.statusBucket.expired");
+          }
+          if (checkinMap[account.id] === false) return t("wbAccounts.toolbar.statusBucket.notCheckedIn");
+          return t("wbAccounts.toolbar.statusBucket.normal");
+        }
+        return null;
+      },
+      availableSorts: ["priority", "name", "expiry"],
+      availableGroups: ["none", "program", "status"],
+    };
+  }, [creditOrderingReady, creditMap, switchConfig, current, cnIdeCurrentAccountId, cliCurrentAccountId, checkinMap, t]);
+
+  /** 过滤 → 排序 → 分桶（视图参数全部留在页内，纯函数不改后端）。 */
+  const filtered = filterAccounts(accounts, listConfig, query);
+  const sorted = sortAccounts(filtered, sort, listConfig);
+  const buckets = groupAccounts(sorted, group, listConfig);
+  /** 只服务「建议优先」徽章：按积分优先级排一遍（与当前 `sort` 无关）。 */
+  const priorityOrdered = sortAccounts(accounts, "priority", listConfig);
+  const priorityAccountId = creditOrderingReady
+    ? priorityOrdered.find((account) => hasExpiringSoonCredits(creditMap[account.id]))?.id
+    : undefined;
+
+  /** 排序 / 分组下拉选项 —— 由 `availableSorts` / `availableGroups`（数据）驱动，无假选项。 */
+  const sortLabels: Partial<Record<AccountSortKey, string>> = {
+    priority: t("wbAccounts.toolbar.sort.priority"),
+    name: t("wbAccounts.toolbar.sort.name"),
+    expiry: t("wbAccounts.toolbar.sort.expiry"),
+  };
+  const groupLabels: Partial<Record<AccountGroupKey, string>> = {
+    none: t("wbAccounts.toolbar.group.none"),
+    program: t("wbAccounts.toolbar.group.program"),
+    status: t("wbAccounts.toolbar.group.status"),
+  };
+  const sortOptions: ToolbarOption[] = listConfig.availableSorts.flatMap((key) => {
+    const label = sortLabels[key];
+    return label ? [{ value: key, label }] : [];
+  });
+  const groupOptions: ToolbarOption[] = listConfig.availableGroups.flatMap((key) => {
+    const label = groupLabels[key];
+    return label ? [{ value: key, label }] : [];
+  });
+
+  /** 全选：只作用于**当前可见**（过滤后）的行；与表头全选读写同一份 `selectedKeys`。 */
+  const allVisibleSelected =
+    sorted.length > 0 && sorted.every((account) => selectedKeys.has(selectionKey(account.id)));
+  const someVisibleSelected =
+    !allVisibleSelected && sorted.some((account) => selectedKeys.has(selectionKey(account.id)));
+  function toggleVisibleSelection() {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      for (const account of sorted) {
+        if (allVisibleSelected) next.delete(selectionKey(account.id));
+        else next.add(selectionKey(account.id));
+      }
+      return next;
+    });
+  }
+  function bucketAllSelected(items: AccountMeta[]): boolean {
+    return items.length > 0 && items.every((account) => selectedKeys.has(selectionKey(account.id)));
+  }
+  function bucketSomeSelected(items: AccountMeta[]): boolean {
+    return !bucketAllSelected(items) && items.some((account) => selectedKeys.has(selectionKey(account.id)));
+  }
+  function toggleBucketSelection(items: AccountMeta[], checked: boolean) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      for (const account of items) {
+        if (checked) next.add(selectionKey(account.id));
+        else next.delete(selectionKey(account.id));
+      }
+      return next;
+    });
+  }
+
+  /** 「清除筛选」出口：复位搜索与分组（`§1.9` 两种空态绝不混用）。 */
+  function clearListFilters() {
+    if (!hasActiveFilter({ query, group })) return;
+    setQuery("");
+    setGroup("none");
+  }
+
+  /** WB 状态徽标（表格用；与卡片同一套语义，只是排布不同）。 */
+  function renderStatusBadges(account: AccountMeta) {
+    const checkedIn = checkinMap[account.id];
+    const expired = typeof account.expiresAt === "number" && account.expiresAt < Date.now();
+    const travel = travelMap[account.id];
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        {checkedIn !== undefined && (
+          <Badge
+            variant={checkedIn ? "success" : "secondary"}
+            className={cn("rounded-md px-1.5 py-0 text-[11px] font-medium", !checkedIn && "text-muted-foreground")}
+          >
+            {checkedIn ? t("wbAccounts.card.checkedIn") : t("wbAccounts.card.notCheckedIn")}
+          </Badge>
+        )}
+        {travel?.label === "traveling" && (
+          <Badge variant="secondary" className="rounded-md px-1.5 py-0 text-[11px] font-medium text-muted-foreground">
+            {t("wbAccounts.card.traveling")}
+          </Badge>
+        )}
+        {(account.needsRelogin || expired) && (
+          <Badge variant="warning" className="rounded-md px-1.5 py-0 text-[11px] font-medium">
+            {account.needsRelogin ? t("wbAccounts.card.needRelogin") : t("wbAccounts.card.tokenExpired")}
+          </Badge>
+        )}
+      </div>
+    );
+  }
+
+  /** 表格「到期」列：Token 到期（长期有效 → 「长期有效」；已过期 → 「Token 已过期」）。 */
+  function formatAccountExpiry(account: AccountMeta): string {
+    if (typeof account.expiresAt !== "number") return t("wbAccounts.card.forever");
+    if (account.expiresAt < Date.now()) return t("wbAccounts.card.tokenExpired");
+    return formatDate(account.expiresAt);
+  }
+
+  /**
+   * 表格列定义（`§1.8`）。列头文案已 i18n；单元格全部返回**已归一**节点
+   * （字符串 / 元素），**绝不返回对象** —— 对象当 React 子节点会卸载整棵树 ⇒ 白屏。
+   *
+   * ⚠️「程序位」列是**只读徽标**（无 `onClick`、无按钮）：表格行只有 2 个可点区
+   * （勾选 + 行本身），门禁对此有静态断言。
+   */
+  const columns: AccountColumn<AccountMeta>[] = [
+    {
+      key: "account",
+      header: t("wbAccounts.table.account"),
+      render: (account) => (
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span
+            className={cn(
+              "flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold",
+              avatarTone(wbAccountName(account)),
+            )}
+          >
+            {wbAccountName(account).charAt(0).toUpperCase()}
+          </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="truncate font-medium" title={wbAccountName(account)}>
+                {wbAccountName(account)}
+              </span>
+              {isWorkbuddyCurrent(account, current) && (
+                <Badge variant="secondary" className="rounded-md px-1.5 py-0 text-[11px] font-medium">
+                  {t("wbAccounts.table.current")}
+                </Badge>
+              )}
+            </div>
+            <div className="truncate text-xs text-muted-foreground" title={accountIdentity(account)}>
+              {accountIdentity(account)}
+            </div>
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      header: t("wbAccounts.table.status"),
+      render: (account) => renderStatusBadges(account),
+    },
+    {
+      key: "credits",
+      header: t("wbAccounts.table.credits"),
+      align: "right",
+      render: (account) => (
+        <span className="tabular-nums">{formatCredits(creditMap[account.id]?.totalRemaining ?? 0)}</span>
+      ),
+    },
+    {
+      key: "expiry",
+      header: t("wbAccounts.table.expiry"),
+      render: (account) => (
+        <span className="tabular-nums text-muted-foreground">{formatAccountExpiry(account)}</span>
+      ),
+    },
+    {
+      key: "programs",
+      header: t("wbAccounts.table.programs"),
+      render: (account) => {
+        const active: string[] = [];
+        if (isWorkbuddyCurrent(account, current)) active.push("WorkBuddy");
+        if (account.id === cnIdeCurrentAccountId) active.push("CodeBuddy IDE");
+        if (account.id === cliCurrentAccountId) active.push("CodeBuddy CLI");
+        return active.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {active.map((label) => (
+              <Badge key={label} variant="secondary" className="rounded-md px-1.5 py-0 text-[11px] font-medium">
+                {label}
+              </Badge>
+            ))}
+          </div>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        );
+      },
+    },
+  ];
 
   const presence = regionPresence(status, accounts);
   /**
@@ -821,6 +1412,101 @@ function RegionPanel({ region }: { region: Region }) {
   const showEmpty = accounts.length === 0 && !current && !error;
   const mismatch = status?.regionMismatch ?? null;
   const expectedAuthFile = status?.authFile || descriptor.authFilename;
+
+  // ---- 详情抽屉的数据装配（字段全部过 `displayText` 出口，见 display-text.ts）----
+  const detail = detailAccount;
+  const detailName = detail
+    ? displayText(detail.nickname) || displayText(detail.uid) || t("wbAccounts.card.unnamed")
+    : "";
+  const detailCredit = detail ? creditMap[detail.id] : undefined;
+  const detailLoading = detail ? Boolean(creditLoadingMap[detail.id]) : false;
+  const detailSections: DetailSection[] = detail
+    ? [
+        {
+          key: "account",
+          title: t("wbAccounts.detail.section.account"),
+          rows: [
+            { label: t("wbAccounts.detail.email"), value: displayText(detail.email) ?? "—", mono: true },
+            { label: t("wbAccounts.detail.uid"), value: displayText(detail.uid) ?? "—", mono: true },
+            { label: t("wbAccounts.detail.id"), value: displayText(detail.id) ?? "—", mono: true },
+            {
+              label: t("wbAccounts.detail.tokenExpiry"),
+              value:
+                typeof detail.expiresAt === "number"
+                  ? detail.expiresAt < Date.now()
+                    ? t("wbAccounts.detail.expired")
+                    : formatDate(detail.expiresAt)
+                  : t("wbAccounts.card.forever"),
+            },
+            {
+              label: t("wbAccounts.detail.checkedIn"),
+              value:
+                checkinMap[detail.id] === true
+                  ? t("wbAccounts.card.checkedIn")
+                  : checkinMap[detail.id] === false
+                    ? t("wbAccounts.card.notCheckedIn")
+                    : "—",
+            },
+          ],
+        },
+      ]
+    : [];
+  const detailPacks: DetailPack[] =
+    detail && detailCredit?.ok
+      ? (detailCredit.resources ?? [])
+          .filter((resource) => resource.remaining > 0)
+          .map((resource, index) => ({ resource, index }))
+          .sort((left, right) => {
+            const leftExpiry = left.resource.expireAt ?? Number.POSITIVE_INFINITY;
+            const rightExpiry = right.resource.expireAt ?? Number.POSITIVE_INFINITY;
+            return leftExpiry === rightExpiry ? left.index - right.index : leftExpiry - rightExpiry;
+          })
+          .map(({ resource }) => ({
+            key: `${resource.packageCode ?? resource.packageName ?? "pack"}-${resource.expireAt ?? "none"}`,
+            // `packageName` / `packageCode` 声明为 `string | null`，但后端可能吐对象
+            // （`api.ts` 只归一了账号字段，没归一 credit 的这两个）⇒ 直接当 React 子节点会
+            // 卸载整棵树（issue #2 白屏）。过 `displayText` 出口归一，取不到再回落。
+            name: displayText(resource.packageName) || displayText(resource.packageCode) || t("wbAccounts.card.creditPackFallback"),
+            remainingText: formatCredits(resource.remaining),
+            totalText: formatCredits(resource.total),
+            usedText: t("wbAccounts.card.used", { n: formatCredits(resource.used) }),
+            expiryText: resource.expired
+              ? t("wbAccounts.card.expired")
+              : resource.expiringSoon
+                ? t("wbAccounts.card.expiresIn7")
+                : resource.expireAt
+                  ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(resource.expireAt, t) })
+                  : t("wbAccounts.card.forever"),
+            expired: resource.expired,
+            expiringSoon: resource.expiringSoon,
+            ratio: resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0,
+          }))
+      : [];
+  const detailPrograms: DetailProgramBadge[] = detail
+    ? [
+        {
+          key: "workbuddy",
+          label: "WorkBuddy",
+          current: isWorkbuddyCurrent(detail, current),
+          installed: true,
+          hasDataDir: true,
+        },
+        {
+          key: "ide",
+          label: "CodeBuddy IDE",
+          current: detail.id === cnIdeCurrentAccountId,
+          installed: Boolean(codebuddyCnIde?.installed),
+          hasDataDir: Boolean(codebuddyCnIde?.installed),
+        },
+        {
+          key: "cli",
+          label: "CodeBuddy CLI",
+          current: detail.id === cliCurrentAccountId,
+          installed: Boolean(codebuddyCli?.configured),
+          hasDataDir: Boolean(codebuddyCli?.configured),
+        },
+      ]
+    : [];
 
   return (
     <>
@@ -893,9 +1579,11 @@ function RegionPanel({ region }: { region: Region }) {
 
       {/* 空态（未安装 / 未登录） */}
       {loading && accounts.length === 0 ? (
-        <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
-          <Loader2 className="animate-spin" />
-          {t("wbAccounts.page.loadingAccounts")}
+        /* 区块**首次加载**用 `<Skeleton>`（§3.6），形状接近真实卡片栅格（不是一行文字）。 */
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))] gap-5">
+          {[0, 1, 2].map((index) => (
+            <Skeleton key={index} className="h-44 w-full rounded-2xl" />
+          ))}
         </div>
       ) : showEmpty ? (
         <EmptyRegionCard
@@ -1045,39 +1733,65 @@ function RegionPanel({ region }: { region: Region }) {
                   {accounts.length}
                 </Badge>
               </div>
-              <TooltipProvider delayDuration={400}>
-                <div className="ml-auto flex items-center gap-1">
-                  <div className="mr-1 flex items-center gap-2.5">
-                    <label htmlFor={`accounts-auto-checkin-${region}`} className="cursor-pointer text-xs font-medium text-muted-foreground">
-                      {t("wbAccounts.page.autoCheckin")}
-                    </label>
-                    <DemoAction>
-                      <Switch
-                        id={`accounts-auto-checkin-${region}`}
-                        checked={autoCheckinConfig?.enabled ?? false}
-                        disabled={!autoCheckinConfig || autoCheckinSaving}
-                        onCheckedChange={(enabled) => void onAutoCheckinChange(enabled)}
-                        aria-label={t("wbAccounts.page.autoCheckin")}
-                      />
-                    </DemoAction>
-                    {autoCheckinSaving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-label={t("wbAccounts.page.autoCheckinSaving")} />}
-                  </div>
-                  <div className="mr-1 flex items-center gap-2.5">
-                    <label htmlFor={`accounts-auto-travel-${region}`} className="cursor-pointer text-xs font-medium text-muted-foreground">
-                      {t("wbAccounts.page.autoTravel")}
-                    </label>
-                    <DemoAction>
-                      <Switch
-                        id={`accounts-auto-travel-${region}`}
-                        checked={autoTravelConfig?.enabled ?? false}
-                        disabled={!autoTravelConfig || autoTravelSaving}
-                        onCheckedChange={(enabled) => void onAutoTravelChange(enabled)}
-                        aria-label={t("wbAccounts.page.autoTravel")}
-                      />
-                    </DemoAction>
-                    {autoTravelSaving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-label={t("wbAccounts.page.autoTravelSaving")} />}
-                  </div>
-                  <Separator orientation="vertical" className="mx-2 h-5" />
+            </div>
+
+            {/* ★ 工具栏**常驻**（不随结果为空而消失）：搜索框的 DOM 因此不会被 unmount，
+                中文输入法连续组词不丢字（IME 约束，§1.4）。工具栏与列表是两个独立子树。 */}
+            <AccountToolbar
+              query={query}
+              onQueryChange={setQuery}
+              searchInputRef={searchRef}
+              sort={sort}
+              sortOptions={sortOptions}
+              onSortChange={(next) => setSort(next as AccountSortKey)}
+              group={group}
+              groupOptions={groupOptions}
+              onGroupChange={(next) => setGroup(next as AccountGroupKey)}
+              view={view}
+              onViewChange={setView}
+              tableViewEnabled={tableEnabled}
+              selection={{
+                allSelected: allVisibleSelected,
+                someSelected: someVisibleSelected,
+                onToggleAll: toggleVisibleSelection,
+                label: allVisibleSelected ? t("shared.toolbar.deselectAll") : t("shared.toolbar.selectAll"),
+              }}
+            >
+              <div className="ml-auto flex items-center gap-1">
+                <div className="mr-1 flex items-center gap-2.5">
+                  <label htmlFor={`accounts-auto-checkin-${region}`} className="cursor-pointer text-xs font-medium text-muted-foreground">
+                    {t("wbAccounts.page.autoCheckin")}
+                  </label>
+                  <DemoAction>
+                    <Switch
+                      id={`accounts-auto-checkin-${region}`}
+                      checked={autoCheckinConfig?.enabled ?? false}
+                      disabled={!autoCheckinConfig || autoCheckinSaving}
+                      onCheckedChange={(enabled) => void onAutoCheckinChange(enabled)}
+                      aria-label={t("wbAccounts.page.autoCheckin")}
+                    />
+                  </DemoAction>
+                  {autoCheckinSaving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-label={t("wbAccounts.page.autoCheckinSaving")} />}
+                </div>
+                <div className="mr-1 flex items-center gap-2.5">
+                  <label htmlFor={`accounts-auto-travel-${region}`} className="cursor-pointer text-xs font-medium text-muted-foreground">
+                    {t("wbAccounts.page.autoTravel")}
+                  </label>
+                  <DemoAction>
+                    <Switch
+                      id={`accounts-auto-travel-${region}`}
+                      checked={autoTravelConfig?.enabled ?? false}
+                      disabled={!autoTravelConfig || autoTravelSaving}
+                      onCheckedChange={(enabled) => void onAutoTravelChange(enabled)}
+                      aria-label={t("wbAccounts.page.autoTravel")}
+                    />
+                  </DemoAction>
+                  {autoTravelSaving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-label={t("wbAccounts.page.autoTravelSaving")} />}
+                </div>
+                <Separator orientation="vertical" className="mx-2 h-5" />
+                {/* `compact`（卡片密度）**仅在卡片视图下渲染**（决策 #5）：表格视图下密度无意义，
+                    且与视图控件并排会构成「两个看起来能切的控件」。 */}
+                {effectiveView === "card" && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -1092,61 +1806,150 @@ function RegionPanel({ region }: { region: Region }) {
                     </TooltipTrigger>
                     <TooltipContent side="top">{compact ? t("wbAccounts.page.compactToLoose") : t("wbAccounts.page.compactToCompact")}</TooltipContent>
                   </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span>
-                        <DemoAction>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="size-9 rounded-lg"
-                            disabled={refreshingCredits || checkinAllRunning || accounts.length === 0}
-                            onClick={() => void onRefreshCredits()}
-                            aria-label={t("wbAccounts.page.refreshCredits")}
-                          >
-                            <RefreshCw className={refreshingCredits || checkinAllRunning ? "animate-spin" : undefined} />
-                          </Button>
-                        </DemoAction>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">{api.isDemoMode() ? t("wbAccounts.page.demoDisabled") : t("wbAccounts.page.refreshCredits")}</TooltipContent>
-                  </Tooltip>
-                </div>
-              </TooltipProvider>
-            </div>
-            <div className={cn("grid min-w-0 items-start gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
-                {orderedAccounts.map((a) => (
-                  <AccountCard
-                    key={a.id}
-                    account={a}
-                    compact={compact}
-                    onDelete={onDelete}
-                    onSwitch={setSwitchAccount}
-                    onSaveRemark={onSaveRemark}
-                    onCheckin={onCheckin}
-                    onRefresh={onRefresh}
-                    todayCheckedIn={checkinMap[a.id]}
-                    travelStatus={travelMap[a.id]}
-                    credit={creditMap[a.id]}
-                    creditLoading={creditLoadingMap[a.id]}
-                    creditUpdatedAt={creditUpdatedAtMap[a.id]}
-                    creditPriority={a.id === priorityAccountId}
-                    workbuddyActive={isWorkbuddyCurrent(a, current)}
-                    codebuddyCliConfigured={codebuddyCli?.configured && !codebuddyCli.migrationRequired && !codebuddyCli.syncPending}
-                    codebuddyCliActive={a.id === cliCurrentAccountId}
-                    codebuddyCliBusy={codebuddyCliSwitchingId !== null}
-                    onSwitchCodebuddyCli={onSwitchCodebuddyCli}
-                    codebuddyCliLoading={codebuddyCliSwitchingId === a.id}
-                    codebuddyCnIdeAvailable={Boolean(codebuddyCnIde?.installed)}
-                    codebuddyCnIdeActive={a.id === cnIdeCurrentAccountId}
-                    codebuddyCnIdeBusy={codebuddyCnIdeSwitchingId !== null}
-                    codebuddyCnIdeLoading={codebuddyCnIdeSwitchingId === a.id}
-                    onSwitchCodebuddyCnIde={onSwitchCodebuddyCnIde}
-                    onAddPlaintextAccount={() => setOauthOpen(true)}
-                    featuresDisabled={false}
-                  />
-                ))}
+                )}
+                {/* 回收站入口（P5 §2.7.1）：按**当前作用域**过滤 —— 只列本作用域被软删除的账号。
+                    入口放账号页工具栏（不放设置页），避免与 P7「备份与恢复」的整库级语义混淆。 */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <DemoAction>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-9 rounded-lg"
+                          onClick={() => setRecycleOpen(true)}
+                          aria-label={t("recycleBin.title")}
+                        >
+                          <Trash2 />
+                        </Button>
+                      </DemoAction>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{api.isDemoMode() ? t("wbAccounts.page.demoDisabled") : t("recycleBin.title")}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <DemoAction>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-9 rounded-lg"
+                          disabled={refreshingCredits || checkinAllRunning || accounts.length === 0}
+                          onClick={() => void onRefreshCredits()}
+                          aria-label={t("wbAccounts.page.refreshCredits")}
+                        >
+                          <RefreshCw className={refreshingCredits || checkinAllRunning ? "animate-spin" : undefined} />
+                        </Button>
+                      </DemoAction>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{api.isDemoMode() ? t("wbAccounts.page.demoDisabled") : t("wbAccounts.page.refreshCredits")}</TooltipContent>
+                </Tooltip>
               </div>
+            </AccountToolbar>
+
+            <div className="mt-4">
+              {/* 两种空态**绝不混用**（§1.9）：真没有账号 → 「还没有账号」+ 添加出口；
+                  有账号但被筛没 → 「没有符合条件的账号」+ 清除筛选出口。 */}
+              {accounts.length === 0 ? (
+                <EmptyState
+                  icon={UserPlus}
+                  title={t("shared.list.empty.none")}
+                  description={t("shared.list.empty.noneDesc")}
+                  action={
+                    <Button onClick={() => setOauthOpen(true)}>
+                      <QrCode />
+                      {t("wbAccounts.page.oauthAdd")}
+                    </Button>
+                  }
+                />
+              ) : sorted.length === 0 ? (
+                <EmptyState
+                  icon={SearchX}
+                  title={t("shared.list.empty.filtered")}
+                  description={t("shared.list.empty.filteredDesc")}
+                  action={
+                    <Button variant="outline" onClick={clearListFilters}>
+                      {t("shared.list.empty.clearFilters")}
+                    </Button>
+                  }
+                />
+              ) : (
+                <div className="space-y-6">
+                  {buckets.map((bucket) => (
+                    <div key={bucket.key ?? "__all__"} className="min-w-0">
+                      {bucket.key !== null && (
+                        <div className="mb-3 flex items-center gap-2">
+                          <h3 className="text-sm font-semibold tracking-tight">{bucket.key}</h3>
+                          <Badge
+                            variant="secondary"
+                            className="h-5 min-w-5 rounded-full border-0 px-1.5 text-[11px] tabular-nums text-muted-foreground shadow-none"
+                          >
+                            {bucket.items.length}
+                          </Badge>
+                        </div>
+                      )}
+                      {effectiveView === "table" ? (
+                        <AccountTable
+                          columns={columns}
+                          rows={bucket.items}
+                          rowKey={(account) => selectionKey(account.id)}
+                          selectedIds={selectedKeys}
+                          onToggleSelect={toggleSelect}
+                          onToggleAll={(checked) => toggleBucketSelection(bucket.items, checked)}
+                          allSelected={bucketAllSelected(bucket.items)}
+                          someSelected={bucketSomeSelected(bucket.items)}
+                          onOpen={openDetail}
+                          isCurrent={(account) => isWorkbuddyCurrent(account, current)}
+                          selectAllLabel={t("shared.table.selectAllAria")}
+                          selectRowLabel={(account) => t("shared.table.selectRowAria", { name: wbAccountName(account) })}
+                          openRowLabel={(account) => t("shared.table.openRowAria", { name: wbAccountName(account) })}
+                        />
+                      ) : (
+                        <div className={cn("grid min-w-0 items-start gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
+                          {bucket.items.map((a) => (
+                            <AccountCard
+                              key={a.id}
+                              account={a}
+                              compact={compact}
+                              onDelete={onDelete}
+                              onSwitch={setSwitchAccount}
+                              onCheckin={onCheckin}
+                              onRefresh={onRefresh}
+                              todayCheckedIn={checkinMap[a.id]}
+                              travelStatus={travelMap[a.id]}
+                              credit={creditMap[a.id]}
+                              creditLoading={creditLoadingMap[a.id]}
+                              creditUpdatedAt={creditUpdatedAtMap[a.id]}
+                              creditPriority={a.id === priorityAccountId}
+                              workbuddyActive={isWorkbuddyCurrent(a, current)}
+                              codebuddyCliConfigured={codebuddyCli?.configured && !codebuddyCli.migrationRequired && !codebuddyCli.syncPending}
+                              codebuddyCliActive={a.id === cliCurrentAccountId}
+                              codebuddyCliBusy={codebuddyCliSwitchingId !== null}
+                              onSwitchCodebuddyCli={onSwitchCodebuddyCli}
+                              codebuddyCliLoading={codebuddyCliSwitchingId === a.id}
+                              codebuddyCnIdeAvailable={Boolean(codebuddyCnIde?.installed)}
+                              codebuddyCnIdeActive={a.id === cnIdeCurrentAccountId}
+                              codebuddyCnIdeBusy={codebuddyCnIdeSwitchingId !== null}
+                              codebuddyCnIdeLoading={codebuddyCnIdeSwitchingId === a.id}
+                              onSwitchCodebuddyCnIde={onSwitchCodebuddyCnIde}
+                              onAddPlaintextAccount={() => setOauthOpen(true)}
+                              onGuideToSetting={onGuideToSetting}
+                              selected={selectedKeys.has(selectionKey(a.id))}
+                              onToggleSelect={toggleSelect}
+                              onOpenDetail={openDetail}
+                              onEditRemark={openRemark}
+                              featuresDisabled={false}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </section>
         </>
       )}
@@ -1180,6 +1983,37 @@ function RegionPanel({ region }: { region: Region }) {
           void refreshRegionStatus(region);
           void refreshCodebuddyCliStatus();
           void refreshCodebuddyCnIdeStatus();
+        }}
+      />
+
+      {/* 回收站（P5 §2.7.1）：恢复 = 移回 live ⇒ 成功后重取账号库，让恢复的账号立刻回到列表。 */}
+      <RecycleBinSheet
+        open={recycleOpen}
+        onOpenChange={setRecycleOpen}
+        scope={scope}
+        onRestored={() => void reconcileAccounts(region)}
+      />
+
+      {/* 统一重启确认（P8 T03 / §3.15.3）：**所有**客户端切换走同一条流程。
+          CLI 例外（`isCli`）⇒ 不渲染「自动重开」，文案如实写「当前 CLI 会话会中断」；
+          IDE ⇒ 「需重启」文案 + 默认勾选自动重开。 */}
+      <RestartConfirmDialog
+        open={restartConfirm !== null}
+        onOpenChange={(o) => {
+          if (!o) setRestartConfirm(null);
+        }}
+        clientLabel={
+          restartConfirm?.isCli
+            ? t("wbAccounts.program.codebuddyCli")
+            : t("wbAccounts.program.codebuddyCnIde")
+        }
+        isCli={restartConfirm?.isCli ?? false}
+        onConfirm={(restart) => {
+          const target = restartConfirm;
+          setRestartConfirm(null);
+          if (!target) return;
+          if (target.isCli) void doSwitchCodebuddyCli(target.account);
+          else void doSwitchCodebuddyCnIde(target.account, restart);
         }}
       />
 
@@ -1268,6 +2102,70 @@ function RegionPanel({ region }: { region: Region }) {
           </div>
           <DialogFooter>
             <Button onClick={() => setMismatchDetailOpen(false)}>{t("wbAccounts.dialog.oauthClose")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 账号详情抽屉（P4）：共享壳 + 本页装配的 sections / packs / programs。 */}
+      <AccountDetailDrawer
+        open={detail !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailAccount(null);
+        }}
+        name={detailName}
+        subtitle={detail ? accountIdentity(detail) : ""}
+        avatarSeed={detailName}
+        loading={detailLoading}
+        packs={detailPacks}
+        sections={detailSections}
+        programs={detailPrograms}
+        // ★ B5：签到积分（**有数据才渲染**；查询未回来 / 失败时为 `null`）。
+        checkin={
+          detail && checkinDetailMap[detail.id]
+            ? {
+                todayCheckedIn: checkinDetailMap[detail.id].todayCheckedIn,
+                ...checkinCreditsOf(checkinDetailMap[detail.id]),
+              }
+            : null
+        }
+        remark={detail ? displayText(detail.remark)?.trim() || "" : ""}
+        onSaveRemark={detail ? (remark) => onSaveRemark(detail, remark) : undefined}
+        autoEditRemark={detailAutoEditRemark}
+        empty={{
+          title: t("shared.drawer.empty.title"),
+          description: t("shared.drawer.empty.description"),
+          action: (
+            <Button size="sm" variant="outline" onClick={() => void onRecheck()}>
+              {t("wbAccounts.empty.recheck")}
+            </Button>
+          ),
+        }}
+      />
+
+      {/* 最小批量操作条（P4）：仅在有勾选时浮现。 */}
+      <AccountBatchBar
+        selectedCount={selectedKeys.size}
+        busy={batchBusy}
+        onCheckin={() => void batchCheckin()}
+        onRefresh={() => void batchRefresh()}
+        onDelete={() => setBatchDeleteOpen(true)}
+        onClear={clearSelection}
+      />
+
+      {/* 批量删除确认（桌面 App 不支持 window.confirm）。 */}
+      <Dialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("shared.batch.deleteTitle")}</DialogTitle>
+            <DialogDescription>{t("shared.batch.deleteDesc", { n: selectedKeys.size })}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchDeleteOpen(false)}>
+              {t("shared.batch.cancel")}
+            </Button>
+            <Button variant="destructive" onClick={() => void batchDelete()}>
+              {t("shared.batch.confirm")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -19,17 +19,15 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { REGIONS, regionDescriptor } from "@/lib/region";
 import { cn } from "@/lib/utils";
 import type { ApiKeyRecord, Region } from "@/lib/types";
 import { useGatewayStore } from "@/stores/gateway";
 
-function formatDate(ts: number): string {
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return "—";
-  return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-}
+/* P3：本地 `formatDate` 已移到 `@/lib/format` —— 它与 Trae 侧各写一份且**已经漂移**：
+   本版把时间戳 `0` 渲染成 `01-01 08:00` 这种**假时间**，共享版会返回 `—`。 */
 
 /** API Key 列表 + 创建对话框 + 一次性明文展示 + 吊销 / 删除（P0-3）。 */
 export function ApiKeyTable({ className }: { className?: string }) {

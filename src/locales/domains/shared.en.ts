@@ -13,7 +13,9 @@ export const en = {
   "shared.region.filter.all": "Combined",
 
   // ---- Statistics scope bar (region-bar.tsx) ----
-  "shared.region.scope.aria": "Statistics scope",
+  /* P3: `shared.region.scope.aria` removed (region selector moved to the sidebar). */
+  "shared.region.combine.aria": "Combine both regions",
+  "shared.region.combine.label": "Combine both regions",
 
   // ---- Gateway account pool status (gateway.ts — one card shared by both sides) ----
   "shared.poolStatus.available": "Available",
@@ -24,6 +26,67 @@ export const en = {
 
   // ---- Gateway account pool card (components/gateway/account-pool-card.tsx) ----
   "shared.gateway.pool.title": "Account pool",
+  /* P3: snippet field labels are shared (previously one set per platform). */
+  /* P11: `snippet.apiBase` / `snippet.apiKey` removed — the `cherry` snippet that used them was
+     dropped with the tool-set change (see `shared.gateway.access.*`). "Base URL" / "API Key" are
+     generic parameter names (English contracts), hardcoded in the snippet, not in the word list. */
+  "shared.gateway.snippet.model": "Model",
+  "shared.gateway.snippet.modelPlaceholder": "Pick a model from the list",
+
+  // =====================================================================
+  // ---- Access guide (P11 §1.7) — protocol × tool, shared by both platforms ----
+  // =====================================================================
+  // ⚠️ Snippet key names (`ANTHROPIC_BASE_URL` / `base_url` / `env_key` …) are contracts read by
+  //    external tools and stay hardcoded in English; only natural-language labels live here.
+  "shared.gateway.access.protocol.openai": "OpenAI-compatible",
+  "shared.gateway.access.protocol.anthropic": "Anthropic-compatible",
+  "shared.gateway.access.tool.genericOpenai": "Other OpenAI-compatible tools",
+  "shared.gateway.access.tool.genericAnthropic": "Other Anthropic-compatible tools",
+  // `{openai}` / `{anthropic}` are the English endpoint contracts.
+  "shared.gateway.access.endpointNote":
+    "Protocol endpoints: {openai} (OpenAI) · {anthropic} (Anthropic) — both are supported, including streaming.",
+  "shared.gateway.access.authHeaderLabel": "Auth header",
+  "shared.gateway.access.authNote": "Auth header: {header}",
+  // Codex (OpenAI protocol) — snippet key names (`base_url` / `env_key`) stay English.
+  "shared.gateway.access.codex.title": "Codex (OpenAI protocol) — custom model_provider",
+  "shared.gateway.access.codex.envKeyNote": "environment variable name; set its value to your key",
+  "shared.gateway.access.codex.docNote": "see the official Codex docs for the remaining fields",
+  // opencode — snippet key names (`baseURL` / `apiKey`) stay English.
+  "shared.gateway.access.opencode.title": "opencode — provider config",
+  "shared.gateway.access.opencode.docNote": "see the official opencode docs for field names",
+  // generic model line hint; `{url}` is the English endpoint contract (`…/v1/models`).
+  "shared.gateway.access.generic.modelHint": "auto-discovered from GET {url}",
+  /* Shared strings for the model-list "source bar" (components/gateway/catalog-source-bar.tsx).
+     Only the parts identical across both platforms live here; source vocabulary and button
+     labels are injected by the caller (WB three levels / Trae "client cache / not loaded"). */
+  "shared.gateway.sourceBar.sourceLabel": "Source",
+  "shared.gateway.sourceBar.identifiedAt": "Last identified {time}",
+  "shared.gateway.sourceBar.neverIdentified": "Never identified",
+  /* ⚠️ Only "identified" — never "N models available" (HTTP 200 ≠ usable; §3.17.3 pitfall 3 / D24). */
+  "shared.gateway.sourceBar.count": "{n} models identified",
+  "shared.gateway.sourceBar.autoHint": "Identified automatically after connecting — no need to fill in model names",
+  "shared.gateway.sourceBar.justNow": "just now",
+  "shared.gateway.sourceBar.minutesAgo": "{n} min ago",
+  "shared.gateway.sourceBar.hoursAgo": "{n} h ago",
+  "shared.gateway.sourceBar.daysAgo": "{n} d ago",
+  /* Model table (P11 §1.6) — components/gateway/model-table.tsx, shared by both platforms.
+     Columns = model / upstream / gateway exposure; no "scope" column (#1), no "protocol" column (#2). */
+  "shared.gateway.models.colModel": "Model",
+  "shared.gateway.models.colUpstream": "Upstream",
+  "shared.gateway.models.colExposed": "Gateway exposure",
+  "shared.gateway.models.upstreamAvailable": "Available",
+  "shared.gateway.models.upstreamUnavailable": "Unavailable",
+  "shared.gateway.models.exposed": "Exposed",
+  "shared.gateway.models.disabled": "Disabled",
+  "shared.gateway.models.disable": "Disable",
+  "shared.gateway.models.enable": "Enable",
+  "shared.gateway.models.count": "{served} of {total} exposed",
+  /* ★ Both exits take effect together — otherwise the disable switch is fake (§3.18.1). */
+  "shared.gateway.models.twoExits":
+    "A disabled model does not appear in `/v1/models`, and calling it directly is rejected with an explanation — both exits take effect together, otherwise the switch is fake.",
+  "shared.gateway.models.disabledToast": "Disabled “{name}”",
+  "shared.gateway.models.enabledToast": "Enabled “{name}”",
+  "shared.gateway.models.toggleFail": "Action failed",
   "shared.gateway.pool.totalRequests": "{count} requests",
   "shared.gateway.pool.tile.available": "Routable",
   "shared.gateway.pool.tile.cooling": "Cooling",
@@ -45,6 +108,33 @@ export const en = {
   // ---- Clipboard (clipboard.ts) ----
   "shared.clipboard.copied": "Copied",
   "shared.clipboard.failed": "Copy failed — select the text and copy it manually",
+
+  // ---- Desktop companion window (components/companion/*, a separate window) ----
+  // The companion is a separate webview (`?window=companion`, see the entry split in
+  // `main.tsx`) sharing this word list. State labels / read-only footnote / empty state /
+  // a11y labels come in T03; T01 only adds the title key the skeleton actually uses.
+  "shared.companion.title": "Session status",
+  // Sidebar entry (App.tsx `CompanionToggle`): tooltip + accessible label.
+  // It is one of the two faces of the same switch as the tray item (both converge on
+  // `companion_set_visible`), so it shares the tray's wording.
+  "shared.companion.entry": "Session companion",
+  "shared.companion.badge.waiting": "{count} awaiting",
+  "shared.companion.footnote": "Read-only · Click to return to the session · Hover to reveal the title",
+  "shared.companion.close": "Hide the companion window",
+  "shared.companion.state.running": "Running",
+  "shared.companion.state.waiting": "Awaiting",
+  "shared.companion.state.done": "Done",
+  "shared.companion.state.failed": "Failed",
+  "shared.companion.row.aria": "{source} · {state} · {hint}",
+  "shared.companion.info.source": "Source",
+  "shared.companion.info.time": "Time",
+  "shared.companion.jump.ok": "Focused {source}",
+  "shared.companion.jump.failed": "Couldn't focus the source: {message}",
+  "shared.companion.empty.title": "No sessions",
+  "shared.companion.empty.description": "Statuses appear here after you start a task in a client.",
+  "shared.companion.empty.refresh": "Refresh",
+  "shared.companion.error.title": "Couldn't load session status",
+  "shared.companion.loading": "Loading session status",
 
   // ---- Demo mode guard (demo-action.tsx) ----
   "shared.demo.unavailable": "Not available in demo mode",
@@ -83,6 +173,8 @@ export const en = {
   "shared.demo.session.agentAcp": "Design Agent and ACP management settings",
   "shared.demo.session.characterAudio": "Complete the character idiom dual audio",
   "shared.demo.session.accountCard": "Unify account card visuals and interactions",
+  "shared.demo.session.replicaAlpha": "Rework replica ownership computation",
+  "shared.demo.session.replicaBeta": "Unify the cross-account session copy entry",
   // ---- Model catalog ----
   "shared.demo.catalog.limitedFree": "Limited-time free",
   "shared.demo.catalog.promo": "Promo",
@@ -172,4 +264,61 @@ export const en = {
   "shared.punct.period": ". ",
   "shared.punct.openParen": " (",
   "shared.punct.closeParen": ")",
+
+  // ---- Account detail drawer (components/account-detail-drawer.tsx, shared) ----
+  "shared.drawer.close": "Close",
+  "shared.drawer.loading": "Loading details…",
+  "shared.drawer.remark.title": "Remark",
+  "shared.drawer.remark.placeholder": "e.g. DS4.1 quota · unlocks 10/03",
+  "shared.drawer.remark.aria": "Remark for {name}",
+  "shared.drawer.remark.editAria": "Edit remark for {name}",
+  "shared.drawer.remark.add": "Add remark",
+  "shared.drawer.packs.title": "Credits / packs",
+  // ★ B5: check-in credits (fields come from the **measured upstream response**).
+  "shared.drawer.checkin.title": "Check-in",
+  "shared.drawer.checkin.today": "Checked in today",
+  "shared.drawer.checkin.streak": "{n}-day streak",
+  "shared.drawer.checkin.total": "{n} credits total",
+  "shared.drawer.programs.title": "Programs (read-only)",
+  "shared.drawer.program.current": "Current account",
+  "shared.drawer.program.installed": "Installed",
+  "shared.drawer.program.noDataDir": "No data dir",
+  "shared.drawer.program.missing": "Not detected",
+  "shared.drawer.empty.title": "No details",
+  "shared.drawer.empty.description": "No details to show for this account yet; re-check and try again.",
+
+  // ---- Minimal batch bar (components/account-batch-bar.tsx, shared) ----
+  "shared.batch.selected": "{n} selected",
+  "shared.batch.checkin": "Check in",
+  "shared.batch.refresh": "Refresh",
+  "shared.batch.delete": "Delete",
+  "shared.batch.clear": "Clear selection",
+  "shared.batch.deleteTitle": "Delete accounts in bulk",
+  "shared.batch.deleteDesc": "Delete the {n} selected accounts? You can restore them from the recycle bin.",
+  "shared.batch.confirm": "Delete",
+  "shared.batch.cancel": "Cancel",
+
+  // ---- Account list toolbar (components/account-toolbar.tsx, shared) ----
+  "shared.toolbar.searchPlaceholder": "Search accounts…",
+  "shared.toolbar.searchAria": "Search accounts",
+  "shared.toolbar.sortAria": "Sort by",
+  "shared.toolbar.groupAria": "Group by",
+  "shared.toolbar.viewAria": "Switch card / table view",
+  "shared.toolbar.viewCard": "Cards",
+  "shared.toolbar.viewTable": "Table",
+  "shared.toolbar.viewTableDisabled": "Window is too narrow for the table view; widen it and try again",
+  "shared.toolbar.selectAll": "Select all",
+  "shared.toolbar.deselectAll": "Deselect all",
+
+  // ---- Account list empty states (two distinct kinds — never mix) ----
+  "shared.list.empty.none": "No accounts yet",
+  "shared.list.empty.noneDesc": "Add or import accounts from this machine to manage them here.",
+  "shared.list.empty.filtered": "No accounts match your filters",
+  "shared.list.empty.filteredDesc": "Try another keyword, or clear the filters to see all accounts.",
+  "shared.list.empty.clearFilters": "Clear filters",
+
+  // ---- Account table (components/account-table.tsx, shared) ----
+  "shared.table.selectAllAria": "Select all in list",
+  "shared.table.selectRowAria": "Select {name}",
+  "shared.table.openRowAria": "Open details for {name}",
 };

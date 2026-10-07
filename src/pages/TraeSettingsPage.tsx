@@ -334,9 +334,13 @@ function RuntimeLogsSection() {
             {t("trae.page.settings.detailLabel")}
           </span>
           <span className="text-xs text-muted-foreground">
-            {data
-              ? t("trae.page.settings.showing", { shown: entries.length, total: data.total })
-              : t("trae.page.settings.loading")}
+            {data ? (
+              t("trae.page.settings.showing", { shown: entries.length, total: data.total })
+            ) : (
+              /* P3：原来这里显示文字「加载中…」—— §3.6 禁止文字型加载态，
+                 改用 `Skeleton` 占位（尺寸贴近真实文案，避免加载完跳动）。 */
+              <Skeleton className="inline-block h-3 w-20 align-middle" />
+            )}
           </span>
         </div>
 
