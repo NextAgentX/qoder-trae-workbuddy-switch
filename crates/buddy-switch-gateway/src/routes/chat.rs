@@ -12,7 +12,7 @@ use buddy_switch_core::modules::region::Region;
 use crate::logging::RequestMeta;
 use crate::outbound::PromptMode;
 use crate::protocol::openai::{CompletionAccumulator, SsePassthrough};
-use crate::routes::relay::{self, RelayOutcome, RelayRequest};
+use crate::routes::relay::{self, RelayKind, RelayOutcome, RelayRequest};
 use crate::routes::{authenticate, json_response, openai_error, parse_body, sse_response};
 use crate::session_headers;
 use crate::state::GatewayState;
@@ -67,6 +67,15 @@ pub async fn handler(
             ))
         }
     };
+
+    // ★ 出口 ②（P11）：被禁用的模型**直接拒绝** —— 与 `/v1/models` 读**同一份** `disabled`
+    //   （`is_disabled` 是唯一判断点）。只改过滤不拒绝 = 假开关（用户以为禁用了、实际还能调）。
+    {
+        let disabled = state.disabled.read().await;
+        if crate::disabled_models::is_disabled(&disabled, region, &model) {
+            return openai_error(crate::error::GatewayError::ModelDisabled { region, model });
+        }
+    }
 
     let raw_source = String::from_utf8_lossy(&body);
     let raw = if model == requested_model {
@@ -223,6 +232,7 @@ async fn run(
         state,
         RelayRequest {
             region,
+            kind: RelayKind::Llm,
             model: model.to_string(),
             prepared_body,
             conversation_request_id,

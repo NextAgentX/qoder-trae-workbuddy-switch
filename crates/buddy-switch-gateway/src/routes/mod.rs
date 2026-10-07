@@ -1,5 +1,6 @@
 //! 路由组装、鉴权与错误响应辅助。
 
+pub mod biz;
 pub mod chat;
 pub mod health;
 pub mod messages;

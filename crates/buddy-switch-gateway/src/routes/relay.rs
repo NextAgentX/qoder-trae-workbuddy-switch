@@ -34,10 +34,24 @@ use crate::state::GatewayState;
 use crate::sticky;
 use crate::timeutil;
 
+/// 本轮中继的**协议类型** —— 决定「路径 + 头 + body 处理」，**不影响治理层**。
+///
+/// ⚠️ 这是 P12 T03（本地路由）加入的：**业务请求要复用同一条**换号/熔断逻辑，
+/// 而不是另写一份 —— `relay` 是「把请求送到上游」的**唯一实现**（见模块文档）。
+pub enum RelayKind {
+    /// LLM：路径 `/v2/chat/completions`，头走 `build_chat_headers`，body 走 `chat_body_for`。
+    Llm,
+    /// **业务请求**（签到 / 积分 / 旅行）：路径由调用方给（**已在白名单内**），
+    /// 头走 `build_auth_headers`，**body 原样透传**（不是 LLM 协议，不做改写）。
+    Biz { path: String },
+}
+
 /// 本轮中继的输入。
 pub struct RelayRequest {
     /// 归属域（由 API Key 决定，不接受客户端声明）。
     pub region: Region,
+    /// ★ **协议类型**（P12 T03 新增）。
+    pub kind: RelayKind,
     /// 客户端声明的模型名（原样，仅用于冷却与账本）。
     pub model: String,
     /// 已由 [`outbound::prepare_outbound_body`] 处理过的请求体。
@@ -144,22 +158,39 @@ pub async fn relay(
             }
         }
 
-        // 出站头：会话头族 + 派生设备标识。
-        let mut extra = session_headers::conversation_headers(&context, &message_id);
-        if !uid.is_empty() {
-            extra.extend(session_headers::device_headers(&uid));
-        }
-
-        let result = state
-            .upstream
-            .chat_stream_with(
-                request.region,
-                &account_value,
-                &request.prepared_body,
-                None,
-                Some(&extra),
-            )
-            .await;
+        // ★ 出站按 `kind` 分派 —— **治理层（本函数其余部分：选号 / 在途 / 冷却 / 熔断 / 换号）完全共用**。
+        let result = match &request.kind {
+            RelayKind::Llm => {
+                // 会话头族 + 派生设备标识（**LLM 专用**：业务请求不适用，故放在本分支内）。
+                let mut extra = session_headers::conversation_headers(&context, &message_id);
+                if !uid.is_empty() {
+                    extra.extend(session_headers::device_headers(&uid));
+                }
+                state
+                    .upstream
+                    .chat_stream_with(
+                        request.region,
+                        &account_value,
+                        &request.prepared_body,
+                        None,
+                        Some(&extra),
+                    )
+                    .await
+            }
+            // 业务请求：**body 原样透传**（不是 LLM 协议，不做改写）。
+            RelayKind::Biz { path } => {
+                state
+                    .upstream
+                    .forward_biz_with(
+                        request.region,
+                        &account_value,
+                        path,
+                        &request.prepared_body,
+                        None,
+                    )
+                    .await
+            }
+        };
 
         // 无论成败都释放在途（本次偏差见模块文档）。
         if !uid.is_empty() {
@@ -516,6 +547,8 @@ mod tests {
     fn relay_request(conversation_id: Option<&str>, model: &str, region: Region) -> RelayRequest {
         RelayRequest {
             region,
+            // 既有测试全部针对 **LLM** 路径 ⇒ 行为必须与加 `kind` 之前**逐字相同**。
+            kind: RelayKind::Llm,
             model: model.to_string(),
             prepared_body: String::new(),
             conversation_request_id: "turn-1".to_string(),

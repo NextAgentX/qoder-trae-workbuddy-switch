@@ -27,6 +27,7 @@ use buddy_switch_core::modules::upstream::UpstreamClient;
 
 use crate::account_strategy::{load_strategies, AccountStrategy};
 use crate::apikey::ApiKeyStore;
+use crate::disabled_models::DisabledModels;
 use crate::logging::RequestLog;
 use crate::outbound::{DegradeGate, PromptSettings};
 use crate::pool::{Pool, PoolConfig, PoolSummary, RealmTag};
@@ -312,6 +313,11 @@ pub struct GatewayState {
     pub keys: Arc<ApiKeyStore>,
     pub catalogs: Arc<CatalogStore>,
     pub strategies: Arc<RwLock<HashMap<Region, AccountStrategy>>>,
+    /// 用户禁用的模型（P11）：**两个出口共用**（`/v1/models` 过滤 + 调用拒绝）。
+    ///
+    /// 进程内**唯一**实例（[`crate::disabled_models::shared`]）—— 与 Trae 网关、命令面
+    /// 读的是同一个 `Arc`，否则「命令改了一份、网关读另一份」就是假开关。
+    pub disabled: Arc<RwLock<DisabledModels>>,
     pub upstream: Arc<UpstreamClient>,
     pub log: Arc<RequestLog>,
     pub started_at: i64,
@@ -384,6 +390,7 @@ impl GatewayState {
             keys,
             catalogs,
             strategies,
+            disabled: crate::disabled_models::shared(),
             upstream,
             log,
             started_at: core_config::now_ms(),

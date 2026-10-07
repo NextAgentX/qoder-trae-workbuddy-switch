@@ -16,6 +16,7 @@
 //! （见 [`super::sse::aggregate`]），而不是把 `stream` 关掉发给上游。
 
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 
 use buddy_switch_core::modules::trae::model_list::ClientModelList;
 use buddy_switch_core::modules::trae::variant::TraeVariant;
@@ -143,6 +144,17 @@ pub fn models_response() -> Value {
     )
 }
 
+/// 静态兜底清单 + **禁用过滤**（出口 ① 的兜底分支也必须过滤 —— 否则 runtime 关闭瞬间会漏出被禁模型）。
+pub fn models_response_filtered(disabled: &BTreeSet<String>) -> Value {
+    models_response_from(
+        MODEL_NAMES
+            .iter()
+            .filter(|name| !crate::disabled_models::is_disabled_in(disabled, **name))
+            .map(|name| (*name, None))
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// `/v1/models` 的响应体 —— **按变体读客户端（上游下发）的清单**，读不到回落静态。
 ///
 /// ## 为什么对外清单也要跟着客户端走（issue #4）
@@ -167,13 +179,23 @@ pub fn models_response() -> Value {
 /// 那是同一句「看得见、调不动」，只是发生在另一批模型上。
 ///
 /// ⇒ 现在只取 `function_for(variant)` 对应的**那一个分组**。
-pub fn models_response_for(variant: TraeVariant) -> Value {
+///
+/// ## ★ 出口 ① 的禁用过滤（P11）
+///
+/// `disabled` 是该变体所在 region 的禁用集合（唯一判断点在 [`crate::disabled_models::is_disabled`]）。
+/// 被禁用的模型**不出现**；`available`（= 该模型 ∈ 本 function 分组）已由 [`servable_entries`]
+/// （或静态兜底清单）保证。两条来源都要过滤 —— 禁用是用户偏好，与清单来源无关。
+pub fn models_response_for(variant: TraeVariant, disabled: &BTreeSet<String>) -> Value {
     let list = buddy_switch_core::modules::trae::model_list::read_client_model_list(variant);
     if list.groups.is_empty() {
-        return models_response();
+        return models_response_filtered(disabled);
     }
 
-    models_response_from(servable_entries(&list, variant))
+    let entries = servable_entries(&list, variant)
+        .into_iter()
+        .filter(|(name, _)| !crate::disabled_models::is_disabled_in(disabled, *name))
+        .collect();
+    models_response_from(entries)
 }
 
 /// 取**本变体真能调**的模型：该程序位 `function` 对应的那个分组。

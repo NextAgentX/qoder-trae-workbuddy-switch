@@ -226,13 +226,25 @@ fn parse_variant_query(query: Option<&str>) -> TraeVariant {
 ///
 /// 客户端没启动过 / 没登录时读不到 ⇒ 回落静态清单（见 [`payload::models_response_for`]），
 /// 保证 OpenAI 客户端**开箱即可列出模型**，而不是返回空表或报错。
-pub async fn models(Extension(key_variant): Extension<TraeKeyVariant>) -> Response {
+pub async fn models(
+    State(state): State<TraeGatewayState>,
+    Extension(key_variant): Extension<TraeKeyVariant>,
+) -> Response {
     let variant = key_variant.0;
-    // `models_response_for` 自己**不失败**（读不到就回落静态清单），所以这里的
-    // `JoinError` 只可能是运行时正在关闭 —— 用静态清单兜底，别让「列模型」挂掉。
-    let body = tokio::task::spawn_blocking(move || payload::models_response_for(variant))
+    // ★ 出口 ①（P11）：读该变体所在 region 的禁用集合，交给清单构造器过滤。
+    //   `region_of_variant` 把程序位映射到存储键（存储按 region 分家，决策 #4）。
+    let disabled = state
+        .disabled
+        .read()
         .await
-        .unwrap_or_else(|_| payload::models_response());
+        .get(super::region_of_variant(variant))
+        .clone();
+    let fallback = disabled.clone();
+    // `models_response_for` 自己**不失败**（读不到就回落静态清单），所以这里的
+    // `JoinError` 只可能是运行时正在关闭 —— 用（过滤后的）静态清单兜底，别让「列模型」挂掉。
+    let body = tokio::task::spawn_blocking(move || payload::models_response_for(variant, &disabled))
+        .await
+        .unwrap_or_else(|_| payload::models_response_filtered(&fallback));
     json_response(StatusCode::OK, body)
 }
 
@@ -260,6 +272,19 @@ pub async fn chat_completions(
 
     let config = state.config_snapshot().await;
     let model = payload::model_of(&parsed, &config.default_model);
+    // ★ 出口 ②（P11）：被禁用的模型直接拒绝 —— 与 `/v1/models` 读**同一份** `disabled`
+    //   （`is_disabled` 是唯一判断点）。只改过滤不拒绝 = 假开关。
+    {
+        let region = super::region_of_variant(variant);
+        let disabled = state.disabled.read().await;
+        if crate::disabled_models::is_disabled(&disabled, region, &model) {
+            return openai_error(
+                StatusCode::FORBIDDEN,
+                "model_disabled",
+                &crate::disabled_models::disabled_message(region, &model),
+            );
+        }
+    }
     let stream = payload::wants_stream(&parsed);
     let max_rotate = config.max_rotate.max(1);
     let chat_id = format!("chatcmpl-{}", uuid_like());
@@ -344,6 +369,18 @@ pub async fn messages(
     // 模型取**转换后**的请求体（那是真正发给上游的东西）；
     // 流式开关见 [`anthropic_wants_stream`]（**必须**读原始请求体）。
     let model = payload::model_of(&upstream, &config.default_model);
+    // ★ 出口 ②（P11）：与 `/v1/chat/completions` 同源 —— 被禁用的模型直接拒绝（Anthropic 错误体）。
+    {
+        let region = super::region_of_variant(variant);
+        let disabled = state.disabled.read().await;
+        if crate::disabled_models::is_disabled(&disabled, region, &model) {
+            return anthropic_error(
+                StatusCode::FORBIDDEN,
+                "model_disabled",
+                &crate::disabled_models::disabled_message(region, &model),
+            );
+        }
+    }
     let stream = anthropic_wants_stream(&parsed);
     let max_rotate = config.max_rotate.max(1);
     // 上游响应 id 用 `chatcmpl-` 前缀（与 `/v1/chat/completions` 一致）。

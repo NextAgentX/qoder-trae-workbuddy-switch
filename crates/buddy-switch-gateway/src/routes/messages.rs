@@ -15,7 +15,7 @@ use buddy_switch_core::modules::region::Region;
 use crate::logging::RequestMeta;
 use crate::outbound::PromptMode;
 use crate::protocol::anthropic::{aggregate_message, to_upstream_request, AnthropicSseStream};
-use crate::routes::relay::{self, RelayOutcome, RelayRequest};
+use crate::routes::relay::{self, RelayKind, RelayOutcome, RelayRequest};
 use crate::routes::{anthropic_error, authenticate, json_response, parse_body, sse_response};
 use crate::session_headers;
 use crate::state::GatewayState;
@@ -68,6 +68,14 @@ pub async fn handler(
             ))
         }
     };
+
+    // ★ 出口 ②（P11）：与 `/v1/chat/completions` 同源 —— 被禁用的模型直接拒绝（读同一份 `disabled`）。
+    {
+        let disabled = state.disabled.read().await;
+        if crate::disabled_models::is_disabled(&disabled, region, &model) {
+            return anthropic_error(crate::error::GatewayError::ModelDisabled { region, model });
+        }
+    }
 
     // Anthropic 请求 → 上游（OpenAI 形态）。
     let upstream_body = to_upstream_request(&parsed);
@@ -226,6 +234,7 @@ async fn run(
         state,
         RelayRequest {
             region,
+            kind: RelayKind::Llm,
             model: model.to_string(),
             prepared_body,
             conversation_request_id,

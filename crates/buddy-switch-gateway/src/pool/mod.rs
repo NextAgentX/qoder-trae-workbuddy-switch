@@ -1188,6 +1188,46 @@ mod tests {
         std::env::temp_dir().join(format!("wb-pool-{tag}-{}", uuid::Uuid::new_v4()))
     }
 
+    /// ★★ **WorkBuddy 选号基线被冻结**（P5-ARCH §2.2 / R4 / 验收 10）。
+    ///
+    /// 两个字段是 **WorkBuddy 的行为基线**，改它们会**静默**改变 WB 的选号结果
+    /// （无编译错误、无日志、无测试失败 —— 直到有人发现「选中的账号变了」）：
+    ///
+    /// - `expiry_urgency_weight = 0.0`：WB 的紧迫度已由 `expiring_weight` 表达，
+    ///   独立紧迫度因子**不启用**；
+    /// - `deterministic = false`：WB 走**有界随机**（短名单内加权抽签），
+    ///   改成 `true` 会退化为严格择优，同样静默改变选号。
+    ///
+    /// Trae 需要「紧迫度权重 > 积分项上限（10）」与「严格择优」，它**必须**通过自己的
+    /// `trae::pool::trae_pick_policy()` **显式覆写** —— **不得**靠改这里的默认值。
+    ///
+    /// 可证伪（变异验证 ②）：把 `PoolConfig::default()` 的任一字段改掉（或让 `Pool::policy()`
+    /// 不再透传它），本用例立即变红。
+    #[test]
+    fn workbuddy_pick_policy_defaults_are_a_frozen_baseline() {
+        let config = PoolConfig::default();
+        assert_eq!(
+            config.expiry_urgency_weight, 0.0,
+            "WorkBuddy 基线：独立紧迫度因子默认必须为 0.0；Trae 须用 trae_pick_policy() 覆写，不得改默认值"
+        );
+        assert!(
+            !config.deterministic,
+            "WorkBuddy 基线：默认必须走有界随机；Trae 须用 trae_pick_policy() 覆写，不得改默认值"
+        );
+
+        // 默认值必须**原样透传**到实际使用的 `PickPolicy`（否则默认值改了、策略没跟上）。
+        let pool = Pool::new(PoolConfig::default());
+        let policy = pool.policy();
+        assert_eq!(
+            policy.expiry_urgency_weight, 0.0,
+            "Pool::policy() 未把默认的 expiry_urgency_weight 透传"
+        );
+        assert!(
+            !policy.deterministic,
+            "Pool::policy() 未把默认的 deterministic 透传"
+        );
+    }
+
     #[test]
     fn config_normalization_clamps_invalid_values() {
         let config = PoolConfig {

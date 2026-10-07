@@ -36,6 +36,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -43,8 +44,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 use buddy_switch_core::modules::config as core_config;
+use buddy_switch_core::modules::region::Region;
+use buddy_switch_core::modules::trae::region::TraeRegion;
 use buddy_switch_core::modules::trae::variant::TraeVariant;
 
+use crate::disabled_models::DisabledModels;
 use crate::sticky::StickyTable;
 use buddy_switch_core::modules::trae::{paths, TRAE_DEFAULT_API_PORT};
 
@@ -122,6 +126,17 @@ pub fn function_for(variant: TraeVariant) -> &'static str {
     match variant {
         TraeVariant::TraeWork | TraeVariant::Global => TRAE_FUNCTION_SOLO_WORK,
         TraeVariant::Trae | TraeVariant::GlobalTraeCode => TRAE_FUNCTION_CHAT_V3,
+    }
+}
+
+/// Trae 程序位 → 通用 [`Region`]（P11 禁用存储按 region 分家，与 WorkBuddy 侧同一把键）。
+///
+/// 为什么按 **region** 而不是程序位：后端禁用存储是 region 粒度（`cn` / `global`），
+/// 用程序位会引入一个存储里不存在的维度（**决策 #4**）。
+pub fn region_of_variant(variant: TraeVariant) -> Region {
+    match variant.region() {
+        TraeRegion::Cn => Region::Cn,
+        TraeRegion::Global => Region::Global,
     }
 }
 
@@ -303,6 +318,11 @@ pub struct TraeGatewayState {
     /// - 避免「同一 uid 在两条线是两个不同账号」被错误合并
     ///   （`core::modules::trae::account` 的 `find_for` 注释）。
     pub pools: Arc<Mutex<HashMap<TraeVariant, TraePool>>>,
+    /// 用户禁用的模型（P11）：**两个出口共用**（`/v1/models` 过滤 + 调用拒绝）。
+    ///
+    /// 进程内**唯一**实例（[`crate::disabled_models::shared`]）—— 与 WorkBuddy 网关、
+    /// 命令面读的是同一个 `Arc`；按 `region`（[`region_of_variant`]）键控。
+    pub disabled: Arc<RwLock<DisabledModels>>,
     /// **会话粘性绑定表**：同一会话优先复用上次成功的账号。
     ///
     /// 与 WorkBuddy 网关共用 [`StickyTable`] 实现。Trae 侧此前没有这一层 ——
@@ -349,6 +369,7 @@ impl TraeGatewayState {
         Self {
             config: Arc::new(RwLock::new(config.clone())),
             pools: Arc::new(Mutex::new(HashMap::new())),
+            disabled: crate::disabled_models::shared(),
             sticky: Arc::new(Mutex::new(StickyTable::new(config.sticky_ttl_ms))),
             log,
             key_store: Arc::new(apikey::TraeApiKeyStore::new(
@@ -678,6 +699,58 @@ pub async fn spawn_listener(state: TraeGatewayState) -> anyhow::Result<GatewayHa
     });
 
     Ok(GatewayHandle::new(local, tx, join))
+}
+
+// ---------------------------------------------------------------------------
+// 网关宿主泛化（P5 §2.4）—— Trae 产品线实现
+// ---------------------------------------------------------------------------
+
+/// Trae 网关产品线（[`crate::GatewayProduct`] 的 Trae 实现）。
+///
+/// **路径所有权**：`GET /health`、`GET /status`、`GET /v1/models`、
+/// `POST /v1/chat/completions`、`POST /v1/messages`（见 [`router`]）。
+///
+/// ⚠️ 与 [`crate::WbGateway`] 的 `/v1/models` / `/v1/chat/completions` **逐字重叠** ⇒
+/// 两者**各持一个 router、各自独立端口**（Trae 7864 / WorkBuddy 57891），**绝不 merge**
+/// （axum 同路径 merge 会 panic）。见 [`crate::GatewayProduct`]。
+pub struct TraeGateway;
+
+/// Trae 网关的进程内共享状态（惰性初始化，读一次配置）。
+static TRAE_SHARED_STATE: OnceLock<TraeGatewayState> = OnceLock::new();
+
+impl crate::GatewayProduct for TraeGateway {
+    type State = TraeGatewayState;
+
+    const OWNED_PATHS: &'static [&'static str] = &[
+        "/health",
+        "/status",
+        "/v1/models",
+        "/v1/chat/completions",
+        "/v1/messages",
+    ];
+
+    fn shared_state() -> TraeGatewayState {
+        TRAE_SHARED_STATE
+            .get_or_init(|| TraeGatewayState::new(TraeGatewayConfig::load()))
+            .clone()
+    }
+
+    fn is_enabled(state: &TraeGatewayState) -> impl std::future::Future<Output = bool> + Send {
+        // 克隆一份（`TraeGatewayState` 是 Arc 句柄，克隆极廉价）使返回的 future 不借 `state`。
+        let state = state.clone();
+        async move { state.config_snapshot().await.enabled }
+    }
+
+    fn router(state: TraeGatewayState) -> axum::Router {
+        // `self::` 明确指向本模块的自由函数（与 trait 方法同名）。
+        self::router(state)
+    }
+
+    fn spawn_listener(
+        state: TraeGatewayState,
+    ) -> impl std::future::Future<Output = anyhow::Result<GatewayHandle>> + Send {
+        self::spawn_listener(state)
+    }
 }
 
 /// Trae 网关请求日志文件路径（供管理命令透出）。

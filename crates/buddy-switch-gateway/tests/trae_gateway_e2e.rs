@@ -903,3 +903,130 @@ async fn anthropic_streaming_emits_anthropic_events() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+// ---------------------------------------------------------------------------
+// P11 模型禁用：出口① / 出口② 的**路由级**端到端（T04 #5）
+// ---------------------------------------------------------------------------
+
+fn models_request(key: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/v1/models")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .expect("构造请求")
+}
+
+/// 取 `/v1/models` 返回的模型 id 列表（走真实路由 + 鉴权中间件）。
+async fn models_ids(app: &axum::Router, key: &str) -> Vec<String> {
+    let response = app
+        .clone()
+        .oneshot(models_request(key))
+        .await
+        .expect("请求应完成");
+    assert_eq!(response.status(), StatusCode::OK, "/v1/models 应 200");
+    let value: serde_json::Value =
+        serde_json::from_str(&body_text(response).await).expect("响应应为 JSON");
+    value["data"]
+        .as_array()
+        .expect("data 应为数组")
+        .iter()
+        .filter_map(|model| model["id"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// ★★ P11 **路由级**端到端：被禁用的模型**真的**不在 `/v1/models`，且**真的**被调用拒绝（403）。
+///
+/// # 为什么必须有这一条（T04 #5）
+///
+/// 门禁里的 P11 断言是**源码结构**扫描（证明「代码在正确位置调用了 `is_disabled`」），
+/// 证明不了「跑起来确实生效」——若把过滤接到错的集合 / 错的 region，源码断言仍会绿。
+/// 本条用**真实路由 + 真实鉴权 + 真实禁用存储**证明：出口① **真的少一条**、
+/// 出口② **真的回 403 `model_disabled`**。这是「假开关」的最终裁判。
+///
+/// ⚠️ 禁用存储是**进程级全局**（[`buddy_switch_gateway::disabled_models::shared`]）——
+/// 与两个出口读的是同一份。用例结束时复位，且整支文件用 `guard()` 串行化。
+#[tokio::test]
+async fn p11_disabled_model_is_hidden_from_models_and_rejected_on_call() {
+    let _guard = guard();
+    let variant = TraeVariant::default();
+    let home = isolated_home("p11-disable", &[("uid-p11", "jwt-p11")]);
+    let key = create_key(&home, variant);
+    let state = TraeGatewayState::new(TraeGatewayConfig::default());
+    let app = router(state);
+
+    // 隔离 home 读不到客户端 `state.vscdb` ⇒ `/v1/models` 回落**静态兜底清单**。
+    // 目标模型必须在那份清单里，否则「少一条」无从谈起。
+    let target = "glm-5.3";
+    assert!(
+        buddy_switch_gateway::trae::payload::MODEL_NAMES.contains(&target),
+        "断言前提：目标模型必须在静态兜底清单里"
+    );
+
+    let region = buddy_switch_gateway::trae::region_of_variant(variant);
+    let store = buddy_switch_gateway::disabled_models::shared();
+
+    // 基线：未禁用 ⇒ 出现在 /v1/models。
+    let before = models_ids(&app, &key).await;
+    assert!(
+        before.iter().any(|id| id == target),
+        "未禁用时应出现在 /v1/models：{before:?}"
+    );
+
+    // 禁用该模型（写进**进程内唯一**的禁用存储 —— 与两个出口读的是同一份）。
+    {
+        let mut lock = store.write().await;
+        lock.set(region, target, true);
+    }
+
+    // 出口①：真的少一条。
+    let after = models_ids(&app, &key).await;
+    assert!(
+        !after.iter().any(|id| id == target),
+        "禁用后不应出现在 /v1/models：{after:?}"
+    );
+    assert_eq!(after.len() + 1, before.len(), "禁用后应正好少一条");
+
+    // 出口②：硬调用真的回 403 `model_disabled`（在触达上游之前就拒）。
+    let response = app
+        .clone()
+        .oneshot(chat_request(
+            Some(&key),
+            &format!(r#"{{"model":"{target}","messages":[]}}"#),
+        ))
+        .await
+        .expect("请求应完成");
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "被禁模型的调用应 403（而不是放行 / 笼统 4xx）"
+    );
+    let text = body_text(response).await;
+    assert!(
+        text.contains("model_disabled"),
+        "错误类别应为 `model_disabled`：{text}"
+    );
+    assert!(text.contains("被禁用"), "文案必须说明「被禁用」：{text}");
+
+    // ★ 大小写变体也必须被拒（T04 #2 的绕过链在**路由级**也堵上）。
+    let response = app
+        .clone()
+        .oneshot(chat_request(
+            Some(&key),
+            &format!(r#"{{"model":"{}","messages":[]}}"#, target.to_uppercase()),
+        ))
+        .await
+        .expect("请求应完成");
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "大写变体的调用也必须 403（否则禁用被绕过）"
+    );
+
+    // 清理：禁用存储是**进程级全局**（同进程其余用例会读到它）。
+    {
+        let mut lock = store.write().await;
+        lock.set(region, target, false);
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}
