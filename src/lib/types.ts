@@ -181,6 +181,38 @@ export interface SessionReplicaResponse {
   source: "ledger" | "empty";
 }
 
+/**
+ * P8 · 安全同步（增量追加）的**一条**任务：把 `sourceCid` 的新增行追加到 `targetCid`。
+ *
+ * ⚠️ **方向由调用方定**：源必须是**行数更多**的那一份（落后的是目标）。
+ * 后端**独立复核**「目标是不是源的严格前缀」⇒ 方向给反了会 `ok: false`，**不会写坏数据**。
+ */
+export interface SyncSessionReplicaItem {
+  /** 源副本的会话 id（行数更多、内容更全的那一份）。 */
+  sourceCid: string;
+  /** 目标副本的会话 id（落后的那一份，只会在其末尾**追加**）。 */
+  targetCid: string;
+}
+
+/** 单条同步的结果（**逐条**返回 ⇒ 批量时天然支持部分失败）。 */
+export interface SyncSessionReplicaResult {
+  sourceCid: string;
+  targetCid: string;
+  /** 是否成功（**已一致**也算成功，`appendedLines` 为 0）。 */
+  ok: boolean;
+  /** 实际追加的行数；仅 `ok` 时有意义。 */
+  appendedLines?: number;
+  /** 失败原因（`ok: false` 时必有）；分歧 / 找不到正文 / 读写失败都会在这里如实说明。 */
+  error?: string;
+}
+
+/** `sync_session_replicas` 的返回（汇总条用 `okCount` / `failCount`）。 */
+export interface SyncSessionReplicaResponse {
+  results: SyncSessionReplicaResult[];
+  okCount: number;
+  failCount: number;
+}
+
 export interface CopyResult {
   id: string;
   newId: string;

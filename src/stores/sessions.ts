@@ -29,7 +29,7 @@ import {
   buildSessionsByAccount,
 } from "@/lib/session-replicas";
 import type { SessionGroupView } from "@/lib/session-replicas";
-import type { Region, Session, SessionFingerprint } from "@/lib/types";
+import type { Region, Session, SessionFingerprint, SyncSessionReplicaItem, SyncSessionReplicaResponse } from "@/lib/types";
 import { selectRegionSlice, useAccountsStore } from "@/stores/accounts";
 
 interface SessionsState {
@@ -44,6 +44,16 @@ interface SessionsState {
   error: string | null;
   /** 加载某 region 的副本组（账号显示名 / 会话行 join 一并完成）。 */
   load: (region: Region) => Promise<void>;
+  /**
+   * ★ P8 · **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
+   *
+   * **不吞错、不自动重载** —— 逐条结果**原样**返回，由页面决定 toast 文案与
+   * 「只重试失败项」；成功后再由页面触发 `load` 刷新（保持 store 无副作用）。
+   */
+  syncItems: (
+    region: Region,
+    items: SyncSessionReplicaItem[],
+  ) => Promise<SyncSessionReplicaResponse>;
 }
 
 /** 该 region 已加载的账号（从账号 store 读，**不另起一份清单**）。 */
@@ -110,5 +120,12 @@ export const useSessionsStore = create<SessionsState>((set) => ({
     } catch (e) {
       set({ groups: [], error: api.asError(e), loading: false });
     }
+  },
+
+  /* ★ P8 安全同步：只转发 + 原样回结果。**不 set 任何 state** ——
+     「什么时候刷新、怎么提示」是页面的决定；store 里藏一次隐式 reload 会让
+     「部分失败」的 toast 与列表状态对不上（刷了一半看着像全成功）。 */
+  syncItems(region, items) {
+    return api.syncSessionReplicas(items, region);
   },
 }));

@@ -160,6 +160,8 @@ fn api_routes() -> Router {
         .route("/api/sessions/replicas", get(api_session_replicas))
         // P8 · 会话内容指纹（组状态派生的数据源；**内容级**，不用 updatedAt 冒充）。
         .route("/api/sessions/fingerprints", post(api_session_fingerprints))
+        // P8 · 安全同步（增量追加）—— **写操作**：只往目标 jsonl 追加，绝不改写已有内容。
+        .route("/api/sessions/sync", post(api_session_sync))
         .route("/api/sessions/copy", post(api_copy_sessions))
         .route("/api/migrate/account", post(api_migrate_account))
         .route("/api/checkin/status", get(api_checkin_status))
@@ -1452,6 +1454,27 @@ async fn api_session_fingerprints(Json(body): Json<Value>) -> Response {
         );
     }
     json_ok(Value::Object(out))
+}
+
+/// POST /api/sessions/sync —— P8 **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
+///
+/// 与 Tauri 侧 `commands::sync_session_replicas` **同契约**（两宿主同步）。
+/// 批量 + 逐条结果 ⇒ 支持**部分失败**（`PLAN.md` §3.6）；判据在 core
+/// （`session::sync_session_replicas_for`），本处理器只做「鉴权 + 取参数」。
+///
+/// ⚠️ **写操作**：会往目标会话 jsonl **追加**行 —— 只追加，**绝不改写 / 删除**目标已有内容；
+/// 出现分歧则**逐条**失败且不落一个字节。
+async fn api_session_sync(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    let items = body
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    json_ok(session::sync_session_replicas_for(region, &items))
 }
 
 async fn api_copy_sessions(Json(body): Json<Value>) -> Response {

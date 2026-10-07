@@ -5403,6 +5403,87 @@ check("★ P8 面板：筛选按需出现 + 失效回落 + 徽章只读已加载
   return "按需筛选 + 失效回落 + 徽章只读";
 });
 
+check("★ P8 同步出口：只在「真有可同步内容」时出现（behind + 有增量）", () => {
+  const rep = readCode("src/lib/session-replicas.ts");
+  const body = rep.split("export function buildSyncItems")[1]?.split("\nexport ")[0] ?? "";
+  if (body === "") throw new Error("找不到 buildSyncItems 函数体（结构已变，请更新本断言）");
+  // ① 非 behind 一律不出项：`latest` 无事可做；`diverge` **必须先人工决定保留哪一份**
+  //    （D20 后置，硬同步会丢内容）；`unknown` 缺指纹 ⇒ 不臆造。
+  if (!/!== "behind"/.test(body)) {
+    throw new Error("buildSyncItems 没有排除非 behind 状态 —— 分歧/未知组不该给同步出口");
+  }
+  // ② 没有增量时不出项（否则是「按了没反应」的假控件，§3.4 规则 1）。
+  if (!/maxDelta <= 0/.test(body)) throw new Error("buildSyncItems 缺「无增量不出项」护栏");
+  // ③ 视图侧：无项就**不渲染**按钮。
+  const view = readCode("src/components/sessions/session-replica-view.tsx");
+  if (!/items\.length === 0/.test(view)) {
+    throw new Error("副本视图没有「无项不渲染按钮」的护栏");
+  }
+  // ④ 页头批量按钮同样按需出现（不摆假控件）。
+  const page = readCode("src/pages/SessionsPage.tsx");
+  if (!/allSyncable\.length > 0/.test(page)) throw new Error("页头批量按钮没有按需出现");
+  return "behind + 有增量才出项 · 视图与页头按需渲染";
+});
+
+check("★ P8 同步是加法：core 只 append、绝不截断；分歧 fail-closed 不落字节", () => {
+  const src = fs.readFileSync(
+    path.join(ROOT, "crates/buddy-switch-core/src/modules/session.rs"),
+    "utf8",
+  );
+  const body = rustFnBody(src, "append_delta_between_files");
+  if (!body) throw new Error("找不到 append_delta_between_files（结构已变，请更新本断言）");
+  // ① 只能以 append 方式打开目标 —— 截断重写会**删掉目标已有内容**（用户对「同步」最大的恐惧）。
+  if (!/\.append\(true\)/.test(body)) throw new Error("没有以 append(true) 打开目标");
+  for (const bad of [".write(true)", "truncate(true)", "set_len("]) {
+    if (body.includes(bad)) throw new Error(`出现 ${bad} —— 违反「同步是加法」（§3.15.4）`);
+  }
+  // ② 分歧判据必须在，且 fail-closed（返回 Err ⇒ 一个字节都不写）。
+  if (!/common < shorter/.test(body)) {
+    throw new Error("缺「公共前缀 < 较短一方」的分歧判据（写成「< 目标行数」会把「目标更新」误判成分歧）");
+  }
+  if (!/return Err\(/.test(body)) throw new Error("分歧没有 fail-closed（没有返回 Err）");
+  // ③ 逻辑行切分必须在 —— 否则「目标末行缺换行」会被误判成分歧。
+  if (!/fn logical_lines/.test(src)) {
+    throw new Error("缺 logical_lines（末行换行差异会被误判成分歧）");
+  }
+  // ④ id 归一化：副本每行都带各自的 sessionId，不归一化 ⇒ 永远分歧。
+  if (!/SESSION_ID_PLACEHOLDER/.test(src)) {
+    throw new Error("缺 SESSION_ID_PLACEHOLDER —— 指纹/行比较会把「各自的 sessionId」算进去");
+  }
+  return "append(true) + 分歧 fail-closed + 逻辑行切分 + id 归一化";
+});
+
+check("★ P8 同步批量：一条失败不中止整批 + 四处接线齐备", () => {
+  const src = fs.readFileSync(
+    path.join(ROOT, "crates/buddy-switch-core/src/modules/session.rs"),
+    "utf8",
+  );
+  const body = rustFnBody(src, "sync_session_replicas_for");
+  if (!body) throw new Error("找不到 sync_session_replicas_for（结构已变，请更新本断言）");
+  // ① 失败分支必须**逐条收集**，不得 `return` / `?` 把整批带走（部分失败是 §3.6 硬要求）。
+  if (!/Err\(error\) => results\.push/.test(body)) {
+    throw new Error("失败分支没有逐条收集 —— 一条失败会带走整批");
+  }
+  if (!/ok_count \+= 1/.test(body)) throw new Error("没有成功计数");
+  if (!/failCount/.test(body)) throw new Error("返回里没有 failCount（汇总条要用）");
+  // ② 四处接线：ROUTES + call() / 命令本体 / generate_handler! / server 路由 + 处理器。
+  const api = readCode("src/lib/api.ts");
+  if (!/sync_session_replicas: \{ method: "POST"/.test(api)) throw new Error("api.ts 缺 ROUTES 条目");
+  if (!/call\("sync_session_replicas"/.test(api)) throw new Error("api.ts 缺 call() 出口");
+  const commands = readCode("src-tauri/src/commands.rs");
+  if (!/pub async fn sync_session_replicas/.test(commands)) {
+    throw new Error("commands.rs 缺命令本体");
+  }
+  const lib = readCode("src-tauri/src/lib.rs");
+  if (!/commands::sync_session_replicas/.test(lib)) {
+    throw new Error("lib.rs 的 generate_handler! 未登记（构建全绿但没人调用）");
+  }
+  const server = readCode("crates/buddy-switch-server/src/api.rs");
+  if (!/\.route\("\/api\/sessions\/sync"/.test(server)) throw new Error("server 缺 .route");
+  if (!/async fn api_session_sync/.test(server)) throw new Error("server 缺处理器");
+  return "逐条收集（部分失败）+ 四处接线齐备";
+});
+
 console.log(`\n${passed} passed / ${failures.length} failed\n`);
 if (failures.length) {
   for (const f of failures) console.error(" - " + f);

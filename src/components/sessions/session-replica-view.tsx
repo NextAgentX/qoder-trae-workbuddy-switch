@@ -25,19 +25,31 @@
  * 是字符串，可安全当 React 子节点渲染。
  */
 
-import { GitBranch, History } from "lucide-react";
+import { Download, GitBranch, History, Loader2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
+import { buildSyncItems } from "@/lib/session-replicas";
 import type { SessionGroupView } from "@/lib/session-replicas";
 
 export interface SessionReplicaViewProps {
   groups: SessionGroupView[];
+  /**
+   * ★ P8「安全同步」：把该组的落后副本一次补齐（**加法**，不删除目标内容）。
+   *
+   * 省略 ⇒ **不渲染同步出口**（如只读场景）。渲染与否**由数据决定**：
+   * `buildSyncItems(group)` 为空（非 `behind` / 无增量）时**不给按钮**，
+   * 避免「按了没反应」的假控件（§3.4 规则 1）。
+   */
+  onSyncGroup?: (group: SessionGroupView) => void;
+  /** 正在同步的组键（按钮进「操作进行中」态；**不是**区块加载态，§3.6）。 */
+  busyGroupKeys?: ReadonlySet<string>;
 }
 
-export function SessionReplicaView({ groups }: SessionReplicaViewProps) {
+export function SessionReplicaView({ groups, onSyncGroup, busyGroupKeys }: SessionReplicaViewProps) {
   const t = useT();
 
   return (
@@ -67,6 +79,30 @@ export function SessionReplicaView({ groups }: SessionReplicaViewProps) {
                   {t("sessions.replica.partialNote")}
                 </span>
               ) : null}
+              {/* ★ P8「安全同步」：**只在真有可同步内容时**才给出口（`behind` + 有增量）。
+                  文案如实写「加法」—— 用户对「同步」最大的恐惧是被覆盖（§3.15.4）。 */}
+              {(() => {
+                const items = buildSyncItems(group);
+                if (items.length === 0 || !onSyncGroup) return null;
+                const busy = busyGroupKeys?.has(group.key) === true;
+                return (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    data-sync-group={group.key}
+                    title={t("sessions.sync.hint")}
+                    onClick={() => onSyncGroup(group)}
+                  >
+                    {busy ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Download className="size-3.5" aria-hidden="true" />
+                    )}
+                    {t("sessions.sync.action", { count: items.length })}
+                  </Button>
+                );
+              })()}
             </div>
           </div>
           {/* ★ 共同旧版（所有副本两两公共前缀的**最小值**）—— **内容级**事实，不是时间。

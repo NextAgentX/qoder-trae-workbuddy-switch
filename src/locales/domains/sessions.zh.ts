@@ -52,6 +52,20 @@ export const zh = {
   "sessions.unsupported.description": "会话复制依赖该平台自身的会话存储与云端归属机制，当前只有 WorkBuddy 具备该能力。",
   "sessions.unsupported.action": "去账号页",
 
+  /* ★ P8「安全同步」（增量追加，§3.15.4）—— **加法**语义。
+     ⚠️ 文案必须写明「只追加、不删除目标已有内容」：用户对「同步」最大的恐惧就是**被覆盖**
+     （`PLAN.md` §3.15.4 明确要求 UI 显式写出这一点）。
+     ⚠️ 分歧组**没有**这条出口（要先人工决定保留哪一份）⇒ 本组文案不涉及分歧。 */
+  "sessions.sync.action": "同步安全项（{count}）",
+  "sessions.sync.all": "同步全部落后项（{count}）",
+  "sessions.sync.hint": "只把来源的新增内容追加到目标，不删除目标已有内容",
+  "sessions.sync.toast.done": "同步完成",
+  "sessions.sync.toast.failAll": "同步失败",
+  "sessions.sync.toast.ok": "已同步 {n} 项，追加 {lines} 条",
+  "sessions.sync.toast.failed": "{n} 项失败",
+  "sessions.sync.toast.retryFailed": "只重试失败项",
+  "sessions.sync.toast.error": "同步请求失败",
+
   /* ★ 统一重启确认（P8 T03 / §3.15.3）—— 跨程序位**复用同一条**流程。
      非 CLI：默认勾选「自动重开」+ 显式「未保存文件可能丢失」提示。
      ⚠️ **CLI 例外**：CLI 切换**不重开**客户端，且**当前 CLI 会话会中断** ⇒ `cli*` 三键

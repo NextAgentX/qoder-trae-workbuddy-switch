@@ -604,6 +604,78 @@ pub fn sync_session_replica_for(
     append_delta_between_files(&src, &dst, source_cid, target_cid)
 }
 
+/// P8 安全同步的**批量**入口（逐条执行 + **部分失败**）—— 两宿主共用。
+///
+/// `items` 形状：`[{ "sourceCid": "…", "targetCid": "…" }, …]`（camelCase，与前端一致）。
+/// 返回 `{ results: [...], okCount, failCount }`，每条含 `ok` / `appendedLines` / `error`。
+///
+/// ## 为什么是批量 + 逐条返回
+///
+/// 一次同步多个落后副本是**批量写操作** ⇒ 必须能表达**部分失败**（`PLAN.md` §3.6）：
+/// 调用方据此给「汇总条 + 只重试失败项」的出口 —— 一条分歧不该让其余全部白跑。
+///
+/// ## 为什么循环放在 core（而不是两个宿主各写一遍）
+///
+/// 与 [`list_replica_groups_for`] 同款：**判据属于 core**，宿主只做「取参数 / 鉴权 /
+/// 丢到阻塞线程」。循环写两遍迟早漂移（一边漏了空 id 校验、一边漏了失败计数）。
+pub fn sync_session_replicas_for(region: Region, items: &[Value]) -> Value {
+    let mut results: Vec<Value> = Vec::with_capacity(items.len());
+    let mut ok_count = 0usize;
+
+    for item in items {
+        let source_cid = item
+            .get("sourceCid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let target_cid = item
+            .get("targetCid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        // 空 id 直接判失败，**不进**文件层（否则会拿空串去 replace，语义无意义）。
+        if source_cid.is_empty() || target_cid.is_empty() {
+            results.push(json!({
+                "sourceCid": source_cid,
+                "targetCid": target_cid,
+                "ok": false,
+                "error": "源 / 目标会话 id 不能为空",
+            }));
+            continue;
+        }
+
+        // ⚠️ 方向由调用方给（源应是行数更多的那份）。给反了**不会写坏数据** ——
+        //    目标不落后 ⇒ 走「已一致」分支 ⇒ `ok: true, appendedLines: 0`。
+        match sync_session_replica_for(region, &source_cid, region, &target_cid) {
+            Ok(report) => {
+                ok_count += 1;
+                results.push(json!({
+                    "sourceCid": source_cid,
+                    "targetCid": target_cid,
+                    "ok": true,
+                    "appendedLines": report.appended_lines,
+                }));
+            }
+            Err(error) => results.push(json!({
+                "sourceCid": source_cid,
+                "targetCid": target_cid,
+                "ok": false,
+                "error": error,
+            })),
+        }
+    }
+
+    let fail_count = results.len() - ok_count;
+    json!({
+        "results": results,
+        "okCount": ok_count,
+        "failCount": fail_count,
+    })
+}
+
 /// jsonl 头部能拿到的最小元数据（cwd / 标题）。
 ///
 /// ## ★ 字段名是实测出来的，别照字面猜
@@ -3101,5 +3173,114 @@ mod fingerprint_tests {
         assert_eq!(common_prefix_len(&fa, &fb2), 1, "内容变化必须被指纹看见");
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 建一个「隔离 home + 两个真实会话 jsonl」的现场（`projects/ws/{src,dst}.jsonl`）。
+    ///
+    /// ⚠️ 必须走 `HomeOverrideGuard`：`session_data_dir` 是**无参全局路径函数**，
+    /// 不钉住 home 就会读到真实 `~/.workbuddy`（本仓踩过四次）。
+    /// ⚠️ **不要**再手动 `env_lock()` —— `set()` 内部已取，不可重入会自锁死。
+    fn sync_fixture(
+        tag: &str,
+        src_body: &str,
+        dst_body: &str,
+    ) -> (
+        PathBuf,
+        crate::modules::config::HomeOverrideGuard,
+        &'static str,
+    ) {
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-batch-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let projects = home.join(".workbuddy").join("projects").join("ws");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(projects.join("src-cid.jsonl"), src_body).unwrap();
+        std::fs::write(projects.join("dst-cid.jsonl"), dst_body).unwrap();
+        let guard = crate::modules::config::HomeOverrideGuard::set(&home);
+        (home, guard, "ws")
+    }
+
+    /// ★★ 批量：**一条失败不得让其余白跑**（部分失败是 `PLAN.md` §3.6 的硬要求）。
+    ///
+    /// 可证伪：把 `sync_session_replicas_for` 里的 `Err` 分支改成 `return`（整批中止），
+    /// 则 `okCount` 会变 0 ⇒ 红。
+    #[test]
+    fn batch_sync_reports_partial_failure_without_aborting_the_rest() {
+        // 源 3 行；目标 1 行（落后，可同步）；另有「分歧目标」。
+        let (home, guard, ws) = sync_fixture(
+            "partial",
+            "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n",
+            "{\"n\":1}\n",
+        );
+        // 造一个与源**分歧**的目标（第 2 行不同）。
+        let projects = home.join(".workbuddy").join("projects").join(ws);
+        std::fs::write(projects.join("div-cid.jsonl"), "{\"n\":1}\n{\"n\":9}\n").unwrap();
+        let div_before = std::fs::read(projects.join("div-cid.jsonl")).unwrap();
+
+        let report = sync_session_replicas_for(
+            Region::Cn,
+            &[
+                json!({ "sourceCid": "src-cid", "targetCid": "dst-cid" }),
+                json!({ "sourceCid": "src-cid", "targetCid": "div-cid" }),
+            ],
+        );
+
+        assert_eq!(report["okCount"], json!(1), "落后那条应当成功");
+        assert_eq!(report["failCount"], json!(1), "分歧那条应当失败");
+        assert_eq!(report["results"][0]["ok"], json!(true));
+        assert_eq!(
+            report["results"][0]["appendedLines"],
+            json!(2),
+            "源 3 行 − 目标 1 行 = 追加 2 行"
+        );
+        assert_eq!(report["results"][1]["ok"], json!(false));
+        assert!(
+            report["results"][1]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("各自有改动"),
+            "失败原因要如实说明是分歧：{}",
+            report["results"][1]["error"]
+        );
+
+        // 真的写进去了，且分歧那条**一个字节都没动**。
+        assert_eq!(
+            String::from_utf8(std::fs::read(projects.join("dst-cid.jsonl")).unwrap()).unwrap(),
+            "{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n"
+        );
+        assert_eq!(std::fs::read(projects.join("div-cid.jsonl")).unwrap(), div_before);
+
+        drop(guard);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// 空 id ⇒ 该条直接判失败，**不进**文件层（也不影响同批其它条）。
+    #[test]
+    fn batch_sync_rejects_empty_ids() {
+        let (home, guard, _ws) = sync_fixture("empty-id", "{\"n\":1}\n{\"n\":2}\n", "{\"n\":1}\n");
+
+        let report = sync_session_replicas_for(
+            Region::Cn,
+            &[
+                json!({ "sourceCid": "", "targetCid": "dst-cid" }),
+                json!({ "sourceCid": "src-cid", "targetCid": "   " }),
+                json!({ "sourceCid": "src-cid", "targetCid": "dst-cid" }),
+            ],
+        );
+
+        assert_eq!(report["okCount"], json!(1), "只有第三条该成功");
+        assert_eq!(report["failCount"], json!(2));
+        assert!(report["results"][0]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("不能为空"));
+        assert!(report["results"][1]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("不能为空"));
+
+        drop(guard);
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

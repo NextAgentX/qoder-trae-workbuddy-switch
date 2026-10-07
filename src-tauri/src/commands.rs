@@ -1114,6 +1114,28 @@ pub async fn session_fingerprints(
     .map_err(|error| format!("读取会话指纹失败: {error}"))
 }
 
+/// POST /api/sessions/sync —— P8 **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
+///
+/// 与 server 侧 `api_session_sync` **同契约**（两宿主同步）。批量 + 逐条结果
+/// ⇒ 支持**部分失败**（`PLAN.md` §3.6）；判据在 core（`session::sync_session_replicas_for`），
+/// 本命令只做「鉴权 + 取参数 + 丢到阻塞线程」。
+///
+/// ⚠️ **写操作**：会往目标会话 jsonl **追加**行 —— 只追加，**绝不改写 / 删除**目标已有内容；
+/// 出现分歧则**逐条**失败且不落一个字节。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sync_session_replicas(
+    items: Vec<Value>,
+    region: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        session::sync_session_replicas_for(region, &items)
+    })
+    .await
+    .map_err(|error| format!("同步会话副本失败: {error}"))
+}
+
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B，按 region）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn copy_sessions(

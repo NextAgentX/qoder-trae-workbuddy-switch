@@ -45,6 +45,8 @@ import type {
   Session,
   SessionFingerprint,
   SessionReplicaResponse,
+  SyncSessionReplicaItem,
+  SyncSessionReplicaResponse,
   SwitchConfig,
   SwitchResult,
   TrashList,
@@ -247,6 +249,9 @@ const ROUTES: Record<string, Route> = {
   list_session_replicas: { method: "GET", path: "/api/sessions/replicas" },
   // P8 · 会话内容指纹（组状态派生的数据源）—— **POST**：批量传 sessionIds。
   session_fingerprints: { method: "POST", path: "/api/sessions/fingerprints" },
+  // P8 · **安全同步（增量追加）** —— POST：批量传 `{ sourceCid, targetCid }[]`。
+  // ★ **写操作**（会往目标 jsonl 追加行）⇒ 不进演示只读命令表。
+  sync_session_replicas: { method: "POST", path: "/api/sessions/sync" },
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
   migrate_account_data: { method: "POST", path: "/api/migrate/account" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
@@ -860,6 +865,31 @@ export function sessionFingerprints(
   region?: Region,
 ): Promise<Record<string, SessionFingerprint | null>> {
   return call("session_fingerprints", { sessionIds, ...(region ? { region } : {}) });
+}
+
+/**
+ * P8 · **安全同步（增量追加）** —— 把源副本里**目标还没有的尾部行**追加过去。
+ *
+ * ## 语义（`PLAN.md` §3.15.4）
+ *
+ * - **同步是加法**：只追加，**绝不删除 / 改写目标已有内容**（用户对「同步」最大的恐惧）；
+ * - **只处理「落后」**：目标必须与源**逐字同前缀**；后端**独立复核**，不信任前端判断；
+ * - **分歧 fail-closed**：公共前缀 < 较短一方 ⇒ 该条 `ok: false`，**一个字节都不写**；
+ * - **方向由调用方给**：`sourceCid` 取**行数更多**的那份（`SessionGroupView.latestLineCount`
+ *   对应的行），`targetCid` 取落后的那份。
+ *
+ * ## 为什么是批量
+ *
+ * 一次同步多个落后副本是**批量写操作** ⇒ 必须能表达**部分失败**（§3.6）：
+ * 逐条返回 `ok` / `error`，调用方据此给「汇总条 + 只重试失败项」的出口。
+ *
+ * ⚠️ **写操作**：不进演示站的只读命令表（`DEMO_READ_COMMANDS`）。
+ */
+export function syncSessionReplicas(
+  items: SyncSessionReplicaItem[],
+  region?: Region,
+): Promise<SyncSessionReplicaResponse> {
+  return call("sync_session_replicas", { items, ...(region ? { region } : {}) });
 }
 
 export function copySessions(

@@ -38,6 +38,19 @@ export const en = {
     "Session copy relies on the platform's own session storage and cloud ownership; currently only WorkBuddy has this capability.",
   "sessions.unsupported.action": "Go to accounts",
 
+  /* ★ P8 "safe sync" (incremental append, §3.15.4) — **additive** by design.
+     The copy must state that nothing in the target is deleted or overwritten: being
+     overwritten is the user's biggest fear about "sync" (PLAN.md §3.15.4). */
+  "sessions.sync.action": "Sync safe items ({count})",
+  "sessions.sync.all": "Sync all behind ({count})",
+  "sessions.sync.hint": "Appends only what the source added; never deletes existing content",
+  "sessions.sync.toast.done": "Sync finished",
+  "sessions.sync.toast.failAll": "Sync failed",
+  "sessions.sync.toast.ok": "Synced {n} item(s), appended {lines} line(s)",
+  "sessions.sync.toast.failed": "{n} failed",
+  "sessions.sync.toast.retryFailed": "Retry failed only",
+  "sessions.sync.toast.error": "Sync request failed",
+
   /* ★ Unified restart confirmation (P8 T03 / §3.15.3). The non-CLI copy defaults to
      "reopen automatically" plus an explicit unsaved-files warning. The CLI copy is the
      exception: it must NOT promise an auto-reopen — it says the session will be interrupted. */

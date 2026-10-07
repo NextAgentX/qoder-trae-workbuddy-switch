@@ -23,7 +23,13 @@
 
 import { displayText } from "@/lib/display-text";
 import { t } from "@/lib/i18n";
-import type { AccountMeta, Session, SessionFingerprint, SessionReplicaGroup } from "@/lib/types";
+import type {
+  AccountMeta,
+  Session,
+  SessionFingerprint,
+  SessionReplicaGroup,
+  SyncSessionReplicaItem,
+} from "@/lib/types";
 
 /** 一行副本（已 join 账号显示名 + 会话行，标题已过 `displayText`）。 */
 export interface SessionReplicaRow {
@@ -156,8 +162,7 @@ export function buildSessionsByAccount(
   return map;
 }
 
-/** 账号显示名：命中账号库用显示名；否则 `uid 前缀 + 「未知账号」`（**绝不**留空）。 */
-function resolveAccountLabel(uid: string, labels: Map<string, string>): string {
+/** 账号显示名：命中账号库用显示名；否则 `uid 前缀 + 「未知账号」`（**绝不**留空）。 */function resolveAccountLabel(uid: string, labels: Map<string, string>): string {
   const known = displayText(labels.get(uid));
   if (known && known.trim() !== "") return known;
   // 前缀取前 8 位（与账号卡片的短 uid 口径一致）；uid 本身可能很短，兜底用整体。
@@ -211,4 +216,38 @@ export function buildGroupViews(
       ...deriveGroupStatus(rows, fingerprints),
     };
   });
+}
+
+/**
+ * ★ P8「安全同步」：把一组里**落后**的副本换算成 `{ sourceCid, targetCid }` 任务。
+ *
+ * ## 为什么源取「行数最多」的那一份
+ *
+ * `behind` 的语义是「公共前缀**覆盖到最短副本**」⇒ 任一副本都是**最长副本的前缀**
+ * （两两公共前缀 ≥ 最短行数）⇒ 把最长的那份当源，追加进其余副本是**纯加法**。
+ * ⚠️ 这不是「猜」：后端会**独立复核**「目标是不是源的严格前缀」，不成立就逐条失败
+ * 且不落一个字节。前端这里只是**选一个合理方向**，判据不在前端。
+ *
+ * ## 什么时候返回空数组（= 不给出口）
+ *
+ * - 状态不是 `behind`：`latest` 无事可做；`diverge` **必须先人工决定保留哪一份**
+ *   （分歧处理 D20 后置）—— 硬同步会丢内容；`unknown` 缺指纹 ⇒ **不臆造**；
+ * - `deltas` 为空 / 最大增量为 0：没有可追加的内容。
+ *
+ * ⇒ 返回空数组时调用方**不渲染按钮**（§3.4 规则 1「无数据不渲染」，不摆假控件）。
+ */
+export function buildSyncItems(group: SessionGroupView): SyncSessionReplicaItem[] {
+  if (group.status !== "behind") return [];
+  if (group.rows.length < 2 || group.deltas.size === 0) return [];
+
+  const deltaOf = (row: SessionReplicaRow) => group.deltas.get(row.sessionId) ?? 0;
+  const maxDelta = Math.max(...group.rows.map(deltaOf));
+  if (maxDelta <= 0) return [];
+
+  const source = group.rows.find((row) => deltaOf(row) === maxDelta);
+  if (!source) return [];
+
+  return group.rows
+    .filter((row) => row.sessionId !== source.sessionId && deltaOf(row) < maxDelta)
+    .map((row) => ({ sourceCid: source.sessionId, targetCid: row.sessionId }));
 }

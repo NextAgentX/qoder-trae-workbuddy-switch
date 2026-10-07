@@ -295,6 +295,7 @@ pub fn run() {
             // P8 T02 · 只读：copy ledger 连通成「会话副本组」（两宿主同步）。
             commands::list_session_replicas,
             commands::session_fingerprints,
+            commands::sync_session_replicas,
             commands::copy_sessions,
             commands::migrate_account_data,
             commands::set_account_remark,
