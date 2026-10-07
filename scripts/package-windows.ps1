@@ -162,6 +162,28 @@ Write-Host ("      node  : {0} ({1})" -f $nodeVer, $nodeExe) -ForegroundColor Da
 Write-Host ("      cargo : {0} ({1})" -f $cargoVer, $cargoExe) -ForegroundColor DarkGray
 Write-Host ("      npm   : {0}" -f $npmCmd) -ForegroundColor DarkGray
 
+# ---------------------------------------------------------------- 1b. spike 工具排除护栏
+# P12 spike 工具（scripts/spike/*）只服务**本地复现**，**不得进打包产物**（设计决策 #4）。
+# 打包链路只消费 dist/（前端）与编译出的二进制，scripts/ 天然不在其中 —— 这里**显式核对**一次，
+# 防止将来有人把 scripts/ 加进 bundle.resources、或把 spike 文件误放进 dist/ 而无人发现。
+$tauriCfgPath = Join-Path $Root "src-tauri\tauri.conf.json"
+if ([System.IO.File]::Exists($tauriCfgPath)) {
+  $tauriCfg = (Get-Content -LiteralPath $tauriCfgPath -Raw | ConvertFrom-Json)
+  $bundleResources = @($tauriCfg.bundle.resources)
+  $badResources = @($bundleResources | Where-Object { $_ -and ("$_" -match 'scripts[\\/]spike') })
+  if ($badResources.Count -gt 0) {
+    Fail ("bundle.resources 不得包含 scripts/spike：{0}" -f ($badResources -join ", "))
+  }
+}
+$distDir = Join-Path $Root "dist"
+if ([System.IO.Directory]::Exists($distDir)) {
+  $spikeInDist = @(Get-ChildItem -LiteralPath $distDir -Recurse -Filter "*spike*" -ErrorAction SilentlyContinue)
+  if ($spikeInDist.Count -gt 0) {
+    Fail ("dist/ 里出现了 spike 文件（打包产物不得包含 spike 工具）：{0}" -f (($spikeInDist | ForEach-Object { $_.FullName }) -join ", "))
+  }
+}
+Write-Host "      已核对：spike 工具未进入打包产物。" -ForegroundColor DarkGray
+
 # ---------------------------------------------------------------- 2. 版本戳
 # 版本号在**打包时从系统时间推导**（`<YYYY>.<M>.<DHHMM>`），不手工 bump，详见
 # scripts/stamp-version.mjs。必须早于 tauri build：tauri 从 package.json /
