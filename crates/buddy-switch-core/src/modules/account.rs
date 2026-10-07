@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::modules::config::{atomic_write, now_ms};
-use crate::modules::region::{accounts_file_for, region_of, region_spec, Region};
+use crate::modules::product::{scope_of_wb_region, Scope};
+use crate::modules::region::{
+    accounts_file_for, accounts_trash_file_for, region_of, region_spec, Region,
+};
 
 fn load_accounts_from_path(path: &Path) -> Vec<Value> {
     if let Ok(text) = std::fs::read_to_string(path) {
@@ -27,24 +30,35 @@ fn save_accounts_to_path(path: &Path, accounts: &[Value]) -> std::io::Result<()>
     atomic_write(path, &content)
 }
 
+/// ★ 账号匹配的**唯一谓词出口**：`id` **或** `uid` 命中即算命中（P5 §2.5 第 (3) 条）。
+///
+/// # 为什么必须是「唯一出口」（真实缺陷形态）
+///
+/// 改造前，**查找 / 备注**按 `id` **或** `uid` 匹配（[`find_account_in`] /
+/// `set_remark_in_path`），而**删除**只按 `id` 匹配。于是「按 uid 选中一批账号再删」
+/// 会**静默空转**：
+///
+/// ```text
+/// 选择集里存的是 uid  →  retain(仅 id) 一个都不命中  →  报「成功」但一条没删
+/// ```
+///
+/// 看起来执行了、实际什么都没发生 —— 比报错坏得多。P5 的软删除（[`trash_account_for`]）/
+/// 恢复（[`restore_account_for`]）/ 永久删除（[`purge_account_for`]）**三者都必须**
+/// 走这个谓词，否则会把同一缺陷原样带进回收站（更隐蔽）。
+///
+/// ⚠️ 本函数是 `id`/`uid` 匹配的**唯一出口**：`find_account_in` /
+/// `trash_account_for` / `restore_account_for` / `purge_account_for` /
+/// `set_remark_in_path` 一律调它，**不得**再各写一遍条件。
+pub fn resolve_account_key(account: &Value, key: &str) -> bool {
+    account.get("id").and_then(Value::as_str) == Some(key)
+        || account.get("uid").and_then(Value::as_str) == Some(key)
+}
+
 fn find_account_in(accounts: &[Value], account_id: &str) -> Option<Value> {
     accounts
         .iter()
-        .find(|account| {
-            account.get("id").and_then(Value::as_str) == Some(account_id)
-                || account.get("uid").and_then(Value::as_str) == Some(account_id)
-        })
+        .find(|account| resolve_account_key(account, account_id))
         .cloned()
-}
-
-fn delete_account_from_path(path: &Path, account_id: &str) -> Result<(), String> {
-    let mut accounts = load_accounts_from_path(path);
-    let before = accounts.len();
-    accounts.retain(|account| account.get("id").and_then(Value::as_str) != Some(account_id));
-    if accounts.len() == before {
-        return Err("账号不存在".to_string());
-    }
-    save_accounts_to_path(path, &accounts).map_err(|error| error.to_string())
 }
 
 /// 读取账号库（CN）；文件缺失或损坏返回空列表。
@@ -1463,13 +1477,16 @@ mod tests {
         assert_eq!(accounts.len(), 2);
     }
 
+    /// 同名账号可独立查找 / 软删除（走 region 入口，隔离 home）。
     #[test]
     fn persisted_same_name_accounts_can_be_found_and_deleted_independently() {
         let test_dir = std::env::temp_dir().join(format!(
             "buddy-switch-same-name-{}",
             uuid::Uuid::new_v4().simple()
         ));
-        let path = test_dir.join("accounts.json");
+        std::fs::create_dir_all(&test_dir).expect("create dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&test_dir);
+
         let mut accounts = vec![];
         upsert_collected_account(
             &mut accounts,
@@ -1479,9 +1496,9 @@ mod tests {
             &mut accounts,
             account("account-2", Some("uid-2"), "同名用户", None),
         );
-        save_accounts_to_path(&path, &accounts).expect("same-name accounts should persist");
+        save_accounts_for(Region::Cn, &accounts).expect("same-name accounts should persist");
 
-        let persisted = load_accounts_from_path(&path);
+        let persisted = load_accounts_for(Region::Cn);
         assert_eq!(
             find_account_in(&persisted, "account-1").unwrap()["uid"],
             "uid-1"
@@ -1491,17 +1508,195 @@ mod tests {
             "uid-2"
         );
 
-        delete_account_from_path(&path, "account-1").expect("first account should delete");
-        let after_first_delete = load_accounts_from_path(&path);
+        delete_account_for(Region::Cn, "account-1").expect("first account should delete");
+        let after_first_delete = load_accounts_for(Region::Cn);
         assert!(find_account_in(&after_first_delete, "account-1").is_none());
         assert_eq!(
             find_account_in(&after_first_delete, "account-2").unwrap()["uid"],
             "uid-2"
         );
+        assert_eq!(
+            load_trash_for(Region::Cn).len(),
+            1,
+            "软删除后回收站应恰好 1 条"
+        );
 
-        delete_account_from_path(&path, "account-2").expect("second account should delete");
-        assert!(load_accounts_from_path(&path).is_empty());
-        std::fs::remove_dir_all(&test_dir).expect("temporary account store should clean up");
+        delete_account_for(Region::Cn, "account-2").expect("second account should delete");
+        assert!(load_accounts_for(Region::Cn).is_empty());
+        assert_eq!(load_trash_for(Region::Cn).len(), 2);
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    /// ★ 按 **uid** 软删除必须真的移入回收站（P5 §2.5 第 (3) 条 · 验收 12）。
+    ///
+    /// 现场缺陷：删除只匹配 `id`，而查找 / 备注匹配 `id|uid` ⇒ 用 uid 选中批删会
+    /// **静默空转**（报成功、实际 0 条）。本用例钉住修复：软删除 / 恢复 / 永久删除 /
+    /// 查找 / 备注**共用** `resolve_account_key`（`id` **或** `uid`）。
+    ///
+    /// 可证伪：把 `trash_account_for` 的 `resolve_account_key` 换回「仅 `id`」，
+    /// 本用例即红（uid 移不动，`is_err()` 与 `len()` 断言双双失败）。
+    #[test]
+    fn delete_by_uid_matches_the_same_predicate_as_find() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-delete-by-uid-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        let accounts = vec![
+            account("id-a", Some("uid-a"), "甲", None),
+            account("id-b", Some("uid-b"), "乙", None),
+        ];
+        save_accounts_for(Region::Cn, &accounts).expect("seed accounts");
+
+        // 谓词本身：id 与 uid 都能命中（这是「统一」的定义）。
+        assert!(resolve_account_key(&accounts[0], "id-a"));
+        assert!(resolve_account_key(&accounts[0], "uid-a"));
+        assert!(!resolve_account_key(&accounts[0], "uid-b"));
+
+        // 查找按 uid 命中，软删除也必须按 uid 命中 —— 两者同源。
+        assert!(find_account_in(&load_accounts_for(Region::Cn), "uid-a").is_some());
+        delete_account_for(Region::Cn, "uid-a").expect("按 uid 删除必须成功，不能静默空转");
+
+        let after = load_accounts_for(Region::Cn);
+        assert_eq!(after.len(), 1, "按 uid 软删除后 live 应恰好剩 1 条");
+        assert!(find_account_in(&after, "id-a").is_none(), "被删的那条必须真的移出 live");
+        assert!(find_account_in(&after, "uid-b").is_some(), "另一条不得被误删");
+        // ★ 关键：移入回收站的**条数 == 1**（不是「移 0 条却报成功」）。
+        let trash = load_trash_for(Region::Cn);
+        assert_eq!(trash.len(), 1, "按 uid 软删除必须真的移入 1 条");
+        assert!(resolve_account_key(&trash[0].account, "uid-a"));
+
+        // 删不存在的 key ⇒ 如实报错（不是静默成功）。
+        assert!(delete_account_for(Region::Cn, "uid-404").is_err());
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ 软删除 → 恢复**往返无损**（P5 §2.7 · 验收 11）：记录 / 凭据原样回 live。
+    ///
+    /// 可证伪：把 `trash_account_for` 改成硬删除（`retain` + 不写 trash）⇒ 本用例变红。
+    #[test]
+    fn soft_delete_then_restore_round_trips_losslessly() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-trash-roundtrip-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        save_accounts_for(
+            Region::Cn,
+            &[json!({
+                "id": "a1", "uid": "u1", "nickname": "甲",
+                "access_token": "AT", "refresh_token": "RT",
+            })],
+        )
+        .expect("seed");
+
+        delete_account_for(Region::Cn, "a1").expect("软删除");
+        assert!(load_accounts_for(Region::Cn).is_empty(), "live 应清空");
+        assert_eq!(load_trash_for(Region::Cn).len(), 1, "回收站应有 1 条");
+
+        restore_account_for(Region::Cn, "a1").expect("恢复");
+        let live = load_accounts_for(Region::Cn);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0]["access_token"], "AT", "凭据必须无损");
+        assert_eq!(live[0]["refresh_token"], "RT");
+        assert_eq!(live[0]["nickname"], "甲");
+        assert!(load_trash_for(Region::Cn).is_empty(), "恢复后回收站应清空");
+
+        // live 已有同 key 时恢复必须报错（不覆盖、不丢数据）。
+        delete_account_for(Region::Cn, "a1").expect("再次软删除");
+        save_accounts_for(Region::Cn, &[account("a1", Some("u1"), "占用", None)]).expect("占位");
+        assert!(
+            restore_account_for(Region::Cn, "a1").is_err(),
+            "live 已存在该账号时必须拒绝恢复"
+        );
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ 永久删除（purge）从回收站真删；留存 sweep 清过期 + 裁上限（先到先出）。
+    #[test]
+    fn purge_removes_and_sweep_enforces_retention_and_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-purge-sweep-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        save_accounts_for(
+            Region::Cn,
+            &[
+                account("a1", Some("u1"), "甲", None),
+                account("a2", Some("u2"), "乙", None),
+            ],
+        )
+        .expect("seed");
+        delete_account_for(Region::Cn, "a1").expect("软删除 a1");
+        delete_account_for(Region::Cn, "a2").expect("软删除 a2");
+        assert_eq!(load_trash_for(Region::Cn).len(), 2);
+
+        purge_account_for(Region::Cn, "a1").expect("永久删除");
+        let trash = load_trash_for(Region::Cn);
+        assert_eq!(trash.len(), 1, "purge 后应只剩 1 条");
+        assert!(!resolve_account_key(&trash[0].account, "a1"));
+        // purge 不存在的 key ⇒ 报错。
+        assert!(purge_account_for(Region::Cn, "u1").is_err());
+
+        // 留存：过期条目被清。
+        let now = now_ms();
+        let mut entries = vec![
+            TrashEntry {
+                account: account("old", Some("u-old"), "旧", None),
+                deleted_at: now - TRASH_RETENTION_MS - 1,
+                expires_at: now - 1,
+                origin_scope: Scope::WbCn,
+            },
+            TrashEntry {
+                account: account("fresh", Some("u-fresh"), "新", None),
+                deleted_at: now,
+                expires_at: now + TRASH_RETENTION_MS,
+                origin_scope: Scope::WbCn,
+            },
+        ];
+        assert_eq!(sweep_trash_entries(&mut entries, now), 1, "过期条目应被清理");
+        assert_eq!(entries.len(), 1);
+        assert!(resolve_account_key(&entries[0].account, "u-fresh"));
+
+        // 上限：超过 200 条时先到先出（删最旧的）。
+        let mut many: Vec<TrashEntry> = (0..TRASH_MAX_ENTRIES + 5)
+            .map(|i| TrashEntry {
+                account: account(&format!("k{i}"), None, "x", None),
+                deleted_at: i as i64,
+                expires_at: now + TRASH_RETENTION_MS,
+                origin_scope: Scope::WbCn,
+            })
+            .collect();
+        let removed = sweep_trash_entries(&mut many, now);
+        assert_eq!(removed, 5, "超出上限的 5 条应被裁掉");
+        assert_eq!(many.len(), TRASH_MAX_ENTRIES);
+        // 最旧的 5 条（deleted_at = 0..4）被删，最旧保留项是 k5。
+        assert!(resolve_account_key(&many[0].account, "k5"));
+
+        // 清空回收站返回删除条数（此刻回收站里只剩 a2）。
+        assert_eq!(clear_trash_for(Region::Cn), 1, "清空应返回被删条数");
+        assert!(load_trash_for(Region::Cn).is_empty(), "清空后回收站必须为空");
+
+        save_accounts_for(Region::Cn, &[account("z", Some("uz"), "z", None)]).expect("seed z");
+        delete_account_for(Region::Cn, "uz").expect("软删除 z");
+        assert_eq!(clear_trash_for(Region::Cn), 1);
+        assert!(load_trash_for(Region::Cn).is_empty());
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 两版账号库必须落到**不同文件**（PRD D2 头号硬约束）。
@@ -1616,14 +1811,217 @@ mod tests {
     }
 }
 
-/// 删除账号（按 id，CN）。
+// ---------------------------------------------------------------------------
+// 软删除 + 回收站（P5 §2.7）—— 破坏性操作的**可恢复**落点
+// ---------------------------------------------------------------------------
+//
+// 删除不再从账号库直接抹掉，而是**移入** `accounts.trash.<region>.json`（附
+// `deleted_at` / `expires_at` / `origin_scope`）。恢复把记录移回 live；永久删除
+// （purge）才是**唯一不可逆步**。留存策略：30 天自动清理 + 上限 200 条（先到先出），
+// 由 `BackgroundTask::StartupMaintenance` 跑 [`sweep_all_trash`]（不新增调度器）。
+//
+// ⚠️ **两条硬约束**（P5 §2.7）：
+// 1. trash 路径经 `enum → table` 派生（[`accounts_trash_file_for`]），raw scope 字符串
+//    **从不**进 `PathBuf`；
+// 2. 软删除 / 恢复 / 永久删除**共用** [`resolve_account_key`]（`id` **或** `uid`）谓词 ——
+//    否则「按 uid 批删」会**移 0 条却报成功**，软删除会把这个静默缺陷带进回收站。
+
+/// 回收站留存窗口（毫秒）：30 天。
+pub const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// 回收站条数上限（先到先出）：防「批量导入 → 批量删除」把文件撑爆。
+pub const TRASH_MAX_ENTRIES: usize = 200;
+
+/// 回收站条目（持久化形态）。`account` 原样保留 ⇒ 恢复无损。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TrashEntry {
+    /// 原账号记录（原样保留，恢复时原样移回 live）。
+    pub account: Value,
+    /// 删除时间（ms）。
+    pub deleted_at: i64,
+    /// 到期时间（ms）= `deleted_at + TRASH_RETENTION_MS`。
+    pub expires_at: i64,
+    /// 冗余存作用域，便于跨 scope 审计（恢复不依赖它）。
+    pub origin_scope: Scope,
+}
+
+fn load_trash_from_path(path: &Path) -> Vec<TrashEntry> {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Ok(entries) = serde_json::from_str::<Vec<TrashEntry>>(&text) {
+            return entries;
+        }
+    }
+    Vec::new()
+}
+
+fn save_trash_to_path(path: &Path, entries: &[TrashEntry]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(entries).unwrap_or_default();
+    atomic_write(path, &content)
+}
+
+/// 留存策略（**纯函数**，可单测）：清过期条目 + 裁上限（先到先出）。
+///
+/// 返回被清理的条数。上限裁剪按 `deleted_at` 升序删最旧的 —— 回收站**含凭据**，
+/// 不能无限增长（安全：已删账号的 token 不应无限期留存）。
+pub fn sweep_trash_entries(entries: &mut Vec<TrashEntry>, now: i64) -> usize {
+    let before = entries.len();
+    entries.retain(|entry| entry.expires_at > now);
+    if entries.len() > TRASH_MAX_ENTRIES {
+        entries.sort_by_key(|entry| entry.deleted_at);
+        let excess = entries.len() - TRASH_MAX_ENTRIES;
+        entries.drain(0..excess);
+    }
+    before - entries.len()
+}
+
+/// 软删除：把账号从 live **移入**回收站（谓词 `id` **或** `uid`）。
+///
+/// 账号不存在 ⇒ `Err`（**不静默成功**）。凭据内嵌在记录里，随记录一起搬移 ⇒ 恢复无损。
+pub fn trash_account_for(region: Region, key: &str) -> Result<(), String> {
+    let live_path = accounts_file_for(region);
+    let trash_path = accounts_trash_file_for(region);
+    let mut accounts = load_accounts_from_path(&live_path);
+    let Some(index) = accounts
+        .iter()
+        .position(|account| resolve_account_key(account, key))
+    else {
+        return Err("账号不存在".to_string());
+    };
+    let account = accounts.remove(index);
+
+    let now = now_ms();
+    let mut trash = load_trash_from_path(&trash_path);
+    trash.push(TrashEntry {
+        account,
+        deleted_at: now,
+        expires_at: now + TRASH_RETENTION_MS,
+        origin_scope: scope_of_wb_region(region),
+    });
+    sweep_trash_entries(&mut trash, now);
+
+    save_accounts_to_path(&live_path, &accounts).map_err(|error| error.to_string())?;
+    save_trash_to_path(&trash_path, &trash).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 恢复：把账号从回收站**移回** live（谓词 `id` **或** `uid`）。
+///
+/// live 已存在同 key 记录 ⇒ `Err`（**不覆盖**，避免把现有账号冲掉而丢数据）。
+pub fn restore_account_for(region: Region, key: &str) -> Result<(), String> {
+    let live_path = accounts_file_for(region);
+    let trash_path = accounts_trash_file_for(region);
+    let mut trash = load_trash_from_path(&trash_path);
+    let Some(index) = trash
+        .iter()
+        .position(|entry| resolve_account_key(&entry.account, key))
+    else {
+        return Err("回收站中没有该账号".to_string());
+    };
+    let mut accounts = load_accounts_from_path(&live_path);
+    if accounts
+        .iter()
+        .any(|account| resolve_account_key(account, key))
+    {
+        return Err("账号库中已存在该账号，无法恢复".to_string());
+    }
+    let entry = trash.remove(index);
+    accounts.push(entry.account);
+    save_accounts_to_path(&live_path, &accounts).map_err(|error| error.to_string())?;
+    save_trash_to_path(&trash_path, &trash).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 永久删除（**唯一不可逆步**）：从回收站真删。
+///
+/// WB 侧凭据（`access_token` / `refresh_token`）**内嵌在记录里**，随记录一并销毁 ⇒
+/// 无需额外处理（区别于 Trae 侧需另删登录态快照目录）。前端必须走 danger 二次确认。
+pub fn purge_account_for(region: Region, key: &str) -> Result<(), String> {
+    let trash_path = accounts_trash_file_for(region);
+    let mut trash = load_trash_from_path(&trash_path);
+    let before = trash.len();
+    trash.retain(|entry| !resolve_account_key(&entry.account, key));
+    if trash.len() == before {
+        return Err("回收站中没有该账号".to_string());
+    }
+    save_trash_to_path(&trash_path, &trash).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 读取某 region 的回收站（文件缺失 / 损坏 ⇒ 空表）。
+pub fn load_trash_for(region: Region) -> Vec<TrashEntry> {
+    load_trash_from_path(&accounts_trash_file_for(region))
+}
+
+/// 清空某 region 的回收站，返回删除条数（**不可逆**）。
+pub fn clear_trash_for(region: Region) -> usize {
+    let trash_path = accounts_trash_file_for(region);
+    let before = load_trash_from_path(&trash_path).len();
+    if before > 0 {
+        let _ = save_trash_to_path(&trash_path, &[]);
+    }
+    before
+}
+
+/// 留存清理（单 region）：清过期 + 裁上限。返回被清理条数。
+pub fn sweep_trash_for(region: Region, now: i64) -> usize {
+    let trash_path = accounts_trash_file_for(region);
+    let mut trash = load_trash_from_path(&trash_path);
+    let removed = sweep_trash_entries(&mut trash, now);
+    if removed > 0 {
+        let _ = save_trash_to_path(&trash_path, &trash);
+    }
+    removed
+}
+
+/// 全部 WB region 的回收站留存清理（`StartupMaintenance` 调用，§2.7 留存策略）。
+pub fn sweep_all_trash() -> usize {
+    let now = now_ms();
+    Region::all()
+        .iter()
+        .map(|region| sweep_trash_for(*region, now))
+        .sum()
+}
+
+/// 回收站条目的**线上形态**（camelCase，供前端渲染）。
+///
+/// `key` 是恢复 / 永久删除要回传的账号标识：优先 `id`、其次 `uid`
+/// （与 [`resolve_account_key`] 的谓词同源 —— 回传哪个都能命中）。
+fn trash_entry_view(entry: &TrashEntry) -> Value {
+    let account = &entry.account;
+    let id = get_str(account, "id");
+    let uid = get_str(account, "uid");
+    json!({
+        "key": id.clone().or_else(|| uid.clone()).unwrap_or_default(),
+        "id": id,
+        "uid": uid,
+        "name": account_display_name(account),
+        "deletedAt": entry.deleted_at,
+        "expiresAt": entry.expires_at,
+        "originScope": entry.origin_scope.as_str(),
+    })
+}
+
+/// 回收站列表的线上形态：`{ scope, entries }`（按删除时间**倒序**，最新在前）。
+pub fn trash_list_value(region: Region) -> Value {
+    let mut entries = load_trash_for(region);
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.deleted_at));
+    let views: Vec<Value> = entries.iter().map(trash_entry_view).collect();
+    json!({ "scope": scope_of_wb_region(region).as_str(), "entries": views })
+}
+
+/// 删除账号（CN）—— **软删除**：移入回收站，可恢复（P5 §2.7）。
 pub fn delete_account(account_id: &str) -> Result<(), String> {
     delete_account_for(Region::Cn, account_id)
 }
 
-/// 按 region 删除账号（按 id）。
+/// 按 region 删除账号 —— **软删除**（移入 `accounts.trash.<region>.json`，可恢复）。
+///
+/// 谓词 `id` **或** `uid`（[`resolve_account_key`]）：按 uid 批删不再静默空转。
 pub fn delete_account_for(region: Region, account_id: &str) -> Result<(), String> {
-    delete_account_from_path(&accounts_file_for(region), account_id)
+    trash_account_for(region, account_id)
 }
 
 /// 就地修改**原始记录**里的备注（字段级更新），返回更新后的脱敏元数据。
@@ -1643,10 +2041,11 @@ fn set_remark_in_path(
     remark: Option<&str>,
 ) -> Result<Value, String> {
     let mut accounts = load_accounts_from_path(path);
-    let Some(index) = accounts.iter().position(|account| {
-        account.get("id").and_then(Value::as_str) == Some(account_id)
-            || account.get("uid").and_then(Value::as_str) == Some(account_id)
-    }) else {
+    // 走**统一谓词**（`id` 或 `uid`）—— 与删除 / 查找同源，避免三处各写一份条件而漂移。
+    let Some(index) = accounts
+        .iter()
+        .position(|account| resolve_account_key(account, account_id))
+    else {
         return Err("账号不存在".to_string());
     };
 

@@ -13,6 +13,7 @@ use std::sync::{LazyLock, Mutex};
 use serde_json::Value;
 
 use crate::modules::config::{now_ms, store_dir};
+use crate::modules::net::{self, TransportErrorKind};
 use crate::modules::region::{catalog_cache_file, Region};
 use crate::modules::upstream::{parse_model_catalog, UpstreamClient, UpstreamErrorKind, UpstreamFailure};
 
@@ -72,7 +73,78 @@ struct CachedCatalog {
     models: Vec<CatalogModel>,
 }
 
-const DEGRADE_NOTE: &str = "上游接口可能已变更，当前展示的是上次成功或内置兜底目录";
+/// ★ 契约（P10 §1.3 规则 2）：**非 live 快照的 `note` 恒非空**。
+///
+/// 三个常量就是「为什么不是实时」的**后端**落点 —— 前端 `describeCatalogSource` 另有
+/// i18n 兜底，二者独立：后端给不出具体原因时前端仍能兜底，后端给得出时原因更具体。
+///
+/// ⚠️ 所有非 live 快照（`cached` / `builtin`）都**必须**经 [`with_reason`] 产出。
+/// 改回 `note: None` 会让来源条退回「只有一个灰徽标，用户分不清是『加载中』还是『拉不到』」
+/// （这正是 `load_cached` 此前把 `note` 置 `None` 留下的缺口）。
+const CACHED_NOTE: &str = "展示的是上次成功识别的缓存目录（本次未能连上上游）";
+/// 「内置」来源的兜底原因（从未成功识别过上游）。
+const BUILTIN_NOTE: &str = "尚未成功识别过上游目录，展示的是内置兜底目录";
+/// 上游返回 200 但清单为空 —— 空清单不可用，不能写 live。
+const EMPTY_CATALOG_NOTE: &str = "上游未返回任何模型（清单为空）";
+
+/// 目录「过期」阈值：24 小时（P10 §1.6 触发表）。
+///
+/// `fetched_at` 超过它 ⇒ 网关启动时后台补识别一次。
+pub const STALE_AFTER_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// ★ 不变量出口：把快照标成**非 live** 来源时，**必须**带上原因。
+///
+/// 这是「非实时必有原因」的后端唯一落点 —— 直接拼 `note: None` 会让契约静默失效。
+fn with_reason(mut snapshot: CatalogSnapshot, reason: &str) -> CatalogSnapshot {
+    debug_assert!(
+        !reason.trim().is_empty(),
+        "非 live 快照的原因不得为空（否则用户只剩一个灰徽标可猜）"
+    );
+    snapshot.note = Some(reason.to_string());
+    snapshot
+}
+
+/// 把上游失败映射为**可读、具体**的原因（✅ P10 #5：超时 / 网络 / 鉴权…）。
+///
+/// 取代此前笼统的 `DEGRADE_NOTE`（「上游接口可能已变更…」）—— 那句话回答不了
+/// 「**为什么**这次不是实时」，用户看到它只能猜。粒度：
+///
+/// - **传输层失败**（`status == 0`）按 [`net`] 的分类细化：连接超时 / 无法连接 / 读体失败；
+/// - **有状态码的失败**按 [`UpstreamErrorKind`]：鉴权 / 额度 / 限流 / 未找到 / 服务端 / 客户端。
+pub fn failure_reason(failure: &UpstreamFailure) -> String {
+    if failure.status == 0 {
+        // `net::describe_transport_error` 的文案以「种类：」开头，据此细化传输层原因。
+        let message = &failure.message;
+        return if message.contains(net::transport_error_label(TransportErrorKind::Timeout)) {
+            "上游未响应（连接超时）".to_string()
+        } else if message.contains(net::transport_error_label(TransportErrorKind::Connect)) {
+            "网络错误（无法连接上游）".to_string()
+        } else if message.contains(net::transport_error_label(TransportErrorKind::BodyOrDecode)) {
+            "网络错误（上游响应读取失败）".to_string()
+        } else {
+            "网络错误（请求失败）".to_string()
+        };
+    }
+    match failure.kind {
+        UpstreamErrorKind::HardCredit => "鉴权 / 额度失败（积分不足）".to_string(),
+        UpstreamErrorKind::SoftRate => "上游限流（请求过于频繁）".to_string(),
+        UpstreamErrorKind::SessionDead => "鉴权失败（登录态已失效）".to_string(),
+        UpstreamErrorKind::NotFound => "上游接口未找到（接口可能已变更）".to_string(),
+        UpstreamErrorKind::Server => "上游服务端错误".to_string(),
+        UpstreamErrorKind::Client => "上游拒绝了请求".to_string(),
+    }
+}
+
+/// 快照是否「待确认」（P10 §3.4 / §1.6）：**从未成功识别**（`fetched_at == None`，即内置），
+/// 或 `fetched_at` 距 `now_ms` 已超过 [`STALE_AFTER_MS`]。
+///
+/// 供「网关启动补识别」判定哪些 region 需要后台探测 —— 避免每次启动都无脑打上游。
+pub fn is_stale(snapshot: &CatalogSnapshot, now_ms: i64) -> bool {
+    match snapshot.fetched_at {
+        None => true,
+        Some(fetched_at) => now_ms.saturating_sub(fetched_at) >= STALE_AFTER_MS,
+    }
+}
 
 /// CN 内置兜底目录（对照参考实现 `FALLBACK_WORKBUDDY_MODELS`，16 条）。
 ///
@@ -190,7 +262,7 @@ impl CatalogStore {
         if let Some(snapshot) = self.load_cached(region) {
             return snapshot;
         }
-        Self::builtin_snapshot(region, None)
+        Self::builtin_snapshot(region, BUILTIN_NOTE)
     }
 
     /// 手动写入实时快照（供网关手动刷新 / 单测种子）。
@@ -229,24 +301,32 @@ impl CatalogStore {
                 self.save_cached(&snapshot);
                 snapshot
             }
-            _ => {
-                if let Some(mut cached) = self.load_cached(region) {
-                    cached.note = Some(DEGRADE_NOTE.to_string());
-                    return cached;
+            // 空清单（上游 200 但未给模型）与 `Err` 都算「本次识别失败」——
+            // 空清单不可用，写 live 会让用户看到「实时 + 0 个模型」。
+            failed => {
+                let reason = match &failed {
+                    Err(failure) => failure_reason(failure),
+                    Ok(_) => EMPTY_CATALOG_NOTE.to_string(),
+                };
+                if let Some(cached) = self.load_cached(region) {
+                    return with_reason(cached, &reason);
                 }
-                Self::builtin_snapshot(region, Some(DEGRADE_NOTE.to_string()))
+                Self::builtin_snapshot(region, &reason)
             }
         }
     }
 
-    fn builtin_snapshot(region: Region, note: Option<String>) -> CatalogSnapshot {
-        CatalogSnapshot {
-            region,
-            source: CatalogSource::Builtin,
-            fetched_at: None,
-            models: Self::fallback_models(region).to_vec(),
-            note,
-        }
+    fn builtin_snapshot(region: Region, reason: &str) -> CatalogSnapshot {
+        with_reason(
+            CatalogSnapshot {
+                region,
+                source: CatalogSource::Builtin,
+                fetched_at: None,
+                models: Self::fallback_models(region).to_vec(),
+                note: None,
+            },
+            reason,
+        )
     }
 
     fn load_cached(&self, region: Region) -> Option<CatalogSnapshot> {
@@ -272,13 +352,16 @@ impl CatalogStore {
         if cached.models.is_empty() {
             return None;
         }
-        Some(CatalogSnapshot {
-            region,
-            source: CatalogSource::Cached,
-            fetched_at: Some(cached.fetched_at),
-            models: cached.models,
-            note: None,
-        })
+        Some(with_reason(
+            CatalogSnapshot {
+                region,
+                source: CatalogSource::Cached,
+                fetched_at: Some(cached.fetched_at),
+                models: cached.models,
+                note: None,
+            },
+            CACHED_NOTE,
+        ))
     }
 
     fn save_cached(&self, snapshot: &CatalogSnapshot) {
@@ -463,5 +546,168 @@ mod tests {
         let store = CatalogStore::with_cache_dir(dir.clone());
         assert_eq!(store.current(Region::Global).source, CatalogSource::Builtin);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn sample_model(id: &str) -> CatalogModel {
+        CatalogModel {
+            id: id.into(),
+            name: id.into(),
+            context_window: 1,
+            max_tokens: 1,
+            supports_images: false,
+            credits: None,
+            badges: Vec::new(),
+            free: false,
+        }
+    }
+
+    fn has_reason(snapshot: &CatalogSnapshot) -> bool {
+        snapshot
+            .note
+            .as_deref()
+            .map(|note| !note.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// ★ 契约（P10 §1.3 规则 2）：**非 live 快照的 `note` 恒非空**。
+    ///
+    /// ## 为什么这条断言必须存在
+    ///
+    /// 「非实时必有原因」此前只是**前端**的兜底（`describeCatalogSource`），后端
+    /// `load_cached` 会把 `note` 置 `None` ⇒ 一份「已保存」快照在**后端**就没有原因。
+    /// 本用例把契约钉在**后端**：非 live ⇒ note 非空。
+    ///
+    /// ## 可证伪（T03 变异验证 ②）
+    ///
+    /// 把 `read_cached_file` 的 `with_reason(…, CACHED_NOTE)` 改回 `note: None`
+    /// （或删掉 `current()` 内置兜底的 `BUILTIN_NOTE`），本用例立刻变红。
+    #[test]
+    fn non_live_snapshot_always_carries_a_reason() {
+        let dir = temp_dir();
+
+        // ① 无 live、无缓存 → 内置：必须带原因。
+        let store = CatalogStore::with_cache_dir(dir.clone());
+        let builtin = store.current(Region::Cn);
+        assert_eq!(builtin.source, CatalogSource::Builtin);
+        assert!(
+            has_reason(&builtin),
+            "内置快照必须带原因（否则用户只剩一个灰徽标），实际 note={:?}",
+            builtin.note
+        );
+
+        // ② 有缓存 → 已保存：必须带原因（这正是 `load_cached` 此前置 `None` 的缺口）。
+        let cached_doc = json!({
+            "region": "cn",
+            "fetched_at": 42,
+            "models": [sample_model("cached-model")],
+        });
+        std::fs::write(
+            dir.join("gateway_models.cn.json"),
+            serde_json::to_string(&cached_doc).unwrap(),
+        )
+        .unwrap();
+        let cached = CatalogStore::with_cache_dir(dir.clone()).current(Region::Cn);
+        assert_eq!(cached.source, CatalogSource::Cached);
+        assert!(
+            has_reason(&cached),
+            "已保存快照必须带原因，实际 note={:?}",
+            cached.note
+        );
+
+        // ③ live 允许无原因（「实时」不需要解释「为什么不是实时」）。
+        let live_store = CatalogStore::with_cache_dir(dir.clone());
+        live_store.set_live(Region::Global, vec![sample_model("live-model")]);
+        let live = live_store.current(Region::Global);
+        assert_eq!(live.source, CatalogSource::Live);
+        assert_eq!(live.note, None, "live 不应带回落原因");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ✅ #5：失败原因**具体**（超时 / 网络 / 鉴权…），不是笼统一句。
+    ///
+    /// 可证伪：把 `failure_reason` 改回返回 `DEGRADE_NOTE` 一类的常量 ⇒ 下面的
+    /// 「含具体词」「互不相同」断言全红。
+    #[test]
+    fn failure_reason_maps_failures_to_concrete_reasons() {
+        // 传输层失败（status == 0）：按 `net` 的分类标签细化。
+        let timeout = catalog_failure(
+            0,
+            UpstreamErrorKind::Server,
+            net::compose_transport_message(TransportErrorKind::Timeout, "error sending request"),
+        );
+        assert!(
+            failure_reason(&timeout).contains("超时"),
+            "连接超时应映射为「超时」，实际：{}",
+            failure_reason(&timeout)
+        );
+
+        let connect = catalog_failure(
+            0,
+            UpstreamErrorKind::Server,
+            net::compose_transport_message(TransportErrorKind::Connect, "tcp connect error"),
+        );
+        assert!(
+            failure_reason(&connect).contains("网络"),
+            "无法连接应映射为「网络错误」，实际：{}",
+            failure_reason(&connect)
+        );
+
+        // 有状态码：按 `kind` 分类。
+        let cases = [
+            (401, UpstreamErrorKind::SessionDead, "鉴权"),
+            (402, UpstreamErrorKind::HardCredit, "积分"),
+            (429, UpstreamErrorKind::SoftRate, "限流"),
+            (404, UpstreamErrorKind::NotFound, "未找到"),
+            (502, UpstreamErrorKind::Server, "服务端"),
+            (400, UpstreamErrorKind::Client, "拒绝"),
+        ];
+        for (status, kind, want) in cases {
+            let reason = failure_reason(&catalog_failure(status, kind, "boom"));
+            assert!(
+                reason.contains(want),
+                "status={status} 期望含「{want}」，实际：{reason}"
+            );
+        }
+
+        // 六种分类的原因必须**互不相同** —— 笼统一句话回答不了「为什么不是实时」。
+        let mut unique = std::collections::HashSet::new();
+        for kind in [
+            UpstreamErrorKind::HardCredit,
+            UpstreamErrorKind::SoftRate,
+            UpstreamErrorKind::SessionDead,
+            UpstreamErrorKind::NotFound,
+            UpstreamErrorKind::Server,
+            UpstreamErrorKind::Client,
+        ] {
+            assert!(
+                unique.insert(failure_reason(&catalog_failure(500, kind, ""))),
+                "两种分类给出了同一条原因：{kind:?}"
+            );
+        }
+    }
+
+    /// `is_stale`：从未识别（`fetched_at == None`）与 `fetched_at` 超过 24h 都算「待确认」。
+    #[test]
+    fn is_stale_covers_builtin_and_expired_live() {
+        let now = 1_700_000_000_000_i64;
+        let mut snapshot = CatalogSnapshot {
+            region: Region::Cn,
+            source: CatalogSource::Builtin,
+            fetched_at: None,
+            models: Vec::new(),
+            note: Some(BUILTIN_NOTE.to_string()),
+        };
+        assert!(is_stale(&snapshot, now), "从未成功识别（内置）必为待确认");
+
+        snapshot.source = CatalogSource::Live;
+        snapshot.fetched_at = Some(now - STALE_AFTER_MS + 1);
+        assert!(!is_stale(&snapshot, now), "24h 内的 live 不待确认");
+
+        snapshot.fetched_at = Some(now - STALE_AFTER_MS);
+        assert!(is_stale(&snapshot, now), "恰好 24h 即待确认");
+
+        snapshot.fetched_at = Some(now - STALE_AFTER_MS - 1);
+        assert!(is_stale(&snapshot, now), "超过 24h 的 live 待确认");
     }
 }

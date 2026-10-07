@@ -316,9 +316,20 @@ pub fn client_executable_for(region: Region) -> PathBuf {
 }
 
 /// 探针脚本落盘路径（固定名，每次覆盖写；内容只有 1 KB）。
+///
+/// ⚠️ **固定名是刻意的**（避免每次调用泄漏一个新文件）⇒ 因此**写与读必须互斥**：
+/// 并发调用 [`fetch_build_key`] 时，若 A 刚写完、B 又写，A 的子进程可能读到**半个文件**
+/// （`fs::write` 先截断再写）。⇒ 用 [`PROBE_LOCK`] 把「写 → 起子进程（读）」串起来。
 fn key_probe_path() -> PathBuf {
     std::env::temp_dir().join("buddy-switch-at-rest-key.js")
 }
+
+/// 探针文件的**进程级互斥**（理由见 [`key_probe_path`]）。
+///
+/// ⚠️ 不是性能优化，是**正确性**：`fs::write` 会先截断，两个并发写会让读者看到空/半文件。
+/// 持锁范围覆盖「写脚本 + 起子进程」——取钥本身是慢操作（起 Electron 子进程），
+/// 串行化它不会成为瓶颈。
+static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 起子进程取 `atRestSecretKey`。
 ///
@@ -328,6 +339,13 @@ pub fn fetch_build_key(exe: &Path) -> Result<String, AtRestError> {
     if !exe.exists() {
         return Err(AtRestError::ClientMissing);
     }
+    // ★ 持锁覆盖**整个函数**（写脚本 → 起子进程 → 等它读完）：探针文件是**固定名**
+    //   （见 `key_probe_path`），并发写会让先起的子进程读到空/半文件。
+    //   锁在函数返回时释放 —— 正好覆盖「子进程读文件」的窗口。
+    let _probe_guard = PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let probe = key_probe_path();
     std::fs::write(&probe, KEY_PROBE_JS)
         .map_err(|e| AtRestError::Spawn(format!("写探针脚本失败：{e}")))?;

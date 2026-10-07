@@ -14,6 +14,7 @@
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -362,6 +363,78 @@ fn find_project_jsonl_for(region: Region, cid: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// 逐行 hash 的**上限** —— 公共前缀不可能超过较短的那个，且分歧多数发生在近期。
+/// 只存前 N 行 hash ⇒ 批量调用时**响应体可控**（不随会话长度线性膨胀）。
+pub const PREFIX_HASH_LIMIT: usize = 512;
+
+/// 一个会话 jsonl 的**内容指纹**（P8「组状态派生」的数据源）。
+///
+/// ## 为什么是「指纹」而不是「消息数」
+///
+/// 原型要的「落后 N 条 / 有分歧」需要**内容级**判据 —— `updatedAt` **不能**表达
+/// 「谁落后」（`P8-ARCH.md` §1.2：「**时间新 ≠ 内容新**」；用时间冒充内容是**撒谎**）。
+/// 本函数从 jsonl 取两样东西：
+///
+/// - `lineCount`：**完整**行数（实测每行一条 `type:"message"` ⇒ ≈ 消息数）；
+/// - `prefixHashes`：**前 [`PREFIX_HASH_LIMIT`] 行**的逐行 hash（**只存 hash，不落盘正文**）。
+///
+/// ⇒ 两副本的**公共前缀长度** = 两个 `prefixHashes` 的最长公共前缀 ⇒ 那才是「共同旧版」；
+/// 各自的 `lineCount - 公共前缀` = 各自新增的条数（**内容级 delta**）。
+///
+/// ⚠️ **只读**：不改写任何会话文件。
+/// ⚠️ **不缓存**：由命令层按 `mtime` 缓存（本函数每次都会真读文件）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFingerprint {
+    pub line_count: usize,
+    pub prefix_hashes: Vec<u64>,
+}
+
+/// 读一个会话的**内容指纹**；jsonl 不存在 / 不可读时返回 `None`（**fail-closed**）。
+pub fn session_fingerprint_for(region: Region, cid: &str) -> Option<SessionFingerprint> {
+    let path = find_project_jsonl_for(region, cid)?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut line_count = 0usize;
+    let mut prefix_hashes: Vec<u64> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        line_count += 1;
+        if prefix_hashes.len() < PREFIX_HASH_LIMIT {
+            prefix_hashes.push(hash_line(line));
+        }
+    }
+    Some(SessionFingerprint {
+        line_count,
+        prefix_hashes,
+    })
+}
+
+/// 稳定 hash（FNV-1a 64）—— **不引第三方依赖**（本 crate 只有 `serde_json`）。
+///
+/// 同一行的**任何**字节变化都会改变结果 ⇒ 可用于判「这一行是否与对方相同」。
+fn hash_line(line: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in line.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// 两个指纹的**公共前缀长度**（「共同旧版」的条数）。
+///
+/// ⚠️ 返回的是**行数**，不是字节 —— 语义即「双方一致到第几条」。
+pub fn common_prefix_len(a: &SessionFingerprint, b: &SessionFingerprint) -> usize {
+    a.prefix_hashes
+        .iter()
+        .zip(b.prefix_hashes.iter())
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 /// jsonl 头部能拿到的最小元数据（cwd / 标题）。
@@ -1083,6 +1156,172 @@ fn record_copy_ledger(
         source_cid,
         new_cid,
     )
+}
+
+/// 副本组的顶点标识：`uid␟cid`（仅用于本次连通计算，**不外泄**）。
+fn replica_vertex_key(uid: &str, cid: &str) -> String {
+    format!("{uid}{LEDGER_SEP}{cid}")
+}
+
+/// 把账本键解析回**同 region** 的 `(source_uid, target_uid, source_cid)`。
+///
+/// **只接受三元键**（同 region 复制）。跨 region 的四元键（带源 region 前缀，见
+/// [`copy_ledger_key_for`]）本期**不引入**（P8 ✅ #2）⇒ 返回 `None`。
+///
+/// ⚠️ 键格式的定义在 [`copy_ledger_key`] / [`copy_ledger_key_for`] —— 解析与构造必须
+/// **同处一地维护**（这正是下面 [`list_replica_groups_for`] 函数头那条注释要守的同一件事）。
+fn parse_copy_ledger_key_same_region(key: &str) -> Option<(String, String, String)> {
+    let mut parts = key.split(LEDGER_SEP);
+    let source_uid = parts.next()?;
+    let target_uid = parts.next()?;
+    let source_cid = parts.next()?;
+    // 还有第 4 段 ⇒ 跨 region 四元键 ⇒ 本期不引入。
+    if parts.next().is_some() {
+        return None;
+    }
+    if source_uid.is_empty() || target_uid.is_empty() || source_cid.is_empty() {
+        return None;
+    }
+    Some((
+        source_uid.to_string(),
+        target_uid.to_string(),
+        source_cid.to_string(),
+    ))
+}
+
+/// ★ 只读：把 copy ledger 的边连通成「会话副本组」（P8 T02）。
+///
+/// ⚠️ **这是一个内部去重账本被提升为产品语义；改动去重逻辑前先看这里。**
+///    ledger 本是「同一源会话 → 同一目标账号只复制一次」的去重机制（[`ledger_hit_for`] /
+///    [`record_copy_ledger`]），P8 把它当作「副本边」的数据源暴露给前端。**优化 / 重构去重
+///    会静默改变 P8 的行为**（那是最难查的一类缺陷）—— 改前先读本注释，并跑
+///    `replica_groups_*` 的单测。
+///
+/// ## 数据源与范围
+/// - 数据源 = `buddy-switch-copy-ledger.json`（[`COPY_LEDGER_FILE`]），**只读**（绝不写回）。
+/// - **只读当前 region** 的账本（P8 ✅ #2）：跨 region 的四元键**不引入**（语义不清）。
+/// - **不改 ledger 结构、不新增模型** —— 只是把既有边读出来连通。
+///
+/// ## 「组」的定义
+/// 把 `(source_uid, source_cid)` 与 `(target_uid, new_cid)` 当作图的顶点、账本条当作边，
+/// **连通即一组**（连通分量）。返回值**只含 ledger 里确有的字段**（`accountUid` /
+/// `sessionId` / `region`）；`title` / `updatedAt` / `hasHistory` **不在 ledger 里**
+/// ⇒ 由**前端**用 `list_sessions` / 账号 store join 补齐，**后端不臆造**。
+///
+/// ## ⚠️ 返回值无内容信息
+/// 值是 `new_cid`（字符串，无消息计数 / base）⇒ 前端**推不出**「落后 / 分叉」
+/// （§3.15.2「时间新 ≠ 内容新」）。本命令**不得**被用来派生组状态。
+///
+/// 返回：
+/// ```json
+/// { "groups": [ { "key": "…", "replicas": [ { "accountUid": "…", "sessionId": "…", "region": "cn" } ] } ],
+///   "source": "ledger" | "empty" }
+/// ```
+pub fn list_replica_groups_for(region: Region) -> Value {
+    list_replica_groups_at(region, None)
+}
+
+/// [`list_replica_groups_for`] 的可重定向版本（**仅单测**把账本读重定向到临时目录）。
+fn list_replica_groups_at(region: Region, override_path: Option<&Path>) -> Value {
+    let path = resolve_ledger_path(region, override_path);
+    let ledger = load_copy_ledger_at(&path);
+    let groups = replica_groups_from_ledger(region, &ledger);
+    if groups.is_empty() {
+        // 无可用登记（文件缺失 / 空 / 只有跨 region 边）⇒ 前端渲染结构化空态。
+        json!({ "groups": [], "source": "empty" })
+    } else {
+        json!({ "groups": groups, "source": "ledger" })
+    }
+}
+
+/// 把账本（`键 → new_cid`）连通成副本组；输出**稳定**（组 / 行均排序），只回
+/// `accountUid` / `sessionId` / `region` 三个字段。
+fn replica_groups_from_ledger(
+    region: Region,
+    ledger: &serde_json::Map<String, Value>,
+) -> Vec<Value> {
+    // 邻接表：顶点键 `uid␟cid` → 邻居集合；`label` 供输出还原 `(uid, cid)`。
+    let mut adjacency: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut label: HashMap<String, (String, String)> = HashMap::new();
+
+    for (key, value) in ledger {
+        // 只认**同 region 三元键**；跨 region 四元键本期不引入（✅ #2）。
+        let Some((source_uid, target_uid, source_cid)) = parse_copy_ledger_key_same_region(key)
+        else {
+            continue;
+        };
+        // 值为空串的登记视作无登记（与 `ledger_hit_for` 的判据一致）。
+        let Some(new_cid) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let source_key = replica_vertex_key(&source_uid, &source_cid);
+        let target_key = replica_vertex_key(&target_uid, new_cid);
+        label
+            .entry(source_key.clone())
+            .or_insert((source_uid, source_cid));
+        label
+            .entry(target_key.clone())
+            .or_insert((target_uid, new_cid.to_string()));
+        adjacency
+            .entry(source_key.clone())
+            .or_default()
+            .insert(target_key.clone());
+        adjacency.entry(target_key).or_default().insert(source_key);
+    }
+
+    // 顶点按字典序遍历，保证组内成员与组间顺序都可复现。
+    let mut vertices: Vec<String> = adjacency.keys().cloned().collect();
+    vertices.sort();
+
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut groups: Vec<Value> = Vec::new();
+    for start in &vertices {
+        if visited.contains(start) {
+            continue;
+        }
+        // BFS 取连通分量。
+        let mut queue: VecDeque<String> = VecDeque::new();
+        queue.push_back(start.clone());
+        visited.insert(start.clone());
+        let mut members: Vec<(String, String)> = Vec::new();
+        while let Some(current) = queue.pop_front() {
+            if let Some((uid, cid)) = label.get(&current) {
+                members.push((uid.clone(), cid.clone()));
+            }
+            if let Some(neighbors) = adjacency.get(&current) {
+                for neighbor in neighbors {
+                    if visited.insert(neighbor.clone()) {
+                        queue.push_back(neighbor.clone());
+                    }
+                }
+            }
+        }
+        members.sort();
+        members.dedup();
+        // 组键 = 分量内字典序最小的 `uid␟cid`（稳定、可复现；用于 React key / 抽屉定位）。
+        let group_key = members
+            .first()
+            .map(|(uid, cid)| replica_vertex_key(uid, cid))
+            .unwrap_or_default();
+        let replicas: Vec<Value> = members
+            .iter()
+            .map(|(uid, cid)| {
+                json!({
+                    "accountUid": uid,
+                    "sessionId": cid,
+                    "region": region.as_str(),
+                })
+            })
+            .collect();
+        groups.push(json!({ "key": group_key, "replicas": replicas }));
+    }
+
+    groups.sort_by(|left, right| {
+        left.get("key")
+            .and_then(Value::as_str)
+            .cmp(&right.get("key").and_then(Value::as_str))
+    });
+    groups
 }
 
 /// 切换前把勾选的会话复制到目标账号（CN，路径 B）。返回复制报告。
@@ -2297,6 +2536,105 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// ★ P8 T02：账本边 → 连通分量（副本组）；只读、只回 ledger 里确有的字段。
+    ///
+    /// 可证伪：把 `replica_groups_from_ledger` 改成「每条边各成一组」（不连通），
+    /// 「共享源会话的两条边应合成一组」即红；把返回值加上 `title` 等臆造字段，
+    /// 「副本行只应有三个字段」即红。
+    #[test]
+    fn replica_groups_connect_edges_into_components() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy_switch_replica_groups_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(COPY_LEDGER_FILE);
+        let ledger = json!({
+            copy_ledger_key("uid-a", "uid-b", "cid-1"): "new-1",
+            copy_ledger_key("uid-a", "uid-c", "cid-1"): "new-2",
+            copy_ledger_key("uid-x", "uid-y", "cid-9"): "new-9",
+        });
+        std::fs::write(&path, serde_json::to_string(&ledger).unwrap()).unwrap();
+
+        let out = list_replica_groups_at(Region::Cn, Some(&path));
+        assert_eq!(out.get("source").and_then(Value::as_str), Some("ledger"));
+        let groups = out.get("groups").and_then(Value::as_array).unwrap();
+        assert_eq!(groups.len(), 2, "共享源会话的两条边应连通成一组");
+
+        // 第一组：uid-a 的 cid-1 复制到 uid-b / uid-c ⇒ 三个顶点（组键 = 字典序最小顶点）。
+        let first = &groups[0];
+        assert_eq!(
+            first.get("key").and_then(Value::as_str),
+            Some(replica_vertex_key("uid-a", "cid-1").as_str()),
+            "组键应取分量内字典序最小的顶点"
+        );
+        let replicas = first.get("replicas").and_then(Value::as_array).unwrap();
+        assert_eq!(replicas.len(), 3, "共享源会话应连通成 3 个顶点");
+        let has = |uid: &str, cid: &str| {
+            replicas.iter().any(|r| {
+                r.get("accountUid").and_then(Value::as_str) == Some(uid)
+                    && r.get("sessionId").and_then(Value::as_str) == Some(cid)
+            })
+        };
+        assert!(has("uid-a", "cid-1"), "源端顶点");
+        assert!(has("uid-b", "new-1"), "目标端顶点");
+        assert!(has("uid-c", "new-2"), "第二个目标端顶点");
+
+        // 只回 ledger 里确有的字段（后端**不臆造** title / updatedAt / hasHistory）。
+        for replica in replicas {
+            let obj = replica.as_object().unwrap();
+            assert_eq!(obj.len(), 3, "副本行只应有 accountUid / sessionId / region");
+            assert!(obj.contains_key("accountUid"));
+            assert!(obj.contains_key("sessionId"));
+            assert_eq!(obj.get("region").and_then(Value::as_str), Some("cn"));
+        }
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ★ P8 T02：跨 region 四元键**不引入**；缺失 / 空账本 ⇒ `source: "empty"`。
+    ///
+    /// 可证伪：让 `parse_copy_ledger_key_same_region` 接受四元键（去掉长度判断），
+    /// 第二条断言即红（跨 region 边会被引入）。
+    #[test]
+    fn replica_groups_ignore_cross_region_and_empty_ledger() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy_switch_replica_groups_cross_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(COPY_LEDGER_FILE);
+
+        // 文件缺失 ⇒ 空。
+        let missing = dir.join("nope.json");
+        let out = list_replica_groups_at(Region::Cn, Some(&missing));
+        assert_eq!(out.get("source").and_then(Value::as_str), Some("empty"));
+        assert!(out
+            .get("groups")
+            .and_then(Value::as_array)
+            .unwrap()
+            .is_empty());
+
+        // 只有跨 region 四元键（带源 region 前缀）⇒ 本期不引入 ⇒ 空。
+        let cross = json!({
+            copy_ledger_key_for(Region::Global, Region::Cn, "uid-a", "uid-b", "cid-1"): "new-1",
+        });
+        std::fs::write(&path, serde_json::to_string(&cross).unwrap()).unwrap();
+        let out = list_replica_groups_at(Region::Cn, Some(&path));
+        assert_eq!(
+            out.get("source").and_then(Value::as_str),
+            Some("empty"),
+            "跨 region 边本期不引入"
+        );
+        assert!(out
+            .get("groups")
+            .and_then(Value::as_array)
+            .unwrap()
+            .is_empty());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// 账本命中还必须要求副本仍存活：副本被删则允许重新复制。
     #[test]
     fn ledger_only_hits_when_copy_still_alive() {
@@ -2336,5 +2674,47 @@ mod tests {
         assert!(alive("copy-1"), "未删除的副本应视为存活");
         assert!(!alive("copy-2"), "已删除的副本不应视为存活");
         assert!(!alive("missing"), "不存在的副本不应视为存活");
+    }
+}
+
+/// P8 内容指纹的单测（**与文件读写解耦** —— 只测纯函数，不需要真实 jsonl）。
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    fn fp(line_count: usize, prefix_hashes: Vec<u64>) -> SessionFingerprint {
+        SessionFingerprint {
+            line_count,
+            prefix_hashes,
+        }
+    }
+
+    #[test]
+    fn hash_line_is_stable_and_change_sensitive() {
+        assert_eq!(hash_line("abc"), hash_line("abc"), "同一行必须同 hash");
+        assert_ne!(hash_line("abc"), hash_line("abd"), "一个字节变化必须换 hash");
+        assert_ne!(hash_line("abc"), hash_line("abc "), "尾部空格也算变化");
+    }
+
+    #[test]
+    fn common_prefix_counts_shared_lines() {
+        // a 与 b 前 2 行一致 ⇒ 「共同旧版」= 2 条；a 多 3 条、b 多 1 条（**内容级 delta**）。
+        let a = fp(5, vec![1, 2, 3, 4, 5]);
+        let b = fp(3, vec![1, 2, 9]);
+        assert_eq!(common_prefix_len(&a, &b), 2, "前 2 行一致 ⇒ 共同旧版 = 2 条");
+    }
+
+    #[test]
+    fn common_prefix_zero_when_first_line_differs() {
+        let a = fp(2, vec![7, 8]);
+        let b = fp(2, vec![1, 2]);
+        assert_eq!(common_prefix_len(&a, &b), 0, "首行即不同 ⇒ 无共同旧版");
+    }
+
+    #[test]
+    fn common_prefix_is_bounded_by_shorter_side() {
+        let a = fp(10, vec![1, 2, 3]);
+        let b = fp(2, vec![1, 2]);
+        assert_eq!(common_prefix_len(&a, &b), 2, "不得超出较短的一方");
     }
 }

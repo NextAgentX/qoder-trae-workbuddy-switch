@@ -149,6 +149,18 @@ pub async fn run_startup_maintenance() {
     if let Err(error) = config::compact_checkin_logs() {
         eprintln!("[签到] 历史日志整理失败: {error}");
     }
+    // 回收站清扫：**复用本入口**（`TaskKind::StartupMaintenance`），不新增调度器。
+    //
+    // 回收站条目带 30 天 `expires_at`，另有 200 条上限；两者都需要一个「低频、每进程至少跑一次」
+    // 的时机来落地。启动补跑正好满足：它天然在进程起来时执行一次，且不依赖任何排程开关
+    // （软删除的过期清理不该被用户的「签到/旅行」开关影响）。
+    //
+    // WorkBuddy 与 Trae 是**两套互不相通**的账号库与回收站，各自清扫，互不吞噬计数。
+    let wb_swept = super::account::sweep_all_trash();
+    let trae_swept = super::trae::account::sweep_all_trash();
+    if wb_swept + trae_swept > 0 {
+        eprintln!("[回收站] 启动清扫过期条目: WorkBuddy {wb_swept} / Trae {trae_swept}");
+    }
     let cfg = schedule::load_schedule_config();
     for task in startup_tasks(&cfg) {
         let _ = run_scheduled_task(task).await;

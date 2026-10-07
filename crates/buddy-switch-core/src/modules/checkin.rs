@@ -145,6 +145,15 @@ pub async fn get_checkin_status_for(region: Region, account: &Value) -> Value {
                 .or_else(|| data.get("todayCheckedIn"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            // ★ B5：把上游的**积分数据显式提取** —— 此前只透传 `raw`，前端**无从展示「逐条 +N」**。
+            //   字段名来自实测响应（`checkin-activity-status`）：
+            //   `daily_credit` / `today_credit` / `total_credits` / `streak_days` / `checkin_dates`。
+            "dailyCredit": data.get("daily_credit").and_then(Value::as_f64),
+            "todayCredit": data.get("today_credit").and_then(Value::as_f64),
+            "totalCredits": data.get("total_credits").and_then(Value::as_f64),
+            "streakDays": data.get("streak_days").and_then(Value::as_i64),
+            "streakBonusCredit": data.get("streak_bonus_credit").and_then(Value::as_f64),
+            "checkinDates": data.get("checkin_dates").cloned().unwrap_or(Value::Null),
             "raw": data,
         });
     }
@@ -163,6 +172,13 @@ pub async fn get_checkin_status_for(region: Region, account: &Value) -> Value {
                 .or_else(|| data.get("todayCheckedIn"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            // 与上面同源（备用端点，字段一致）。
+            "dailyCredit": data.get("daily_credit").and_then(Value::as_f64),
+            "todayCredit": data.get("today_credit").and_then(Value::as_f64),
+            "totalCredits": data.get("total_credits").and_then(Value::as_f64),
+            "streakDays": data.get("streak_days").and_then(Value::as_i64),
+            "streakBonusCredit": data.get("streak_bonus_credit").and_then(Value::as_f64),
+            "checkinDates": data.get("checkin_dates").cloned().unwrap_or(Value::Null),
             "raw": data,
         });
     }

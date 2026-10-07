@@ -17,10 +17,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::modules::product::{scope_of_trae_region, Scope as PlatformScope};
 use crate::modules::trae::credits::CooldownsFile;
 use crate::modules::trae::icube::{self, DeviceCredential, ProofSigFormat};
 use crate::modules::trae::jwt;
 use crate::modules::trae::paths;
+use crate::modules::trae::region::TraeRegion;
 use crate::modules::trae::store;
 use crate::modules::trae::variant::TraeVariant;
 use crate::modules::trae::{
@@ -607,45 +609,235 @@ pub fn import_local_for(variant: TraeVariant) -> Result<RawAccount, String> {
     Ok(record)
 }
 
+// ---------------------------------------------------------------------------
+// 软删除 + 回收站（P5 §2.7）—— Trae 侧同构实现（刻意与 WB 侧不去重，见共享知识）
+// ---------------------------------------------------------------------------
+//
+// 删除不再从账号库直接抹掉，而是**移入** `checkin_accounts.trash.<region>.json`。除账号记录外，
+// **设备绑定**（I-2）与**分组关系**也一并移入回收站 ⇒ 恢复时原样还原（无损）。purge 是唯一
+// 不可逆步：一并销毁登录态快照目录。留存策略：30 天 + 上限 200 条，由 `StartupMaintenance`
+// 跑 [`sweep_all_trash`]。
+
+/// 回收站留存窗口（毫秒）：30 天。与 WorkBuddy 侧同值。
+pub const TRASH_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// 回收站条数上限（先到先出）。
+pub const TRASH_MAX_ENTRIES: usize = 200;
+
+/// Trae 回收站条目（持久化形态）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashEntry {
+    /// 原账号记录（原样保留 ⇒ 恢复无损）。
+    pub account: RawAccount,
+    /// 删除时间（ms）。
+    pub deleted_at: i64,
+    /// 到期时间（ms）= `deleted_at + TRASH_RETENTION_MS`。
+    pub expires_at: i64,
+    /// 冗余存作用域，便于跨 scope 审计（恢复不依赖它）。
+    pub origin_scope: PlatformScope,
+    /// 删除时摘下的设备绑定（恢复时还原；`None` = 原本无绑定）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// 删除时该账号所属分组（恢复时还原；`None` = 未分组）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+}
+
+/// 读取某区域回收站（文件缺失 / 损坏 ⇒ 空表）。
+pub fn load_trash_for_region(region: TraeRegion) -> Vec<TrashEntry> {
+    store::read_json(&paths::accounts_trash_file_for_region(region))
+}
+
+/// 留存策略（**纯函数**）：清过期 + 裁上限（先到先出）。返回清理条数。
+pub fn sweep_trash_entries(entries: &mut Vec<TrashEntry>, now: i64) -> usize {
+    let before = entries.len();
+    entries.retain(|entry| entry.expires_at > now);
+    if entries.len() > TRASH_MAX_ENTRIES {
+        entries.sort_by_key(|entry| entry.deleted_at);
+        let excess = entries.len() - TRASH_MAX_ENTRIES;
+        entries.drain(0..excess);
+    }
+    before - entries.len()
+}
+
+/// 软删除（按区域）：把账号记录 + 设备绑定 + 分组关系**移入**回收站。
+///
+/// 账号不存在 ⇒ `Err`（**不静默成功**，与 WorkBuddy 侧同形）。
+pub fn trash_for_region(region: TraeRegion, user_id: &str) -> Result<(), String> {
+    let mut accounts = load_accounts_for_region(region);
+    let Some(index) = accounts
+        .accounts
+        .iter()
+        .position(|account| resolve_user_id(account) == user_id)
+    else {
+        return Err("账号不存在".into());
+    };
+    let account = accounts.accounts.remove(index);
+    // I-2：删账号一并摘下设备绑定 —— 但**移入回收站**（而非丢弃），恢复时还原。
+    let device_id = accounts.device_bindings.remove(user_id);
+
+    // 分组关系同样移入回收站（恢复时还原），并从 live 分组文件移除（避免「孤儿成员」复活）。
+    let groups_path = paths::groups_file_for_region(region);
+    let mut groups: GroupsFile = store::read_json(&groups_path);
+    let group_id = groups.membership.remove(user_id);
+
+    let now = chrono::Local::now().timestamp_millis();
+    let mut trash = load_trash_for_region(region);
+    trash.push(TrashEntry {
+        account,
+        deleted_at: now,
+        expires_at: now + TRASH_RETENTION_MS,
+        origin_scope: scope_of_trae_region(region),
+        device_id,
+        group_id,
+    });
+    sweep_trash_entries(&mut trash, now);
+
+    save_accounts_for_region(region, &accounts)?;
+    store::write_json(&paths::accounts_trash_file_for_region(region), &trash)?;
+    store::write_json(&groups_path, &groups)?;
+    Ok(())
+}
+
+/// 恢复（按区域）：把账号记录 + 设备绑定 + 分组关系从回收站移回 live。
+///
+/// live 已存在同 uid ⇒ `Err`（**不覆盖**，避免把现有账号冲掉而丢数据）。
+pub fn restore_for_region(region: TraeRegion, user_id: &str) -> Result<(), String> {
+    let mut trash = load_trash_for_region(region);
+    let Some(index) = trash
+        .iter()
+        .position(|entry| resolve_user_id(&entry.account) == user_id)
+    else {
+        return Err("回收站中没有该账号".into());
+    };
+    let mut accounts = load_accounts_for_region(region);
+    if accounts
+        .accounts
+        .iter()
+        .any(|account| resolve_user_id(account) == user_id)
+    {
+        return Err("账号库中已存在该账号，无法恢复".into());
+    }
+    let entry = trash.remove(index);
+    // 还原设备绑定（I-2 的逆操作）。
+    if let Some(device_id) = entry.device_id.clone() {
+        accounts.device_bindings.insert(user_id.to_string(), device_id);
+    }
+    accounts.accounts.push(entry.account);
+    save_accounts_for_region(region, &accounts)?;
+    // 还原分组关系。
+    if let Some(group_id) = entry.group_id.clone() {
+        let groups_path = paths::groups_file_for_region(region);
+        let mut groups: GroupsFile = store::read_json(&groups_path);
+        groups.membership.insert(user_id.to_string(), group_id);
+        store::write_json(&groups_path, &groups)?;
+    }
+    store::write_json(&paths::accounts_trash_file_for_region(region), &trash)?;
+    Ok(())
+}
+
+/// 该区域的**两条程序位**（purge 时删除**全部**程序位的快照；穷举，无回落）。
+fn variants_of_region(region: TraeRegion) -> [TraeVariant; 2] {
+    match region {
+        TraeRegion::Cn => [TraeVariant::TraeWork, TraeVariant::Trae],
+        TraeRegion::Global => [TraeVariant::Global, TraeVariant::GlobalTraeCode],
+    }
+}
+
+/// 永久删除（**唯一不可逆步**）：从回收站真删 + 销毁关联登录态快照。
+///
+/// 凭据（`jwt` / `refresh_token`）内嵌在记录里，随记录一并销毁；**快照是独立目录**，
+/// 必须显式删 —— 否则「删了账号，登录态快照还在」（安全：已删账号的登录态不应留存）。
+pub fn purge_for_region(region: TraeRegion, user_id: &str) -> Result<(), String> {
+    let mut trash = load_trash_for_region(region);
+    let Some(index) = trash
+        .iter()
+        .position(|entry| resolve_user_id(&entry.account) == user_id)
+    else {
+        return Err("回收站中没有该账号".into());
+    };
+    trash.remove(index);
+    for variant in variants_of_region(region) {
+        if let Some(dir) = paths::profile_dir_for(variant, user_id) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    store::write_json(&paths::accounts_trash_file_for_region(region), &trash)?;
+    Ok(())
+}
+
+/// 清空某区域回收站，返回删除条数（**不可逆**）。
+pub fn clear_trash_for_region(region: TraeRegion) -> usize {
+    let before = load_trash_for_region(region).len();
+    if before > 0 {
+        let _ = store::write_json(
+            &paths::accounts_trash_file_for_region(region),
+            &Vec::<TrashEntry>::new(),
+        );
+    }
+    before
+}
+
+/// 留存清理（单区域）：清过期 + 裁上限。返回清理条数。
+pub fn sweep_trash_for_region(region: TraeRegion, now: i64) -> usize {
+    let mut trash = load_trash_for_region(region);
+    let removed = sweep_trash_entries(&mut trash, now);
+    if removed > 0 {
+        let _ = store::write_json(&paths::accounts_trash_file_for_region(region), &trash);
+    }
+    removed
+}
+
+/// 全部 Trae region 的回收站留存清理（`StartupMaintenance` 调用）。
+pub fn sweep_all_trash() -> usize {
+    let now = chrono::Local::now().timestamp_millis();
+    TraeRegion::all()
+        .iter()
+        .map(|region| sweep_trash_for_region(*region, now))
+        .sum()
+}
+
+/// 回收站条目的**线上形态**（camelCase）。
+fn trash_entry_view(entry: &TrashEntry) -> Value {
+    let uid = resolve_user_id(&entry.account);
+    json!({
+        "key": uid,
+        "userId": uid,
+        "name": entry.account.name,
+        "deletedAt": entry.deleted_at,
+        "expiresAt": entry.expires_at,
+        "originScope": entry.origin_scope.as_str(),
+    })
+}
+
+/// 回收站列表的线上形态：`{ scope, entries }`（按删除时间倒序，最新在前）。
+pub fn trash_list_value_for_region(region: TraeRegion) -> Value {
+    let mut entries = load_trash_for_region(region);
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.deleted_at));
+    let views: Vec<Value> = entries.iter().map(trash_entry_view).collect();
+    json!({ "scope": scope_of_trae_region(region).as_str(), "entries": views })
+}
+
 /// 删除账号（默认变体，兼容壳）。
 pub fn delete(user_id: &str, delete_profile: bool) -> Result<(), String> {
     delete_for(TraeVariant::default(), user_id, delete_profile)
 }
 
-/// 删除账号（按变体分家）。
+/// 删除账号（按变体分家）—— **软删除**：移入回收站，可恢复（P5 §2.7）。
 ///
-/// `delete_profile = true` 时一并删除登录态快照目录。默认不删：
+/// 账号记录、设备绑定、分组关系一并**移入**回收站（[`trash_for_region`]）⇒ 恢复无损。
+///
+/// `delete_profile = true` 时**额外**删除登录态快照目录。默认不删：
 /// 快照可能包含用户还未备份的登录态，误删成本高于磁盘占用。
 ///
 /// **删快照也必须限定变体**：两条产品线的快照根目录不同
 /// （见 [`paths::profiles_dir_for`]），否则会删到另一条产品线的快照。
-///
-/// **I-2**：删账号必须**一并删掉它的设备绑定**。否则 uid 被重新登录 / 复用时，
-/// 会拿**属于旧设备**的绑定去签名 ⇒ 续期被上游拒绝（20403/20405），
-/// 而用户看到的是「刚加的账号就是刷新不了」。
 pub fn delete_for(
     variant: TraeVariant,
     user_id: &str,
     delete_profile: bool,
 ) -> Result<(), String> {
-    let mut accounts = load_accounts_for(variant);
-    let before = accounts.accounts.len();
-    accounts
-        .accounts
-        .retain(|account| resolve_user_id(account) != user_id);
-    // 只删**这个** uid 的绑定：同一本账号库里其他 uid 的绑定不受影响。
-    let binding_removed = accounts.device_bindings.remove(user_id).is_some();
-    // 账号条数与绑定**任一**有变化就要回存：账号本就不存在、但绑定残留时也得清掉。
-    if accounts.accounts.len() != before || binding_removed {
-        save_accounts_for(variant, &accounts)?;
-    }
-
-    // 无论账号是否存在，都清理分组成员关系，避免「孤儿成员」在重建同名账号时复活。
-    let mut groups = load_groups_for(variant);
-    if groups.membership.remove(user_id).is_some() {
-        save_groups_for(variant, &groups)?;
-    }
-
+    trash_for_region(variant.region(), user_id)?;
     if delete_profile {
         if let Some(dir) = paths::profile_dir_for(variant, user_id) {
             let _ = std::fs::remove_dir_all(dir);
@@ -3178,6 +3370,154 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
                 bound_device_id(TraeVariant::Global, "same-uid").as_deref(),
                 Some("dev-cn"),
                 "另一条产品线的绑定不得被污染"
+            );
+        });
+    }
+
+    /// ★【P5 §2.7】软删除把账号记录 + 设备绑定 + 分组关系**移入**回收站；恢复**无损**还原。
+    ///
+    /// 可证伪性：若 `trash_for_region` 只搬账号记录（丢掉绑定 / 分组），恢复后
+    /// `bound_device_id` / `membership` 会空 ⇒ 第二、三条恢复断言红；若恢复不写回 live
+    /// （只在回收站内挪动），`find_for` 会 `None` ⇒ 第一条恢复断言红。
+    #[test]
+    fn soft_delete_moves_account_device_and_group_into_trash_and_restores_losslessly() {
+        with_temp_home(|| {
+            let region = TraeRegion::Cn;
+            let variant = TraeVariant::TraeWork;
+            let mut file = load_accounts_for_region(region);
+            file.accounts.push(raw("u1", "一号"));
+            file.device_bindings.insert("u1".into(), "dev-1".into());
+            save_accounts_for_region(region, &file).expect("造账号 + 绑定");
+
+            let groups_path = paths::groups_file_for_region(region);
+            let mut groups: GroupsFile = store::read_json(&groups_path);
+            groups.membership.insert("u1".into(), "g-1".into());
+            store::write_json(&groups_path, &groups).expect("造分组关系");
+
+            trash_for_region(region, "u1").expect("软删除应成功");
+
+            // live 侧三项全部消失（但只是「移走」，并未销毁）。
+            assert!(find_for(variant, "u1").is_none(), "live 账号库必须不再有它");
+            assert_eq!(bound_device_id(variant, "u1"), None, "绑定必须离开 live");
+            let groups: GroupsFile = store::read_json(&groups_path);
+            assert!(!groups.membership.contains_key("u1"), "分组关系必须离开 live");
+
+            // 回收站侧三项齐全，且带 30 天到期时间。
+            let trash = load_trash_for_region(region);
+            assert_eq!(trash.len(), 1, "回收站应恰有一条");
+            assert_eq!(
+                trash[0].device_id.as_deref(),
+                Some("dev-1"),
+                "设备绑定必须移入回收站（否则恢复后拿不到旧设备私钥）"
+            );
+            assert_eq!(trash[0].group_id.as_deref(), Some("g-1"), "分组关系必须移入回收站");
+            assert_eq!(trash[0].origin_scope, scope_of_trae_region(region));
+            assert!(
+                trash[0].expires_at > trash[0].deleted_at,
+                "必须带 30 天留存到期时间"
+            );
+
+            restore_for_region(region, "u1").expect("恢复应成功");
+
+            let restored = find_for(variant, "u1").expect("恢复后 live 必须重新出现");
+            assert_eq!(restored.name, "一号", "记录必须原样还原");
+            assert_eq!(
+                bound_device_id(variant, "u1").as_deref(),
+                Some("dev-1"),
+                "绑定必须还原"
+            );
+            let groups: GroupsFile = store::read_json(&groups_path);
+            assert_eq!(
+                groups.membership.get("u1").map(String::as_str),
+                Some("g-1"),
+                "分组关系必须还原"
+            );
+            assert!(load_trash_for_region(region).is_empty(), "恢复后回收站必须清空该条");
+        });
+    }
+
+    /// ★【P5 §2.7】purge 是**唯一不可逆步**：删回收站条目 + 销毁该区域**两条程序位**的快照目录。
+    ///
+    /// 可证伪性：若 purge 只删回收站条目、不删快照 ⇒ 快照断言红（「删了账号，登录态还在」）。
+    #[test]
+    fn purge_removes_trash_entry_and_all_program_snapshots() {
+        with_temp_home(|| {
+            let region = TraeRegion::Cn;
+            let mut file = load_accounts_for_region(region);
+            file.accounts.push(raw("u1", "一号"));
+            save_accounts_for_region(region, &file).expect("造账号");
+            trash_for_region(region, "u1").expect("软删除");
+
+            // 造两条程序位（TraeWork / TraeCode）的快照目录。
+            let work_snap = paths::profile_dir_for(TraeVariant::TraeWork, "u1").expect("槽位合法");
+            let code_snap = paths::profile_dir_for(TraeVariant::Trae, "u1").expect("槽位合法");
+            std::fs::create_dir_all(&work_snap).expect("造 TraeWork 快照");
+            std::fs::create_dir_all(&code_snap).expect("造 Trae 快照");
+
+            purge_for_region(region, "u1").expect("永久删除应成功");
+
+            assert!(load_trash_for_region(region).is_empty(), "回收站条目必须被销毁");
+            assert!(!work_snap.exists(), "TraeWork 快照必须被销毁");
+            assert!(!code_snap.exists(), "Trae 快照必须被销毁");
+        });
+    }
+
+    /// ★【P5 §2.7】留存策略：过期清理 + 上限裁剪（先到先出）。纯函数，可无文件系统验证。
+    #[test]
+    fn sweep_trash_enforces_retention_window_and_cap() {
+        let now = 1_700_000_000_000_i64;
+        let entry = |deleted_at: i64| TrashEntry {
+            account: raw("u", "n"),
+            deleted_at,
+            expires_at: deleted_at + TRASH_RETENTION_MS,
+            origin_scope: scope_of_trae_region(TraeRegion::Cn),
+            device_id: None,
+            group_id: None,
+        };
+
+        // ① 超过 30 天必须清掉，未过期保留。
+        let mut entries = vec![
+            entry(now - TRASH_RETENTION_MS - 1), // 已过期
+            entry(now - 1_000),                  // 未过期
+        ];
+        assert_eq!(sweep_trash_entries(&mut entries, now), 1, "应只清掉过期那条");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].expires_at > now, "保留的必须是未过期条目");
+
+        // ② 超过上限 ⇒ 裁最旧的（先到先出）。
+        let total = TRASH_MAX_ENTRIES as i64 + 5;
+        let mut many: Vec<TrashEntry> = (0..total).map(|i| entry(now - (total - i))).collect();
+        assert_eq!(sweep_trash_entries(&mut many, now), 5, "应裁掉超出的 5 条");
+        assert_eq!(many.len(), TRASH_MAX_ENTRIES, "必须裁到上限");
+        assert!(
+            many.iter().all(|e| e.deleted_at >= now - TRASH_MAX_ENTRIES as i64),
+            "保留的必须是较新的（先到先出）"
+        );
+    }
+
+    /// ★【P5 §2.7】软删除 / 恢复 / 永久删除对**不存在**的 uid 必须报错（**不静默成功**）。
+    ///
+    /// 可证伪性：若任一函数在找不到目标时静默返回 `Ok`，对应断言红 —— 这正是「批量删除
+    /// 移 0 条却报成功」这类缺陷的防线。
+    #[test]
+    fn trash_restore_purge_error_on_unknown_uid() {
+        with_temp_home(|| {
+            let region = TraeRegion::Cn;
+            assert!(
+                trash_for_region(region, "ghost").is_err(),
+                "软删除不存在的账号必须报错"
+            );
+            assert!(
+                delete_for(TraeVariant::TraeWork, "ghost", false).is_err(),
+                "删除不存在的账号必须报错，不得静默成功"
+            );
+            assert!(
+                restore_for_region(region, "ghost").is_err(),
+                "恢复不存在的条目必须报错"
+            );
+            assert!(
+                purge_for_region(region, "ghost").is_err(),
+                "永久删除不存在的条目必须报错"
             );
         });
     }

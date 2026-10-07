@@ -337,45 +337,27 @@ impl UpstreamClient {
             .await
     }
 
-    /// 同 [`Self::chat_stream`]，但允许调用方注入额外出站头（会话头族 / 派生标识）。
+    /// **通用出站**：把一次 POST 送到上游并分类结果。
     ///
-    /// `extra_headers` 在基础头之后写入、在 `User-Agent` 之前写入——即
-    /// **UA 由本函数最终决定**，调用方无法用额外头覆盖它（fail-closed）。
-    /// 空值不写入（避免发出 `X-Foo:` 这类空头）。
-    pub async fn chat_stream_with(
+    /// ★ **2026-10-07 从 [`Self::chat_stream_with`] 抽出** —— 为了让「本地路由」的
+    /// **业务请求转发**（P12 T03）**复用同一条出站路径**，而不是另写一份。
+    ///
+    /// **参数全部由调用方决定**（URL / 头 / body）⇒ 本函数**不含任何协议假设**。
+    /// ⚠️ 唯一约定：**`User-Agent` 由本函数最后写入**（沿用既有 fail-closed 语义 ——
+    /// 调用方无法经 `headers` 覆盖 UA）。
+    pub async fn forward_with(
         &self,
-        region: Region,
-        acc: &Value,
-        body_json: &str,
+        url: &str,
+        mut headers: HashMap<String, String>,
+        body: String,
         signal: Option<watch::Receiver<bool>>,
-        extra_headers: Option<&HashMap<String, String>>,
+        user_agent: &str,
     ) -> UpstreamChatResult {
-        let user_agent = match self.resolve_chat_ua(region) {
-            Ok(ua) => ua,
-            Err(message) => {
-                return UpstreamChatResult::Err {
-                    status: 0,
-                    kind: UpstreamErrorKind::Server,
-                    message,
-                }
-            }
-        };
-
-        let url = format!("{}/v2/chat/completions", region_spec(region).chat_base);
-        let mut headers = account::build_chat_headers(region, acc);
-        if let Some(extra) = extra_headers {
-            for (key, value) in extra {
-                if !value.is_empty() {
-                    headers.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        headers.insert("User-Agent".to_string(), user_agent);
-        let body = chat_body_for(region, body_json);
+        headers.insert("User-Agent".to_string(), user_agent.to_string());
 
         let request = self
             .http
-            .post(&url)
+            .post(url)
             .headers(header_map(&headers))
             .body(body);
         let send = request.send();
@@ -419,6 +401,74 @@ impl UpstreamClient {
                 message: format!("transport error: {}", net::describe_transport_error(&error)),
             },
         }
+    }
+
+    /// **业务请求出站**（P12 T03 · 本地路由）：URL = `billing_base + path`，头走 [`account::build_auth_headers`]。
+    ///
+    /// 与 [`Self::chat_stream_with`] 的差异**只有两处**（**路径基址 + 头构造**）——
+    /// 出站与结果分类**完全复用** [`Self::forward_with`]。
+    ///
+    /// ⚠️ **body 原样透传**：业务请求不是 LLM 协议，**不做任何改写**（不调 `chat_body_for`）。
+    pub async fn forward_biz_with(
+        &self,
+        region: Region,
+        acc: &Value,
+        path: &str,
+        body_json: &str,
+        signal: Option<watch::Receiver<bool>>,
+    ) -> UpstreamChatResult {
+        let user_agent = match self.resolve_chat_ua(region) {
+            Ok(ua) => ua,
+            Err(message) => {
+                return UpstreamChatResult::Err {
+                    status: 0,
+                    kind: UpstreamErrorKind::Server,
+                    message,
+                }
+            }
+        };
+        let url = format!("{}{path}", region_spec(region).billing_base);
+        let headers = account::build_auth_headers(acc);
+        self.forward_with(&url, headers, body_json.to_string(), signal, &user_agent)
+            .await
+    }
+
+    /// 同 [`Self::chat_stream`]，但允许调用方注入额外出站头（会话头族 / 派生标识）。
+    ///
+    /// `extra_headers` 在基础头之后写入、在 `User-Agent` 之前写入——即
+    /// **UA 由本函数最终决定**，调用方无法用额外头覆盖它（fail-closed）。
+    /// 空值不写入（避免发出 `X-Foo:` 这类空头）。
+    pub async fn chat_stream_with(
+        &self,
+        region: Region,
+        acc: &Value,
+        body_json: &str,
+        signal: Option<watch::Receiver<bool>>,
+        extra_headers: Option<&HashMap<String, String>>,
+    ) -> UpstreamChatResult {
+        let user_agent = match self.resolve_chat_ua(region) {
+            Ok(ua) => ua,
+            Err(message) => {
+                return UpstreamChatResult::Err {
+                    status: 0,
+                    kind: UpstreamErrorKind::Server,
+                    message,
+                }
+            }
+        };
+
+        let url = format!("{}/v2/chat/completions", region_spec(region).chat_base);
+        let mut headers = account::build_chat_headers(region, acc);
+        if let Some(extra) = extra_headers {
+            for (key, value) in extra {
+                if !value.is_empty() {
+                    headers.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        // ★ 出站交给通用实现 —— 行为与抽取前**逐字一致**（仅把「URL/头/body 的构造」留在本函数）。
+        self.forward_with(&url, headers, chat_body_for(region, body_json), signal, &user_agent)
+            .await
     }
 
     /// POST 刷新端点；`X-Refresh-Token` 仅在此出现。

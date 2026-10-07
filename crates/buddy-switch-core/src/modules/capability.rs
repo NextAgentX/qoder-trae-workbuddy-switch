@@ -15,6 +15,79 @@ use serde_json::{json, Value};
 use crate::modules::region::{self, Region};
 use crate::modules::session;
 
+/// 平台能力（PLAN §2.7）—— **平台固有，用户不可改**（P5 §2.5 第 (2) 条）。
+///
+/// ## 与「用户偏好」正交
+///
+/// - **能力**（本枚举）：平台**有没有**这个功能。用户改不了。由**命令分发层**校验
+///   （`product::require_capability`，**默认拒绝**）。
+/// - **偏好**（`preferences.*`）：用户**要不要看**这个入口。纯前端，**不影响数据**。
+///
+/// 典型混淆：用户关掉「CodeBuddy CLI」入口 ≠ 该能力消失 —— 走 URL 或直接调命令仍应工作。
+///
+/// ## 为什么必须在**命令分发层**校验（而不是靠 UI 隐藏）
+///
+/// Tauri 自定义命令对 webview **全可达**：UI 不渲染按钮 ≠ 命令调不到。Trae 侧既有的
+/// `trae/platform.rs::capabilities()` 只是**诊断用的 unsupported 列表**，**不是门控**。
+/// 故每个涉及能力的命令入口都要 `require_capability(product, Capability::X)?`，
+/// 缺能力即 `Err`（见 `product::require_capability`）。
+///
+/// ⚠️ **取值与前端 `src/lib/platforms/registry.ts` 的 `Capability` 联合类型逐字对齐**
+/// （`serde(rename_all = "camelCase")` 产出 `autoRotate` / `sessionCopy`）。
+/// 两侧漂移由 `product.rs` 的跨语言护栏测试
+/// （`product_spec_capabilities_match_frontend_registry`）兜住。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Capability {
+    /// 签到。
+    Checkin,
+    /// 自动旅行（**WorkBuddy 独有**）。
+    Travel,
+    /// 积分 / 资源包。
+    Credits,
+    /// 扫码登录。
+    Oauth,
+    /// API 网关。
+    Gateway,
+    /// 自动轮换（**WorkBuddy 独有**）。
+    AutoRotate,
+    /// 会话复制（**只有 WorkBuddy 桌面**，见 PLAN §3.15）。
+    SessionCopy,
+}
+
+impl Capability {
+    /// 稳定标识 —— 与前端 `Capability` 字面量**逐字一致**。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Capability::Checkin => "checkin",
+            Capability::Travel => "travel",
+            Capability::Credits => "credits",
+            Capability::Oauth => "oauth",
+            Capability::Gateway => "gateway",
+            Capability::AutoRotate => "autoRotate",
+            Capability::SessionCopy => "sessionCopy",
+        }
+    }
+
+    /// 从字符串解析能力；未知返回 `None`（供诊断 / 注册表对照用）。
+    pub fn parse(s: &str) -> Option<Capability> {
+        Capability::all().into_iter().find(|c| c.as_str() == s)
+    }
+
+    /// 全部能力，供遍历用。
+    pub fn all() -> [Capability; 7] {
+        [
+            Capability::Checkin,
+            Capability::Travel,
+            Capability::Credits,
+            Capability::Oauth,
+            Capability::Gateway,
+            Capability::AutoRotate,
+            Capability::SessionCopy,
+        ]
+    }
+}
+
 /// 平台受限能力：说明「哪个能力、在哪些平台可用、当前平台为什么不行」。
 ///
 /// 字段刻意带上 `supported_on` 与 `reason`：前端可直接渲染成一条可操作的提示，
@@ -131,5 +204,34 @@ mod tests {
         assert_eq!(value["capability"], json!("open_workbuddy_data_dir"));
         assert!(value["reason"].as_str().unwrap_or("").contains("Windows"));
         assert!(value.get("ok").is_none(), "做不到就不能带 ok:true");
+    }
+
+    /// `Capability::as_str` 的 7 个取值与前端 `registry.ts` 的联合类型**逐字一致**，
+    /// 且互不重复、可往返解析。
+    #[test]
+    fn capability_as_str_matches_frontend_union_and_round_trips() {
+        let expected = [
+            "checkin",
+            "travel",
+            "credits",
+            "oauth",
+            "gateway",
+            "autoRotate",
+            "sessionCopy",
+        ];
+        let got: Vec<&str> = Capability::all().iter().map(|c| c.as_str()).collect();
+        assert_eq!(got, expected, "Capability 取值必须与前端 Capability 联合类型逐字对齐");
+
+        // 互不重复（重复会让「按名解析」产生歧义）。
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), got.len(), "Capability 取值不得重复");
+
+        // 往返。
+        for cap in Capability::all() {
+            assert_eq!(Capability::parse(cap.as_str()), Some(cap));
+        }
+        assert_eq!(Capability::parse("nope"), None);
     }
 }

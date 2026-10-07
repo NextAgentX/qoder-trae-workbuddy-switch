@@ -117,6 +117,14 @@ pub fn accounts_file_for_region(region: TraeRegion) -> PathBuf {
     scoped_file_for_region("checkin_accounts.json", region)
 }
 
+/// 账号回收站文件（按区域分家）：`checkin_accounts.trash.json` / `checkin_accounts.trash.global.json`。
+///
+/// P5 §2.7 软删除的落点。与 [`accounts_file_for_region`] 同款：**枚举 → 查表**派生
+/// （经 [`region_scoped_file_name`]），raw scope 字符串**从不**进 `PathBuf`。
+pub fn accounts_trash_file_for_region(region: TraeRegion) -> PathBuf {
+    scoped_file_for_region("checkin_accounts.trash.json", region)
+}
+
 /// 分组文件（按区域分家）。
 pub fn groups_file_for_region(region: TraeRegion) -> PathBuf {
     scoped_file_for_region("groups.json", region)
@@ -536,6 +544,12 @@ mod tests {
 
     #[test]
     fn trae_paths_live_under_store_dir_trae() {
+        // ★ **必须持 env 锁**（本条曾漏掉 —— 实测 flaky，约 1/4 概率）：
+        //   `store_dir()` / `trae_dir()` **各自独立**读进程级的 `BUDDY_SWITCH_HOME`。
+        //   若并发测试（如 `HomeOverrideGuard`）在中途改掉它，两次调用会读到**不同的 home**
+        //   ⇒ 断言退化成「左边临时目录、右边真实目录」的**假失败**。
+        //   ⚠️ `env_lock` 是**自愿协作**的：不持锁的测试**不受保护**（隔壁那条已持锁）。
+        let _lock = crate::modules::config::env_lock();
         // 相对断言：不依赖真实 HOME，只验证层级关系与命名空间隔离。
         let base = store_dir();
         let dir = trae_dir();

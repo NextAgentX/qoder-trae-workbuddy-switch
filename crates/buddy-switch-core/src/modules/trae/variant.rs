@@ -1,5 +1,33 @@
 //! 产品线变体（variant）：把 Trae 各条产品线的全部差异收敛到一张表。
 //!
+//! ## ⚠️ 弃用状态（P5 §2.6 · 2026-10-05）
+//!
+//! `TraeVariant` 把「**区域**（国内版 / 国际版）」与「**程序位**（TraeWork / TraeCode）」
+//! **压在同一根轴上** —— 这是本仓最要命的命名混淆（VOCABULARY §4：`variant` 双义）。
+//! 目标形态是两根正交轴：[`super::region::TraeRegion`]（持久化轴，账号库 / 端点 / 冷却）
+//! + [`super::region::TraeProgram`]（执行轴，写哪个客户端 / 启哪个 exe）。
+//!
+//! **本模块已弃用（deprecated）**：新代码**不得**再依赖 `TraeVariant`；迁移按
+//! 「调用点逐段迁到 `region.rs` 双轴 → 全部迁完后删除本模块」推进。
+//!
+//! ### ★ 删除的前置条件（**当前未满足** ⇒ P5 T05 只标注弃用、**不删除**）
+//!
+//! 设计规定：必须**在前端 `TraeRegionId` / `TraeProgramId` 完全替代 `TraeVariantId` 之后**
+//! 才可删除（否则前端静默读到 `undefined`，**不报错**）。截至 2026-10-05 实测**未满足**：
+//!
+//! - 前端 `src/` 仍有 **12 个文件、81 处**引用 `TraeVariantId`
+//!   （`lib/trae-types.ts` / `lib/trae-variant-status.ts` / `pages/TraeAccountsPage.tsx` /
+//!   `pages/TraeSettingsPage.tsx` / 网关组件…）；
+//! - 后端 Rust 仍有 **830 处**引用 `TraeVariant`（含 `paths.rs` 里 **18 个** `*_for(variant)` 家族函数）。
+//!
+//! ⇒ 现在删除 `variant.rs` 或 `paths.rs` 的旧家族会**立刻编译失败 / 运行期静默 `undefined`**。
+//! 删除须**另立任务**，先把上述调用点全部迁到双轴。
+//!
+//! ⚠️ 迁移必须走解析函数，**不要**按字符串字面量硬映射：`TraeVariant` 的四个取值**不是**
+//! `TraeRegion × TraeProgram` 的朴素笛卡尔积命名 —— 历史值 `trae_work` / `trae_cn`
+//! **都是国内构建**（`TraeRegion::parse` 把两者都归 `Cn`），只有 `global_trae_code` 是国际版 TraeCode。
+//! 逐段迁移一律经 [`super::region::TraeRegion::parse`] / [`super::region::TraeProgram::parse`]。
+//!
 //! ## 为什么需要这一层
 //!
 //! Trae 有**多条可以同机并存的产品线**（实测本机同时装着 `TRAE SOLO CN` 与

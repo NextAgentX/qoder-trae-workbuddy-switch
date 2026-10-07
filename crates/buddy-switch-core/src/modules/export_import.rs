@@ -66,44 +66,143 @@ pub fn preview_accounts(text: &str) -> Result<Value, String> {
     Ok(json!({ "accounts": items, "total": array.len() }))
 }
 
+/// 冲突策略：命中同 uid 时怎么办（§1.4 / D16）。
+///
+/// - `KeepLocal`：保留本地（**默认**，幂等的成立条件）；
+/// - `Overwrite`：用导入记录覆盖本地（账号级导入的现状语义）；
+/// - `KeepBoth`：不覆盖，把导入记录作为**新记录追加**（唯一「增行」策略）；
+/// - `Ask`：由 UI 逐条决定（本期 UI 裁剪，§7 #5；若后端真收到它，按**保留本地**处理）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConflictPolicy {
+    /// 保留本地（默认，D16）。
+    KeepLocal,
+    /// 覆盖本地。
+    Overwrite,
+    /// 保留两者（追加为新记录）。
+    KeepBoth,
+    /// 逐条询问（本期后端枚举保留、UI 裁剪）。
+    Ask,
+}
+
+impl ConflictPolicy {
+    /// 从命令层字符串解析（**fail-closed**）：空 ⇒ 默认 `KeepLocal`（D16 的安全默认），
+    /// 未知拼写 ⇒ `Err`（**绝不**回落到某个策略 —— 回落会让「覆盖」被静默当成「保留本地」，
+    /// 或反过来，用户以为覆盖了其实没覆盖）。
+    pub fn parse(raw: &str) -> Result<ConflictPolicy, String> {
+        match raw.trim() {
+            "" => Ok(ConflictPolicy::KeepLocal),
+            "keepLocal" | "KeepLocal" => Ok(ConflictPolicy::KeepLocal),
+            "overwrite" | "Overwrite" => Ok(ConflictPolicy::Overwrite),
+            "keepBoth" | "KeepBoth" => Ok(ConflictPolicy::KeepBoth),
+            "ask" | "Ask" => Ok(ConflictPolicy::Ask),
+            other => Err(format!(
+                "未知的冲突策略「{other}」：合法取值为 keepLocal / overwrite / keepBoth。"
+            )),
+        }
+    }
+
+    /// 稳定标识（与 [`ConflictPolicy::parse`] 往返一致）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConflictPolicy::KeepLocal => "keepLocal",
+            ConflictPolicy::Overwrite => "overwrite",
+            ConflictPolicy::KeepBoth => "keepBoth",
+            ConflictPolicy::Ask => "ask",
+        }
+    }
+}
+
+/// token 策略：导入记录**缺 token** 时怎么办（§1.4）。
+///
+/// - `Require`：缺 `access_token` 即跳过（**账号级**导入的现状语义）；
+/// - `Allow`：无 token 也合入（**全局备份**用 —— 不含凭据的备份全是无 token 记录，
+///   `Require` 会让一条都导不进，「需重新登录」场景整条失效）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenPolicy {
+    /// 缺 token 即跳过。
+    Require,
+    /// 无 token 也合入。
+    Allow,
+}
+
 /// 单条导入记录的合并动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MergeOutcome {
+pub enum MergeOutcome {
     /// 追加为新账号。
     Appended,
     /// 覆盖同 uid 的本地账号（保留导入记录原样）。
     Overwritten,
-    /// 缺少 access_token，跳过。
+    /// 命中同 uid 但保留本地（未覆盖、未追加）。
+    KeptLocal,
+    /// 命中同 uid 但保留两者（追加为新记录）。
+    KeptBoth,
+    /// 缺少 access_token（`TokenPolicy::Require`）或按策略不计入，跳过。
     Skipped,
 }
 
-/// 纯函数：把一条导入记录合并进账号列表。
+/// ★ **唯一合并出口**：账号级导入与全局备份**共用**（禁止新写一份）。
 ///
-/// 按 uid 去重：同 uid 覆盖（保留导入记录原样）；uid 缺失或无法匹配则追加。
-/// 缺少 access_token 的记录跳过，不进入账号库。
-fn merge_import_record(accounts: &mut Vec<Value>, item: &Value) -> MergeOutcome {
-    if account::get_str(item, "access_token").is_none() {
+/// 按 uid 去重（账号的稳定身份）：命中同 uid 时依 [`ConflictPolicy`] 处理。
+/// token 策略由 [`TokenPolicy`] 决定（账号级 `Require`、全局 `Allow`）。
+///
+/// - **账号级**（[`merge_import_records`]）调 `(Overwrite, Require)` ⇒ 与改造前逐字节一致；
+/// - **全局备份**（`backup_sections`）调 `(policy, Allow)`。
+pub fn merge_import_record(
+    accounts: &mut Vec<Value>,
+    item: &Value,
+    conflict: ConflictPolicy,
+    tokens: TokenPolicy,
+) -> MergeOutcome {
+    if matches!(tokens, TokenPolicy::Require) && account::get_str(item, "access_token").is_none() {
         return MergeOutcome::Skipped;
     }
-    if let Some(uid) = account::get_str(item, "uid").as_deref() {
-        if let Some(existing) = accounts
-            .iter_mut()
-            .find(|a| account::get_str(a, "uid").as_deref() == Some(uid))
-        {
-            let mut replaced = item.clone();
-            // 导入记录缺 id 时保留本地 id：账号库不允许出现无 id 记录
-            //（删除按 id、列表 key、导出选择都依赖 id）。
-            if account::get_str(&replaced, "id").is_none() {
-                if let Some(id) = existing.get("id").cloned() {
-                    replaced["id"] = id;
+
+    let matched_index = account::get_str(item, "uid").and_then(|uid| {
+        accounts
+            .iter()
+            .position(|a| account::get_str(a, "uid").as_deref() == Some(uid.as_str()))
+    });
+
+    match matched_index {
+        Some(index) => match conflict {
+            // `Ask` 在后端不可达（UI 逐条裁决）；真收到即按**保留本地**这一安全默认处理。
+            ConflictPolicy::KeepLocal | ConflictPolicy::Ask => MergeOutcome::KeptLocal,
+            ConflictPolicy::KeepBoth => {
+                let mut appended = item.clone();
+                // 赋新 id 避免与本地记录 id 撞车（id 是删除 / 列表 key / 导出选择的依据）。
+                let incoming_id = account::get_str(&appended, "id");
+                let collides = incoming_id
+                    .as_deref()
+                    .map(|id| {
+                        accounts
+                            .iter()
+                            .any(|a| account::get_str(a, "id").as_deref() == Some(id))
+                    })
+                    .unwrap_or(true);
+                if collides {
+                    appended["id"] = json!(uuid::Uuid::new_v4().to_string());
                 }
+                accounts.push(appended);
+                MergeOutcome::KeptBoth
             }
-            *existing = replaced;
-            return MergeOutcome::Overwritten;
+            ConflictPolicy::Overwrite => {
+                let mut replaced = item.clone();
+                // 导入记录缺 id 时保留本地 id：账号库不允许出现无 id 记录
+                //（删除按 id、列表 key、导出选择都依赖 id）。
+                if account::get_str(&replaced, "id").is_none() {
+                    if let Some(id) = accounts[index].get("id").cloned() {
+                        replaced["id"] = id;
+                    }
+                }
+                accounts[index] = replaced;
+                MergeOutcome::Overwritten
+            }
+        },
+        None => {
+            accounts.push(item.clone());
+            MergeOutcome::Appended
         }
     }
-    accounts.push(item.clone());
-    MergeOutcome::Appended
 }
 
 /// 纯函数：解析文件文本并按选中索引把记录合并进账号列表，返回计数。
@@ -119,13 +218,22 @@ pub fn merge_import_records(
     for &index in indexes {
         match array.get(index) {
             None => result.skipped += 1,
-            Some(item) => match merge_import_record(accounts, item) {
+            // ★ 账号级导入：`(Overwrite, Require)` ⇒ 与改造前逐字节一致（P0-1 不破）。
+            Some(item) => match merge_import_record(
+                accounts,
+                item,
+                ConflictPolicy::Overwrite,
+                TokenPolicy::Require,
+            ) {
                 MergeOutcome::Appended => result.imported += 1,
                 MergeOutcome::Overwritten => {
                     result.imported += 1;
                     result.overwritten += 1;
                 }
-                MergeOutcome::Skipped => result.skipped += 1,
+                // 账号级走 `Overwrite`，后两者不可达；防御性计入跳过。
+                MergeOutcome::KeptLocal | MergeOutcome::KeptBoth | MergeOutcome::Skipped => {
+                    result.skipped += 1
+                }
             },
         }
     }
@@ -521,5 +629,76 @@ mod tests {
         let records = vec![record("a1", Some("u1"), "甲", None, true)];
         assert!(write_records_to_file(&dir, &records, "../escape.json").is_err());
         assert!(write_records_to_file(&dir, &records, "no-ext").is_err());
+    }
+
+    // ── 泛化后的合并语义（P7 T01）：策略参数 ──────────────────────────────────
+
+    /// `TokenPolicy::Allow`：**无 token 的记录也能合入**（全局备份的关键）。
+    ///
+    /// 可证伪：若全局备份误用 `Require`（账号级语义），不含凭据的备份会一条都导不进，
+    /// 「需重新登录」场景整条失效。
+    #[test]
+    fn merge_allow_policy_imports_records_without_token() {
+        let mut accounts: Vec<Value> = vec![];
+        let item = json!({ "id": "a1", "uid": "u1", "nickname": "无凭据" });
+        let outcome = merge_import_record(&mut accounts, &item, ConflictPolicy::KeepLocal, TokenPolicy::Allow);
+        assert_eq!(outcome, MergeOutcome::Appended);
+        assert_eq!(accounts.len(), 1, "无 token 记录在 Allow 下必须合入");
+    }
+
+    /// `ConflictPolicy::KeepLocal`（默认）：命中 uid ⇒ 保留本地（不覆盖、不增行）。
+    #[test]
+    fn merge_keep_local_preserves_local_record() {
+        let mut accounts = vec![record("local", Some("u1"), "本地", None, true)];
+        let item = json!({ "id": "imported", "uid": "u1", "nickname": "导入", "access_token": "t" });
+        let outcome = merge_import_record(&mut accounts, &item, ConflictPolicy::KeepLocal, TokenPolicy::Allow);
+        assert_eq!(outcome, MergeOutcome::KeptLocal);
+        assert_eq!(accounts.len(), 1, "保留本地不得增行（幂等的核心）");
+        assert_eq!(accounts[0]["id"], "local");
+        assert_eq!(accounts[0]["nickname"], "本地");
+    }
+
+    /// `ConflictPolicy::KeepBoth`：命中 uid ⇒ 追加为新记录（唯一增行策略），并赋新 id。
+    #[test]
+    fn merge_keep_both_appends_with_fresh_id() {
+        let mut accounts = vec![record("local", Some("u1"), "本地", None, true)];
+        let item = json!({ "id": "imported", "uid": "u1", "nickname": "导入", "access_token": "t" });
+        let outcome = merge_import_record(&mut accounts, &item, ConflictPolicy::KeepBoth, TokenPolicy::Allow);
+        assert_eq!(outcome, MergeOutcome::KeptBoth);
+        assert_eq!(accounts.len(), 2, "KeepBoth 必须增行");
+        // 追加记录的 id 不得与本地 id 撞车。
+        assert_ne!(accounts[1]["id"], json!("local"));
+        assert_eq!(accounts[0]["id"], json!("local"), "本地记录不动");
+    }
+
+    /// `Ask` 在后端不可达（UI 逐条裁决）⇒ 按**保留本地**这一安全默认处理。
+    #[test]
+    fn merge_ask_falls_back_to_keep_local() {
+        let mut accounts = vec![record("local", Some("u1"), "本地", None, true)];
+        let item = json!({ "id": "imported", "uid": "u1", "nickname": "导入", "access_token": "t" });
+        let outcome = merge_import_record(&mut accounts, &item, ConflictPolicy::Ask, TokenPolicy::Allow);
+        assert_eq!(outcome, MergeOutcome::KeptLocal);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["nickname"], "本地");
+    }
+
+    /// 命令层字符串解析 **fail-closed**：空 ⇒ 默认保留本地（D16）；未知拼写 ⇒ `Err`。
+    ///
+    /// 可证伪：若把 `parse` 改成「未知即回落 `KeepLocal`」，末条 `is_err()` 断言即红 ——
+    /// 那正是「用户选了覆盖、实际按保留本地处理」的静默错误形态。
+    #[test]
+    fn conflict_policy_parse_is_fail_closed() {
+        assert_eq!(ConflictPolicy::parse(""), Ok(ConflictPolicy::KeepLocal));
+        assert_eq!(ConflictPolicy::parse("  "), Ok(ConflictPolicy::KeepLocal));
+        assert!(ConflictPolicy::parse("keapLocal").is_err(), "拼错必须拒绝，不得回落");
+        assert!(ConflictPolicy::parse("覆盖").is_err(), "非契约取值必须拒绝");
+        for policy in [
+            ConflictPolicy::KeepLocal,
+            ConflictPolicy::Overwrite,
+            ConflictPolicy::KeepBoth,
+            ConflictPolicy::Ask,
+        ] {
+            assert_eq!(ConflictPolicy::parse(policy.as_str()), Ok(policy), "往返不一致");
+        }
     }
 }

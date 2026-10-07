@@ -1465,6 +1465,109 @@ pub fn launch_workbuddy_for(region: Region, progress: Option<&dyn Fn(&str)>) -> 
     }
 }
 
+// ---------------------------------------------------------------------------
+// 悬浮窗「点击条目 → 聚焦来源客户端」（P9 ✅ #1）
+// ---------------------------------------------------------------------------
+
+/// 把来源客户端窗口带到前台（**OS 级 bring-to-front**，best-effort）。
+///
+/// ## 语义（P9 ✅ #1）
+///
+/// 悬浮窗是**只读**的：点击某行**只**把来源客户端带到前台 ——
+/// **不切账号、不导航主窗口、不删改任何数据**。它只「把你带到那儿」。
+///
+/// ## 未运行 ⇒ 可理解的错误（**不静默失败**）
+///
+/// 客户端没在跑就没有可聚焦的窗口。这里返回**一整句可读的错误**（含产品名），
+/// 由调用方渲染成明确反馈 —— 绝不「点了没反应」。
+pub fn focus_workbuddy_for(region: Region) -> Result<(), String> {
+    if !is_workbuddy_running_for(region) {
+        return Err(format!(
+            "{} 客户端未运行，请先启动客户端后再试",
+            region_app_stems(region)[0]
+        ));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        focus_workbuddy_windows_for(region)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        focus_workbuddy_macos_for(region)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        focus_workbuddy_linux_for(region)
+    }
+}
+
+/// Windows：用 PowerShell 的 `WScript.Shell.AppActivate(pid)` 把主窗口带到前台。
+///
+/// ## 为什么走 PowerShell 而不是 `windows` crate
+///
+/// 项目现有的 `windows` 依赖只开了 `Win32_Foundation` / `Win32_Security_Cryptography`
+/// 两个 feature；聚焦窗口需要 `Win32_UI_WindowsAndMessaging` + `Win32_System_Threading`
+/// —— 为一次用户触发的动作引入一批 `unsafe` FFI 并不划算。`AppActivate` 是 OS 级的
+/// bring-to-front，语义一致。
+#[cfg(target_os = "windows")]
+fn focus_workbuddy_windows_for(region: Region) -> Result<(), String> {
+    // 用**映像名**（[`region_image_stems`]，非产品名）匹配进程：国际版映像无空格
+    // （`WorkBuddyAI`），拿产品名（`WorkBuddy AI`）会匹配不到。
+    let names = region_image_stems(region)
+        .iter()
+        .map(|stem| format!("'{stem}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "$p = Get-Process -Name {names} -ErrorAction SilentlyContinue | \
+         Where-Object {{ $_.MainWindowHandle -ne 0 }} | Select-Object -First 1; \
+         if (-not $p) {{ exit 3 }}; \
+         if (-not (New-Object -ComObject WScript.Shell).AppActivate($p.Id)) {{ exit 4 }}; \
+         exit 0"
+    );
+    let status = cmd_builder("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .status()
+        .map_err(|error| format!("唤起客户端失败: {error}"))?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(3) => Err("客户端没有可聚焦的窗口（可能还在启动，或最小化到了托盘）".to_string()),
+        Some(4) => Err("无法把客户端窗口带到前台，请手动切换".to_string()),
+        _ => Err("唤起客户端失败，请手动切换".to_string()),
+    }
+}
+
+/// macOS：`open -a <app>` 会**激活已运行实例**（不会新开一个）。
+#[cfg(target_os = "macos")]
+fn focus_workbuddy_macos_for(region: Region) -> Result<(), String> {
+    let app = macos_workbuddy_app_path_for(region);
+    let status = cmd_builder("open")
+        .arg("-a")
+        .arg(&app)
+        .status()
+        .map_err(|error| format!("唤起客户端失败: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("无法把客户端窗口带到前台，请手动切换".to_string())
+    }
+}
+
+/// Linux：`wmctrl -a <名称>`（best-effort；未安装 wmctrl ⇒ 可理解错误）。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn focus_workbuddy_linux_for(region: Region) -> Result<(), String> {
+    let title = region_app_stems(region)[0];
+    let status = cmd_builder("wmctrl")
+        .args(["-a", title])
+        .status()
+        .map_err(|_| "未安装 wmctrl，无法聚焦客户端窗口".to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("未找到客户端窗口，请手动切换".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

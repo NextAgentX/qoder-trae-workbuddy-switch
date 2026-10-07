@@ -281,6 +281,147 @@ pub fn backup_dir() -> PathBuf {
     store_dir().join("backups")
 }
 
+// ---------------------------------------------------------------------------
+// 备份目录：自动备份命名 / 保留（P7 T02 · D17 / D18）
+// ---------------------------------------------------------------------------
+//
+// ## 两类「保留集」备份与手动导出的区别（§1.8）
+//
+// - **自动备份**（D17，定时）：文件名前缀 [`AUTO_BACKUP_PREFIX`]，每日一份、保留最近
+//   [`AUTO_BACKUP_KEEP`] 份；
+// - **导入前快照**（D18，强制）：文件名前缀 [`PRE_IMPORT_SNAPSHOT_PREFIX`]，导入前自动产生；
+// - **手动导出**：用户自己保管，**不进**保留集（不会被本模块的清理逻辑删掉）。
+//
+// 保留集里两类备份**共同**受「最近 7 份」约束（超过即删最旧）—— 否则导入前快照会无界增长。
+
+/// 定时自动备份的保留份数（D17：每日一次、保留最近 7 份）。
+pub const AUTO_BACKUP_KEEP: usize = 7;
+
+/// 自动备份文件名前缀（与手动导出、导入前快照区分）。
+pub const AUTO_BACKUP_PREFIX: &str = "auto-backup-";
+
+/// 导入前快照文件名前缀（D18，强制不可关）。
+pub const PRE_IMPORT_SNAPSHOT_PREFIX: &str = "pre-import-";
+
+/// 自动备份配置文件名（默认开、可在设置里关掉，§7 #7）。
+pub fn auto_backup_config_file() -> PathBuf {
+    store_dir().join("auto_backup_config.json")
+}
+
+/// 默认自动备份配置（D17 / §7 #7：**默认开** —— 备份价值在于「出事时有」）。
+pub fn default_auto_backup_config() -> Value {
+    json!({ "enabled": true })
+}
+
+/// 读取自动备份配置（缺失 / 损坏时回落默认 = 开）。
+pub fn load_auto_backup_config() -> Value {
+    let mut cfg = default_auto_backup_config();
+    let f = auto_backup_config_file();
+    if f.exists() {
+        if let Ok(text) = std::fs::read_to_string(&f) {
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&text) {
+                if let Some(enabled) = map.get("enabled").and_then(Value::as_bool) {
+                    cfg["enabled"] = json!(enabled);
+                }
+            }
+        }
+    }
+    cfg
+}
+
+/// 定时自动备份是否启用（后台任务每个周期据此决定是否产生新备份）。
+///
+/// ⚠️ **默认开、但必须能关掉**（§7 #7）：关闭后后台任务**不再产生新备份**，
+/// **已产生的保留**（不追溯删除）。
+pub fn is_auto_backup_enabled() -> bool {
+    load_auto_backup_config()
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// 保存自动备份配置（只保留已知字段）。
+pub fn save_auto_backup_config(cfg: &Value) -> std::io::Result<()> {
+    let mut merged = default_auto_backup_config();
+    if let Some(enabled) = cfg.get("enabled").and_then(Value::as_bool) {
+        merged["enabled"] = json!(enabled);
+    }
+    std::fs::create_dir_all(store_dir())?;
+    let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
+    atomic_write(&auto_backup_config_file(), &content)
+}
+
+/// 该文件名是否属于「保留集」管理的备份（自动备份 / 导入前快照）。
+///
+/// **手动导出**的文件不进保留集（那是用户自己保管的，§1.8）。
+pub fn is_managed_backup_name(name: &str) -> bool {
+    name.ends_with(".json")
+        && (name.starts_with(AUTO_BACKUP_PREFIX) || name.starts_with(PRE_IMPORT_SNAPSHOT_PREFIX))
+}
+
+/// 自动备份文件名（**每日一份、同日覆盖**）：`auto-backup-YYYY-MM-DD.json`。
+pub fn auto_backup_file_name(date: &str) -> String {
+    format!("{AUTO_BACKUP_PREFIX}{date}.json")
+}
+
+/// 导入前快照文件名（含时刻，避免同日多次导入互相覆盖）：`pre-import-<stamp>.json`。
+pub fn pre_import_snapshot_file_name(stamp: &str) -> String {
+    format!("{PRE_IMPORT_SNAPSHOT_PREFIX}{stamp}.json")
+}
+
+/// 列出保留集里的备份文件，**按修改时间升序**（最旧在前）。
+///
+/// 用 mtime 而不是文件名排序：两类前缀（`auto-backup-` / `pre-import-`）混在一起时，
+/// 按名排序会把前缀当主序，得不到真实的时间顺序。mtime 是唯一可靠的时序依据。
+pub fn managed_backup_files() -> Vec<PathBuf> {
+    let dir = backup_dir();
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .map(is_managed_backup_name)
+                        .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    files.sort_by_key(|path| backup_mtime(path));
+    files
+}
+
+/// 取文件修改时间（读不到 ⇒ UNIX_EPOCH，即视为最旧）。
+fn backup_mtime(path: &Path) -> SystemTime {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .unwrap_or(UNIX_EPOCH)
+}
+
+/// 保留最近 `keep` 份，删除更旧的；返回删除数量（**只作用于保留集**）。
+///
+/// `keep == 0` 是**空操作**（不删任何东西）：0 会被误读成「删光」，而「保留策略」的本意
+/// 绝不是清空备份目录。
+pub fn prune_managed_backups(keep: usize) -> usize {
+    if keep == 0 {
+        return 0;
+    }
+    let files = managed_backup_files();
+    if files.len() <= keep {
+        return 0;
+    }
+    let mut removed = 0;
+    for path in &files[..files.len() - keep] {
+        if std::fs::remove_file(path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub fn checkin_config_file() -> PathBuf {
     store_dir().join("auto_checkin_config.json")
 }

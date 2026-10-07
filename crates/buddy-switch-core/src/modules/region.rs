@@ -154,6 +154,8 @@ pub struct RegionSpec {
     pub auth_env: &'static str,
     /// 账号库文件名：accounts.json | accounts.global.json。
     pub accounts_filename: &'static str,
+    /// 回收站文件名：accounts.trash.json | accounts.trash.global.json（P5 §2.7 软删除的落点）。
+    pub accounts_trash_filename: &'static str,
     /// chat 上游基址。
     pub chat_base: &'static str,
     /// billing / 官网基址。
@@ -178,6 +180,7 @@ const CN_SPEC: RegionSpec = RegionSpec {
     auth_filename: "workbuddy-desktop.info",
     auth_env: "WORKBUDDY_AUTH_FILE",
     accounts_filename: "accounts.json",
+    accounts_trash_filename: "accounts.trash.json",
     chat_base: "https://copilot.tencent.com",
     billing_base: "https://www.codebuddy.cn",
     models_path: "/console/enterprises/personal/models",
@@ -195,6 +198,7 @@ const GLOBAL_SPEC: RegionSpec = RegionSpec {
     auth_filename: "workbuddy-desktop-ai.info",
     auth_env: "WORKBUDDY_AI_AUTH_FILE",
     accounts_filename: "accounts.global.json",
+    accounts_trash_filename: "accounts.trash.global.json",
     chat_base: "https://www.workbuddy.ai",
     billing_base: "https://www.workbuddy.ai",
     models_path: "/v3/config",
@@ -241,6 +245,14 @@ pub fn origin_referer(region: Region) -> &'static str {
 /// 账号库文件路径：`accounts.json`（CN）/ `accounts.global.json`（Global）。
 pub fn accounts_file_for(region: Region) -> PathBuf {
     store_dir().join(region_spec(region).accounts_filename)
+}
+
+/// 账号回收站文件路径：`accounts.trash.json`（CN）/ `accounts.trash.global.json`（Global）。
+///
+/// P5 §2.7 软删除的落点。与 [`accounts_file_for`] 同款：**枚举 → 查表**派生，
+/// raw scope 字符串**从不**进 `PathBuf`（§前置 4 的路径派生唯一规则）。
+pub fn accounts_trash_file_for(region: Region) -> PathBuf {
+    store_dir().join(region_spec(region).accounts_trash_filename)
 }
 
 /// 网关配置文件路径：`~/.buddy-switch/gateway_config.json`。
@@ -359,6 +371,7 @@ mod tests {
         assert_eq!(spec.chat_base, "https://copilot.tencent.com");
         assert_eq!(spec.auth_filename, "workbuddy-desktop.info");
         assert_eq!(spec.accounts_filename, "accounts.json");
+        assert_eq!(spec.accounts_trash_filename, "accounts.trash.json");
         assert_eq!(spec.models_path, "/console/enterprises/personal/models");
         assert_eq!(spec.catalog_ua, CatalogUa::Cli);
         assert_eq!(spec.fallback_app_version, "5.5.6");
@@ -371,6 +384,7 @@ mod tests {
         assert_eq!(spec.chat_base, "https://www.workbuddy.ai");
         assert_eq!(spec.auth_filename, "workbuddy-desktop-ai.info");
         assert_eq!(spec.accounts_filename, "accounts.global.json");
+        assert_eq!(spec.accounts_trash_filename, "accounts.trash.global.json");
         assert_eq!(spec.models_path, "/v3/config");
         assert_eq!(spec.catalog_ua, CatalogUa::App);
         assert_eq!(spec.fallback_app_version, "5.5.2");
@@ -433,6 +447,31 @@ mod tests {
 
         assert!(!RegionFilter::Cn.is_all());
         assert!(RegionFilter::All.is_all());
+    }
+
+    /// ★ 回收站文件路径必须**按 region 分家**且与 live 账号库**不同文件**（P5 §2.7）。
+    ///
+    /// 可证伪：把 `accounts_trash_file_for` 改成写死 CN 的文件名 ⇒ 两版回收站互相覆盖，
+    /// 第二条断言变红（用户「删了 A 库的账号，却在 B 库的回收站里看到」）。
+    #[test]
+    fn accounts_trash_file_for_is_region_scoped_and_distinct_from_live() {
+        let cn = accounts_trash_file_for(Region::Cn);
+        let global = accounts_trash_file_for(Region::Global);
+
+        assert_eq!(
+            cn.file_name().and_then(|n| n.to_str()),
+            Some("accounts.trash.json"),
+            "CN 回收站文件名"
+        );
+        assert_eq!(
+            global.file_name().and_then(|n| n.to_str()),
+            Some("accounts.trash.global.json"),
+            "Global 回收站文件名"
+        );
+        assert_ne!(cn, global, "两版回收站不得指向同一文件");
+        // 与 live 账号库必须是**不同文件**，否则软删除会覆盖 live。
+        assert_ne!(cn, accounts_file_for(Region::Cn));
+        assert_ne!(global, accounts_file_for(Region::Global));
     }
 
     #[test]
