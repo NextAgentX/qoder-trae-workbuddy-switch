@@ -66,8 +66,10 @@ export const en = {
   "backup.import.run": "Start import",
   "backup.import.result.title": "Import result",
   "backup.import.result.summary": "Added {added} · Overwritten {overwritten} · Skipped {skipped}",
-  "backup.import.result.failed": "{count} accounts failed to import",
+  "backup.import.result.failed": "{count} sections failed to import",
   "backup.import.result.retry": "Retry failed items",
+  "backup.import.result.retryDone": "Failed sections were retried",
+  "backup.import.result.retryPartial": "{count} sections still failed to import",
   "backup.import.result.snapshot":
     "A snapshot of the pre-import state was taken; roll back from “Restore from auto backup”.",
   "backup.import.result.done": "Done",

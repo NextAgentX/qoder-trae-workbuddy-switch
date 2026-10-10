@@ -8,6 +8,118 @@
 
 ---
 
+## ★ 最新状态（2026-10-08 · 第六轮）—— 三条新能力落地（限流可视化 / Skill 管理 / 客户端设置托管）
+
+> 产出人：lead · 日期：2026-10-08
+> **判据**：`cargo test -p buddy-switch-core --lib`（`client_limits` 9 + `skill` 24 + `client_settings` 19，全绿）、
+> `cargo check --workspace` 绿、`npx tsc --noEmit` 0 错、`npm run check:api`（**routes=157 / call=145 / invoke=163**）、
+> `npm run check:scope`（**227 passed / 0 failed**）+ 直接读源码。
+
+### A⁶. 本轮新增的三条能力（此前**完全不存在**，不是「补验证」）
+
+| # | 能力 | 来源任务 | 落地证据 |
+|:--|:---|:---|:---|
+| 1 | **客户端限流可视化**（账号 × 模型 × 恢复时刻） | `09-22-client-rate-limit-visibility`（P0） | core `client_limits.rs`（`workbuddy.db` 以 `SQLITE_OPEN_READ_ONLY` **只读**打开、绝不写库；`parse_reset_at_ms` 认 `YYYY-MM-DD HH:MM:SS UTC+8` 文案模板；按 `(uid, model, reset_at)` 去重取最近；join 失败**保留为 unknown 不丢弃**）+ `GET /api/client/limits` / `commands::client_limits` + `client-limits-card.tsx`（挂 `AccountsPage`，当前受限置顶） |
+| 2 | **Skill 管理**（清单 / 启停 / 跨区搬迁 / 本地导入） | `09-22-skill-manager`（P1） | core `skill.rs`（frontmatter **行级**改写 `user-invocable` / `disable-model-invocation`，其余字节不动；跨区搬迁「合并补齐」且**冲突保留目标侧**；模块内备份只在「目标原本存在且确有改动」时触发）+ 5 条命令四通道 + `skill-manager.tsx`（侧栏底部「应用级区」） |
+| 3 | **客户端设置统一托管**（读 / 编辑 / 备份 / 恢复 / 差异） | `09-22-upstream-client-settings`（P1） | core `client_settings.rs`（6 槽位声明式规格表；**格式指纹 + 手术式 patch**，只替换目标值的字节跨度；写前判进程、运行中拒绝；恢复前再备份；跨产品按语义映射表归并代理字段）+ 6 条命令四通道 + `client-settings.tsx` |
+
+三条能力都遵守同一纪律：**两宿主（`api.rs` / `commands.rs`）调同一个 core 函数并原样返回**，
+杜绝「一侧多包一层」的形状漂移；只读命令进 `DEMO_READ_COMMANDS`，写 / 动作命令由 `DemoAction` 遮罩。
+
+### A⁶.1 两条「此前判为不可得」的结论已翻案（+1 条部分翻案）
+
+| 之前的判断 | 实际 |
+|:---|:---|
+| Trae 侧代理字段取值域**无证据** ⇒ 缩到「统一查看 + 各自编辑」（`09-22-upstream-client-settings` PRD「背景·四」/ Risks 1） | ✅ **取到证据**：从客户端 bundle（`Trae CN\resources\app\out\main.js`、WorkBuddy bundle 的 `parseProxySettings`）逐字节读出取值域，已写成常量并由单测 `代理字段取值域常量被钉住` 钉住 |
+| 限流 `6020` / `6022` 文案**卡上游、客户端 i18n 取不到**（`09-22-client-rate-limit-visibility` PRD S6） | ⚠️ **部分翻案（2026-10-08 补查）**：客户端 bundle 内精确键 `queue.waiting.title` / `queue.userLimit.title` **0 命中**（确非客户端键，属上游）；但客户端**自有**排队块文案 `capacityQueueBlock.*`（中英）已取证 ⇒ **补展示可行**，映射口径待拍板 |
+| 客户端设置若整体重序列化会产生**与内容无关的大 diff**（PRD「背景·三」） | ✅ **已规避**：实现走「格式指纹 + 仅替换目标值跨度」，`patch保持缩进风格且只改目标行` / `替换值不动周边空白` / `点号路径定位且未知键与顺序不变` 三条单测钉死；且实测排版与 PRD 2026-09-22 的记载**不同**（Trae CN 实为 2 空格 LF、`TRAE SOLO*` 实为纯 tab CRLF，非「0 缩进 / 混合」），故实现**靠检测而非假设** |
+
+### B⁶. 真实剩余清单（第六轮口径）
+
+| # | 项 | 性质 | 卡在哪 |
+|:--|:---|:---|:---|
+| 1 | **P12 spike 运行时确认**（H0 运行时 / H1 真客户端半段 / H4 抓 header 原始大小写） | ⛔ 需**用户手动** | `P12-SPIKE-RESULTS.md` §6 |
+| 2 | **新增客户端**（VS Code CodeBuddy 插件 / JetBrains 插件） | 未排期 | 注册表已渲染 `planned` 态；真实支持需单独立项（`PLAN.md §3.3` B 表 / `VOCABULARY.md`） |
+| 3 | **P9 悬浮窗键盘可达性 · 运行时走查** | ⛔ 需**用户手动 / E2E** | 代码 + 静态门禁已落地；走查清单见 `P9-KEYBOARD-CHECKLIST.md` |
+| 4 | **客户端设置的「真实客户端端到端」**（关进程 → 改一个键 → 启动客户端 → 客户端确实读到新值） | ⛔ 需**用户手动** | `09-22-upstream-client-settings` PRD S6 / Acceptance 最后一条 |
+| 5 | **限流 `6020` / `6022` 的排队语义文案** | ⚠️ **部分取证（2026-10-08 补查）** | 客户端 bundle（`WorkBuddy\resources\app.asar`）内**精确键 0 命中**（`queue.waiting.title` / `queue.userLimit.title` 非客户端 i18n 键，属**上游**消息键）；客户端**自有**排队块文案 `capacityQueueBlock.*` 已取证（中英：`title.waiting`=当前模型资源紧张，请等候。/ `title.full`=当前模型队列已满 / `title.userLimit`=您已达到当前模型的使用上限 / `title.timeout` / `title.expired`）。**补展示是小改，但映射口径待拍板**（PRD S6「★ 6020/6022 取证」） |
+| 6 | **Trae 国际版联网联调**（OAuth → 签到 → 积分） | ⛔ 需**用户手动** | 本机无可用国际版凭据（`09-21-trae-region-program-model` S5） |
+| 7 | **三条新能力的真实应用 UI 走查** | ⬜ 待补 | 目前只有单测 + 静态门禁（`tsc` / `check:api` / `check:scope`）；**未在真实应用里点过**（`skill-manager` 仅跑过 `build:demo`） |
+| 8 | **Skill 管理的 L3b（GitHub repo 安装）与 `discover` 社区搜索** | ⬜ 未做（已收敛） | PRD §7 建议不做（与内置 marketplace 重叠）；`scan-unmanaged` / `import-from-apps` 一并降级 |
+| 9 | **客户端设置的 webui 门禁口径** | ⬜ 待拍板 | 当前取「保留入口 + 标注操作的是**服务端机器**」；PRD 允许二选一 |
+| 10 | 原型特有 8 条 | ⬜ 不适用 | 本就不该照搬 |
+
+### C⁶. 「仅静态覆盖」清单（本轮新增 3 条）
+
+| 能力 | 静态判据 | 缺什么 |
+|:---|:---|:---|
+| **客户端限流可视化** | `cargo test` 9 条（时区 / join / 去重 / 排序 / 只读）+ `check:api` | 真实数据全量跑一遍的**输出核对**（PRD Acceptance 1~3）与卡片在真实应用的**渲染走查** |
+| **Skill 管理** | `cargo test` 24 条（frontmatter CRLF/BOM、行级保字节、往返幂等、冲突保留目标侧、备份触发条件、路径穿越拒绝）+ `tsc` + `build:demo` | 真实 `{data_dir}/skills` 上的**启停 / 搬迁 / 导入**端到端 |
+| **客户端设置托管** | `cargo test` 19 条（6 槽位、四风格指纹、patch 只改目标行、幂等备份、恢复逐字节、三类比对、跨产品代理归并、损坏 JSON 报错、路径穿越拒绝、进程占用带码） | **真实客户端端到端**（B⁶ 第 4 条） |
+
+---
+
+## ★ 最新状态（2026-10-08 · 第五轮）—— P9 悬浮窗键盘可达性落地
+
+> 产出人：lead · 日期：2026-10-08
+> **判据**：`scripts/check-scope-registry.cjs`（**227 passed / 0 failed**，+1 条新断言）+ 直接读源码。
+
+### A⁗. 第四轮「真实剩余清单」第 3 条已不成立（**补的是「实现」，不只是「验证」**）
+
+| 第四轮写的 | 实际情况 | 证据 |
+|:---|:---|:---|
+| 「**P9 悬浮窗键盘可达性** —— 未验证，独立窗口不能复用主窗口验证路径」 | ❌ **焦点入口此前根本没实现**：`P9-ARCH §1.7` 明写「窗口打开后焦点落在**第一个可聚焦行**」，而 `companion-app.tsx` 只依赖 Rust 侧 `window.set_focus()`（**OS 级窗口焦点**，不回填 webview 内的**元素**焦点）⇒ `decorations(false)` 下键盘用户打开后**没有任何焦点入口**。本轮**补齐** | `companion-app.tsx`（`focusEntry`：`contentRef.querySelector("button")` → 退 `closeRef`；`didInitialFocusRef` 只做一次；`listen("companion-visibility")` 重开送回焦点）；`companion-row.tsx`（行=原生 `<button>` + `:focus-visible`；`motion-reduce:animate-none`）；门禁第 **227** 条 |
+
+**本轮补齐的五条（`P9-ARCH §1.7`）**：
+
+| 项 | 实现 |
+|:---|:---|
+| 焦点入口 | 内容就绪后聚焦**第一个可聚焦元素**（行 / 空态「刷新」），退路=关闭按钮；**只做一次**，不抢用户焦点 |
+| 重新可见 | 隐藏 = 不销毁 ⇒ `listen("companion-visibility")` true 时**送回焦点**（`set_focus` 只给窗口焦点） |
+| 行可聚焦 | 每行是**原生 `<button>`**（Tab / Enter / Space 原生可用），`:focus-visible` 展开标题 |
+| 拖动不抢焦点 | 拖拽手柄走 `data-tauri-drag-region`（原生拖动，**不产生可聚焦元素**） |
+| Esc / 关闭按钮 | Esc = 隐藏窗口；关闭按钮是 `<button aria-label="隐藏悬浮窗">`（可聚焦、可 Enter） |
+
+**诚实边界（不撒谎）**：门禁第 **227** 条是**静态结构断言**（A8：独立窗口不能复用主窗口的键盘验证）——
+它钉死「代码里有焦点入口 / Esc / 原生 button / drag-region」，**不等于**「运行时真的按预期工作」。
+**独立窗口的运行时键盘走查仍待一条 companion webview 的 E2E（或手测清单）**（见下方「仅静态覆盖」清单）。
+本轮**未做**该运行时走查：用户正在使用该客户端，触发窗口显隐/重启会打断其任务。
+
+### B⁗. 真实剩余清单（第五轮口径）
+
+| # | 项 | 性质 | 卡在哪 |
+|:--|:---|:---|:---|
+| 1 | **P12 spike 运行时确认**（H0 运行时 / H1 真客户端半段 / H4 抓 header 原始大小写） | ⛔ 需**用户手动** | `P12-SPIKE-RESULTS.md` §6 |
+| 2 | **新增客户端**（VS Code CodeBuddy 插件 / JetBrains 插件） | 未排期 | 注册表已渲染 `planned` 态，真实支持需单独立项 |
+| 3 | **P9 悬浮窗键盘可达性 · 运行时走查** | ⛔ 需**用户手动 / E2E** | 代码 + 门禁已落地；**运行时**验证需独立窗口 E2E（本轮因客户端占用未做） |
+| 4 | 原型特有 8 条 | ⬜ 不适用 | 本就不该照搬 |
+
+---
+
+## ★ 最新状态（2026-10-08 · 第四轮）—— 逐条「+N」落地
+
+> 产出人：lead · 日期：2026-10-08
+> **判据**：`scripts/check-scope-registry.cjs`（**226 passed / 0 failed**，+1 条新断言）+ 直接读源码 + `cargo test`（新增 2 条**可证伪**单测）。
+
+### A‴. 第三轮「真实剩余清单」第 3 条已不成立
+
+| 第三轮写的 | 实际情况 | 证据 |
+|:---|:---|:---|
+| 「**签到积分「逐条 +N」明细** —— ⛔ 卡后端：`CheckinEvent` 无金额字段 ⇒ 推不出」 | ❌ **已实现**。数据源其实**已在**：提交前的 `checkin-activity-status` 返回 `daily_credit` / `today_credit`（与 Trae 侧「预检返回的 `credits` 就是本次签到可得的额度」同源，见 `trae/checkin.rs`）。缺的只是**把额度落进签到日志**并**逐条透传到 `events`** | `checkin.rs`（`checkin_reward_from_status` + `entry_map["amount"]`）；`credit_usage.rs`（`CheckinEvent.amount` + `"amount": event.amount`）；`types.ts`（`CreditStatsCheckinEvent.amount`）；`CreditStatsPage.tsx`（`+${formatCredits(reward)}`）；门禁第 **226** 条 |
+
+**取舍（不撒谎）**：额度**只认上游实测字段、只取正数**；`0` / 缺失一律 `None` ⇒ 前端显示 `—`，**不摆「+0」**。逐日**聚合**入账仍不可得（后端 `daily[]` 只由余额快照推导，只有消耗侧），故「区间入账」tile 与每日收支柱保持单向 —— 这一条**不变**。
+
+### B‴. 真实剩余清单（第四轮口径）
+
+| # | 项 | 性质 | 卡在哪 |
+|:--|:---|:---|:---|
+| 1 | **P12 spike 运行时确认**（H0 运行时 / H1 真客户端半段 / H4 抓 header 原始大小写） | ⛔ 需**用户手动** | `P12-SPIKE-RESULTS.md` §6 |
+| 2 | **新增客户端**（VS Code CodeBuddy 插件 / JetBrains 插件） | 未排期 | 注册表已渲染 `planned` 态，真实支持需单独立项 |
+| 3 | **P9 悬浮窗键盘可达性** | 未验证 | 独立窗口，不能复用主窗口验证路径 |
+| 4 | 原型特有 8 条 | ⬜ 不适用 | 本就不该照搬 |
+
+---
+
 ## ★ 最新状态（2026-10-07 · 第三轮 · 收官）—— 以代码 + 门禁为准
 
 > 产出人：lead · 日期：2026-10-07（本轮回写）
@@ -508,6 +620,7 @@ GAP 判定的多个「整期缺失」现已实现（新增文件）：`src/compo
 | 点击条目回到原会话（有反馈） | — | P9 | ✅ | `companion-app.tsx:95-117`（`handleJump` + 成功/失败反馈） | — |
 | 邮箱默认脱敏 | ★ | P9 | ✅ | `account-card.tsx:93-105`（`accountIdentity`：首字母 + `*` + 域名） | 星号个数与原型正则不同（同函数即可） |
 | 搜索仍按完整邮箱匹配 | ★ | P9 | ✅ | `src/lib/account-search.ts:32-44`（用 `email` 原值）；展示侧才脱敏 | — |
+| **悬浮窗键盘可达性**（独立窗口自管焦点） | ★ | P9 | ✅（代码 + 静态门禁） | `companion-app.tsx`（`focusEntry` 焦点入口 + `didInitialFocusRef` 只做一次 + `listen("companion-visibility")` 重开送回焦点 + Esc 隐藏）；`companion-row.tsx`（行=原生 `<button>` + `:focus-visible`）；门禁第 **227** 条 | ⚠️ **运行时**走查待独立窗口 E2E（见 §5）—— 门禁是**静态结构断言**，不等于运行时行为 |
 
 ### 2.19 账号卡程序位（§3.3 / 附录 D）
 
@@ -588,7 +701,7 @@ GAP 判定的多个「整期缺失」现已实现（新增文件）：`src/compo
 | **P11 后端「两个出口」禁用** | `check-scope-registry.cjs:1508-1615`（扫 `models.rs` 的 `.filter`、`chat.rs`/`messages.rs` 的 `GatewayError::ModelDisabled`、`disabled_models::is_disabled` 唯一性、大小写不敏感） | 门禁验的是「**代码在正确位置调用了 `is_disabled`**」，**不等于**「运行时真的会拒绝」。虽有 `crates/buddy-switch-gateway/tests/wb_gateway_p11_e2e.rs`（路由级 e2e）与 Trae 侧 e2e，但**门禁本体是静态扫描** |
 | **P7 全局备份/恢复（整组）** | `:3267-3450`（子导航 9 项 / 预览计数 / 文案红线 / 定时开关 / 预估推导 / 冲突三选 / 词条同步）；后端锚 `:3467-3596`（`Scope::parse` fail-closed / 导入前快照 / 恢复防目录穿越 / 损坏文件） | **无 UI 端到端**（导出→导入→冲突→部分失败 的完整链路未在真实应用跑过） |
 | **P8 会话工作台（骨架 + 门控 + 空态 + 副本视图）** | `:3992-4240`（第 6 目的地能力门控 / `scopedNav` 过滤 / Trae 空态 / 不列 WB 组 / `partial:true` / 不用 `updatedAt` 冒充状态 / 两宿主同步） | 全部为**静态扫描**；副本视图在真实应用**无运行时验证** |
-| **P9 悬浮窗（只读 / 四态 / 懒创建 / 位置记忆 / 入口）** | `:2828-3240`（不进 `windows[]` / capability label / 落屏校验 / `?window=companion` 分流 / 托盘入口 / 只读命令面 / 四态样式两两不同 / 标题不进 DOM） | 静态 + 词条同步；**独立窗口的键盘可达性 / 拖拽 / 托盘**无运行时验证 |
+| **P9 悬浮窗（只读 / 四态 / 懒创建 / 位置记忆 / 入口 / 键盘可达性）** | `:2828-3240`（不进 `windows[]` / capability label / 落屏校验 / `?window=companion` 分流 / 托盘入口 / 只读命令面 / 四态样式两两不同 / 标题不进 DOM）+ **`:3263`（键盘可达性：焦点入口 / Esc / 原生 button / drag-region / 关闭按钮 / motion-reduce）** | 静态 + 词条同步；**独立窗口的键盘可达性运行时走查 / 拖拽 / 托盘**无运行时验证 —— 走查清单见 `P9-KEYBOARD-CHECKLIST.md` |
 | **P4 账号工具栏 / 表格 / 可点区** | `:689-1033`（卡片可点区 ≤4 / `TraeProgram.region` 构造点 / `programsFor` 不按 program 去重 / 表格行 ≤2 可点区 / 搜索框常驻 IME / 无假选项） | 静态计数与结构锚；**IME / 聚焦顺序**无运行时验证 |
 | **P5 回收站（UI）** | `:2009-2132`（入口在账号页 / purge 二次确认 / 清空明示条数 / 显示到期时间 / `onRestored` 刷新 / 状态语言） | 静态；**真实恢复链路**无 UI 端到端 |
 | **会话能力的平台边界** | `:209-215,3992-4034`（`sessionCopy` 能力门控 / `DESTINATION_CAPABILITY`） | 静态；「Trae 侧栏确实不渲染」无运行时验证 |

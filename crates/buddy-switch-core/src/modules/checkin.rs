@@ -220,6 +220,18 @@ pub async fn perform_checkin_for(region: Region, account: &Value) -> Value {
     json!({"ok": false, "error": msg})
 }
 
+/// 从签到状态响应里取**本次签到可得额度**（逐条「+N」的 N）。
+///
+/// 字段名来自**上游实测响应**（`checkin-activity-status`，见 [`get_checkin_status_for`]）：
+/// 优先 `dailyCredit`（当日签到额度），回落 `todayCredit`（今日已得）。
+/// 只认**正数** —— `0` / 缺失一律视为「上游没给」⇒ `None`（宁可不写，也不摆「+0」）。
+fn checkin_reward_from_status(status: &Value) -> Option<f64> {
+    ["dailyCredit", "todayCredit"]
+        .iter()
+        .filter_map(|field| status.get(*field).and_then(Value::as_f64))
+        .find(|amount| *amount > 0.0)
+}
+
 fn decide_from_status(status: &Value) -> StatusDecision {
     if status.get("ok").and_then(Value::as_bool) != Some(true) {
         return StatusDecision::Error(
@@ -260,6 +272,10 @@ pub async fn checkin_account_for(region: Region, account: &Value) -> Value {
         }
         StatusDecision::Submit => {}
     }
+    // ★ 逐条「+N」：本次签到额度取自**提交前**的状态查询（`checkin-activity-status`），
+    //   与 Trae 侧「预检返回的 credits 就是本次签到可得的额度」同源 —— 不必再打一次
+    //   状态接口算差值。只认上游**实测**字段，取不到就不写金额（前端显示「—」，不摆「+0」）。
+    let reward = checkin_reward_from_status(&status);
 
     // Only this branch submits daily-checkin, so only its outcome is eligible
     // for the sign-in log.
@@ -293,6 +309,12 @@ pub async fn checkin_account_for(region: Region, account: &Value) -> Value {
     });
     if let Some(e) = error.clone() {
         entry_map["error"] = json!(e);
+    }
+    // 只有「真的签到成功」才落金额；`already` / `error` 不写（拿不到就是拿不到）。
+    if result == "success" {
+        if let Some(amount) = reward {
+            entry_map["amount"] = json!(amount);
+        }
     }
     add_checkin_log(&entry_map);
     json!({"result": result, "error": error})
@@ -481,6 +503,39 @@ mod tests {
         assert_eq!(
             decide_from_status(&json!({"ok": true, "todayCheckedIn": false})),
             StatusDecision::Submit
+        );
+    }
+
+    /// 逐条「+N」的取值：优先 `dailyCredit`，回落 `todayCredit`，**只认正数**。
+    ///
+    /// 可证伪：把 `find(|amount| *amount > 0.0)` 换成 `.next()`（不筛正数）⇒ 第 3 条
+    /// 断言会拿到 `0.0` 而红；把字段顺序调换 ⇒ 第 1 条断言拿到 `30.0` 而红。
+    #[test]
+    fn checkin_reward_prefers_daily_then_today_and_ignores_non_positive() {
+        assert_eq!(
+            checkin_reward_from_status(&json!({"dailyCredit": 100.0, "todayCredit": 30.0})),
+            Some(100.0),
+            "dailyCredit 优先"
+        );
+        assert_eq!(
+            checkin_reward_from_status(&json!({"todayCredit": 30.0})),
+            Some(30.0),
+            "dailyCredit 缺失时回落 todayCredit"
+        );
+        assert_eq!(
+            checkin_reward_from_status(&json!({"dailyCredit": 0.0, "todayCredit": 0.0})),
+            None,
+            "0 视为「上游没给」，不摆 +0"
+        );
+        assert_eq!(
+            checkin_reward_from_status(&json!({"dailyCredit": null})),
+            None,
+            "null 视为「上游没给」"
+        );
+        assert_eq!(
+            checkin_reward_from_status(&json!({"ok": true})),
+            None,
+            "字段全缺时为 None"
         );
     }
 

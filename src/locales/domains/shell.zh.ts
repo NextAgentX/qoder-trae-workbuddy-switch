@@ -13,17 +13,59 @@ export const zh = {
   "product.navAria": "{product} 导航",
 
   "nav.overview": "概览",
-  "nav.accounts": "账号管理",
+  /* ⚠️ 导航文案对齐原型 `DESTINATIONS`（`buddy-switch-prototype.html:1139-1146`）：
+     原型是**短词**「账号」「网关」—— 不是「账号管理」「API 服务」（后者会把 240px 侧栏占满）。 */
+  "nav.accounts": "账号",
   "nav.usage": "用量",
   "nav.tokenStats": "Token 统计",
   "nav.credits": "积分统计",
-  "nav.apiService": "API 服务",
+  "nav.apiService": "网关",
   "nav.settings": "设置",
 
   "sidebar.version": "版本",
+  // 品牌块副标题（原型 `.brand-text i`，`buddy-switch-prototype.html:163`）。
+  "sidebar.brand.tagline": "多平台账号管理",
   "sidebar.running": "{product} 运行中",
   "sidebar.notRunning": "{product} 未运行",
   "sidebar.update": "更新",
+
+  // ---- 顶部应用栏（redesign L1 作用域 + 全局动作）----
+  "topbar.scope.aria": "切换作用域",
+  "topbar.scope.menuLabel": "作用域（平台 × 区域）",
+  "topbar.scope.sub.loggedIn": "{name} · {n} 个账号",
+  "topbar.scope.sub.loggedOut": "未登录 · {n} 个账号",
+  "topbar.scope.sub.missing": "未检测到 · {n} 个账号",
+  // 有需处理账号时缀在副标题后（原型 `scope-menu`）—— 切之前就能看出哪个作用域有事要办。
+  "topbar.scope.sub.attention": " · {n} 个需处理",
+  // 作用域菜单底部说明行（原型 `scope-menu` 最后一行）：一句话讲清切换的影响面。
+  "topbar.scope.hint": "作用域决定「我现在管的是哪一套账号」。切换后，侧栏、内容区、统计口径全部跟随。",
+  "topbar.run.running": "运行中",
+  "topbar.run.stopped": "未运行",
+  "topbar.run.missing": "未检测到",
+  "topbar.search": "搜索账号、页面或动作",
+  "topbar.refresh": "刷新当前作用域",
+  "topbar.theme": "切换明暗主题",
+  "topbar.appMenu": "应用设置",
+
+  // ---- 页头作用域副标题（redesign §3.2：页头统一「作用域 · 说明」+ 右侧 scope-chip）----
+  // ⚠️ 只读展示：切作用域的唯一入口在顶栏，页内不放区域切换器（区域已并入 L1 作用域）。
+  "pageHead.overview.signedIn": "{scope} · 当前登录 {name}",
+  "pageHead.overview.signedOut": "{scope} · 未登录",
+  "pageHead.accounts": "{scope} · {n} 个账号",
+  "pageHead.accounts.pending": "{scope} · {n} 个账号 · {m} 个需处理",
+  "pageHead.usage": "{scope} · Token 与积分统计合并到一个工作台",
+  "pageHead.gateway": "{scope} · 把账号池暴露为 OpenAI / Anthropic 兼容接口",
+  "pageHead.settings": "{scope} · 按主题分区，不再是一屏长滚动",
+  "pageHead.sessions": "{scope} · 同一份会话在各账号里的副本 —— 谁落后、谁分叉、同步给谁",
+
+  // ---- 平台能力标签（概览「能力」卡；取值来自注册表 `Capability`）----
+  "capability.checkin": "自动签到",
+  "capability.travel": "自动旅行",
+  "capability.credits": "积分统计",
+  "capability.oauth": "OAuth 登录",
+  "capability.gateway": "API 网关",
+  "capability.autoRotate": "自动轮换",
+  "capability.sessionCopy": "会话复制",
 
   // ---- 命令面板（⌘K，P6 §3.7）----
   "palette.entry": "搜索或跳转",
@@ -126,6 +168,15 @@ export const zh = {
   "settings.subnav.diagnostics": "权限与诊断",
   "settings.subnav.logs": "日志",
   "settings.subnav.backup": "备份与恢复",
+
+  // ---- 网关工作台子导航（PLAN §3.9：6 项，两个产品线共用同一份表）----
+  "gateway.subnav.aria": "网关分区",
+  "gateway.subnav.overview": "概览",
+  "gateway.subnav.keys": "密钥",
+  "gateway.subnav.models": "模型",
+  "gateway.subnav.pool": "账号池",
+  "gateway.subnav.proxy": "请求代理",
+  "gateway.subnav.logs": "请求日志",
 
   // ---- 设置页「日志」分区（WorkBuddy 无独立运行日志，给空态 + 出口）----
   "settings.logs.emptyTitle": "本分区暂无运行日志",

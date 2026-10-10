@@ -277,6 +277,9 @@ pub fn account_meta(acc: &Value) -> Value {
         "refreshExpiresAt": acc.get("refreshExpiresAt"),
         "refreshedAt": acc.get("refreshedAt"),
         "createdAt": acc.get("createdAt"),
+        // 最近一次「实际使用该账号」（切换 / 启动）的时间戳。与上一行同为**数字**
+        // （[`now_ms`]，epoch 毫秒）—— 由 [`touch_last_used_for`] 写入，缺失时为 `null`。
+        "lastUsedAt": acc.get("lastUsedAt"),
         "needsRelogin": acc.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true),
         "needsReloginReason": display_str(acc, "needs_relogin_reason"),
         // 用户备注：自由文本，可能缺失或为 null。前端按「有值才渲染」处理。
@@ -286,6 +289,10 @@ pub fn account_meta(acc: &Value) -> Value {
         // `reason` 下发）。同一件事只在**一处**编码，才不会两处漂移 ——
         // 账号级布尔要等请求才用得上，而请求本身就会带回原因。
         "remark": display_str(acc, "remark"),
+        // 用户自定义分组名：自由文本，可能缺失或为 null（缺省 = 未分组）。
+        // 与 `remark` 同为**本地标注**：采集/导入时**不会**出现在采集结果里，
+        // 由 [`upsert_collected_account`] 保留、[`set_account_group_for`] 维护。
+        "groupName": display_str(acc, "groupName"),
     })
 }
 
@@ -486,6 +493,14 @@ pub fn upsert_collected_account(accounts: &mut Vec<Value>, mut collected: Value)
         // 且触发场景很常见：重新扫码登录同一个账号、再次「导入本机账号」。
         if let Some(remark) = existing.get("remark").cloned() {
             collected["remark"] = remark;
+        }
+        // 同上：自定义分组与「最近使用」也是**本地标注**（采集结果里没有），
+        // 不显式带回就会丢 —— UI 每次自动 `importLocal` 都会重采集同一 uid，
+        // 丢掉分组 / 最近使用会让「自定义分组」与「最近使用」排序静默失效。
+        for key in ["groupName", "lastUsedAt"] {
+            if let Some(value) = existing.get(key).cloned() {
+                collected[key] = value;
+            }
         }
 
         for index in matching_indexes.into_iter().rev() {
@@ -1809,6 +1824,111 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
+
+    /// `account_meta` 必须下发 `lastUsedAt` / `groupName` 两个新键；**缺失时为 `null`**
+    /// （形状恒定，前端按「有值才渲染」处理，缺键与 `null` 必须等价）。
+    #[test]
+    fn account_meta_exposes_last_used_and_group_name() {
+        let meta = account_meta(&json!({
+            "id": "a1",
+            "lastUsedAt": 1_700_000_000_000i64,
+            "groupName": "工作",
+        }));
+        assert_eq!(meta["lastUsedAt"], json!(1_700_000_000_000i64));
+        assert_eq!(meta["groupName"], "工作");
+
+        let empty = account_meta(&json!({ "id": "a2" }));
+        assert_eq!(empty["lastUsedAt"], Value::Null);
+        assert_eq!(empty["groupName"], Value::Null);
+
+        // 底线：新键不得泄露凭据（与本模块既有口径一致）。
+        assert!(meta.get("access_token").is_none(), "meta 不得泄露 token");
+    }
+
+    /// 切换 / 启动写入的「最近使用」时间戳必须**可解析为数字**，且**只改一个键**。
+    ///
+    /// 可证伪：把 `touch_last_used_in_path` 改成写 ISO 字符串（`"2026-…"`）⇒
+    /// `as_i64()` 断言即红 —— 前端 `types.ts` 声明这一族为 `number | null`。
+    #[test]
+    fn touch_last_used_stamps_a_numeric_timestamp_without_touching_tokens() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-last-used-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let path = dir.join("accounts.json");
+        save_accounts_to_path(
+            &path,
+            &[json!({
+                "id": "a1", "uid": "u1", "nickname": "小明",
+                "access_token": "AT", "refresh_token": "RT",
+            })],
+        )
+        .expect("seed accounts");
+
+        let before = now_ms();
+        let meta = touch_last_used_in_path(Region::Cn, &path, "a1").expect("touch");
+        let after = now_ms();
+        let stamp = meta["lastUsedAt"]
+            .as_i64()
+            .expect("lastUsedAt 必须是数字（epoch 毫秒），不能是字符串");
+        assert!(
+            stamp >= before && stamp <= after,
+            "时间戳应落在 [before, after] 内"
+        );
+
+        let raw = load_accounts_from_path(&path);
+        assert!(raw[0]["lastUsedAt"].as_i64().is_some(), "落盘后仍是数字");
+        assert_eq!(raw[0]["access_token"], "AT", "token 不得被抹掉");
+        assert_eq!(raw[0]["refresh_token"], "RT", "token 不得被抹掉");
+
+        // uid 也能定位；不存在 ⇒ 报错（不静默成功）。
+        assert!(touch_last_used_in_path(Region::Cn, &path, "u1").is_ok());
+        assert!(touch_last_used_in_path(Region::Cn, &path, "nope").is_err());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// `set_account_group` 能更新 / 清空分组，且**只动分组一个键**。
+    ///
+    /// 可证伪：删掉 `set_group_in_path` 里的 `record.remove("groupName")` ⇒
+    /// 「清空后字段仍在」那条断言红。
+    #[test]
+    fn set_account_group_updates_and_clears_without_touching_tokens() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-group-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let path = dir.join("accounts.json");
+        save_accounts_to_path(
+            &path,
+            &[json!({
+                "id": "a1", "uid": "u1", "nickname": "小明",
+                "access_token": "AT", "refresh_token": "RT",
+            })],
+        )
+        .expect("seed accounts");
+
+        // 设置（去首尾空白）；meta 与原始记录都更新，token 不动。
+        let meta = set_group_in_path(Region::Cn, &path, "a1", Some("  工作  ")).expect("set group");
+        assert_eq!(meta["groupName"], "工作");
+        let raw = load_accounts_from_path(&path);
+        assert_eq!(raw[0]["groupName"], "工作");
+        assert_eq!(raw[0]["access_token"], "AT", "token 不得被抹掉");
+        assert_eq!(raw[0]["refresh_token"], "RT", "token 不得被抹掉");
+
+        // 空分组 = 删除该键（缺省即「未分组」，不留空串）。
+        set_group_in_path(Region::Cn, &path, "a1", Some("   ")).expect("clear group");
+        let cleared = load_accounts_from_path(&path);
+        assert!(cleared[0].get("groupName").is_none(), "空分组应删除字段");
+        assert_eq!(cleared[0]["access_token"], "AT");
+
+        assert!(set_group_in_path(Region::Cn, &path, "u1", Some("按 uid 定位")).is_ok());
+        assert!(set_group_in_path(Region::Cn, &path, "nope", Some("x")).is_err());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2078,6 +2198,95 @@ pub fn set_account_remark_for(
 /// 设置 CN 账号备注。
 pub fn set_account_remark(account_id: &str, remark: Option<&str>) -> Result<Value, String> {
     set_account_remark_for(Region::Cn, account_id, remark)
+}
+
+/// 就地修改**原始记录**里的自定义分组（字段级更新），返回更新后的脱敏元数据。
+///
+/// 与 [`set_remark_in_path`] **同款**：读原始记录、只改一个键、再原子写回 ——
+/// 绝不让调用方拿脱敏 `meta` 整条写回（那会把两个 token 一并抹掉）。
+/// 分组传空（或全空白）时**删除该键**而不是写空串（缺省即「未分组」）。
+fn set_group_in_path(
+    region: Region,
+    path: &Path,
+    account_id: &str,
+    group: Option<&str>,
+) -> Result<Value, String> {
+    let mut accounts = load_accounts_from_path(path);
+    // 走**统一谓词**（`id` 或 `uid`）—— 与删除 / 查找 / 备注同源。
+    let Some(index) = accounts
+        .iter()
+        .position(|account| resolve_account_key(account, account_id))
+    else {
+        return Err("账号不存在".to_string());
+    };
+
+    let record = accounts[index]
+        .as_object_mut()
+        .ok_or_else(|| "账号记录格式异常".to_string())?;
+    match group.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => {
+            record.insert("groupName".to_string(), json!(text));
+        }
+        None => {
+            record.remove("groupName");
+        }
+    }
+
+    let updated = accounts[index].clone();
+    save_accounts_to_path(path, &accounts).map_err(|error| error.to_string())?;
+    Ok(account_meta_for(region, &updated))
+}
+
+/// 按 region 设置账号自定义分组（按 id 或 uid 定位；空值 = 移出分组）。
+pub fn set_account_group_for(
+    region: Region,
+    account_id: &str,
+    group: Option<&str>,
+) -> Result<Value, String> {
+    set_group_in_path(region, &accounts_file_for(region), account_id, group)
+}
+
+/// 设置 CN 账号自定义分组。
+pub fn set_account_group(account_id: &str, group: Option<&str>) -> Result<Value, String> {
+    set_account_group_for(Region::Cn, account_id, group)
+}
+
+/// 就地写入**最近使用**时间戳（字段级更新），返回更新后的脱敏元数据。
+///
+/// ## 为什么单独一个函数（而不是各调用点各写一遍读改写）
+///
+/// 「账号被实际使用」有两个位置（切换、启动），都必须落这一条事实；若各写一遍
+/// load/modify/save，很容易一处漏改、或写成「再读一次盘再写一次」的**第二趟写盘**。
+/// 收成一处：**一次**读改写，只改 `lastUsedAt` 一个键，绝不碰 token。
+///
+/// ## 时间戳口径（**沿用既有格式，不新造**）
+///
+/// 与账号库里 `createdAt` / `refreshedAt` 完全一致 —— [`now_ms`]（epoch **毫秒**，数字），
+/// 对照 `auth_file::imported_account_from_root` 的 `"createdAt": now_ms()` 与
+/// `refresh.rs` 的 `account["refreshedAt"] = json!(now_ms())`。**刻意不是 ISO-8601 字符串**：
+/// 前端 `types.ts` 把这一族声明为 `number | null`，字符串化会破坏比较与格式化。
+fn touch_last_used_in_path(region: Region, path: &Path, account_id: &str) -> Result<Value, String> {
+    let mut accounts = load_accounts_from_path(path);
+    let Some(index) = accounts
+        .iter()
+        .position(|account| resolve_account_key(account, account_id))
+    else {
+        return Err("账号不存在".to_string());
+    };
+
+    let record = accounts[index]
+        .as_object_mut()
+        .ok_or_else(|| "账号记录格式异常".to_string())?;
+    record.insert("lastUsedAt".to_string(), json!(now_ms()));
+
+    let updated = accounts[index].clone();
+    save_accounts_to_path(path, &accounts).map_err(|error| error.to_string())?;
+    Ok(account_meta_for(region, &updated))
+}
+
+/// 按 region 记录账号「最近一次使用」（切换 / 启动）的时刻。
+pub fn touch_last_used_for(region: Region, account_id: &str) -> Result<Value, String> {
+    touch_last_used_in_path(region, &accounts_file_for(region), account_id)
 }
 
 /// 导入本机当前账号（从认证文件读取，CN）。

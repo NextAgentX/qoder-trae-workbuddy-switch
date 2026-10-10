@@ -588,6 +588,20 @@ fn logical_lines(text: &str) -> Vec<&str> {
     lines
 }
 
+/// 解析「源 / 目标会话正文」两个路径；任一侧缺失 ⇒ `Err`（**fail-closed**，宁可不做也不猜路径）。
+fn resolve_jsonl_pair(
+    source_region: Region,
+    source_cid: &str,
+    target_region: Region,
+    target_cid: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let src = find_project_jsonl_for(source_region, source_cid)
+        .ok_or_else(|| format!("找不到源会话正文（{source_cid}）"))?;
+    let dst = find_project_jsonl_for(target_region, target_cid)
+        .ok_or_else(|| format!("找不到目标会话正文（{target_cid}）"))?;
+    Ok((src, dst))
+}
+
 /// 按 region / cid 解析真实路径后执行 [`append_delta_between_files`]。
 ///
 /// 两侧任一会话正文找不到 ⇒ `Err`（**fail-closed**：宁可不做，也不猜路径）。
@@ -597,10 +611,7 @@ pub fn sync_session_replica_for(
     target_region: Region,
     target_cid: &str,
 ) -> Result<AppendDeltaReport, String> {
-    let src = find_project_jsonl_for(source_region, source_cid)
-        .ok_or_else(|| format!("找不到源会话正文（{source_cid}）"))?;
-    let dst = find_project_jsonl_for(target_region, target_cid)
-        .ok_or_else(|| format!("找不到目标会话正文（{target_cid}）"))?;
+    let (src, dst) = resolve_jsonl_pair(source_region, source_cid, target_region, target_cid)?;
     append_delta_between_files(&src, &dst, source_cid, target_cid)
 }
 
@@ -657,6 +668,183 @@ pub fn sync_session_replicas_for(region: Region, items: &[Value]) -> Value {
                     "targetCid": target_cid,
                     "ok": true,
                     "appendedLines": report.appended_lines,
+                }));
+            }
+            Err(error) => results.push(json!({
+                "sourceCid": source_cid,
+                "targetCid": target_cid,
+                "ok": false,
+                "error": error,
+            })),
+        }
+    }
+
+    let fail_count = results.len() - ok_count;
+    json!({
+        "results": results,
+        "okCount": ok_count,
+        "failCount": fail_count,
+    })
+}
+
+/// P8 分歧处理的执行报告。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnifyReport {
+    /// 是否真的覆盖了目标（`false` = 本来就与源一致 ⇒ **未写盘、也未备份**）。
+    pub overwritten: bool,
+    /// 目标原有的行数。
+    pub previous_lines: usize,
+    /// 覆盖后的行数（= 源的行数）。
+    pub total_lines: usize,
+    /// ★ 用户**会丢掉的**条数（目标相对共同旧版多出来的那部分）—— 供 UI **如实告知**。
+    pub lost_lines: usize,
+    /// 备份路径（`overwritten: false` 时为 `None`）。**没备份成功就不覆盖**。
+    pub backup: Option<String>,
+}
+
+/// ★ P8 **分歧处理**：把**选定的那一份**统一到目标副本 —— 这是**覆盖**，不是加法。
+///
+/// ## 为什么必须是「覆盖」
+///
+/// 分歧的定义就是「双方在共同旧版之后**各自改过**」⇒ 加法**无法**让两边一致
+/// （各自都有对方没有的内容）。`PLAN.md` §3.15.2 因此写死：
+/// 「**有分叉时必须先选保留哪一份**才能统一（**不许静默覆盖**）」。
+/// 用户显式选了「保留哪一份」，其余副本的分歧内容**会被丢弃** ⇒
+/// UI 必须把 `lost_lines` **如实**告诉用户，并给二次确认（§3.5 不许假承诺）。
+///
+/// ## 三条安全约束
+///
+/// 1. **先备份再覆盖**：目标 jsonl 原样存到 `backup_root/<dst_cid>.jsonl`；
+///    **备份写不成就不覆盖** —— 与 `backup_failure_is_reported_instead_of_faked` 同一纪律：
+///    谎报「有回滚点」比不备份更坏；
+/// 2. **一致就不动**：内容已与源一致 ⇒ `overwritten: false`，**不写盘也不备份**；
+/// 3. **id 归一化**：写进去的内容要把 `src_cid` 换成 `dst_cid`（同 [`copy_session_to_user_cross`]）。
+pub fn unify_replica_between_files(
+    src: &Path,
+    dst: &Path,
+    src_cid: &str,
+    dst_cid: &str,
+    backup_root: &Path,
+) -> Result<UnifyReport, String> {
+    if src == dst {
+        return Err("源与目标是同一个文件，拒绝统一".into());
+    }
+    let src_text = std::fs::read_to_string(src).map_err(|e| format!("读取源会话失败：{e}"))?;
+    let dst_text = std::fs::read_to_string(dst).map_err(|e| format!("读取目标会话失败：{e}"))?;
+
+    // 与「安全同步」同源的 id 归一化：副本每行都带**各自的** sessionId。
+    let normalized = if src_cid == dst_cid {
+        src_text.clone()
+    } else {
+        src_text.replace(src_cid, dst_cid)
+    };
+    let src_lines = logical_lines(&normalized);
+    let dst_lines = logical_lines(&dst_text);
+
+    let common = src_lines
+        .iter()
+        .zip(dst_lines.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let lost_lines = dst_lines.len().saturating_sub(common);
+
+    // ① 逐行相同且行数相同 ⇒ 本来就一致，**不写盘**。
+    if common == src_lines.len() && src_lines.len() == dst_lines.len() {
+        return Ok(UnifyReport {
+            overwritten: false,
+            previous_lines: dst_lines.len(),
+            total_lines: src_lines.len(),
+            lost_lines: 0,
+            backup: None,
+        });
+    }
+
+    // ② 先备份；**备份不成功就绝不覆盖**。
+    std::fs::create_dir_all(backup_root).map_err(|e| format!("创建备份目录失败：{e}"))?;
+    let backup_path = backup_root.join(format!("{dst_cid}.jsonl"));
+    std::fs::copy(dst, &backup_path)
+        .map_err(|e| format!("备份目标会话失败（**未做任何覆盖**）：{e}"))?;
+    // ★ 复核备份**真的落盘且字节数一致** —— 只信 `copy` 的返回值不够
+    //   （本仓有过「吞掉错误、无条件返回备份路径」的事故）。
+    let backed_up = std::fs::metadata(&backup_path).map(|m| m.len()).unwrap_or(0);
+    let original = std::fs::metadata(dst).map(|m| m.len()).unwrap_or(0);
+    if backed_up != original {
+        return Err(format!(
+            "备份校验失败（备份 {backed_up} 字节 / 原文件 {original} 字节）⇒ **未做任何覆盖**"
+        ));
+    }
+
+    // ③ 覆盖 —— 这一行是**破坏性**的：目标原有的分歧内容就此丢弃（已有备份兜底）。
+    std::fs::write(dst, normalized.as_bytes()).map_err(|e| format!("写入目标会话失败：{e}"))?;
+
+    Ok(UnifyReport {
+        overwritten: true,
+        previous_lines: dst_lines.len(),
+        total_lines: src_lines.len(),
+        lost_lines,
+        backup: Some(backup_path.to_string_lossy().into_owned()),
+    })
+}
+
+/// P8 分歧处理的**批量**入口（逐条执行 + **部分失败**）—— 两宿主共用。
+///
+/// `items` 形状：`[{ "sourceCid": "…", "targetCid": "…" }, …]`，其中 `sourceCid` 是
+/// **用户选定要保留的那一份**，`targetCid` 是**被它覆盖**的其余副本。
+///
+/// 返回 `{ results: [...], okCount, failCount }`，每条含
+/// `overwritten` / `lostLines` / `previousLines` / `totalLines` / `backup` / `error`。
+///
+/// ⚠️ 与 [`sync_session_replicas_for`] 的两点差别（**别混用**）：
+/// - 这里**会删内容**（覆盖），同步只追加；UI 必须对这里做二次确认；
+/// - 备份目录按**本次调用**共用（`sessions-unify/<utc>`），不是每条一个目录。
+pub fn unify_session_replicas_for(region: Region, items: &[Value]) -> Value {
+    let backup_root = backup_dir().join("sessions-unify").join(utc_iso());
+    let mut results: Vec<Value> = Vec::with_capacity(items.len());
+    let mut ok_count = 0usize;
+
+    for item in items {
+        let source_cid = item
+            .get("sourceCid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let target_cid = item
+            .get("targetCid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if source_cid.is_empty() || target_cid.is_empty() {
+            results.push(json!({
+                "sourceCid": source_cid,
+                "targetCid": target_cid,
+                "ok": false,
+                "error": "源 / 目标会话 id 不能为空",
+            }));
+            continue;
+        }
+
+        let outcome = resolve_jsonl_pair(region, &source_cid, region, &target_cid).and_then(
+            |(src, dst)| {
+                unify_replica_between_files(&src, &dst, &source_cid, &target_cid, &backup_root)
+            },
+        );
+
+        match outcome {
+            Ok(report) => {
+                ok_count += 1;
+                results.push(json!({
+                    "sourceCid": source_cid,
+                    "targetCid": target_cid,
+                    "ok": true,
+                    "overwritten": report.overwritten,
+                    "previousLines": report.previous_lines,
+                    "totalLines": report.total_lines,
+                    "lostLines": report.lost_lines,
+                    "backup": report.backup,
                 }));
             }
             Err(error) => results.push(json!({
@@ -3282,5 +3470,102 @@ mod fingerprint_tests {
 
         drop(guard);
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    // ---------------------------------------------------------------- P8 分歧处理
+
+    /// ★ 分歧处理：把选定的一份统一到目标 ⇒ **覆盖**，且如实报出「丢了多少条」+ 备份原文件。
+    ///
+    /// 可证伪：把 `unify_replica_between_files` 改成「追加」（复用 `append`）即红 ——
+    /// 分歧两边各自都有对方没有的内容，追加**永远**合不到一起，`dst == src` 断言必失败。
+    #[test]
+    fn unify_overwrites_target_and_reports_what_is_lost() {
+        let dir = sync_tmp_dir("unify");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+        let backup = dir.join("backup");
+
+        // 前 1 行相同，第 2 行**各自不同** ⇒ 真分歧。
+        std::fs::write(&src, "{\"id\":\"SRC\",\"n\":1}\n{\"id\":\"SRC\",\"n\":2}\n").unwrap();
+        std::fs::write(&dst, "{\"id\":\"DST\",\"n\":1}\n{\"id\":\"DST\",\"n\":9}\n").unwrap();
+
+        let report = unify_replica_between_files(&src, &dst, "SRC", "DST", &backup).unwrap();
+        assert!(report.overwritten, "分歧必须真的覆盖");
+        assert_eq!(report.previous_lines, 2);
+        assert_eq!(report.total_lines, 2);
+        assert_eq!(report.lost_lines, 1, "目标第 2 行是它独有的 ⇒ 丢 1 条");
+
+        // 目标内容 = 源内容（且 id 已归一化成目标自己的 id）。
+        assert_eq!(
+            String::from_utf8(std::fs::read(&dst).unwrap()).unwrap(),
+            "{\"id\":\"DST\",\"n\":1}\n{\"id\":\"DST\",\"n\":2}\n",
+            "覆盖后目标应与选定的一份一致，且 id 归一化"
+        );
+
+        // ★ 备份必须**真的**存在，且内容是**覆盖前**的目标原文（否则「可回滚」是假的）。
+        let backup_path = std::path::PathBuf::from(report.backup.clone().expect("应给出备份路径"));
+        assert!(backup_path.is_file(), "备份文件不存在：{backup_path:?}");
+        assert_eq!(
+            String::from_utf8(std::fs::read(&backup_path).unwrap()).unwrap(),
+            "{\"id\":\"DST\",\"n\":1}\n{\"id\":\"DST\",\"n\":9}\n",
+            "备份必须是覆盖前的原文"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 已一致 ⇒ 不写盘、不备份（`overwritten: false`，`backup: None`）。
+    #[test]
+    fn unify_is_a_noop_when_already_consistent() {
+        let dir = sync_tmp_dir("unify-noop");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+        let backup = dir.join("backup");
+
+        std::fs::write(&src, "{\"id\":\"A\",\"n\":1}\n{\"id\":\"A\",\"n\":2}\n").unwrap();
+        std::fs::write(&dst, "{\"id\":\"A\",\"n\":1}\n{\"id\":\"A\",\"n\":2}\n").unwrap();
+        let before = std::fs::read(&dst).unwrap();
+
+        let report = unify_replica_between_files(&src, &dst, "A", "A", &backup).unwrap();
+        assert!(!report.overwritten, "一致时不该覆盖");
+        assert_eq!(report.lost_lines, 0);
+        assert!(report.backup.is_none(), "一致时不该产生备份");
+        assert_eq!(std::fs::read(&dst).unwrap(), before, "一致时不许动目标");
+        assert!(!backup.exists(), "一致时不该建备份目录");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ★★ **备份失败 ⇒ 绝不覆盖**（本仓「谎报有回滚点」事故的同一纪律）。
+    ///
+    /// 可证伪：把 `create_dir_all(...).map_err(...)?` 改成 `let _ = ...`（吞掉错误），
+    /// 目标就会被覆盖 ⇒ `dst 逐字节不变` 的断言即红。
+    #[test]
+    fn unify_refuses_and_writes_nothing_when_backup_fails() {
+        let dir = sync_tmp_dir("unify-nobackup");
+        let src = dir.join("src.jsonl");
+        let dst = dir.join("dst.jsonl");
+
+        std::fs::write(&src, "{\"n\":1}\n{\"n\":2}\n").unwrap();
+        std::fs::write(&dst, "{\"n\":1}\n{\"n\":9}\n").unwrap();
+        let before = std::fs::read(&dst).unwrap();
+
+        // 备份根目录的**父路径是个普通文件** ⇒ `create_dir_all` 必失败。
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+
+        let error = unify_replica_between_files(&src, &dst, "cid-a", "cid-a", &blocker.join("sub"))
+            .expect_err("备份建不出来时必须报错");
+        assert!(
+            error.contains("创建备份目录失败"),
+            "文案应指明原因：{error}"
+        );
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            before,
+            "备份失败时目标必须一个字节都没变"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

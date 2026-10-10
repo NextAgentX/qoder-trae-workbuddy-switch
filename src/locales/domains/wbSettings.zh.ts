@@ -41,6 +41,11 @@ export const zh = {
   "wbSettings.checkin.resultSuccess": "签到成功",
   "wbSettings.checkin.resultAlready": "已签到",
   "wbSettings.checkin.resultFailed": "失败",
+  // 自动旅行（真实键：`auto_travel_config.json` 的 `enabled`；原型 签到与积分 → 自动旅行）。
+  "wbSettings.checkin.travelLabel": "启用自动旅行",
+  "wbSettings.checkin.travelDesc": "通过旅行任务获取额外积分",
+  "wbSettings.checkin.travelOn": "已开启自动旅行",
+  "wbSettings.checkin.travelOff": "已关闭自动旅行",
 
   // ---- CodeBuddy CLI 自动轮换 ----
   "wbSettings.rotate.groupTitle": "CodeBuddy CLI 自动轮换",
@@ -71,6 +76,20 @@ export const zh = {
   "wbSettings.rotate.actionDisabled": "未启用",
   "wbSettings.rotate.actionError": "出错",
 
+  // ---- 客户端检测（只读；数据来自真实探测命令） ----
+  "wbSettings.client.detectTitle": "客户端检测",
+  "wbSettings.client.detectWorkbuddy": "WorkBuddy Desktop",
+  "wbSettings.client.detectWorkbuddyDesc": "检测安装路径与版本",
+  "wbSettings.client.detectCli": "CodeBuddy CLI",
+  "wbSettings.client.detectCliDesc": "命令行工具的可用性",
+  "wbSettings.client.detectCnIde": "CodeBuddy CN IDE",
+  "wbSettings.client.detectCnIdeDesc": "国内版 IDE 的接入状态",
+  "wbSettings.client.detected": "已检测到",
+  "wbSettings.client.detectedVersion": "已检测到 · {version}",
+  "wbSettings.client.notDetected": "未检测到",
+  "wbSettings.client.configured": "已接入",
+  "wbSettings.client.notConfigured": "未接入",
+
   // ---- 权限检测 ----
   "wbSettings.permission.groupTitle": "权限检测",
   "wbSettings.permission.authFileMissing": "认证文件路径未获取",
@@ -88,6 +107,28 @@ export const zh = {
   "wbSettings.permission.guideStep3Drag": "直接拖进",
   "wbSettings.permission.guideStep3Post": "完全磁盘访问的列表区域（即使没有提示框，拖入即生效），然后打开它的开关",
   "wbSettings.permission.guideStep4": "回到本页点「检测权限」，或直接重试切换",
+
+  // ---- 危险操作（Q1）----
+  // ⚠️ 刻意**不含**「重置设备标识」：那是 Trae 客户端自己的 6 层文件，WorkBuddy 没有
+  //   这套结构，本工具在网关侧的身份是 sha256 派生的纯函数值（不落盘、无可重置对象）。
+  "wbSettings.danger.groupTitle": "危险操作",
+  "wbSettings.danger.intro": "以下操作会影响本机数据。执行前请确认已知后果。",
+  "wbSettings.danger.diagLabel": "导出诊断包",
+  "wbSettings.danger.diagDesc":
+    "打包版本、平台、各数据源是否可读与网关配置摘要，便于反馈问题。不含任何凭据、也不含会话正文。",
+  "wbSettings.danger.diag": "导出诊断包",
+  "wbSettings.danger.exporting": "导出中…",
+  "wbSettings.danger.diagSaved": "诊断包已保存：{name}",
+  "wbSettings.danger.diagFailed": "导出诊断包失败",
+  "wbSettings.danger.logsLabel": "清空网关请求日志",
+  "wbSettings.danger.logsDesc": "删除本机全部网关请求记录，用于排查代理问题。不可撤销。",
+  "wbSettings.danger.logsClear": "清空日志",
+  "wbSettings.danger.logsCleared": "网关请求日志已清空",
+  "wbSettings.danger.logsClearFailed": "清空网关请求日志失败",
+  "wbSettings.danger.logsConfirmTitle": "清空网关请求日志？",
+  "wbSettings.danger.logsConfirmDesc":
+    "本机全部网关请求记录会被删除，且无法恢复。账号、配置与凭据不受影响。",
+  "wbSettings.danger.logsConfirmBtn": "确认清空",
 
   // ---- 账号切换 ----
   "wbSettings.switch.groupTitle": "账号切换",
@@ -126,6 +167,8 @@ export const zh = {
   "wbSettings.gateway.bodiesDesc": "含隐私风险；默认关闭，仅记录时间/模型/状态码等元数据",
   "wbSettings.gateway.invalidPort": "端口需为 1-65535 之间的整数",
   "wbSettings.gateway.invalidKeep": "保留条数需为 0-10000 之间的整数",
+  "wbSettings.gateway.enabledLabel": "启用本地网关",
+  "wbSettings.gateway.enabledDesc": "在 127.0.0.1 上提供 OpenAI / Anthropic 兼容接口",
 
   // ---- 定时任务排程 ----
   "wbSettings.schedule.groupTitle": "定时任务排程",

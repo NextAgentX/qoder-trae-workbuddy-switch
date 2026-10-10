@@ -19,6 +19,19 @@ export const zh = {
   "proxy.toggle.disable": "关闭",
   "proxy.restore": "一键还原",
 
+  // ★ E2：关闭态的**说明行**。原型 `demo-app.js:1114` 有关闭态说明，真实实现标题下空无一物
+  //   ⇒ 用户看到「已关闭」却不知道「默认关闭」是产品选择、以及开启需要自己动客户端。
+  "proxy.offNotice.title": "当前未启用请求代理",
+  "proxy.offNotice.default": "请求代理默认关闭，不影响任何现有请求。",
+  "proxy.offNotice.howTo": "开启需自行在客户端配置代理或把 base URL 指向本机网关地址。",
+
+  // ★ E1：开启态 KPI（原型 `demo-app.js:1131-1134` 的 `.kpi-row` 三格）。
+  //   ⚠️ 「落盘正文」恒为 0 —— 这是**承诺**（不落盘请求正文），不是统计出来的数。
+  "proxy.kpi.requests": "今日代理请求",
+  "proxy.kpi.switches": "今日换号",
+  "proxy.kpi.bodies": "落盘正文",
+  "proxy.kpi.bodiesZero": "0（不落盘）",
+
   "proxy.risk.title": "开启前请知悉",
   "proxy.risk.traffic": "流量会经过本机网关",
   "proxy.risk.noBody": "不落盘请求正文",

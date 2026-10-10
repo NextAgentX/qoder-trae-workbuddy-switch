@@ -22,7 +22,7 @@
  *
  * ## 契约（详见 `docs/redesign/P3-ARCH.md`）
  *
- * - 视图参数每页**最多一条**（区域归侧栏 `ScopeSwitch`，页内只留合并态 `RegionBar`）；
+ * - 视图参数每页**最多一条**（区域归顶栏 `ScopeSelector`，页内只留合并态 `RegionBar`）；
  * - 空数组**不渲染**该图；整视图空 ⇒ 区块级 `EmptyState`（含出口）；
  * - 区分「真的没有」与「被视图参数筛没」；
  * - 所有展示字段过 `displayText`（白屏防线）。
@@ -54,6 +54,7 @@ import { regionFilterLabel } from "@/lib/region";
 import type { RegionFilter, TokenStatistics, TokenStatsSource } from "@/lib/types";
 import { useScope } from "@/lib/use-scope";
 import {
+  calendarWindowKeys,
   dailyModelSeries,
   heatmapMatrix,
   mergeSources,
@@ -139,16 +140,27 @@ function TrendView({
     [matrix],
   );
 
-  const rangeDaily = useMemo(
-    () => [...source.daily].sort((left, right) => left.key.localeCompare(right.key)).slice(-range),
+  const rangeRecords = useMemo(
+    () => {
+      // ★ A1：窗口按**日历日**取（与 `dailyModelSeries` 同源），不再 `slice(-range)`
+      //   —— 稀疏数组下那会取到窗口外的历史天。
+      const inWindow = new Set(calendarWindowKeys(range));
+      return source.daily.reduce(
+        (sum, point) => (inWindow.has(point.key) ? sum + point.records : sum),
+        0,
+      );
+    },
     [source.daily, range],
   );
-  const rangeRecords = rangeDaily.reduce((sum, point) => sum + point.records, 0);
   /** 「被视图参数筛没」：全时段有记录，但当前范围窗口内为 0。 */
   const filtered = source.summary.records > 0 && rangeRecords === 0;
 
   const total = columns.reduce((sum, column) => sum + column.total, 0);
-  const average = columns.length > 0 ? Math.round(total / columns.length) : 0;
+  /* ★ A1-3：日均的分母是**窗口天数**（`range`），不是「有数据的天数」。
+     旧实现除以 `columns.length`（补 0 前 = 有数据的天数）⇒ 实测 1500 Token / 5 天
+     显示「日均 300」，而真实 30 天日均应为 50 —— 与 `wbStats.zh.ts` 里
+     「按自然日平均」的说明**互相矛盾**。 */
+  const average = range > 0 ? Math.round(total / range) : 0;
   const peak = columns.reduce(
     (best, column) => (column.total > best.total ? column : best),
     columns[0] ?? { day: "", label: "", total: 0, segments: [] },
@@ -175,8 +187,8 @@ function TrendView({
   }
 
   const tiles: StatTile[] = [
-    { icon: MessagesSquare, label: t("wbStats.usage.trend.total"), value: compactTokens(total) },
-    { icon: TrendingUp, label: t("wbStats.usage.trend.avg"), value: compactTokens(average) },
+    { icon: MessagesSquare, label: t("wbStats.usage.trend.total"), value: compactTokens(total), hint: t(`wbStats.usage.range.${range}`) },
+    { icon: TrendingUp, label: t("wbStats.usage.trend.avg"), value: compactTokens(average), hint: t("wbStats.usage.trend.avgHint") },
     { icon: Gauge, label: t("wbStats.usage.trend.peak"), value: compactTokens(peak.total), hint: peak.label || undefined },
     { icon: Coins, label: t("wbStats.usage.trend.models"), value: exactTokens(slices.length) },
   ];
@@ -209,7 +221,7 @@ function TrendView({
             caption={`${exactTokens(slices.length)} · ${compactTokens(total)}`}
             ariaLabel={t("wbStats.usage.trend.donutTitle")}
           >
-            <ModelDonut slices={slices} />
+            <ModelDonut slices={slices} size={150} />
           </ChartFrame>
         ) : null}
       </div>
@@ -396,10 +408,10 @@ export default function TokenStatsPage({ view = "trend" }: { view?: TokenUsageVi
     source!.sessions.length === 0;
 
   return (
-    <div className="mx-auto w-full max-w-[1180px] min-w-0 px-4 py-6 sm:px-8 sm:py-9">
+    <div className="mx-auto w-full max-w-[1240px] min-w-0 px-7 pt-[26px] pb-[60px]">
       <header className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-4 sm:mb-5">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight">{t("wbStats.token.pageTitle")}</h1>
+          <h2 className="text-xl font-semibold tracking-tight">{t("wbStats.token.pageTitle")}</h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
             {regionFilterLabel(region)}
             {region === "all" && t("wbStats.token.bothRegions")}

@@ -139,6 +139,13 @@ WebviewWindowBuilder::new(app, "companion", WebviewUrl::App("index.html?window=c
 | 关闭按钮 | 是 `<button aria-label="隐藏悬浮窗">`（原型 `demo-app.js:202`）—— 可聚焦、可 Enter |
 | **验证路径** | **独立于主窗口**：companion 是**另一个 webview**，`verify-behaviors.cjs`（JSDOM 驱动原型 HTML）**覆盖不到**它 ⇒ 需要**针对 companion webview 的 E2E**（或一份**独立手测清单**，见 §5 T05）。**复用主窗口的键盘测试 = 空转**（A8 的原话：「否则『通过』是空转」） |
 
+> **落地状态（2026-10-08 回写）**：上表**五条已在代码里钉死** —— `companion-app.tsx` 的 `focusEntry`
+> （内容就绪后聚焦第一个可聚焦元素，退路=关闭按钮；`didInitialFocusRef` 只做一次）+ `listen("companion-visibility")`
+> 重开送回焦点 + Esc 隐藏；`companion-row.tsx` 的行是**原生 `<button>`** + `:focus-visible` + `motion-reduce:animate-none`；
+> 拖拽手柄走 `data-tauri-drag-region`。**静态门禁**见 `check-scope-registry.cjs` 第 **227** 条。
+> ⚠️ 门禁是**静态结构断言**：**运行时**键盘走查仍待一条 companion webview 的 E2E / 手测（本轮未做）。
+> **手测清单已就位** → [`P9-KEYBOARD-CHECKLIST.md`](./P9-KEYBOARD-CHECKLIST.md)（§5 T05 规定的验证路径）。
+
 ### 1.8 与原型的分歧（★ 不能照搬）
 
 | 原型行为 | 为什么不能照搬 | 真实实现 |

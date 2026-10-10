@@ -108,6 +108,7 @@ The webui listens on `127.0.0.1:57890` by default. The interface is identical to
 | Migrate data on switch | Merge the current account's long-term memory and connector configuration into the target account (same-name entries merged recursively, deduplicated by content), with same-version and cross-version migration supported; the original content is backed up before being rewritten |
 | Permission check | macOS authorization walkthrough (App Management / Full Disk Access drag-to-authorize plus automatic detection) |
 | Auto-update | Check GitHub Releases for new versions; full-package updates are signature-verified (tauri-updater) |
+| Client rate-limit ledger | **Read-only** aggregation from the client's local data of "account × model × reset time": which account is rate-limited on which model and when it recovers; still-limited entries float to the top and are highlighted, recovered ones are dimmed. No gateway dependency, no account-state changes; queue-class codes (`6020` / `6022`) are shown as the raw code labelled "Queued" |
 
 ### TraeWork section
 
@@ -139,6 +140,17 @@ Expose the current account's model quota to other local AI tools (Cursor, Claude
 | Account policy | Configure the account-selection strategy and the account-pool balance refresh interval |
 | Request log | Record the model, account, tokens and status of every request; can be cleared |
 
+### App-level capabilities (shared by both sections)
+
+Two further app-level entries sit next to "General Settings" at the bottom of the sidebar. They **do not follow the product section** and both sections share the same implementation.
+
+| Capability | Description |
+| --- | --- |
+| Skill manager | Scan the frontmatter of `{data_dir}/skills/<dir>/SKILL.md`, list them and **enable / disable** each entry (writing both `user-invocable` and `disable-model-invocation` together; **line-level rewrite**, every other byte preserved, including CRLF/BOM); supports cross-region (CN ↔ Global) copying to fill gaps (target side wins on conflict) and importing from a local directory / zip |
+| Client settings hosting | Read and write the **proxied upstream clients'** own `settings.json` (both WorkBuddy versions plus Trae's four program slots): a declarative 6-slot spec table, a format fingerprint (indent unit + line endings), a **surgical byte-level patch** (minimal diff), backup / restore and cross-slot diffing; a process-running guard protects writes |
+
+> ⚠️ "Client settings hosting" edits the **upstream clients' own** `settings.json`, which is a **different file** from this tool's own proxy settings (`proxy*` / `traePath*` on the `SettingsPage` / `TraeSettingsPage`, stored under `~/.buddy-switch/**`) — the names are merely similar.
+
 ## Usage
 
 ### WorkBuddy
@@ -163,6 +175,13 @@ Expose the current account's model quota to other local AI tools (Cursor, Claude
 4. **Switch login state**: account card → "Switch", which writes the selected client's login state and restarts the client; a snapshot is saved automatically before switching
 5. **Snapshot rollback**: Settings → "Login-state snapshots" to save / restore / delete
 6. **API service**: sidebar → "API Service"; create a key and follow the integration guide on the page to configure it in your tool
+
+### App-level capabilities (shared by both sections)
+
+The two entries next to "General Settings" at the bottom of the sidebar are independent of the product section and stay available when you switch sections:
+
+1. **Skill manager**: sidebar → "Skill Manager" → pick a region to list entries under that region's `skills/` directory; **enable / disable** each entry with its switch (both frontmatter fields are written together), use "Copy from the other region" to fill gaps, or import from a local directory / zip
+2. **Client settings hosting**: sidebar → "Client Settings" → pick the client slot to host (both WorkBuddy versions plus Trae's four program slots), then read and edit the target keys of its `settings.json`; writes are a **minimal byte-level patch** (indentation and line endings preserved), and you can inspect cross-slot diffs or back up / restore at any time. **Exit the corresponding client process before writing** (a running process is rejected outright)
 
 ### Automatic rotation policy (WorkBuddy)
 

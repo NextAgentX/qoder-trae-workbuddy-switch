@@ -20,6 +20,11 @@ pub struct ApiKeyRecord {
     pub region: Region,
     /// 前缀，如 `sk-wb-a1b2`（用于列表脱敏展示）。
     pub prefix: String,
+    /// ★ E3：尾部 4 位（如 `9f3c`）—— 与 `prefix` 同为**非敏感**片段，
+    /// 列表里显示成 `sk-wb-a1b2••••••••9f3c`，用户才能**确认是哪一把**。
+    /// ⚠️ `#[serde(default)]` ⇒ **旧台账没有该字段时按空串处理**（显示时省略尾部，不报错）。
+    #[serde(default)]
+    pub suffix: String,
     /// `sha256(hex)` of full plaintext key。
     pub hash: String,
     pub created_at: i64,
@@ -36,6 +41,7 @@ impl ApiKeyRecord {
             "name": self.name,
             "region": self.region,
             "prefix": self.prefix,
+            "suffix": self.suffix,
             "createdAt": self.created_at,
             "revokedAt": self.revoked_at,
             "revoked": self.revoked_at.is_some(),
@@ -75,11 +81,14 @@ impl ApiKeyStore {
         let secret = uuid::Uuid::new_v4().simple().to_string(); // 32 hex
         let plaintext = format!("sk-wb-{secret}");
         let prefix = format!("sk-wb-{}", &secret[..4]);
+        // ★ E3：尾部 4 位（32 hex 的末 4）—— 与 prefix 一样**不可逆推**出整把 key。
+        let suffix = secret[secret.len() - 4..].to_string();
         let record = ApiKeyRecord {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             region,
             prefix,
+            suffix,
             hash: sha256_hex(&plaintext),
             created_at: core_config::now_ms(),
             revoked_at: None,
@@ -238,7 +247,11 @@ mod tests {
         let object = masked.as_object().unwrap();
         let fields: std::collections::BTreeSet<&str> = object.keys().map(String::as_str).collect();
         let expected: std::collections::BTreeSet<&str> = [
-            "id", "name", "region", "prefix", "createdAt", "revokedAt", "revoked", "lastUsedAt",
+            // ★ E3 新增 `suffix`（尾部 4 位）。它是**显式白名单**的一员 ——
+            //   本测试的意义正是「掩码视图只能有这些键」，多一个键就要**在这里被批准**，
+            //   而不是悄悄混进去。下面两条断言保证它不泄露 hash / 明文。
+            "id", "name", "region", "prefix", "suffix", "createdAt", "revokedAt", "revoked",
+            "lastUsedAt",
         ]
         .into_iter()
         .collect();
@@ -246,6 +259,20 @@ mod tests {
         assert!(!object.contains_key("hash"));
         assert!(!masked.to_string().contains(&record.hash));
         assert!(!masked.to_string().contains(&plaintext));
+        // ★ `suffix` 恰好是明文的**末 4 位**（这是设计意图：用户靠它确认是哪一把），
+        //   所以「明文以 suffix 结尾」是**必然**的，不是泄露。
+        //   真正的边界是：suffix **只有 4 位**，加上 prefix 的 4 位也**远不足以**还原 32 位 secret
+        //   ⇒ 掩码视图绝不包含 hash / 明文主体（上面两条断言已在守这条）。
+        assert_eq!(record.suffix.len(), 4, "suffix 应恰好 4 位");
+        assert!(
+            plaintext.ends_with(&record.suffix),
+            "suffix 就是明文末 4 位（供用户核对）"
+        );
+        assert_eq!(
+            record.prefix.len(),
+            "sk-wb-".len() + 4,
+            "prefix 也只暴露 4 位"
+        );
         assert_eq!(masked["region"], json!(Region::Global));
         assert_eq!(masked["revoked"], false);
     }

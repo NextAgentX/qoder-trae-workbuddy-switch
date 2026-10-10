@@ -17,14 +17,14 @@ export function Toaster(props: ToasterProps) {
       icons={{
         success: <CheckCircle2 className="size-4 text-brand" />,
         info: <Info className="size-4 text-brand" />,
-        warning: <AlertTriangle className="size-4 text-amber-600" />,
+        warning: <AlertTriangle className="size-4 text-warning" />,
         error: <XCircle className="size-4 text-destructive" />,
         loading: <Loader2 className="size-4 animate-spin text-brand" />,
       }}
       toastOptions={{
         classNames: {
           toast:
-            "!gap-2.5 !rounded-lg !border-slate-200/90 !bg-popover !px-3 !py-2.5 !text-popover-foreground !shadow-[0_8px_24px_rgba(15,23,42,.09)]",
+            "!gap-2.5 !rounded-lg !border-border !bg-popover !px-3 !py-2.5 !text-popover-foreground !shadow-overlay",
           content: "!gap-0.5",
           title: "!text-[13px] !font-medium !leading-5",
           // `!whitespace-pre-line`：诊断类错误是**多行**文案（说清产品线 / 缺失来源 /
@@ -33,7 +33,7 @@ export function Toaster(props: ToasterProps) {
           description: "!text-xs !leading-5 !text-muted-foreground !whitespace-pre-line",
           icon: "!mr-0 !self-start !pt-0.5",
           closeButton:
-            "!size-5 !border-slate-200 !bg-popover !text-muted-foreground !shadow-sm hover:!bg-accent hover:!text-foreground focus-visible:!ring-2 focus-visible:!ring-brand/30",
+            "!size-5 !border-border !bg-popover !text-muted-foreground !shadow-sm hover:!bg-accent hover:!text-foreground focus-visible:!ring-2 focus-visible:!ring-brand/30",
           actionButton: "!h-7 !rounded-md !bg-brand !px-2.5 !text-xs !text-brand-foreground",
           cancelButton: "!h-7 !rounded-md !bg-muted !px-2.5 !text-xs !text-muted-foreground",
         },

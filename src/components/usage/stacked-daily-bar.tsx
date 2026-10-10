@@ -59,29 +59,46 @@ export function StackedDailyBar({ columns }: { columns: DailyModelColumn[] }) {
   if (columns.length === 0 || series.length === 0) return null;
 
   return (
-    <ChartContainer config={config} className="h-64 w-full sm:h-72">
-      <BarChart data={rows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap="18%">
-        <CartesianGrid vertical={false} strokeDasharray="3 3" />
-        <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} />
-        <YAxis tickLine={false} axisLine={false} width={48} tickFormatter={(value) => compactTokens(Number(value))} />
-        <ChartTooltip
-          cursor={{ fill: "var(--muted)", opacity: 0.4 }}
-          content={<ChartTooltipContent indicator="dot" />}
-        />
-        {series.map((item, index) => (
-          <Bar
-            key={item.key}
-            dataKey={item.key}
-            stackId="tokens"
-            fill={`var(--color-${item.key})`}
-            stroke="var(--background)"
-            strokeWidth={2}
-            maxBarSize={28}
-            radius={index === series.length - 1 ? [4, 4, 0, 0] : 0}
-            isAnimationActive={false}
+    <div className="min-w-0 space-y-3.5">
+      <ChartContainer config={config} className="h-[210px] w-full">
+        <BarChart data={rows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap="18%">
+          <CartesianGrid vertical={false} strokeDasharray="3 3" />
+          <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} />
+          <YAxis tickLine={false} axisLine={false} width={48} tickFormatter={(value) => compactTokens(Number(value))} />
+          <ChartTooltip
+            cursor={{ fill: "var(--muted)", opacity: 0.4 }}
+            content={<ChartTooltipContent indicator="dot" />}
           />
+          {series.map((item, index) => (
+            <Bar
+              key={item.key}
+              dataKey={item.key}
+              stackId="tokens"
+              fill={`var(--color-${item.key})`}
+              stroke="var(--background)"
+              strokeWidth={2}
+              maxBarSize={28}
+              radius={index === series.length - 1 ? [4, 4, 0, 0] : 0}
+              isAnimationActive={false}
+            />
+          ))}
+        </BarChart>
+      </ChartContainer>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        {series.map((item) => (
+          <span
+            key={item.key}
+            className="inline-flex items-center gap-1.5 text-[11.5px] text-muted-foreground"
+          >
+            <span
+              className="size-[9px] shrink-0 rounded-[3px]"
+              style={{ backgroundColor: item.color }}
+              aria-hidden="true"
+            />
+            {config[item.key]?.label ?? item.name}
+          </span>
         ))}
-      </BarChart>
-    </ChartContainer>
+      </div>
+    </div>
   );
 }

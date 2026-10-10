@@ -142,7 +142,13 @@ export function ApiKeyTable({ className }: { className?: string }) {
                           {regionDescriptor(key.region).versionLabel}
                         </Badge>
                       </td>
-                      <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">{key.prefix}…</td>
+                      {/* ★ E3：掩码补上尾部 4 位（`prefix••••••••suffix`）——
+                      用户靠它**确认是哪一把**。旧台账无 suffix ⇒ 只显示前缀 + 省略号。 */}
+                      <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">
+                        {key.suffix
+                          ? `${key.prefix}••••••••${key.suffix}`
+                          : `${key.prefix}…`}
+                      </td>
                       <td className="py-2 pr-4 text-xs text-muted-foreground">{formatDate(key.createdAt)}</td>
                       <td className="py-2 pr-4">
                         {revoked ? (

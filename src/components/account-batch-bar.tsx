@@ -1,5 +1,6 @@
-import { CircleCheck, RefreshCw, Trash2, XIcon } from "lucide-react";
+import { CircleCheck, Download, RefreshCw, Trash2, XIcon } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,8 @@ export interface AccountBatchBarProps {
   busy?: boolean;
   onCheckin?: () => void;
   onRefresh?: () => void;
+  /** 导出所选账号（原型 `batch-export`：批量条上的第四个动作）。 */
+  onExport?: () => void;
   onDelete?: () => void;
   /** 清除选择（必填：这是「退出选择模式」的唯一出口）。 */
   onClear: () => void;
@@ -41,6 +44,7 @@ export function AccountBatchBar({
   busy = false,
   onCheckin,
   onRefresh,
+  onExport,
   onDelete,
   onClear,
 }: AccountBatchBarProps) {
@@ -49,11 +53,23 @@ export function AccountBatchBar({
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-6 z-40 flex justify-center px-4">
-      <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border bg-popover/95 px-2 py-1.5 shadow-[0_10px_30px_rgba(15,23,42,.18)] backdrop-blur">
-        <span className="px-2 text-xs font-medium tabular-nums">
+      <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-border bg-popover/95 px-2 py-1.5 shadow-overlay backdrop-blur">
+        <Badge variant="secondary" className="tabular-nums">
           {t("shared.batch.selected", { n: selectedCount })}
-        </span>
+        </Badge>
         <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
+        {onRefresh && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 rounded-full px-3 text-xs"
+            disabled={busy}
+            onClick={onRefresh}
+          >
+            <RefreshCw />
+            {t("shared.batch.refresh")}
+          </Button>
+        )}
         {onCheckin && (
           <Button
             variant="ghost"
@@ -66,16 +82,16 @@ export function AccountBatchBar({
             {t("shared.batch.checkin")}
           </Button>
         )}
-        {onRefresh && (
+        {onExport && (
           <Button
             variant="ghost"
             size="sm"
             className="h-8 rounded-full px-3 text-xs"
             disabled={busy}
-            onClick={onRefresh}
+            onClick={onExport}
           >
-            <RefreshCw />
-            {t("shared.batch.refresh")}
+            <Download />
+            {t("shared.batch.export")}
           </Button>
         )}
         {onDelete && (

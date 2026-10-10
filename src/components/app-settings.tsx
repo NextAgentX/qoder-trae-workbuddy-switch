@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw, Save, Settings2 } from "lucide-react";
+import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw, Save } from "lucide-react";
 
 import { DemoAction } from "@/components/demo-action";
 import { SettingsFieldRow, SettingsGroup } from "@/components/settings-primitives";
@@ -12,7 +12,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -496,42 +495,36 @@ export function AppSettingsGroups() {
 }
 
 /**
- * 侧栏底部「通用设置」入口 —— 固定在**版本号上方**。
+ * 「通用设置」弹层 —— **受控**形态，由顶栏 ⚙ 溢出菜单（`shell/app-menu.tsx`）驱动。
  *
- * ## 为什么落在这里
+ * ## 为什么是受控 Dialog 而不是带 Trigger 的入口
  *
- * 侧栏底部区块（`App.tsx` 里那个 `<section>`）是两个产品分区**唯一共用**的渲染
- * 区域：上方的导航与右侧主区域都随产品切换，只有这里是恒定的。它也不属于
- * `PRODUCT_NAV`，因此不会把「侧栏固定 5 项、路由 5:5」的约束改成 6:6。
+ * L0（应用级）入口按原型收进顶栏的 ⚙ 菜单：菜单项负责「开哪一个弹层」，
+ * 弹层自己不再带触发按钮 —— 否则会出现「同一弹层两个入口」的重复形态。
+ * 受控（`open` / `onOpenChange`）让菜单成为**唯一**的开关来源。
  *
  * ## 为什么是 Dialog 而不是内联控件
  *
  * 这些块含取数（`getGithubConfig` / `getLaunchAtLoginEnabled`）与更新相关的
- * 轮询，常驻挂载会让每次启动都多付一次 IPC；Dialog 是**懒挂载**，不开就不取数。
- * 侧栏 220px 也放不下「更新代理地址」这类字段行。
+ * 轮询，常驻挂载会让每次启动都多付一次 IPC；Dialog 内容默认卸载 ⇒ **懒挂载**，
+ * 不开就不取数。
  *
  * ⚠️ `UpdateCard` 内含 `UpdateInstallDialog`，所以这里是**嵌套 Dialog**。
  * Radix 的 `DismissableLayer` 维护层栈，Esc 只关最上层，行为正确 —— 但不要
  * 把「点升级时先关外层」当优化：外层一关，`UpdateCard` 会随之卸载，
  * 升级弹窗的 `installOpen` 状态就丢了。
  */
-export function AppSettingsEntry() {
+export function AppSettingsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const t = useT();
-  const [open, setOpen] = useState(false);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-8 w-full justify-start gap-2 rounded-lg px-2 text-xs font-normal text-sidebar-foreground/70 hover:bg-foreground/[0.04] hover:text-sidebar-foreground"
-        >
-          <Settings2 className="size-3.5" aria-hidden="true" />
-          {t("appSettings.entry")}
-        </Button>
-      </DialogTrigger>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("appSettings.title")}</DialogTitle>

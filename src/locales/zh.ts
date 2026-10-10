@@ -1,9 +1,11 @@
 import { zh as backup } from "./domains/backup.zh";
+import { zh as clientSettings } from "./domains/clientSettings.zh";
 import { zh as recycleBin } from "./domains/recycleBin.zh";
 import { zh as proxy } from "./domains/proxy.zh";
 import { zh as sessions } from "./domains/sessions.zh";
 import { zh as shell } from "./domains/shell.zh";
 import { zh as shared } from "./domains/shared.zh";
+import { zh as skillManager } from "./domains/skillManager.zh";
 import { zh as traeComponents } from "./domains/traeComponents.zh";
 import { zh as traeGateway } from "./domains/traeGateway.zh";
 import { zh as traePages } from "./domains/traePages.zh";
@@ -47,6 +49,8 @@ export const zh = {
   ...sessions,
   ...recycleBin,
   ...proxy,
+  ...skillManager,
+  ...clientSettings,
 } as const;
 
 /** 词表键。`en.ts` 以它为 `Partial` 的上界，故英文侧拼错键名会编译报错。 */

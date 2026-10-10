@@ -2,7 +2,9 @@ import { Users } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { DemoAction } from "@/components/demo-action";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { POOL_STATUS_LABELS } from "@/lib/gateway";
 import { useT } from "@/lib/i18n";
@@ -191,9 +193,9 @@ export function AccountPoolCard({
                 className={cn(
                   "mt-2 text-2xl font-semibold tabular-nums tracking-[-0.02em]",
                   meta.tone === "ok"
-                    ? "text-emerald-600 dark:text-emerald-400"
+                    ? "text-success"
                     : meta.tone === "warn"
-                      ? "text-amber-600 dark:text-amber-400"
+                      ? "text-warning"
                       : meta.tone === "danger"
                         ? "text-destructive"
                         : "text-muted-foreground",
@@ -211,41 +213,96 @@ export function AccountPoolCard({
           {emptyHint ?? t("shared.gateway.pool.empty")}
         </p>
       ) : (
-        <div className="divide-y divide-border/60">
-          {accounts.map((account) => {
-            const meta = POOL_STATUS_LABELS[account.status];
-            return (
-              <div key={account.uid} className="flex flex-wrap items-center gap-3 px-5 py-3">
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">{account.name}</span>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {t("shared.gateway.pool.credits", {
-                    credits: formatCredits(account.credits),
-                  })}
-                </span>
-                <Badge
-                  variant={meta.tone === "danger" ? "destructive" : "secondary"}
-                  className={cn(
-                    "shrink-0",
-                    meta.tone === "ok" && "text-emerald-600 dark:text-emerald-400",
-                    meta.tone === "warn" && "text-amber-600 dark:text-amber-400",
-                  )}
-                >
-                  {meta.label}
-                </Badge>
-                {account.cooldownReason && (
-                  <span className="w-full truncate text-xs text-muted-foreground sm:w-auto">
-                    {account.cooldownReason}
-                  </span>
-                )}
-              </div>
-            );
-          })}
+        /* 原型 `viewGateway` :3056-3068 是**表格**（账号 / 积分 / 状态 / 选号）。
+           「权重」「粘性」两列**不渲染**：后端 `status_list` 只给 uid / name / realm / status /
+           credits / cooldown* / disabled，权重由选号算法**实时计算**、粘性只是会话复用（均无字段、
+           无接口）⇒ 没有数据就不摆列，绝不臆造数字。 */
+        <div className="overflow-x-auto" data-act="gw-pool-table">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-border/60 text-left text-xs text-muted-foreground">
+                <th scope="col" className="px-5 py-2 font-medium">
+                  {t("shared.gateway.pool.colAccount")}
+                </th>
+                <th scope="col" className="px-2 py-2 font-medium">
+                  {t("shared.gateway.pool.colCredits")}
+                </th>
+                <th scope="col" className="px-2 py-2 font-medium">
+                  {t("shared.gateway.pool.colStatus")}
+                </th>
+                <th scope="col" className="px-5 py-2 text-right font-medium">
+                  {t("shared.gateway.pool.colPick")}
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {accounts.map((account) => {
+                const meta = POOL_STATUS_LABELS[account.status];
+                const pinned = account.uid === preferredUid;
+                return (
+                  <tr key={account.uid} className="border-b border-border/40 last:border-0">
+                    <td className="px-5 py-2.5">
+                      <span className="text-sm font-medium">{account.name}</span>
+                      {pinned && (
+                        <Badge variant="secondary" className="ml-2 shrink-0">
+                          {t("shared.gateway.pool.pinned")}
+                        </Badge>
+                      )}
+                    </td>
+                    <td className="px-2 py-2.5 text-xs text-muted-foreground tabular-nums">
+                      {t("shared.gateway.pool.credits", {
+                        credits: formatCredits(account.credits),
+                      })}
+                    </td>
+                    <td className="px-2 py-2.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge
+                          variant={meta.tone === "danger" ? "destructive" : "secondary"}
+                          className={cn(
+                            "shrink-0",
+                            meta.tone === "ok" && "text-success",
+                            meta.tone === "warn" && "text-warning",
+                          )}
+                        >
+                          {meta.label}
+                        </Badge>
+                        {account.cooldownReason && (
+                          <span className="truncate text-xs text-muted-foreground">
+                            {account.cooldownReason}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-5 py-2.5 text-right">
+                      <DemoAction>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 px-2"
+                          data-act="pool-pin"
+                          disabled={saving}
+                          /* 空串 = 不指定（回落「跟随登录态 / 自动择优」）；排他由后端单值策略保证
+                             —— 同一 region 只有一个 pinned，故「同一时刻只有一个账号被指定」。 */
+                          onClick={() => onPreferredUidChange(pinned ? "" : account.uid)}
+                        >
+                          {pinned ? t("shared.gateway.pool.unpin") : t("shared.gateway.pool.pin")}
+                        </Button>
+                      </DemoAction>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
 
       <div className="border-t border-border/60 px-5 py-3">
         <p className="text-xs leading-5 text-muted-foreground">
           {t("shared.gateway.pool.preferredHint")}
+        </p>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {t("shared.gateway.pool.exclusiveHint")}
         </p>
       </div>
 

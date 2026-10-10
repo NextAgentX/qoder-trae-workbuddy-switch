@@ -9,9 +9,10 @@ use std::sync::Mutex;
 
 use tauri::{Emitter, Manager};
 use buddy_switch_core::modules::{
-    account, auth_file, backup, capability, checkin, config, credit_usage, credits, export_import,
-    migrate, oauth, process, programs, refresh, region::Region, region::RegionFilter, rotate, session, switch, token_stats, trae,
-    travel, update,
+    account, auth_file, backup, capability, checkin, client_limits, client_settings, config,
+    credit_usage, credits, diagnostics, export_import, migrate, oauth, process, programs, refresh,
+    region::Region, region::RegionFilter, rotate, session, skill, switch, token_daily,
+    token_stats, trae, travel, update,
 };
 // P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
 // ⚠️ 本文件在 `crates/buddy-switch-server/src/api.rs` 有**同款**接线（刻意不去重，见共享知识）。
@@ -677,6 +678,87 @@ pub async fn detect_codebuddy_cn_ide_account() -> Result<Value, String> {
         .map_err(|e| e.to_string())?
 }
 
+/// GET /api/vscode-codebuddy-plugin/status —— VS Code 内 CodeBuddy 扩展状态。
+///
+/// **表驱动**：`programs::status("vscode_codebuddy_plugin")`。
+///
+/// async + spawn_blocking：状态检测会跑进程探测 / 读 state.vscdb，
+/// 账号页每次挂载都会刷新，若在主线程执行会造成页面卡顿。
+#[tauri::command]
+pub async fn get_vscode_codebuddy_plugin_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| programs::status("vscode_codebuddy_plugin"))
+        .await
+        .map_err(|error| format!("查询 VS Code CodeBuddy 扩展状态失败: {error}"))?
+}
+
+/// POST /api/vscode-codebuddy-plugin/switch —— 注入凭证并可选重启 VS Code。
+///
+/// **表驱动**：`programs::switch("vscode_codebuddy_plugin", …)`（默认重启，由 adapter 归一）。
+///
+/// async + spawn_blocking：切换会优雅关闭并重新打开 VS Code，可能阻塞数十秒。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn switch_vscode_codebuddy_plugin_account(
+    account_id: String,
+    restart: Option<bool>,
+) -> Result<Value, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        programs::switch("vscode_codebuddy_plugin", &account_id, restart)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// POST /api/vscode-codebuddy-plugin/detect —— 读取本机 VS Code 扩展当前登录并尝试匹配账号库。
+///
+/// **表驱动**：`programs::detect("vscode_codebuddy_plugin")`。
+#[tauri::command]
+pub async fn detect_vscode_codebuddy_plugin_account() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| programs::detect("vscode_codebuddy_plugin"))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// GET /api/jetbrains-codebuddy-plugin/status —— JetBrains IDE 内 CodeBuddy 插件状态。
+///
+/// **表驱动**：`programs::status("jetbrains_codebuddy_plugin")`。
+#[tauri::command]
+pub async fn get_jetbrains_codebuddy_plugin_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| programs::status("jetbrains_codebuddy_plugin"))
+        .await
+        .map_err(|error| format!("查询 JetBrains CodeBuddy 插件状态失败: {error}"))?
+}
+
+/// POST /api/jetbrains-codebuddy-plugin/switch —— 写入 secret-storage.xml 并可选重启 IDE。
+///
+/// **表驱动**：`programs::switch("jetbrains_codebuddy_plugin", …)`（默认重启，由 adapter 归一）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn switch_jetbrains_codebuddy_plugin_account(
+    account_id: String,
+    restart: Option<bool>,
+) -> Result<Value, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        programs::switch("jetbrains_codebuddy_plugin", &account_id, restart)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// POST /api/jetbrains-codebuddy-plugin/detect —— 读取本机 JetBrains 插件当前登录并尝试匹配账号库。
+///
+/// **表驱动**：`programs::detect("jetbrains_codebuddy_plugin")`。
+#[tauri::command]
+pub async fn detect_jetbrains_codebuddy_plugin_account() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| programs::detect("jetbrains_codebuddy_plugin"))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 
 /// POST /api/delete —— 删除账号（按 region）。
 ///
@@ -708,6 +790,23 @@ pub fn set_account_remark(
     }
     let region = parse_region(region.as_deref());
     account::set_account_remark_for(region, &account_id, remark.as_deref())
+}
+
+/// 设置账号自定义分组（**字段级更新**，不触碰 token）。
+///
+/// 与 [`set_account_remark`] 同源：只读一个 JSON、改一个键、原子写回（**一次**读改写）。
+/// `group` 空串 / 缺省 = 移出分组（删除账号库里的 `groupName` 键，缺省即「未分组」）。
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_account_group(
+    account_id: String,
+    group: Option<String>,
+    region: Option<String>,
+) -> Result<Value, String> {
+    if account_id.trim().is_empty() {
+        return Err("缺少 accountId".to_string());
+    }
+    let region = parse_region(region.as_deref());
+    account::set_account_group_for(region, &account_id, group.as_deref())
 }
 
 /// POST /api/oauth/start —— 发起 OAuth 扫码登录（按 region）。
@@ -835,18 +934,42 @@ pub fn preview_import_backup(file_text: String, policy: String) -> Result<Value,
 ///
 /// `selection` 与导出同形（`{ scopes, includesCredentials }`）；缺省 ⇒ 全选（D14）。
 /// 冲突策略默认**保留本地**（D16）⇒ 连导两次第二次全「跳过」（幂等）。
+///
+/// ★ `only_scopes`（C1）：非空 ⇒ **只导入这些 scope**，即「只重试失败项」。
+/// 失败单元就是 scope（`backup::import_backup` 逐 scope 事务），前端把上次的
+/// `retryableScopes` 原样回传即可，**无需重新选择文件**。
 #[tauri::command(rename_all = "camelCase")]
-pub fn import_backup(file_text: String, policy: String, selection: Value) -> Result<Value, String> {
+pub fn import_backup(
+    file_text: String,
+    policy: String,
+    selection: Value,
+    only_scopes: Option<Vec<String>>,
+) -> Result<Value, String> {
     let policy = export_import::ConflictPolicy::parse(&policy)?;
     let selection: backup::BackupSelection = serde_json::from_value(selection)
         .map_err(|error| format!("导入参数不合法：{error}"))?;
-    backup::import_backup(&file_text, policy, &selection)
+    let only_scopes = only_scopes.unwrap_or_default();
+    backup::import_backup(&file_text, policy, &selection, &only_scopes)
 }
 
 /// P7 T02：列出自动备份 / 导入前快照（最新在前）。
 #[tauri::command]
 pub fn list_auto_backups() -> Result<Value, String> {
     backup::list_auto_backups()
+}
+
+/// Q1：导出**诊断包**（只读；凭据按 `backup::CREDENTIAL_KEYS` 剥离后才返回）。
+///
+/// 返回 `{ name, text }`：`text` 是可直接落盘的 JSON。凭据闸门在 core 内
+/// （命中即 `Err`），前端只负责存盘 —— **不必**在前端再实现一遍剥离。
+#[tauri::command]
+pub fn export_diagnostic() -> Result<Value, String> {
+    let text = diagnostics::export_diagnostic()?;
+    let name = format!(
+        "buddy-switch-diagnostic-{}.json",
+        buddy_switch_core::modules::cst::cst_datetime(config::now_ms()).format("%Y%m%d-%H%M%S")
+    );
+    Ok(serde_json::json!({ "name": name, "text": text }))
 }
 
 /// P7 T02：从自动备份 / 导入前快照**恢复**（覆盖策略；恢复本身也可撤销）。
@@ -966,6 +1089,142 @@ pub fn open_accounts_dir(region: Option<String>) -> Result<Value, String> {
     }
     reveal_dir(&dir)?;
     Ok(json!({ "ok": true, "region": region.as_str(), "dir": dir.to_string_lossy() }))
+}
+
+// ---- Skill 管理（cc-switch 式）------------------------------------------------
+// ⚠️ 与 `crates/buddy-switch-server/src/api.rs` 的 5 个同名 handler **同契约**
+// （两宿主同步）。两侧都调同一个 core `skill::*` 函数并原样返回其结果，
+// 本层**不自己拼 JSON 形状** —— 从根上杜绝「一侧透传、另一侧多包一层」的漂移（PRD §9）。
+//
+// 鉴权：5 条命令都读写**用户级文件**（`{data_dir}/skills`），沿用最贴近该语义的既有
+// capability `SessionCopy`（同为「WorkBuddy 桌面才有的用户数据读写」）。capability 表在
+// core（`product_spec`），本层只查表，**默认拒绝**。
+//
+// `async` + `spawn_blocking`：清单要递归读盘 + 解析 frontmatter，启停 / 搬迁 / 导入都是
+// 写盘（可能几 MB），不能跑在 Tauri 主线程上（否则 loading 遮罩无法渲染）。
+
+/// GET /api/skills —— 列出该 region 用户级 skills 目录下的 skill 清单（**只读**）。
+#[tauri::command]
+pub async fn list_skills(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || skill::list_skills(region))
+        .await
+        .map_err(|error| format!("读取 skill 清单失败: {error}"))?
+}
+
+/// POST /api/skills/enabled —— 启停一个 skill（行级改写官方原生字段，幂等）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_skill_enabled(
+    region: Option<String>,
+    dir_name: String,
+    enabled: bool,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || skill::set_skill_enabled(region, &dir_name, enabled))
+        .await
+        .map_err(|error| format!("启停 skill 失败: {error}"))?
+}
+
+/// POST /api/skills/copy-cross —— 跨 region「合并补齐」搬迁（冲突保留目标侧）。
+///
+/// `sourceRegion` / `targetRegion` **都必须显式给出**（跨区命令，无合理缺省）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn copy_skills_cross(
+    source_region: Option<String>,
+    target_region: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        skill::copy_skills_cross(source_region, target_region)
+    })
+    .await
+    .map_err(|error| format!("跨区搬迁 skill 失败: {error}"))?
+}
+
+/// POST /api/skills/import —— 从本地目录或 zip 导入一个 skill。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn import_skill(region: Option<String>, source_path: String) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || skill::import_skill(region, &source_path))
+        .await
+        .map_err(|error| format!("导入 skill 失败: {error}"))?
+}
+
+/// POST /api/skills/open-dir —— 在文件管理器中打开该 region 的 skills 目录。
+#[tauri::command]
+pub async fn open_skills_dir(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (dir, payload) = skill::prepare_skills_dir(region)?;
+        reveal_dir(&dir)?;
+        Ok(payload)
+    })
+    .await
+    .map_err(|error| format!("打开 skills 目录失败: {error}"))?
+}
+
+// ---- 上游客户端 settings.json 统一托管 ----------------------------------------
+// ⚠️ 与 `crates/buddy-switch-server/src/api.rs` 的 6 个同名 handler **同契约**（两宿主同步）。
+// 两侧都调同一个 core `client_settings::*` 函数并原样返回其结果，本层**不自己拼 JSON 形状**
+// —— 从根上杜绝「一侧透传、另一侧多包一层」的漂移（PRD §9）。
+//
+// 无 capability 门控：本模块跨 WorkBuddy / Trae 两个产品线托管**各自客户端**的本地设置文件，
+// 平台能力表里没有与之对应的能力项（不是签到 / 积分 / 会话复制之类），故不套用任何平台能力。
+//
+// `async` + `spawn_blocking`：读写都要落盘（含 `tasklist` 进程探测，慢），不能跑在 Tauri
+// 主线程上（否则 loading 遮罩无法渲染）。
+
+/// GET /api/client-settings/slots —— 列出 6 个槽位（未安装者 `installed:false` **仍在列表**）。
+#[tauri::command]
+pub async fn list_client_settings_slots() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(client_settings::list_slots)
+        .await
+        .map_err(|error| format!("列出客户端设置槽位失败: {error}"))
+}
+
+/// GET /api/client-settings/read —— 原文 + 解析后键值 + 格式指纹。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn read_client_settings(slot: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || client_settings::read_settings(&slot))
+        .await
+        .map_err(|error| format!("读取客户端设置失败: {error}"))?
+}
+
+/// POST /api/client-settings/patch —— 键值级 patch（**格式保持**，模块内部自动备份）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn patch_client_settings(slot: String, patch: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || client_settings::patch_settings(&slot, &patch))
+        .await
+        .map_err(|error| format!("写入客户端设置失败: {error}"))?
+}
+
+/// GET /api/client-settings/backups —— 该槽位的历史备份点（按 id 降序）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_client_settings_backups(slot: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || client_settings::list_backups(&slot))
+        .await
+        .map_err(|error| format!("列出客户端设置备份失败: {error}"))?
+}
+
+/// POST /api/client-settings/restore —— 整文件恢复（**恢复前对当前文件再备份一次**）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restore_client_settings_backup(
+    slot: String,
+    backup_id: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        client_settings::restore_backup(&slot, &backup_id)
+    })
+    .await
+    .map_err(|error| format!("恢复客户端设置失败: {error}"))?
+}
+
+/// POST /api/client-settings/diff —— 任选两个槽位比对（仅 A 有 / 仅 B 有 / 值不同）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn diff_client_settings(slot_a: String, slot_b: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || client_settings::diff_slots(&slot_a, &slot_b))
+        .await
+        .map_err(|error| format!("比对客户端设置失败: {error}"))?
 }
 
 /// POST /api/switch —— 切换账号（备份 → 关进程 → 复制会话 → 写认证 → 重启，按 region）。
@@ -1136,6 +1395,47 @@ pub async fn sync_session_replicas(
     .map_err(|error| format!("同步会话副本失败: {error}"))
 }
 
+/// POST /api/sessions/unify —— P8 **分歧处理（覆盖式统一）**：把用户选定保留的那一份覆盖到其余副本。
+///
+/// 与 server 侧 `api_session_unify` **同契约**（两宿主同步）。批量 + 逐条结果 ⇒ 支持**部分失败**
+/// （`PLAN.md` §3.6）；判据在 core（`session::unify_session_replicas_for`），本命令只做
+/// 「鉴权 + 取参数 + 丢到阻塞线程」。
+///
+/// ⚠️ **破坏性写操作**：目标副本原有的分歧内容会被丢弃（`PLAN.md` §3.15.2「不许静默覆盖」）
+/// ⇒ 前端**必须**先二次确认并把 `lostLines` 如实告知；core 会**先备份再覆盖**，备份失败则不覆盖。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn unify_session_replicas(
+    items: Vec<Value>,
+    region: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        session::unify_session_replicas_for(region, &items)
+    })
+    .await
+    .map_err(|error| format!("统一会话副本失败: {error}"))
+}
+
+/// GET /api/client/limits —— 客户端限流台账（**只读**观测：账号 × 模型 × 恢复时刻）。
+///
+/// 与 server 侧 `api_client_limits` **同契约**（两宿主同步）。判据在 core
+/// （`client_limits::client_limits_for`），本命令只做「鉴权 + 取参数 + 丢到阻塞线程」。
+///
+/// ⚠️ **只读**：不写 `workbuddy.db`、不改账号状态、不触发切换（PRD R4 / R8）。
+/// `async` + `spawn_blocking`：要递归扫 `projects/**/*.jsonl` + 只读查 db（慢 IO）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn client_limits(
+    region: Option<String>,
+    since_days: Option<i64>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || client_limits::client_limits_for(region, since_days))
+        .await
+        .map_err(|error| format!("读取客户端限流台账失败: {error}"))
+}
+
 /// POST /api/sessions/copy —— 把勾选会话复制到指定账号（路径 B，按 region）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn copy_sessions(
@@ -1287,6 +1587,30 @@ pub async fn get_token_statistics(days: Option<i64>, region: Option<String>) -> 
     tauri::async_runtime::spawn_blocking(move || token_stats::get_statistics_for_filter(filter, days))
         .await
         .map_err(|error| format!("扫描 Token 统计失败: {error}"))
+}
+
+/// 今日 Token：账号 × 来源（client / gateway）的当日累计。
+///
+/// 返回 `{ date, accounts: [{ uid, clientIn, clientOut, gatewayIn, gatewayOut }],
+/// unknownClient: { in, out } | null, gatewayTruncated: bool }`（camelCase）。
+///
+/// `force = true` 时强制重扫客户端 JSONL（当日数据在扫过之后仍会增长）；否则命中
+/// 「今日已扫」闸门、直接读缓存。`async` + `spawn_blocking`：可能递归扫
+/// `projects` 目录下的 jsonl + 只读查 db（慢 IO）。
+#[tauri::command]
+pub async fn get_account_token_today(
+    region: Option<String>,
+    force: Option<bool>,
+) -> Result<Value, String> {
+    let region = parse_region(region.as_deref());
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        token_daily::record_client_today(region, force);
+        token_daily::record_gateway_today(region);
+        token_daily::account_token_today(region)
+    })
+    .await
+    .map_err(|error| format!("统计今日 Token 失败: {error}"))
 }
 
 /// POST /api/checkin —— 单账号立即签到（按 region）。

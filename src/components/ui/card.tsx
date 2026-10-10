@@ -7,7 +7,11 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
     <div
       data-slot="card"
       className={cn(
-        "bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm",
+        /* 与原型 `.card`（`buddy-switch-prototype.html:229-232`）逐项对齐：
+           `border-radius: var(--radius)` = 12px ⇒ `rounded-lg`（**不是** `rounded-xl`：它在主题里
+           被定义为 `--radius + 4px` = 16px，比原型圆一档）；
+           `box-shadow: var(--shadow-sm)` ⇒ `shadow-card`（三级高度里的「静止」档）。 */
+        "bg-card text-card-foreground flex flex-col gap-6 rounded-lg border py-6 shadow-card",
         className,
       )}
       {...props}

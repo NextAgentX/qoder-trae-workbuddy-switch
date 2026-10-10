@@ -44,7 +44,7 @@
 use serde_json::{json, Value};
 
 use crate::modules::capability::Unsupported;
-use crate::modules::{codebuddy_cli, codebuddy_cn_ide, vscode_cn_inject};
+use crate::modules::{codebuddy_cli, codebuddy_cn_ide, jetbrains, vscode_cn_inject, vscode_ext};
 
 /// 程序位支持的**统一操作**。用于 `Unsupported` 的 `capability` 字段与诊断。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +209,60 @@ impl ProgramAdapter for VscodeCnInjectAdapter {
     }
 }
 
+/// `vscode_codebuddy_plugin` 程序位 —— VS Code 内 CodeBuddy 扩展：状态 / 切换 / 探测当前账号。
+///
+/// ⚠️ 它**没有**「安装辅助」入口（扩展由用户在 VS Code 内自行安装），故 `install_helper`
+/// 走默认结构化 `Unsupported`。
+struct VscodeCodebuddyPluginAdapter;
+
+impl ProgramAdapter for VscodeCodebuddyPluginAdapter {
+    fn label(&self) -> &'static str {
+        "VS Code CodeBuddy 扩展"
+    }
+
+    fn status(&self) -> Result<Value, String> {
+        // `vscode_ext::status()` 是**不可失败**的（返回裸 `Value`）；包成 `Ok` 以统一面。
+        Ok(vscode_ext::status())
+    }
+
+    fn switch(&self, account_id: &str, restart: Option<bool>) -> Result<Value, String> {
+        // 与 CN IDE 一致：切换的既有默认是「切换后重启编辑器」（`restart` 缺省即 `true`）。
+        vscode_ext::switch_account(account_id, restart.unwrap_or(true))
+    }
+
+    fn detect(&self) -> Result<Value, String> {
+        vscode_ext::detect_current_account()
+    }
+}
+
+/// `jetbrains_codebuddy_plugin` 程序位 —— JetBrains IDE（IDEA / PyCharm）内 CodeBuddy 插件：
+/// 状态 / 切换 / 探测当前账号。
+///
+/// ⚠️ 它**没有**「安装辅助」入口（插件由用户在 IDE 内自行安装），故 `install_helper`
+/// 走默认结构化 `Unsupported`。
+///
+/// ⚠️ `ProjectAdapter::switch` 签名不携带「目标配置目录」选择，故这里对全部已装插件的
+/// IDE 目录写入（`config_dirs = None`）—— 与参考实现的缺省行为一致。
+struct JetbrainsCodebuddyPluginAdapter;
+
+impl ProgramAdapter for JetbrainsCodebuddyPluginAdapter {
+    fn label(&self) -> &'static str {
+        "JetBrains CodeBuddy 插件"
+    }
+
+    fn status(&self) -> Result<Value, String> {
+        Ok(jetbrains::status())
+    }
+
+    fn switch(&self, account_id: &str, restart: Option<bool>) -> Result<Value, String> {
+        jetbrains::switch_account(account_id, restart.unwrap_or(true), None)
+    }
+
+    fn detect(&self) -> Result<Value, String> {
+        jetbrains::detect_current_account()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 表（单一事实来源）
 // ---------------------------------------------------------------------------
@@ -257,6 +311,10 @@ static CODEBUDDY_CLI: CodebuddyCliAdapter = CodebuddyCliAdapter;
 static CODEBUDDY_CN_IDE: CodebuddyCnIdeAdapter = CodebuddyCnIdeAdapter;
 /// VS Code CodeBuddy 插件程序位（只读）。
 static VSCODE_CN_INJECT: VscodeCnInjectAdapter = VscodeCnInjectAdapter;
+/// VS Code CodeBuddy 扩展程序位（读写）。
+static VSCODE_CODEBUDDY_PLUGIN: VscodeCodebuddyPluginAdapter = VscodeCodebuddyPluginAdapter;
+/// JetBrains CodeBuddy 插件程序位（读写）。
+static JETBRAINS_CODEBUDDY_PLUGIN: JetbrainsCodebuddyPluginAdapter = JetbrainsCodebuddyPluginAdapter;
 
 /// WorkBuddy 的**全部程序位**（顺序即 UI 展示顺序）。
 ///
@@ -278,6 +336,16 @@ pub static PROGRAMS: &[ProgramSpec] = &[
         id: "vscode_cn_inject",
         label_key: "wbAccounts.program.vscodeCnInject",
         adapter: &VSCODE_CN_INJECT,
+    },
+    ProgramSpec {
+        id: "vscode_codebuddy_plugin",
+        label_key: "wbAccounts.program.vscodeCodebuddyPlugin",
+        adapter: &VSCODE_CODEBUDDY_PLUGIN,
+    },
+    ProgramSpec {
+        id: "jetbrains_codebuddy_plugin",
+        label_key: "wbAccounts.program.jetbrainsCodebuddyPlugin",
+        adapter: &JETBRAINS_CODEBUDDY_PLUGIN,
     },
 ];
 
@@ -418,17 +486,34 @@ mod tests {
         assert!(error.contains("mock"), "错误文案应列出合法取值：{error}");
     }
 
-    /// 表钉住三个程序位（顺序稳定）。**移除任一项 ⇒ 本用例变红**（变异验证 ④）。
+    /// 表钉住五个程序位（顺序稳定）。**移除任一项 ⇒ 本用例变红**（变异验证 ④）。
     #[test]
-    fn programs_table_lists_the_three_wb_slots() {
+    fn programs_table_lists_the_five_wb_slots() {
         assert_eq!(
             program_ids(),
-            vec!["codebuddy_cli", "codebuddy_cn_ide", "vscode_cn_inject"],
+            vec![
+                "codebuddy_cli",
+                "codebuddy_cn_ide",
+                "vscode_cn_inject",
+                "vscode_codebuddy_plugin",
+                "jetbrains_codebuddy_plugin",
+            ],
             "WB 程序位表漂了 —— 顺序即 UI 展示顺序"
         );
         // 第 3 个程序位（`vscode_cn_inject`）必须真的在表里（「第 3 个程序位」用例的锚点）。
         assert_eq!(PROGRAMS[2].id, "vscode_cn_inject");
         assert_eq!(PROGRAMS[2].label_key, "wbAccounts.program.vscodeCnInject");
+        // 新增的 VS Code / JetBrains 插件程序位必须真的在表里（label_key 与前端逐字一致）。
+        assert_eq!(PROGRAMS[3].id, "vscode_codebuddy_plugin");
+        assert_eq!(
+            PROGRAMS[3].label_key,
+            "wbAccounts.program.vscodeCodebuddyPlugin"
+        );
+        assert_eq!(PROGRAMS[4].id, "jetbrains_codebuddy_plugin");
+        assert_eq!(
+            PROGRAMS[4].label_key,
+            "wbAccounts.program.jetbrainsCodebuddyPlugin"
+        );
     }
 
     /// id 驱动查表：每个表项都能按 id 取回；未知 id ⇒ `None` / `Err`。

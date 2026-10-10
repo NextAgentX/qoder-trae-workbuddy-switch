@@ -20,8 +20,8 @@ function formatTokens(value: number | null | undefined): string {
 }
 
 function statusTone(status: number): string {
-  if (status >= 200 && status < 300) return "text-emerald-600 dark:text-emerald-400";
-  if (status === 429) return "text-amber-600 dark:text-amber-400";
+  if (status >= 200 && status < 300) return "text-success";
+  if (status === 429) return "text-warning";
   return "text-destructive";
 }
 

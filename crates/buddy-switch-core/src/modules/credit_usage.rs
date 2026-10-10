@@ -50,6 +50,8 @@ struct CheckinEvent {
     account_name: String,
     result: String,
     error: Option<String>,
+    /// 本次签到可得额度（逐条「+N」的 N）。上游没给时为 `None` ⇒ 前端显示「—」。
+    amount: Option<f64>,
 }
 
 fn non_empty_string(value: Option<&Value>) -> Option<String> {
@@ -231,6 +233,9 @@ fn parse_checkin_event(value: &Value) -> Option<CheckinEvent> {
         account_name: non_empty_string(value.get("email")).unwrap_or_else(|| "unknown".to_string()),
         result: non_empty_string(value.get("result")).unwrap_or_else(|| "error".to_string()),
         error: non_empty_string(value.get("error")),
+        // 逐条「+N」：`amount` 由签到流程写入（见 `checkin::checkin_account_for`）；
+        // 旧日志没有该字段 ⇒ `None`（前端显示「—」，不猜）。
+        amount: number(value.get("amount")).filter(|amount| *amount > 0.0),
     })
 }
 
@@ -523,6 +528,7 @@ fn build_statistics(
                 "accountName": event.account_id.as_ref().and_then(|id| account_names.get(id)).cloned().unwrap_or_else(|| event.account_name.clone()),
                 "result": event.result,
                 "error": event.error,
+                "amount": event.amount,
             }),
         )
     }));
@@ -1068,6 +1074,42 @@ mod tests {
             .collect();
         assert!(event_kinds.contains(&"checkin"));
         assert!(event_kinds.contains(&"usage"));
+    }
+
+    /// 逐条「+N」：签到日志带 `amount` 时透传到 `events[].amount`；不带时为 `null`。
+    ///
+    /// 可证伪：删掉 `build_statistics` 里 checkin 分支的 `"amount": event.amount` ⇒
+    /// 第一条断言拿到 `null` 而红；去掉 `parse_checkin_event` 的 `amount` 解析 ⇒ 同样红。
+    #[test]
+    fn checkin_events_expose_per_item_amount_when_present() {
+        let now = at_local_date(0, 12);
+        let logs = vec![
+            json!({
+                "ts": now,
+                "accountId": "account-1",
+                "email": "one@example.com",
+                "result": "success",
+                "amount": 100.0,
+            }),
+            json!({
+                "ts": now - 1_000,
+                "accountId": "account-2",
+                "email": "two@example.com",
+                "result": "success",
+            }),
+        ];
+        let stats = build_statistics(&[], &logs, &[], now);
+        let events = stats["events"].as_array().expect("events");
+        let with_amount = events
+            .iter()
+            .find(|event| event["accountId"] == "account-1")
+            .expect("带金额的签到事件");
+        assert_eq!(with_amount["amount"], 100.0);
+        let without_amount = events
+            .iter()
+            .find(|event| event["accountId"] == "account-2")
+            .expect("不带金额的签到事件");
+        assert!(without_amount["amount"].is_null(), "旧日志没有金额 ⇒ null，不猜");
     }
 
     #[test]

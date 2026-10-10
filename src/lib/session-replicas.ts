@@ -29,6 +29,7 @@ import type {
   SessionFingerprint,
   SessionReplicaGroup,
   SyncSessionReplicaItem,
+  UnifySessionReplicaItem,
 } from "@/lib/types";
 
 /** 一行副本（已 join 账号显示名 + 会话行，标题已过 `displayText`）。 */
@@ -250,4 +251,45 @@ export function buildSyncItems(group: SessionGroupView): SyncSessionReplicaItem[
   return group.rows
     .filter((row) => row.sessionId !== source.sessionId && deltaOf(row) < maxDelta)
     .map((row) => ({ sourceCid: source.sessionId, targetCid: row.sessionId }));
+}
+
+/**
+ * ★ P8 **分歧处理**：把「用户选定保留的那一份」换算成 `{ sourceCid, targetCid }` 任务。
+ *
+ * ⚠️ 与 [`buildSyncItems`] **语义相反**：那边是**加法**（只追加），这里是**覆盖** ——
+ * 目标原有的分歧内容会被丢弃。`PLAN.md` §3.15.2 要求「**不许静默覆盖**」⇒
+ * 调用方必须先二次确认，并把 [`lostLinesFor`] 的条数**如实**告诉用户。
+ *
+ * ## 只在 `diverge` 给出口
+ *
+ * `latest` / `behind` 用加法就够了（`behind` 走 `buildSyncItems`），**没必要**让用户
+ * 在「覆盖」和「追加」之间做无谓的选择；`unknown` 缺指纹 ⇒ 连哪份新都说不准，
+ * **不许**拿它去覆盖（§3.4 规则 1：无数据不渲染）。
+ *
+ * `keepSessionId` 不在组里 ⇒ 返回空数组（防止 UI 传了个陈旧 id 就开覆盖）。
+ */
+export function buildUnifyItems(
+  group: SessionGroupView,
+  keepSessionId: string,
+): UnifySessionReplicaItem[] {
+  if (group.status !== "diverge") return [];
+  if (!group.rows.some((row) => row.sessionId === keepSessionId)) return [];
+  return group.rows
+    .filter((row) => row.sessionId !== keepSessionId)
+    .map((row) => ({ sourceCid: keepSessionId, targetCid: row.sessionId }));
+}
+
+/**
+ * 某个副本被覆盖时**会丢掉的条数**（= 它相对共同旧版的新增条数，即它的 `delta`）。
+ *
+ * 推导：该副本的内容 = 共同旧版 + 它自己的新增；覆盖成选定那一份之后，
+ * 它自己的那部分就没了 ⇒ **丢的就是它的 `delta`**。
+ *
+ * 缺指纹 / 该副本不在 `deltas` 里 ⇒ 返回 `null` —— **不臆造**（UI 如实显示「未知」，
+ * 而不是显示一个编出来的 0）。
+ */
+export function lostLinesFor(group: SessionGroupView, sessionId: string): number | null {
+  if (group.commonPrefix === null) return null;
+  const delta = group.deltas.get(sessionId);
+  return delta === undefined ? null : delta;
 }

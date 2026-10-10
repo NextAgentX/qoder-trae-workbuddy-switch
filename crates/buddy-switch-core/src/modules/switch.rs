@@ -100,6 +100,10 @@ pub fn switch_account_cross(
     }
     progress("正在写入认证文件…");
     auth_file::write_account_to_auth_file_for(region, &acc)?;
+    // ★ 记录「最近使用」：切换即代表该账号被**实际使用**（时间戳口径与账号库既有
+    // `createdAt` / `refreshedAt` 一致）。写入失败**不阻断**切换 —— 认证文件已写好、
+    // 账号已被用上，一条本地记账失败不该把整个切换判为失败（故忽略错误，不 `?`）。
+    let _ = account::touch_last_used_for(region, account_id);
     if restart {
         progress("正在启动 WorkBuddy…");
         launch_workbuddy_for(region, Some(&progress))?;

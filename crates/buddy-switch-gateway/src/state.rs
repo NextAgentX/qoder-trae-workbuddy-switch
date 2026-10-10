@@ -320,6 +320,9 @@ pub struct GatewayState {
     pub disabled: Arc<RwLock<DisabledModels>>,
     pub upstream: Arc<UpstreamClient>,
     pub log: Arc<RequestLog>,
+    /// ★ E1：代理 KPI 的热计数（今日代理请求 / 今日换号）。
+    /// 落盘由 [`crate::proxy_kpi::flush`] 负责（跨网关重启不丢，见该模块文档）。
+    pub proxy_kpi: Arc<crate::proxy_kpi::ProxyCounters>,
     pub started_at: i64,
     /// 账号池（多账号治理：选号 / 冷却 / 熔断 / 账本）。
     pub pool: Arc<RwLock<Pool>>,
@@ -393,6 +396,14 @@ impl GatewayState {
             disabled: crate::disabled_models::shared(),
             upstream,
             log,
+            // 进程启动即把上次落盘的台账**并进来**，避免重启后「今日」从零起算。
+            proxy_kpi: Arc::new({
+                let counters = crate::proxy_kpi::ProxyCounters::new();
+                if let Some(day) = crate::proxy_kpi::today() {
+                    counters.restore(day.requests, day.switches);
+                }
+                counters
+            }),
             started_at: core_config::now_ms(),
             pool: Arc::new(RwLock::new(pool)),
             prompt: Arc::new(RwLock::new(prompt)),

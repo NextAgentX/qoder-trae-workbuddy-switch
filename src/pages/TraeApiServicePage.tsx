@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Copy, FolderOpen, Loader2, Power, RefreshCw, ShieldAlert } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { DemoAction } from "@/components/demo-action";
-import { TraeVariantSwitch } from "@/components/trae-variant-switch";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { AccountPoolCard } from "@/components/gateway/account-pool-card";
+import {
+  GATEWAY_SUBNAV,
+  GatewaySubnav,
+  parseGatewaySubnav,
+  type GatewaySubnavId,
+} from "@/components/gateway/gateway-subnav";
 import { TraeApiKeyTable } from "@/components/gateway/trae-api-key-table";
 import { TraeIntegrationGuide } from "@/components/gateway/trae-integration-guide";
 import { TraeModelList } from "@/components/gateway/trae-model-list";
@@ -26,6 +33,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
+import { scopeOf } from "@/lib/scope";
 import { copyText } from "@/lib/clipboard";
 import {
   DEFAULT_TRAE_GATEWAY_CONFIG,
@@ -43,6 +51,15 @@ import { useTraeVariant } from "@/lib/use-trae-variant";
 
 const LOOPBACK = "127.0.0.1";
 const LAN = "0.0.0.0";
+
+/**
+ * Trae 网关的子导航表：**去掉「请求代理」**。
+ *
+ * P12 的「C 路 base URL 重定向」只覆盖 **WorkBuddy 网关端口**（`proxy.rs` 的
+ * `PROXY_GATEWAY_BASE`），Trae 侧没有对应后端 ⇒ 不渲染该项 ——
+ * 一个点进去什么都没有的项，比不渲染更糟（§3.4 规则 1：缺能力不画空壳）。
+ */
+const TRAE_GATEWAY_SUBNAV = GATEWAY_SUBNAV.filter((item) => item.id !== "proxy");
 
 /**
  * 本页快照：网关配置 / 监听状态 / 模型清单（按程序位）/ 请求日志。
@@ -114,6 +131,10 @@ export default function TraeApiServicePage() {
   const [openingDir, setOpeningDir] = useState(false);
   /** 模型清单「重新读取」的进行中状态（只驱动按钮的转圈，不参与快照）。 */
   const [refreshingModels, setRefreshingModels] = useState(false);
+  /* ★ 子导航选中项：**初值从 URL 读**（`?sub=logs`），非法值 fail-closed 回 `overview`
+     （与设置页 `?section=`、WB 网关页同一口径）。 */
+  const [searchParams] = useSearchParams();
+  const [sub, setSub] = useState<GatewaySubnavId>(() => parseGatewaySubnav(searchParams.get("sub")));
 
   const loadSnapshot = useCallback(async (): Promise<ApiServiceSnapshot> => {
     // 本区域的两条程序位（TraeWork / TraeCode）：清单按程序位分家，一次取全。
@@ -292,10 +313,12 @@ export default function TraeApiServicePage() {
   }, [config.bindAddr, config.port]);
 
   const keyPrefix = status?.apiKeyPrefix || "";
+  /* 页头作用域：平台固定 trae，区域来自 `useTraeVariant`（URL 作用域优先）。 */
+  const scope = scopeOf("trae", variant);
 
   if (loading && !status) {
     return (
-      <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+      <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
         <Skeleton className="h-9 w-48" />
         <Skeleton className="mt-4 h-32 w-full" />
         <Skeleton className="mt-6 h-64 w-full" />
@@ -304,14 +327,18 @@ export default function TraeApiServicePage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-      {/* 区域入口在**标题下方**（两个模块统一的位置）：整页跟随它。 */}
-      <header className="mb-6">
-        <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.api.title")}</h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {t("trae.stats.api.subtitle")}
-        </p>
-        <TraeVariantSwitch className="mt-4" />
+    <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
+      {/* 页头（原型 `viewGateway`）：作用域副标题 + 只读 scope-chip。
+          区域切换已上移到顶栏的 `ScopeSelector`（L1 作用域），页内不再有区域选择器。 */}
+      <header className="mb-5 flex items-start gap-4">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.api.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("pageHead.gateway", { scope: scopeLabel(t, scope) })}
+          </p>
+        </div>
+        <div className="grow" />
+        <ScopeChip scope={scope} />
       </header>
 
       {error && (
@@ -330,188 +357,206 @@ export default function TraeApiServicePage() {
         </Alert>
       )}
 
-      {/* ---- 网关 ---- */}
-      <Card className="mb-6 gap-0 py-0">
-        <div className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Power className="size-4 text-muted-foreground" />
-              {t("trae.stats.api.gateway.enable")}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {t("trae.stats.api.gateway.desc", {
-                upstream: status?.upstream || "trae-api-cn.mchost.guru",
-              })}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {saving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
-            <DemoAction>
-              <Switch
-                checked={config.enabled}
-                disabled={saving}
-                onCheckedChange={(checked) => void persist({ enabled: checked })}
-                aria-label={t("trae.stats.api.gateway.enable")}
+      {/* ---- 主区：子导航 + 分区内容（PLAN §3.9：替代原来的 6 卡纵向堆叠）---- */}
+      <div className="flex min-w-0 flex-col gap-6 lg:flex-row lg:gap-8">
+        <GatewaySubnav
+          active={sub}
+          items={TRAE_GATEWAY_SUBNAV}
+          onSelect={setSub}
+          className="lg:w-44 lg:shrink-0"
+        />
+
+        <div className="min-w-0 flex-1">
+          {/* ---- 概览：服务状态 + 接入地址 + 接入指引 ---- */}
+          {sub === "overview" && (
+            <>
+              {/* ---- 网关 ---- */}
+              <Card className="mb-6 gap-0 py-0">
+                <div className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <Power className="size-4 text-muted-foreground" />
+                      {t("trae.stats.api.gateway.enable")}
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("trae.stats.api.gateway.desc", {
+                        upstream: status?.upstream || "trae-api-cn.mchost.guru",
+                      })}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {saving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+                    <DemoAction>
+                      <Switch
+                        checked={config.enabled}
+                        disabled={saving}
+                        onCheckedChange={(checked) => void persist({ enabled: checked })}
+                        aria-label={t("trae.stats.api.gateway.enable")}
+                      />
+                    </DemoAction>
+                    <DemoAction>
+                      <Button variant="outline" size="sm" onClick={() => void loadAll()}>
+                        <RefreshCw />
+                        {t("trae.stats.api.refresh")}
+                      </Button>
+                    </DemoAction>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">{t("trae.stats.api.gateway.bindAddr")}</span>
+                    <Select value={config.bindAddr} onValueChange={onBindAddrChange} disabled={saving}>
+                      <SelectTrigger size="sm" className="w-52" aria-label={t("trae.stats.api.gateway.bindAddr")}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={LOOPBACK}>{t("trae.stats.api.gateway.bindLoopback")}</SelectItem>
+                        <SelectItem value={LAN}>{t("trae.stats.api.gateway.bindLan")}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">{t("trae.stats.api.gateway.port")}</span>
+                    <DemoAction>
+                      <Input
+                        className="h-8 w-28"
+                        inputMode="numeric"
+                        value={portDraft}
+                        onChange={(event) => setPortDraft(event.target.value.replace(/[^\d]/g, ""))}
+                        onBlur={commitPort}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") commitPort();
+                        }}
+                        aria-label={t("trae.stats.api.gateway.port")}
+                      />
+                    </DemoAction>
+                  </div>
+                  <span className="flex items-center gap-1.5 text-xs">
+                    {t("trae.stats.api.gateway.statusLabel")}
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-1.5 font-medium",
+                        running ? "text-success" : "text-muted-foreground",
+                      )}
+                    >
+                      <span className={cn("size-2 rounded-full", running ? "bg-success" : "bg-muted-foreground/50")} />
+                      {running
+                        ? t("trae.stats.api.gateway.running")
+                        : t("trae.stats.api.gateway.stopped")}
+                    </span>
+                  </span>
+                  <DemoAction>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="ml-auto"
+                      disabled={openingDir}
+                      onClick={() => void onOpenDataDir()}
+                    >
+                      {openingDir ? <Loader2 className="animate-spin" /> : <FolderOpen />}
+                      {t("trae.stats.api.gateway.openDataDir")}
+                    </Button>
+                  </DemoAction>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-5 py-3 text-xs text-muted-foreground">
+                  {t("trae.stats.api.gateway.noteLead")}
+                  <code className="font-mono">/v1/chat/completions</code>
+                  {t("trae.stats.api.gateway.noteTail")}
+                  {config.bindAddr === LAN && t("trae.stats.api.gateway.lanWarning")}
+                </div>
+
+                {status?.lastError && (
+                  <div className="border-t border-border/60 px-5 py-3">
+                    <p className="text-xs text-muted-foreground">{t("trae.stats.api.gateway.lastError")}</p>
+                    <p className="mt-1 break-words text-xs text-destructive">{status.lastError}</p>
+                  </div>
+                )}
+              </Card>
+
+              {/* ---- 接入地址 ---- */}
+              {/* WorkBuddy 此处是「按版本」逐 region 一行；Trae 无 region，故只有一条。 */}
+              <Card className="mb-6 gap-0 py-0">
+                <div className="border-b border-border/60 px-5 py-3">
+                  <span className="text-sm font-semibold">{t("trae.stats.api.endpoint.title")}</span>
+                </div>
+                <div className="px-5 py-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-muted-foreground">{t("trae.stats.api.endpoint.baseUrl")}</span>
+                    <code className="min-w-0 break-all rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">
+                      {baseUrl}
+                    </code>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void copyText(baseUrl, t("trae.stats.api.endpoint.copied"))}
+                    >
+                      <Copy />
+                      {t("trae.stats.api.copy")}
+                    </Button>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    <span>{t("trae.stats.api.endpoint.keyPrefix")}</span>
+                    <code className="font-mono">
+                      {keyPrefix ? `${keyPrefix}…` : t("trae.stats.api.endpoint.noKey")}
+                    </code>
+                  </div>
+                </div>
+              </Card>
+
+              {/* ---- 接入指引（单条 Base URL，无 region Tabs） ---- */}
+              <TraeIntegrationGuide
+                baseUrl={baseUrl}
+                model={config.defaultModel}
+                keyPrefix={keyPrefix}
               />
-            </DemoAction>
-            <DemoAction>
-              <Button variant="outline" size="sm" onClick={() => void loadAll()}>
-                <RefreshCw />
-                {t("trae.stats.api.refresh")}
-              </Button>
-            </DemoAction>
-          </div>
+            </>
+          )}
+
+          {/* ---- 密钥（多 Key + 归属产品线） ---- */}
+          {/* 替代 WorkBuddy 的单 Key 卡：这里支持多把 Key，每把绑定一条产品线。 */}
+          {sub === "keys" && (
+            <TraeApiKeyTable defaultVariant={variant} onChanged={() => void loadAll()} />
+          )}
+
+          {/* ---- 模型清单（按程序位读客户端缓存，可重新读取：见 TraeModelList 的模块头） ---- */}
+          {sub === "models" && (
+            <TraeModelList
+              sources={modelSources}
+              region={traeRegionOf(variant)}
+              defaultModel={config.defaultModel}
+              refreshing={refreshingModels}
+              onRefresh={() => void onRefreshModels()}
+            />
+          )}
+
+          {/* ---- 账号池（与 WorkBuddy 侧共用同一张卡） ---- */}
+          {sub === "pool" && (
+            <AccountPoolCard
+              pool={status?.pool ?? null}
+              accounts={status?.accounts ?? []}
+              diagnose={status?.diagnose ?? []}
+              preferredUid={config.preferredUid}
+              onPreferredUidChange={(uid) => void persist({ preferredUid: uid })}
+              saving={saving}
+              totalRequests={status?.totalRequests ?? null}
+            />
+          )}
+
+          {/* ---- 请求日志 ---- */}
+          {sub === "logs" && (
+            <TraeRequestLog logs={logs} clearing={clearing} onClear={() => void onClearLogs()} />
+          )}
         </div>
-
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t("trae.stats.api.gateway.bindAddr")}</span>
-            <Select value={config.bindAddr} onValueChange={onBindAddrChange} disabled={saving}>
-              <SelectTrigger size="sm" className="w-52" aria-label={t("trae.stats.api.gateway.bindAddr")}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={LOOPBACK}>{t("trae.stats.api.gateway.bindLoopback")}</SelectItem>
-                <SelectItem value={LAN}>{t("trae.stats.api.gateway.bindLan")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t("trae.stats.api.gateway.port")}</span>
-            <DemoAction>
-              <Input
-                className="h-8 w-28"
-                inputMode="numeric"
-                value={portDraft}
-                onChange={(event) => setPortDraft(event.target.value.replace(/[^\d]/g, ""))}
-                onBlur={commitPort}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") commitPort();
-                }}
-                aria-label={t("trae.stats.api.gateway.port")}
-              />
-            </DemoAction>
-          </div>
-          <span className="flex items-center gap-1.5 text-xs">
-            {t("trae.stats.api.gateway.statusLabel")}
-            <span
-              className={cn(
-                "inline-flex items-center gap-1.5 font-medium",
-                running ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground",
-              )}
-            >
-              <span className={cn("size-2 rounded-full", running ? "bg-emerald-500" : "bg-muted-foreground/50")} />
-              {running
-                ? t("trae.stats.api.gateway.running")
-                : t("trae.stats.api.gateway.stopped")}
-            </span>
-          </span>
-          <DemoAction>
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-auto"
-              disabled={openingDir}
-              onClick={() => void onOpenDataDir()}
-            >
-              {openingDir ? <Loader2 className="animate-spin" /> : <FolderOpen />}
-              {t("trae.stats.api.gateway.openDataDir")}
-            </Button>
-          </DemoAction>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 border-t border-border/60 px-5 py-3 text-xs text-muted-foreground">
-          {t("trae.stats.api.gateway.noteLead")}
-          <code className="font-mono">/v1/chat/completions</code>
-          {t("trae.stats.api.gateway.noteTail")}
-          {config.bindAddr === LAN && t("trae.stats.api.gateway.lanWarning")}
-        </div>
-
-        {status?.lastError && (
-          <div className="border-t border-border/60 px-5 py-3">
-            <p className="text-xs text-muted-foreground">{t("trae.stats.api.gateway.lastError")}</p>
-            <p className="mt-1 break-words text-xs text-destructive">{status.lastError}</p>
-          </div>
-        )}
-      </Card>
-
-      {/* ---- 接入地址 ---- */}
-      {/* WorkBuddy 此处是「按版本」逐 region 一行；Trae 无 region，故只有一条。 */}
-      <Card className="mb-6 gap-0 py-0">
-        <div className="border-b border-border/60 px-5 py-3">
-          <span className="text-sm font-semibold">{t("trae.stats.api.endpoint.title")}</span>
-        </div>
-        <div className="px-5 py-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-xs text-muted-foreground">{t("trae.stats.api.endpoint.baseUrl")}</span>
-            <code className="min-w-0 break-all rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">
-              {baseUrl}
-            </code>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => void copyText(baseUrl, t("trae.stats.api.endpoint.copied"))}
-            >
-              <Copy />
-              {t("trae.stats.api.copy")}
-            </Button>
-          </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-            <span>{t("trae.stats.api.endpoint.keyPrefix")}</span>
-            <code className="font-mono">
-              {keyPrefix ? `${keyPrefix}…` : t("trae.stats.api.endpoint.noKey")}
-            </code>
-          </div>
-        </div>
-      </Card>
-
-      {/* ---- API Key（多 Key + 归属产品线） ---- */}
-      {/* 替代 WorkBuddy 的单 Key 卡：这里支持多把 Key，每把绑定一条产品线。 */}
-      <TraeApiKeyTable
-        className="mb-6"
-        defaultVariant={variant}
-        onChanged={() => void loadAll()}
-      />
-
-      {/* ---- 账号池（与 WorkBuddy 侧共用同一张卡） ---- */}
-      <AccountPoolCard
-        pool={status?.pool ?? null}
-        accounts={status?.accounts ?? []}
-        diagnose={status?.diagnose ?? []}
-        preferredUid={config.preferredUid}
-        onPreferredUidChange={(uid) => void persist({ preferredUid: uid })}
-        saving={saving}
-        totalRequests={status?.totalRequests ?? null}
-        className="mb-6"
-      />
-
-      {/* ---- 模型清单（按程序位读客户端缓存，可重新读取：见 TraeModelList 的模块头） ---- */}
-      <TraeModelList
-        sources={modelSources}
-        region={traeRegionOf(variant)}
-        defaultModel={config.defaultModel}
-        refreshing={refreshingModels}
-        onRefresh={() => void onRefreshModels()}
-        className="mb-6"
-      />
-
-      {/* ---- 接入指引（单条 Base URL，无 region Tabs） ---- */}
-      <TraeIntegrationGuide
-        baseUrl={baseUrl}
-        model={config.defaultModel}
-        keyPrefix={keyPrefix}
-        className="mb-6"
-      />
-
-      {/* ---- 请求日志 ---- */}
-      <TraeRequestLog logs={logs} clearing={clearing} onClear={() => void onClearLogs()} />
+      </div>
 
       {/* ---- 局域网风险确认 ---- */}
       <Dialog open={riskOpen} onOpenChange={setRiskOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <ShieldAlert className="size-4 text-amber-500" />
+              <ShieldAlert className="size-4 text-warning" />
               {t("trae.stats.api.lanDialog.title")}
             </DialogTitle>
             <DialogDescription>{t("trae.stats.api.lanDialog.desc")}</DialogDescription>

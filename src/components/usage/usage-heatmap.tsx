@@ -15,7 +15,7 @@
  * 热力图的价值是「哪个时段最忙」，把它当绝对量读会误导。aria-label 也只说强度。
  */
 
-import { useLocale, useT } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { HeatmapMatrix } from "@/lib/usage-charts";
 
 const LEVEL_CLASS = [
@@ -38,7 +38,6 @@ function weekdayLabels(locale: string): string[] {
 }
 
 export function UsageHeatmap({ matrix }: { matrix: HeatmapMatrix }) {
-  const t = useT();
   const locale = useLocale();
   const labels = weekdayLabels(locale);
   const hourTicks = [0, 6, 12, 18, 23];
@@ -48,11 +47,11 @@ export function UsageHeatmap({ matrix }: { matrix: HeatmapMatrix }) {
       <div className="min-w-0 space-y-1">
         {matrix.cells.map((row, rowIndex) => (
           <div key={labels[rowIndex]} className="flex items-center gap-2">
-            <span className="w-8 shrink-0 text-right text-[11px] text-muted-foreground">
+            <span className="w-[30px] shrink-0 text-right text-[11px] text-muted-foreground">
               {labels[rowIndex]}
             </span>
             <div
-              className="grid min-w-0 flex-1 gap-1"
+              className="grid min-w-0 flex-1 gap-[3px]"
               style={{ gridTemplateColumns: `repeat(${matrix.cols}, minmax(0, 1fr))` }}
             >
               {row.map((value, colIndex) => {
@@ -60,7 +59,7 @@ export function UsageHeatmap({ matrix }: { matrix: HeatmapMatrix }) {
                 return (
                   <span
                     key={colIndex}
-                    className={`aspect-square min-w-0 rounded-[2px] ${LEVEL_CLASS[level]}`}
+                    className={`h-[17px] min-w-0 rounded-[2px] ${LEVEL_CLASS[level]}`}
                     title={`${labels[rowIndex]} ${String(colIndex).padStart(2, "0")}:00 · ${Math.round((value / matrix.max) * 100)}%`}
                   />
                 );
@@ -70,7 +69,7 @@ export function UsageHeatmap({ matrix }: { matrix: HeatmapMatrix }) {
         ))}
       </div>
       <div className="mt-2 flex items-center gap-2">
-        <span className="w-8 shrink-0" aria-hidden="true" />
+        <span className="w-[30px] shrink-0" aria-hidden="true" />
         <div
           className="grid min-w-0 flex-1 text-[10px] text-muted-foreground"
           style={{ gridTemplateColumns: `repeat(${matrix.cols}, minmax(0, 1fr))` }}
@@ -83,7 +82,6 @@ export function UsageHeatmap({ matrix }: { matrix: HeatmapMatrix }) {
           ))}
         </div>
       </div>
-      <p className="mt-1 text-[10px] text-muted-foreground">{t("wbStats.usage.trend.heatmapDesc")}</p>
     </div>
   );
 }

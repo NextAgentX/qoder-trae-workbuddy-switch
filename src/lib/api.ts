@@ -4,6 +4,7 @@ import type {
   AccountRecord,
   AccountStrategy,
   AccountStrategyMap,
+  AccountTokenTodayResponse,
   ApiKeyRecord,
   AppStatus,
   AutoBackupConfig,
@@ -16,9 +17,17 @@ import type {
   CodeBuddyCliSwitchResult,
   CodeBuddyCnIdeStatus,
   CodeBuddyCnIdeSwitchResult,
+  CodebuddyPluginDetectResult,
+  CodebuddyPluginSwitchResult,
   CheckinConfig,
   CheckinLog,
   CheckinResult,
+  ClientLimitsResponse,
+  ClientSettingsBackupsResponse,
+  ClientSettingsDiffResponse,
+  ClientSettingsReadResponse,
+  ClientSettingsSlotsResponse,
+  ClientSettingsWriteResult,
   CreateApiKeyResult,
   CreditExpiry,
   CreditStatistics,
@@ -33,6 +42,7 @@ import type {
   ImportPreviewAccount,
   ImportResult,
   ImportSummary,
+  JetbrainsCodebuddyPluginStatus,
   OAuthPollResult,
   OAuthStartResult,
   ProxyStatus,
@@ -45,14 +55,21 @@ import type {
   Session,
   SessionFingerprint,
   SessionReplicaResponse,
+  SkillCopyReport,
+  SkillImportResult,
+  SkillListResponse,
+  SkillToggleResult,
   SyncSessionReplicaItem,
   SyncSessionReplicaResponse,
+  UnifySessionReplicaItem,
+  UnifySessionReplicaResponse,
   SwitchConfig,
   SwitchResult,
   TrashList,
   TravelConfig,
   TravelStatus,
   UpdateInfo,
+  VscodeCodebuddyPluginStatus,
 } from "./types";
 import { demoModeEnabled, demoUnavailableMessage } from "./demo-mode";
 import { displayText } from "./display-text";
@@ -132,6 +149,9 @@ const DEMO_READ_COMMANDS = new Set([
   "credits",
   "checkin_status",
   "get_codebuddy_cli_status", "get_codebuddy_cn_ide_status", "get_checkin_status",
+  // 编辑器内 CodeBuddy 插件（VS Code / JetBrains）的**只读**状态。
+  // ⚠️ switch / detect 是动作（detect 会读本机 secret），一律不进这里。
+  "get_vscode_codebuddy_plugin_status", "get_jetbrains_codebuddy_plugin_status",
   "get_credit_expiry", "get_credit_statistics", "get_auto_checkin_config",
   "get_token_statistics",
   "get_checkin_logs", "get_auto_rotate_config", "rotate_status", "get_rotate_logs",
@@ -144,6 +164,8 @@ const DEMO_READ_COMMANDS = new Set([
   // API 网关只读命令（演示站需返回虚构数据，否则 build:demo 报错）
   "get_gateway_config", "gateway_status", "list_api_keys", "get_gateway_models",
   "get_account_strategy", "get_disabled_models", "get_gateway_logs",
+  // 「今日 Token」（**只读**观测）：演示站需返回虚构数据，否则 build:demo 报错。
+  "get_account_token_today",
   // Trae 分区只读命令（演示站需返回虚构数据，否则 build:demo 报错）。
   // 只登记**只读**命令：写操作（签到 / 增删账号 / 切换 / 重置设备…）一律不进这里，
   // 由 `DemoAction` 包裹后在演示模式下统一提示不可操作。
@@ -160,6 +182,15 @@ const DEMO_READ_COMMANDS = new Set([
   // P7 全局备份**只读**命令（导出 / 自动备份列表 / 自动备份配置）。
   // 预览 / 导入 / 恢复 / 保存配置是**动作**，一律不进这里（由页面侧处理不可用）。
   "export_backup", "list_auto_backups", "get_auto_backup_config",
+  // 客户端限流台账（**只读**观测）：演示站需返回虚构数据，否则 build:demo 报错。
+  "client_limits",
+  // Skill 管理（**只读**清单）：演示站需返回虚构数据，否则 build:demo 报错。
+  // ⚠️ 启停 / 跨区搬迁 / 导入 / 打开目录都是写 / 动作，一律不进这里。
+  "list_skills",
+  // 上游客户端 settings.json 托管（**只读** 4 条）：演示站需返回虚构数据，否则 build:demo 报错。
+  // ⚠️ patch（写）/ restore（写）是写操作，一律不进这里（由页面侧处理不可用）。
+  "list_client_settings_slots", "read_client_settings",
+  "list_client_settings_backups", "diff_client_settings",
 ]);
 
 export function isDemoMode(): boolean {
@@ -225,8 +256,19 @@ const ROUTES: Record<string, Route> = {
   get_codebuddy_cn_ide_status: { method: "GET", path: "/api/codebuddy-cn-ide/status" },
   switch_codebuddy_cn_ide_account: { method: "POST", path: "/api/codebuddy-cn-ide/switch" },
   detect_codebuddy_cn_ide_account: { method: "POST", path: "/api/codebuddy-cn-ide/detect" },
+  // P0 §3.3 B 表（**待新增 → 已落地**）：编辑器内 CodeBuddy 插件两个程序位。
+  // 路径与宿主 `commands.rs` / `api.rs` 的 `/api/<name>/…` 一一对应，命令名即路由键。
+  get_vscode_codebuddy_plugin_status: { method: "GET", path: "/api/vscode-codebuddy-plugin/status" },
+  switch_vscode_codebuddy_plugin_account: { method: "POST", path: "/api/vscode-codebuddy-plugin/switch" },
+  detect_vscode_codebuddy_plugin_account: { method: "POST", path: "/api/vscode-codebuddy-plugin/detect" },
+  get_jetbrains_codebuddy_plugin_status: { method: "GET", path: "/api/jetbrains-codebuddy-plugin/status" },
+  switch_jetbrains_codebuddy_plugin_account: { method: "POST", path: "/api/jetbrains-codebuddy-plugin/switch" },
+  detect_jetbrains_codebuddy_plugin_account: { method: "POST", path: "/api/jetbrains-codebuddy-plugin/detect" },
   delete_account: { method: "POST", path: "/api/delete" },
   set_account_remark: { method: "POST", path: "/api/account/remark" },
+  set_account_group: { method: "POST", path: "/api/account/group" },
+  // 「今日 Token」按账号聚合（**只读**）：`region` / `force` 走 query ⇒ GET。
+  get_account_token_today: { method: "GET", path: "/api/account/token-today" },
   oauth_start: { method: "POST", path: "/api/oauth/start" },
   oauth_status: { method: "POST", path: "/api/oauth/status" },
   import_local: { method: "POST", path: "/api/import-local" },
@@ -241,6 +283,8 @@ const ROUTES: Record<string, Route> = {
   import_backup: { method: "POST", path: "/api/backup/import" },
   list_auto_backups: { method: "GET", path: "/api/backup/auto/list" },
   restore_auto_backup: { method: "POST", path: "/api/backup/auto/restore" },
+  // Q1 · 诊断包导出（只读；凭据闸门在 core，命中即拒绝发出）。
+  export_diagnostic: { method: "POST", path: "/api/diagnostics/export" },
   get_auto_backup_config: { method: "GET", path: "/api/backup/auto/config" },
   save_auto_backup_config: { method: "POST", path: "/api/backup/auto/config" },
   switch_account: { method: "POST", path: "/api/switch" },
@@ -252,7 +296,27 @@ const ROUTES: Record<string, Route> = {
   // P8 · **安全同步（增量追加）** —— POST：批量传 `{ sourceCid, targetCid }[]`。
   // ★ **写操作**（会往目标 jsonl 追加行）⇒ 不进演示只读命令表。
   sync_session_replicas: { method: "POST", path: "/api/sessions/sync" },
+  // P8 · **分歧处理（覆盖式统一）** —— POST：批量传 `{ sourceCid, targetCid }[]`。
+  // ★ **破坏性写操作**（目标原有的分歧内容会被丢弃）⇒ 不进演示只读命令表。
+  unify_session_replicas: { method: "POST", path: "/api/sessions/unify" },
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
+  // 客户端限流台账（**只读**观测：账号 × 模型 × 恢复时刻）。
+  client_limits: { method: "GET", path: "/api/client/limits" },
+  // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入。
+  // ⚠️ 只有 `list_skills` 是**只读**（进演示只读表）；其余 4 条是写 / 动作，不进演示表。
+  list_skills: { method: "GET", path: "/api/skills" },
+  set_skill_enabled: { method: "POST", path: "/api/skills/enabled" },
+  copy_skills_cross: { method: "POST", path: "/api/skills/copy-cross" },
+  import_skill: { method: "POST", path: "/api/skills/import" },
+  open_skills_dir: { method: "POST", path: "/api/skills/open-dir" },
+  // 上游客户端 settings.json 统一托管（读 · 编辑 · 备份 · 恢复 · 差异比对）。
+  // ⚠️ 只读的 4 条（slots / read / backups / diff）进演示只读表；patch / restore 是写操作，不进。
+  list_client_settings_slots: { method: "GET", path: "/api/client-settings/slots" },
+  read_client_settings: { method: "GET", path: "/api/client-settings/read" },
+  patch_client_settings: { method: "POST", path: "/api/client-settings/patch" },
+  list_client_settings_backups: { method: "GET", path: "/api/client-settings/backups" },
+  restore_client_settings_backup: { method: "POST", path: "/api/client-settings/restore" },
+  diff_client_settings: { method: "POST", path: "/api/client-settings/diff" },
   migrate_account_data: { method: "POST", path: "/api/migrate/account" },
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
@@ -519,6 +583,7 @@ function normalizeAccountMeta(account: AccountMeta): AccountMeta {
     enterpriseName: displayText(account.enterpriseName),
     needsReloginReason: displayText(account.needsReloginReason),
     remark: displayText(account.remark),
+    groupName: displayText(account.groupName),
   };
 }
 
@@ -602,6 +667,45 @@ export function detectCodebuddyCnIdeAccount(): Promise<{
   message?: string;
 }> {
   return call("detect_codebuddy_cn_ide_account");
+}
+
+// ---------------------------------------------------------------------------
+// P0 §3.3 B 表 · 编辑器内 CodeBuddy 插件（VS Code / JetBrains）两个程序位
+// ---------------------------------------------------------------------------
+//
+// 与 `codebuddy_cn_ide` 同构（状态 / 切换 / 探测三条），差别只在**目标**：
+// VS Code 写 `state.vscdb` 的 Safe Storage secret，JetBrains 写
+// `options/secret-storage.xml`。后端两条命令走**同一个** `programs::switch` 出口，
+// 故返回形状一致（[`CodebuddyPluginSwitchResult`]），前端也只定义一份类型。
+
+export function getVscodeCodebuddyPluginStatus(): Promise<VscodeCodebuddyPluginStatus> {
+  return call("get_vscode_codebuddy_plugin_status");
+}
+
+export function switchVscodeCodebuddyPluginAccount(
+  accountId: string,
+  restart = true,
+): Promise<CodebuddyPluginSwitchResult> {
+  return call("switch_vscode_codebuddy_plugin_account", { accountId, restart });
+}
+
+export function detectVscodeCodebuddyPluginAccount(): Promise<CodebuddyPluginDetectResult> {
+  return call("detect_vscode_codebuddy_plugin_account");
+}
+
+export function getJetbrainsCodebuddyPluginStatus(): Promise<JetbrainsCodebuddyPluginStatus> {
+  return call("get_jetbrains_codebuddy_plugin_status");
+}
+
+export function switchJetbrainsCodebuddyPluginAccount(
+  accountId: string,
+  restart = true,
+): Promise<CodebuddyPluginSwitchResult> {
+  return call("switch_jetbrains_codebuddy_plugin_account", { accountId, restart });
+}
+
+export function detectJetbrainsCodebuddyPluginAccount(): Promise<CodebuddyPluginDetectResult> {
+  return call("detect_jetbrains_codebuddy_plugin_account");
 }
 
 
@@ -745,19 +849,39 @@ export function previewImportBackup(
  * ★ P7 T02：导入全局备份（**先快照** → 逐 scope 合并 → 汇总）。
  *
  * 默认冲突策略**保留本地**（D16）⇒ 连导两次第二次全「跳过」（幂等）。结果走**部分失败态**
- * （`failed` / `retryable` + 可展开明细），**不许**只提示「导入完成」（§3.5 文案红线）。
+ * （`failed` / `retryableScopes` + 逐 scope 明细），**不许**只提示「导入完成」（§3.5 文案红线）。
+ *
+ * ★ C1 `onlyScopes`：非空 ⇒ **只导入这些 scope**，即「只重试失败项」——
+ * 把上次结果的 `retryableScopes` 原样回传即可，**不需要重新选择文件**。
+ * 失败单元就是 scope（后端逐 scope 事务），因此这是最细的诚实粒度。
  */
 export function importBackup(
   fileText: string,
   policy: BackupConflictPolicy,
   selection: BackupSelectionState,
+  onlyScopes: readonly string[] = [],
 ): Promise<ImportSummary> {
-  return call<ImportSummary>("import_backup", { fileText, policy, selection });
+  return call<ImportSummary>("import_backup", {
+    fileText,
+    policy,
+    selection,
+    onlyScopes: [...onlyScopes],
+  });
 }
 
 /** P7 T02：列出自动备份 / 导入前快照（最新在前）。 */
 export function listAutoBackups(): Promise<{ backups: AutoBackupEntry[] }> {
   return call<{ backups: AutoBackupEntry[] }>("list_auto_backups");
+}
+
+/**
+ * Q1：导出**诊断包**（只读）。
+ *
+ * 后端在返回前已按 `CREDENTIAL_KEYS` 递归剥离并做**纯文本闸门**（命中即报错、
+ * 不返回）⇒ 前端只负责落盘，**不得**在这里再拼内容或绕过该闸门。
+ */
+export function exportDiagnostic(): Promise<{ name: string; text: string }> {
+  return call<{ name: string; text: string }>("export_diagnostic");
 }
 
 /** P7 T02：从自动备份 / 导入前快照**恢复**（覆盖策略；恢复本身也可撤销）。 */
@@ -803,6 +927,50 @@ export function setAccountRemark(
     accountId,
     remark,
   }).then(normalizeAccountMeta);
+}
+
+/**
+ * 设置账号自定义分组（**字段级更新**）。
+ *
+ * 与 {@link setAccountRemark} 同源：只改 `groupName` 一个键、绝不整条写回（那会把 token 抹掉）。
+ * 传空串即移出分组（后端会删掉账号库里的 `groupName` 键，而不是写一个空串）。
+ */
+export function setAccountGroup(
+  accountId: string,
+  group: string,
+  region?: Region,
+): Promise<AccountMeta> {
+  return call<AccountMeta>("set_account_group", {
+    accountId,
+    group,
+    region: region ?? "cn",
+  }).then(normalizeAccountMeta);
+}
+
+/**
+ * 读取「今日 Token」按账号聚合（**只读**观测）。
+ *
+ * ## 数据来源与诚实边界（UI 渲染红线）
+ *
+ * 后端把**两路**用量合到一起：① 客户端自身 CLI 落盘的用量；② 经本网关的请求日志。
+ * 三条边界（见 {@link AccountTokenTodayResponse}）：
+ * - `accounts` 里**缺失**某账号 = 「今日无记录 / 未知」⇒ UI 渲染 **「—」**，**不得**当 0；
+ * - 出现在 `accounts` 里的 `0` 是**真实 0**；
+ * - `gatewayTruncated: true` ⇒ 网关部分只是**下界** ⇒ UI 渲染 **`≥N`** 并说明。
+ *
+ * @param force 强制重算（忽略后端当日缓存）；缺省 `false`。
+ */
+export function getAccountTokenToday(
+  region?: Region,
+  force = false,
+): Promise<AccountTokenTodayResponse> {
+  const args: Record<string, unknown> = {};
+  if (region) args.region = region;
+  if (force) args.force = true;
+  return call<AccountTokenTodayResponse>(
+    "get_account_token_today",
+    Object.keys(args).length > 0 ? args : undefined,
+  );
 }
 
 /** 读取账号切换与账号列表展示配置（全局单份）。 */
@@ -890,6 +1058,46 @@ export function syncSessionReplicas(
   region?: Region,
 ): Promise<SyncSessionReplicaResponse> {
   return call("sync_session_replicas", { items, ...(region ? { region } : {}) });
+}
+
+/**
+ * P8 · **分歧处理（覆盖式统一）** —— 把**用户选定保留的那一份**覆盖到其余副本。
+ *
+ * ## ⚠️ 这是本仓**唯一会丢弃会话内容**的写操作
+ *
+ * 分歧的定义是「双方在共同旧版之后**各自改过**」⇒ 加法**永远**合不到一起
+ * （各自都有对方没有的内容）。`PLAN.md` §3.15.2 因此写死：
+ * 「**有分叉时必须先选保留哪一份**才能统一（**不许静默覆盖**）」。
+ *
+ * ⇒ 调用方**必须**先二次确认，并把 `lostLines`（会丢几条）**如实**告诉用户；
+ * 后端**覆盖前先备份**目标原文（`backup` 字段回传路径），备份不成功就**不覆盖**。
+ *
+ * ⚠️ **写操作**：不进演示站的只读命令表（`DEMO_READ_COMMANDS`）。
+ */
+export function unifySessionReplicas(
+  items: UnifySessionReplicaItem[],
+  region?: Region,
+): Promise<UnifySessionReplicaResponse> {
+  return call("unify_session_replicas", { items, ...(region ? { region } : {}) });
+}
+
+/**
+ * 客户端限流台账（**只读**观测）：账号 × 模型 × 恢复时刻。
+ *
+ * 从客户端自身落盘的三张只读表 join 得出 —— **不依赖网关、不代理客户端流量**：
+ * ① `projects` 下递归的 `.jsonl`（限流错误本体）② `workbuddy.db` sessions（model + user_id，**只读**）
+ * ③ 账号库（uid → nickname）。详见 core `client_limits.rs`。
+ *
+ * @param sinceDays `0` = 全量扫描；缺省 = 近 7 天（有界扫描，PRD R10）。
+ */
+export function clientLimits(
+  region?: Region,
+  sinceDays?: number,
+): Promise<ClientLimitsResponse> {
+  const args: Record<string, unknown> = {};
+  if (region) args.region = region;
+  if (typeof sinceDays === "number") args.sinceDays = sinceDays;
+  return call("client_limits", Object.keys(args).length > 0 ? args : undefined);
 }
 
 export function copySessions(
@@ -1357,11 +1565,32 @@ export function proxyDisable(): Promise<ProxyStatus> {
 }
 
 /**
+ * 打开**某作用域**的客户端数据目录（在文件管理器中）—— **参数化命令 `open_data_dir` 的单一入口**。
+ *
+ * 平台与区域**都由 `scope` 决定** ⇒ 调用方不必再写
+ * `product === "workbuddy" ? openWorkbuddyDataDir(…) : openTraeDataDir(…)`
+ * 这类平台分支（§1.2 的收敛纪律：平台差异走数据，不走组件分支）。
+ *
+ * 返回形状：成功 `{ok, path, region}`；平台不支持时是**结构化 `Unsupported`**
+ * （`{capability, label, supportedOn, reason}`，**不带 `ok`**）—— 调用方据此区分
+ * 「做不到」与「失败」，而不是把两者都当错误弹。
+ */
+export function openDataDir(scope: Scope): Promise<{
+  ok?: boolean;
+  path?: string;
+  capability?: string;
+  label?: string;
+  supportedOn?: string;
+  reason?: string;
+}> {
+  return call("open_data_dir", { scope });
+}
+
+/**
  * 打开 **WorkBuddy 客户端**的数据目录（在文件管理器中）。
  *
- * 返回形状与 Trae 侧的 [`openTraeDataDir`] 同构：成功 `{ok, path, region}`，
- * 平台不支持时是**结构化 `Unsupported`**（`{capability, label, supportedOn, reason}`，
- * **不带 `ok`**）—— 调用方据此区分「做不到」与「失败」，而不是把两者都当错误弹。
+ * ⚠️ 这是 {@link openDataDir} 的**薄壳**（只为既有调用点保留）。新代码请直接传 `scope` ——
+ * 多一层「按平台选函数」的分支正是 P2 要消除的形态。
  */
 export function openWorkbuddyDataDir(region?: Region): Promise<{
   ok?: boolean;
@@ -1373,7 +1602,7 @@ export function openWorkbuddyDataDir(region?: Region): Promise<{
 }> {
   // P5 T03：改调参数化命令 `open_data_dir`（`scope` 决定平台与区域）。旧 `open_workbuddy_data_dir`
   // 保留为别名（见 `ALIASES`）。
-  return call("open_data_dir", { scope: scopeOf("workbuddy", region ?? "cn") });
+  return openDataDir(scopeOf("workbuddy", region ?? "cn"));
 }
 
 export function listApiKeys(): Promise<{ keys: ApiKeyRecord[] }> {
@@ -1448,6 +1677,114 @@ export function clearGatewayLogs(): Promise<{ ok: boolean }> {
 /** 在系统文件管理器中打开该版本的账号库所在目录（设置页）。 */
 export function openAccountsDir(region?: Region): Promise<{ ok: boolean }> {
   return call("open_accounts_dir", region ? { region } : undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入
+// ---------------------------------------------------------------------------
+
+/**
+ * 列出该 region 用户级 skills 目录下的 skill 清单（**只读**）。
+ *
+ * ⚠️ 读的是**运行本应用那台机器**上的 `{data_dir}/skills`。webui 直连远程服务端时，
+ * 那是**服务端**的目录（界面据此给出「机器来源」提示）。
+ */
+export function listSkills(region?: Region): Promise<SkillListResponse> {
+  return call("list_skills", region ? { region } : undefined);
+}
+
+/**
+ * 启停一个 skill —— 行级改写 `SKILL.md` frontmatter 的两个官方原生字段。
+ *
+ * 幂等：已是目标状态时后端直接返回 `changed: false`（不写盘、不备份）。
+ */
+export function setSkillEnabled(
+  region: Region | undefined,
+  dirName: string,
+  enabled: boolean,
+): Promise<SkillToggleResult> {
+  return call("set_skill_enabled", { ...regionArg(region), dirName, enabled });
+}
+
+/**
+ * 跨 region「合并补齐」搬迁：目标侧缺的补，同名冲突**保留目标侧**（绝不静默覆盖）。
+ *
+ * 天然幂等：重复执行不产生新内容。两个 region 都必须显式给出。
+ */
+export function copySkillsCross(
+  sourceRegion: Region,
+  targetRegion: Region,
+): Promise<SkillCopyReport> {
+  return call("copy_skills_cross", { sourceRegion, targetRegion });
+}
+
+/** 从**本地目录或 zip** 导入一个 skill（同名冲突保留目标侧）。 */
+export function importSkill(
+  region: Region | undefined,
+  sourcePath: string,
+): Promise<SkillImportResult> {
+  return call("import_skill", { ...regionArg(region), sourcePath });
+}
+
+/** 在系统文件管理器中打开该 region 的 skills 目录（不存在时先创建）。 */
+export function openSkillsDir(region?: Region): Promise<{ ok: boolean; region: string; dir: string }> {
+  return call("open_skills_dir", region ? { region } : undefined);
+}
+
+// ---------------------------------------------------------------------------
+// 上游客户端 settings.json 统一托管（读 · 编辑 · 备份 · 恢复 · 差异比对）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 管的是**被本工具代理的上游客户端**（WorkBuddy 两版 + Trae 四个程序位）自己的
+// `settings.json`，**不是**本工具自己的 `~/.buddy-switch/**`。槽位路径由后端规格表
+// （core `client_settings::CLIENT_SLOTS`）唯一决定，前端**不得**自行拼路径。
+//
+// ⚠️ 只读的 4 条（slots / read / backups / diff）进演示只读表；patch / restore 是**写操作**，
+// 演示模式下由页面侧统一提示不可用（`call` 对非只读命令会直接 reject）。
+
+/** 列出 6 个槽位（未安装者 `installed:false` **仍在列表**）。 */
+export function listClientSettingsSlots(): Promise<ClientSettingsSlotsResponse> {
+  return call("list_client_settings_slots");
+}
+
+/** 读取某槽位的原文 + 解析后键值 + 格式指纹。未安装**不是错误**（`installed:false`）。 */
+export function readClientSettings(slot: string): Promise<ClientSettingsReadResponse> {
+  return call("read_client_settings", { slot });
+}
+
+/**
+ * 键值级 patch（**格式保持**：缩进 / 换行 / 未知键 / 键顺序逐字节不变）。
+ *
+ * @param patch 形如 `{ "<点号路径>": <新值> }`（如 `claw.channels.wechatmp.enabled`）。
+ *   幂等：值与现状相同时后端返回 `changed: false`（不写盘、不备份）。
+ *   客户端运行中会被后端拒绝（`client.settings.process_running`）。
+ */
+export function patchClientSettings(
+  slot: string,
+  patch: Record<string, unknown>,
+): Promise<ClientSettingsWriteResult> {
+  return call("patch_client_settings", { slot, patch });
+}
+
+/** 列出某槽位的历史备份点（按 id 降序）。 */
+export function listClientSettingsBackups(slot: string): Promise<ClientSettingsBackupsResponse> {
+  return call("list_client_settings_backups", { slot });
+}
+
+/** 整文件恢复到某备份点（**恢复前对当前文件再备份一次**）。 */
+export function restoreClientSettingsBackup(
+  slot: string,
+  backupId: string,
+): Promise<ClientSettingsWriteResult> {
+  return call("restore_client_settings_backup", { slot, backupId });
+}
+
+/** 任选两个槽位比对（仅 A 有 / 仅 B 有 / 值不同）。 */
+export function diffClientSettings(
+  slotA: string,
+  slotB: string,
+): Promise<ClientSettingsDiffResponse> {
+  return call("diff_client_settings", { slotA, slotB });
 }
 
 // ---------------------------------------------------------------------------
@@ -2049,13 +2386,18 @@ export function deleteTraeApiKey(id: string): Promise<{ ok: boolean }> {
   return call("delete_trae_api_key", { id });
 }
 
-/** 打开 Trae 数据目录（非 Windows 返回结构化 `Unsupported`）。 */
+/**
+ * 打开 Trae 数据目录（非 Windows 返回结构化 `Unsupported`）。
+ *
+ * ⚠️ 这是 {@link openDataDir} 的**薄壳**（只为既有调用点保留）：`variant` 先按
+ * **区域**折叠成 `scope`，再交给参数化命令。新代码请直接传 `scope`。
+ */
 export function openTraeDataDir(
   variant?: TraeVariantId | null,
 ): Promise<{ ok?: boolean; path?: string }> {
   // P5 T03：改调参数化命令 `open_data_dir`；`variant` 先按**区域**折叠成 `scope`。
   // 旧 `open_trae_data_dir` 保留为别名（见 `ALIASES`）。
-  return call("open_data_dir", { scope: scopeOf("trae", traeRegionOf(variant ?? "cn")) });
+  return openDataDir(scopeOf("trae", traeRegionOf(variant ?? "cn")));
 }
 
 /**

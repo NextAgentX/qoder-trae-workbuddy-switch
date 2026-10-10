@@ -225,7 +225,7 @@ export default function TraeTokenStatsPage() {
 
   if (loading && !stats) {
     return (
-      <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+      <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
         <Skeleton className="h-9 w-48" />
         <Skeleton className="mt-4 h-32 w-full" />
         <Skeleton className="mt-6 h-64 w-full" />
@@ -235,9 +235,9 @@ export default function TraeTokenStatsPage() {
 
   if (error && !stats) {
     return (
-      <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+      <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
         <header className="mb-6">
-          <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.token.title")}</h1>
+          <h2 className="text-xl font-semibold tracking-tight">{t("trae.stats.token.title")}</h2>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
             {t("trae.stats.token.subtitle")}
           </p>
@@ -262,11 +262,11 @@ export default function TraeTokenStatsPage() {
   const empty = (summary?.records ?? 0) === 0;
 
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+    <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
       <header className="mb-6">
         <div className="flex min-w-0 flex-wrap items-end justify-between gap-3">
           <div className="min-w-0">
-            <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.token.title")}</h1>
+            <h2 className="text-xl font-semibold tracking-tight">{t("trae.stats.token.title")}</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
               {t("trae.stats.token.subtitle")}
             </p>
@@ -584,7 +584,7 @@ export default function TraeTokenStatsPage() {
       {unsupported.length > 0 && <UnsupportedSection items={unsupported} />}
 
       {stats && stats.parseErrors > 0 && (
-        <p className="flex items-center gap-1.5 px-1 text-xs text-amber-600">
+        <p className="flex items-center gap-1.5 px-1 text-xs text-warning">
           <CircleAlert className="size-3.5" aria-hidden="true" />
           {t("trae.stats.token.parseErrors", { count: stats.parseErrors })}
         </p>

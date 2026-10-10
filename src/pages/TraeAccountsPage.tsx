@@ -25,7 +25,7 @@ import { AccountBatchBar } from "@/components/account-batch-bar";
 import { AccountTable, type AccountColumn } from "@/components/account-table";
 import { AccountToolbar, type ToolbarOption } from "@/components/account-toolbar";
 import { AccountDetailDrawer, type DetailPack, type DetailProgramBadge, type DetailSection } from "@/components/account-detail-drawer";
-import { TraeVariantBar } from "@/components/trae-variant-bar";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { TraeAccountCard, formatCredits, jwtBadge, shortTime, type TraeProgram } from "@/components/trae-account-card";
 import { TraeExportAccountsDialog } from "@/components/trae-export-accounts-dialog";
 import { TraeImportAccountsDialog } from "@/components/trae-import-accounts-dialog";
@@ -155,11 +155,11 @@ interface AccountsSnapshot {
  * 卡片栅格 → 各确认 Dialog。用户在两个分区之间切换时不需要重新学习界面。
  *
  * **文案与数据源按 Trae 实情落地**，不搬 WorkBuddy 的：
- * - 版本切换的**语义与 WorkBuddy 完全对应**（国内版 / 国际版），控件也**同源**
- *   （`variant-switch.tsx`，位置同在标题下方）。本页用 `TraeVariantBar` 是因为它比通用款
- *   多一行「各区域登录了哪个账号」——账号页正需要这层信息，其他页面用单行的
- *   `TraeVariantSwitch` 即可。承载标识见 `useTraeVariant`（返回**区域**；旧值
- *   `trae_work`/`trae_cn` 一律回落国内版，否则老书签会去读空库）；
+ * - 区域（国内版 / 国际版）与 WorkBuddy **语义完全对应**，且**切换入口统一在顶栏**
+ *   （`ScopeSelector`，区域已并入 L1 作用域）：这些页面级切换器（`TraeVariantBar` /
+ *   `TraeVariantSwitch` / `WorkbuddyRegionSwitch`）已删除，页头只留一枚**只读** `ScopeChip`。
+ *   承载标识见 `useTraeVariant`（返回**区域**；旧值 `trae_work`/`trae_cn` 一律回落国内版，
+ *   否则老书签会去读空库）；
  * - 卡片头部的**程序切换按钮**（该区域的每个 Trae 程序各一枚）对应 WorkBuddy 卡片上的
  *   WorkBuddy / CodeBuddy IDE / CodeBuddy CLI 三枚按钮——都是「把这个账号挂到哪个
  *   客户端上」。这个维度 Trae 叫**程序位**（TraeWork / TraeCode，见 `TraeProgram`），
@@ -815,10 +815,17 @@ export default function TraeAccountsPage() {
    *
    * 判定口径与 `checkinAll` 一致：全失败 ⇒ `error`；一轮没轮到任何账号 ⇒ 明说
    * 「没有需要签到的账号」；其余按后端报告拼「成功 / 已签 / 失败」三段。
+   *
+   * ★ B4：部分失败时**把失败项留在 toast 的 action 里** ⇒ 可「只重试失败项」。
+   *   原实现只汇总 `result.failed` 计数、**不保留失败 id**，Trae 用户只能把成功的一起重跑。
+   *   （WB 侧 `AccountsPage::batchCheckin` 早已对齐，`runCheckinFor` 返回 `failedIds`。）
+   * @param userIds 省略 = 对当前勾选项跑；传入 = 只对这批（重试路径）。
    */
-  async function batchCheckin() {
+  async function batchCheckin(userIds?: string[]) {
     if (batchBusy) return;
-    const targets = accounts.filter((account) => selectedKeys.has(selectionKey(account.userId)));
+    const targets = userIds
+      ? accounts.filter((account) => userIds.includes(account.userId))
+      : accounts.filter((account) => selectedKeys.has(selectionKey(account.userId)));
     if (targets.length === 0) return;
     setBatchBusy(true);
     const label = t("trae.page.accounts.actionBatchCheckin");
@@ -834,12 +841,24 @@ export default function TraeAccountsPage() {
       if (result.already > 0) parts.push(t("trae.page.accounts.checkinBatchAlready", { n: result.already }));
       if (result.failed > 0) parts.push(t("trae.page.accounts.checkinBatchFailed", { n: result.failed }));
       const description = parts.join(t("shared.punct.comma"));
+      /* ★ 从逐条结果里挑出真正失败的 id（`ok === false`）；`results` 可能缺失 ⇒ 兜底不重试。
+         只在「本轮确实跑过 (`total > 0`) 且有失败项」时给出口，否则重试无意义。 */
+      const failedIds = (result.results ?? [])
+        .filter((row) => !row.ok && row.userId)
+        .map((row) => row.userId);
+      const retryAction =
+        result.total > 0 && failedIds.length > 0
+          ? {
+              label: t("trae.page.accounts.checkinRetryFailed"),
+              onClick: () => void batchCheckin(failedIds),
+            }
+          : undefined;
       if (result.total === 0) {
         toast.success(t("trae.page.accounts.noNeedCheckin"));
       } else if (result.failed === result.total) {
-        toast.error(t("trae.page.accounts.actionFailed", { label }), { description });
+        toast.error(t("trae.page.accounts.actionFailed", { label }), { description, action: retryAction });
       } else {
-        toast.success(t("trae.page.accounts.actionDone", { label }), { description });
+        toast.success(t("trae.page.accounts.actionDone", { label }), { description, action: retryAction });
       }
       await loadAll();
     } catch (e) {
@@ -1072,8 +1091,6 @@ export default function TraeAccountsPage() {
    * 与区域无关，故仍看 `env`。
    */
   const autoDetected = isAutoDetected(env);
-  /** 当前产品线的展示名；拿不到探测结果时回落 `variant` 状态的展示名。 */
-  const variantLabel = productLabel ?? traeVariantLabel(variant);
 
   const checkedToday = accounts.filter((account) => account.checkedToday).length;
   const totalCredits = accounts.reduce(
@@ -1422,30 +1439,33 @@ export default function TraeAccountsPage() {
     : [];
   const detailRemark = detail ? displayText(detail.remark)?.trim() || "" : "";
 
+  /* 页头作用域（原型 `viewAccounts`）复用上方的 `scope`；「需处理」= JWT 已过期，
+     与 WorkBuddy 侧的 `needsRelogin` 同一层语义。 */
+  const expiredCount = accounts.filter((account) => account.jwtStatus === "expired").length;
+
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+    <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
       {/* 页头与 WorkBuddy 逐字同构：**只有标题与说明，不放任何动作按钮**。
           动作一律下沉到「添加与迁移账号」横幅与账号工具栏，
           这样两个分区的动作位置、视觉重量完全一致。
           曾经这里堆了 4 个按钮（刷新 / 刷新积分 / 全部签到 / 添加账号），
           与 WorkBuddy 的骨架冲突，也让同一功能出现两个入口。 */}
-      <header className="mb-6">
+      <header className="mb-5 flex items-start gap-4">
         <div className="min-w-0">
           <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.page.accounts.title")}</h1>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            {t("trae.page.accounts.subtitle", { line: variantLabel })}
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {expiredCount > 0
+              ? t("pageHead.accounts.pending", {
+                  scope: scopeLabel(t, scope),
+                  n: accounts.length,
+                  m: expiredCount,
+                })
+              : t("pageHead.accounts", { scope: scopeLabel(t, scope), n: accounts.length })}
           </p>
         </div>
+        <div className="grow" />
+        <ScopeChip scope={scope} />
       </header>
-
-      {/* 区域状态条（在**标题下方**，与另一模块同一位置；比通用款多一行「各区域登录态」）。
-          `value` / `onValueChange` 映射到 URL `?line=`（`useTraeVariant`）；切换**只改 URL**，
-          由下方既有 `loadAll` 重取四份数据——**不**用 `TabsContent` 为每个变体各放一个面板，
-          那会让两个面板各自挂载一次取数、每次切换都触发重复请求。 */}
-      {/* 两条线的状态与登录态**由本页注入**（本页为了卡片上的程序切换按钮本来就要取全）。
-          这比让状态条自己再读一遍更不易错：同一次渲染只有一份数据，
-          「主体已是新账号、顶部还写着旧账号」在结构上不可能出现。 */}
-      <TraeVariantBar className="mb-6" statuses={variantStatuses} logins={logins} />
 
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -1489,7 +1509,7 @@ export default function TraeAccountsPage() {
       ) : (
         <>
           {/* 「添加与迁移账号」横幅：位置、结构与 WorkBuddy 完全一致。 */}
-          <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-[0_6px_20px_rgba(15,23,42,.025)]">
+          <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-card">
             <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
               <div className="absolute -right-12 -top-20 size-44 rounded-full border-[28px] border-slate-400/[0.035]" />
             </div>
@@ -1544,7 +1564,7 @@ export default function TraeAccountsPage() {
             <div className="flex flex-wrap items-center gap-x-8 gap-y-3 px-5 py-3.5 text-sm">
               <span className="flex items-center gap-2">
                 {t("trae.page.accounts.client")}
-                <span className={cn("font-medium", clientInstalled ? "text-emerald-600" : "text-muted-foreground")}>
+                <span className={cn("font-medium", clientInstalled ? "text-success" : "text-muted-foreground")}>
                   {clientInstalled
                     ? clientVersion
                       ? t("trae.page.accounts.installedVersion", { version: clientVersion })
@@ -1572,8 +1592,8 @@ export default function TraeAccountsPage() {
               </span>
               <span className="flex items-center gap-2">
                 {t("trae.page.accounts.runtime")}
-                <span className={cn("inline-flex items-center gap-1.5 font-medium", clientRunning ? "text-emerald-600" : "text-muted-foreground")}>
-                  <span className={cn("size-2 rounded-full", clientRunning ? "bg-emerald-500" : "bg-muted-foreground/50")} />
+                <span className={cn("inline-flex items-center gap-1.5 font-medium", clientRunning ? "text-success" : "text-muted-foreground")}>
+                  <span className={cn("size-2 rounded-full", clientRunning ? "bg-success" : "bg-muted-foreground/50")} />
                   {clientRunning ? t("trae.page.accounts.running") : t("trae.page.accounts.notRunning")}
                 </span>
               </span>
@@ -1589,7 +1609,7 @@ export default function TraeAccountsPage() {
                 </span>
               )}
               {expiringSoon > 0 && (
-                <span className="text-amber-600 dark:text-amber-400">
+                <span className="text-warning">
                   {t("trae.page.accounts.jwtExpiring")} <span className="font-medium">{expiringSoon}</span>
                 </span>
               )}
@@ -1613,7 +1633,7 @@ export default function TraeAccountsPage() {
             {clientDataDir && (
               <div className="border-t border-border/60 px-5 py-2.5 text-xs text-muted-foreground">
                 {t("trae.page.accounts.dataDirLabel")}<code className="font-mono">{clientDataDir}</code>
-                {!clientDataDirExists && <span className="ml-2 text-amber-600 dark:text-amber-400">{t("trae.page.accounts.dataDirMissing")}</span>}
+                {!clientDataDirExists && <span className="ml-2 text-warning">{t("trae.page.accounts.dataDirMissing")}</span>}
               </div>
             )}
           </Card>
@@ -1841,7 +1861,7 @@ export default function TraeAccountsPage() {
                           openRowLabel={(account) => t("shared.table.openRowAria", { name: traeAccountName(account) })}
                         />
                       ) : (
-                        <div className={cn("grid min-w-0 items-start gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
+                        <div className="grid min-w-0 grid-cols-1 items-start gap-3 min-[761px]:grid-cols-2 min-[1101px]:grid-cols-3">
                           {bucket.items.map((account) => (
                             <TraeAccountCard
                               key={account.userId}
@@ -1957,7 +1977,7 @@ export default function TraeAccountsPage() {
               <div key={item.userId + item.name} className="flex items-center justify-between gap-3 px-5 py-2.5 text-sm">
                 <span className="min-w-0 truncate">{item.name}</span>
                 <span className="flex shrink-0 items-center gap-3">
-                  {item.delta > 0 && <span className="text-emerald-600 dark:text-emerald-400">+{item.delta}</span>}
+                  {item.delta > 0 && <span className="text-success">+{item.delta}</span>}
                   <span className="text-xs text-muted-foreground">{item.message || item.action}</span>
                   <Badge variant={item.ok ? "secondary" : "destructive"}>
                     {item.action === "skip_already"
@@ -1991,7 +2011,7 @@ export default function TraeAccountsPage() {
             )}
           </div>
           {report && report.warnings.length > 0 && (
-            <div className="border-t border-border/60 px-5 py-3 text-xs text-amber-600 dark:text-amber-400">
+            <div className="border-t border-border/60 px-5 py-3 text-xs text-warning">
               {report.warnings.map((warning) => (
                 <div key={warning}>{warning}</div>
               ))}
@@ -2008,10 +2028,10 @@ export default function TraeAccountsPage() {
             <span className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
               <span>{checkin?.summary.time ?? t("trae.page.accounts.lastUnknownTime")}</span>
               {checkin && !checkin.summaryIsToday && (
-                <span className="text-amber-600 dark:text-amber-400">{t("trae.page.accounts.lastNotToday")}</span>
+                <span className="text-warning">{t("trae.page.accounts.lastNotToday")}</span>
               )}
               <span className="flex items-center gap-1.5">
-                <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+                <CheckCircle2 className="size-3.5 text-success" />
                 {t("trae.page.accounts.resultSuccess")} <span className="font-medium text-foreground">{checkin?.summary.totalOk ?? 0}</span>
                 <XCircle className="ml-1.5 size-3.5 text-destructive" />
                 {t("trae.page.accounts.resultFailed")} <span className="font-medium text-foreground">{checkin?.summary.failed ?? 0}</span>
@@ -2027,7 +2047,7 @@ export default function TraeAccountsPage() {
                 <span className="min-w-0 truncate">{item.name || item.userId}</span>
                 <span className="flex shrink-0 items-center gap-3">
                   {item.delta > 0 && (
-                    <span className="text-emerald-600 dark:text-emerald-400">+{item.delta}</span>
+                    <span className="text-success">+{item.delta}</span>
                   )}
                   <span className="max-w-[280px] truncate text-xs text-muted-foreground">
                     {item.message || item.action}
@@ -2337,7 +2357,7 @@ function EmptyTraeCard({
                 {dataDir ? `${dataDir}\\User\\globalStorage\\storage.json` : t("trae.page.accounts.emptyNoDataDir")}
               </code>
               {!dataDirExists && (
-                <span className="text-xs text-amber-600 dark:text-amber-400">
+                <span className="text-xs text-warning">
                   {t("trae.page.accounts.dataDirMissing")}
                 </span>
               )}

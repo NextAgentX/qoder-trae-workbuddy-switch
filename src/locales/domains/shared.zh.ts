@@ -29,6 +29,9 @@ export const zh = {
      页面内只剩「合并」这个**视图参数**开关。 */
   "shared.region.combine.aria": "合并国内版与国际版查看",
   "shared.region.combine.label": "合并国内版与国际版",
+  /* P3：合并态由「开关」改为 `.seg` 双按钮（原型 `viewUsage` 的 params 段）。 */
+  "shared.region.combine.only": "仅本作用域",
+  "shared.region.combine.all": "合并全部作用域",
 
   // ---- 网关账号池状态（gateway.ts —— WorkBuddy 与 Trae **共用**同一张卡）----
   // ⚠️ `expired` 只有 Trae 侧会产出：WorkBuddy 池不存积分有效期，没有判据就不展示。
@@ -125,6 +128,16 @@ export const zh = {
   "shared.gateway.pool.preferredMissing": "已指定的账号（当前不在池中）",
   // 偏好语义：指定账号不可用时**回落**自动择优，而不是拒绝服务。
   "shared.gateway.pool.preferredHint": "偏好而非强制：指定账号冷却 / 失效 / 零积分时自动改用其他账号，不会拒绝服务。",
+  // 表格列与「指定」列（原型 viewGateway :3057-3069：账号 / 积分 / 状态 / 选号）。
+  "shared.gateway.pool.colAccount": "账号",
+  "shared.gateway.pool.colCredits": "积分",
+  "shared.gateway.pool.colStatus": "状态",
+  "shared.gateway.pool.colPick": "选号",
+  "shared.gateway.pool.pin": "指定",
+  "shared.gateway.pool.unpin": "取消指定",
+  "shared.gateway.pool.pinned": "已指定",
+  // 选号优先级与排他性说明（原型 :3069）。
+  "shared.gateway.pool.exclusiveHint": "选号优先级：显式指定 > 粘性会话 > 自动择优。指定是排他的——同一时刻只有一个账号被指定。",
 
   // ---- 剪贴板（clipboard.ts） ----
   "shared.clipboard.copied": "已复制",
@@ -320,6 +333,12 @@ export const zh = {
   "shared.drawer.remark.aria": "{name} 的备注",
   "shared.drawer.remark.editAria": "编辑 {name} 的备注",
   "shared.drawer.remark.add": "添加备注",
+  // 分组区（就地编辑，与备注区**同构**；仅在调用方注入 `onSaveGroup` 时渲染）。
+  "shared.drawer.group.title": "分组",
+  "shared.drawer.group.placeholder": "输入自定义分组名（留空即移出分组）",
+  "shared.drawer.group.aria": "{name} 的分组",
+  "shared.drawer.group.editAria": "编辑 {name} 的分组",
+  "shared.drawer.group.add": "设置分组",
   // 积分 / 资源包区块：文本已由调用方格式化，抽屉只负责排版。
   "shared.drawer.packs.title": "积分 / 资源包",
   // 只读程序位徽标（**不是**切换控件）—— 抽屉里不允许出现第二个「看起来能切」的控件。
@@ -333,6 +352,35 @@ export const zh = {
   "shared.drawer.program.installed": "已安装",
   "shared.drawer.program.noDataDir": "无数据目录",
   "shared.drawer.program.missing": "未检测到",
+  // 可点「切换到此账号」程序位 + 向导入口（原型 drawerAccount :3480-3486）。
+  // ⚠️ 只在调用方注入 `switchTargets` 时渲染 —— 未注入时仍走上面的只读徽标（Trae）。
+  "shared.drawer.switch.title": "切换到此账号",
+  "shared.drawer.switch.wizard": "使用向导切换（可选迁移内容）",
+  "shared.drawer.switch.available": "可切换",
+  // 头部「当前登录」徽章（原型 :3475）—— 与只读徽标 `program.current` 区分：后者是「该程序位的当前账号」。
+  "shared.drawer.currentLogin": "当前登录",
+  // 操作区（原型 drawerAccount :3518-3527）：刷新 / 手动签到 / 编辑备注 / 导出 / 权限诊断 / 删除。
+  "shared.drawer.actions.title": "操作",
+  "shared.drawer.actions.refresh": "刷新 Token",
+  "shared.drawer.actions.checkin": "手动签到",
+  "shared.drawer.actions.editRemark": "编辑备注",
+  "shared.drawer.actions.editGroup": "编辑分组",
+  "shared.drawer.actions.export": "导出",
+  "shared.drawer.actions.permission": "切换权限诊断",
+  "shared.drawer.actions.delete": "删除账号",
+  // 凭据不可用时的说明（原型 `.proto-note` :3526）—— 过期 / 需重登不给签到入口。
+  "shared.drawer.actions.credentialNote": "凭据已过期或需重新登录，不提供签到入口，请先处理凭据。",
+  // 签到历史（近 7 天）：日期 / 结果 / 获得积分（原型 checkinHistoryHtml :3428-3439）。
+  // ⚠️ 获得积分取自**积分统计的签到事件**（账号 + 日期）；取不到时渲染「—」，绝不臆造固定奖励。
+  "shared.drawer.checkin.historyTitle": "签到历史（近 7 天）",
+  "shared.drawer.checkin.historyDate": "日期",
+  "shared.drawer.checkin.historyResult": "结果",
+  "shared.drawer.checkin.historyAmount": "获得积分",
+  "shared.drawer.checkin.result.success": "成功",
+  "shared.drawer.checkin.result.already": "已签到",
+  "shared.drawer.checkin.result.fail": "失败",
+  "shared.drawer.checkin.result.none": "未签到",
+  "shared.drawer.checkin.historyEmpty": "暂无签到记录",
   // 详情区块全空时的空态（四要素里的 title / description；出口由调用方以 ReactNode 注入）。
   "shared.drawer.empty.title": "暂无详情",
   "shared.drawer.empty.description": "该账号暂时没有可展示的详情；可重新检测后再试。",
@@ -344,6 +392,8 @@ export const zh = {
   "shared.batch.selected": "已选 {n} 项",
   "shared.batch.checkin": "批量签到",
   "shared.batch.refresh": "刷新",
+  // 原型 `batch-export`：批量条上导出**所选**账号（不是全部 —— 全部有工具栏那个入口）。
+  "shared.batch.export": "导出",
   "shared.batch.delete": "删除",
   "shared.batch.clear": "清除选择",
   "shared.batch.deleteTitle": "批量删除账号",

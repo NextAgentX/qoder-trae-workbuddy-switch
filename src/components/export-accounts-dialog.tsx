@@ -14,6 +14,7 @@ import {
 import * as api from "@/lib/api";
 import { useT, type Translate } from "@/lib/i18n";
 import type { AccountMeta, Region } from "@/lib/types";
+import { accountDisplayName } from "@/components/account-card";
 
 interface Props {
   open: boolean;
@@ -27,7 +28,7 @@ interface Props {
 
 /** 账号展示名（与账号卡片一致）。 */
 function accountLabel(a: AccountMeta): string {
-  return a.nickname || a.email || a.uid || a.id;
+  return accountDisplayName(a);
 }
 
 /** 导出文件名：buddy-switch-accounts-YYYY-MM-DD.json */

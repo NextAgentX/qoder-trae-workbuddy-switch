@@ -90,6 +90,9 @@ export function CatalogSourceBar({
         {view.identifiedCount > 0 && (
           <span>{t("shared.gateway.sourceBar.count", { n: view.identifiedCount })}</span>
         )}
+        {/* 原因**内联在同一行**（原型 `.cat-bar`：badge + 时间 + `.cat-note` + 提示 + 按钮一行）；
+            非「实时」时用警示色 —— 不能只给一个灰色徽标让用户猜（`.cat-note`）。 */}
+        {view.reason && <span className="text-warning">{view.reason}</span>}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           <span>{t("shared.gateway.sourceBar.autoHint")}</span>
           <DemoAction>
@@ -106,7 +109,6 @@ export function CatalogSourceBar({
           </DemoAction>
         </span>
       </div>
-      {view.reason && <p className="mt-1 text-xs text-amber-600">{view.reason}</p>}
     </div>
   );
 }

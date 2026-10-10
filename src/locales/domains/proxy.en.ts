@@ -14,6 +14,20 @@ export const en = {
   "proxy.toggle.disable": "Turn off",
   "proxy.restore": "Restore",
 
+  // ★ E2: closed-state explanation. Without it, "Off" tells the user nothing about
+  //   whether it is a product default or something they have to configure themselves.
+  "proxy.offNotice.title": "Request proxy is not enabled",
+  "proxy.offNotice.default": "The request proxy is off by default; no existing request is affected.",
+  "proxy.offNotice.howTo":
+    "To turn it on, configure a proxy in the client yourself, or point its base URL at the local gateway address.",
+
+  // ★ E1: KPI row in the enabled state. "Persisted bodies" is always 0 — a promise
+  //   (request bodies are never written to disk), not a measured number.
+  "proxy.kpi.requests": "Proxied today",
+  "proxy.kpi.switches": "Account switches today",
+  "proxy.kpi.bodies": "Persisted bodies",
+  "proxy.kpi.bodiesZero": "0 (never persisted)",
+
   "proxy.risk.title": "Before you turn it on",
   "proxy.risk.traffic": "Traffic goes through the local gateway",
   "proxy.risk.noBody": "Request bodies are not written to disk",

@@ -43,11 +43,14 @@ export const COMPANION_TITLE_PLACEHOLDER = "••••••••";
  *
  * ★ 四个值**两两不同**：这样「四态可区分」是**结构上成立**的，不靠数据凑。
  * `running` 用 primary + 脉冲；`waiting` amber；`done` emerald；`failed` destructive（P9 §1.4）。
+ *
+ * ⚠️ 脉冲是**持续动画**，须尊重 `prefers-reduced-motion`（PLAN §3.6 无障碍基线）——
+ * 故 `running` 额外挂 `motion-reduce:animate-none`（减弱动效时静置为实心点，状态仍可辨）。
  */
 export const COMPANION_STATE_DOT_CLASS: Record<CompanionState, string> = {
-  running: "bg-primary animate-pulse",
-  waiting: "bg-amber-500",
-  done: "bg-emerald-500",
+  running: "bg-primary animate-pulse motion-reduce:animate-none",
+  waiting: "bg-warning",
+  done: "bg-success",
   failed: "bg-destructive",
 };
 

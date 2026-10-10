@@ -25,6 +25,14 @@
   - 实测确认：WebUI 构建写 `dist`（`/assets/index-*.js`），演示构建写 `dist-demo`（`/trae-workbuddy-switch/assets/index-*.js`），且**演示构建前后 `dist/index.html` 的 SHA256 完全不变**。
 - **新增构建产物一致性护栏（回归测试）**：`embedded_index_html_references_only_embedded_assets` 断言内嵌 `index.html` 引用的**每个根绝对资源**都能在 embed 中命中，配套 `asset_refs_in`（提取器）与 `embedded_index_html_is_servable_at_root_and_index`。它把上述白屏事故变成测试期可见的错误——把演示构建塞回 `dist/` 后该测试立即变红并给出可执行提示。**server 测试 16 → 19。**
 
+## 后续新增能力（2026-10 起，超出「多区域 + 网关」原范围）
+
+以下三项在本次改造之后新增，属**应用级 / 观测类**能力，与网关无关；细节见 `README.md`「功能」章节与 `.trellis/tasks/09-22-*` 下的 PRD。
+
+- **客户端限流台账**：从客户端本地数据（`projects/**/*.jsonl` + 只读 `workbuddy.db` 的 `sessions` 表 + 账号库 `auth_raw.account.uid`）**只读** join，汇总「账号 × 模型 × 恢复时刻」；按 `(uid, model, reset_at)` 去重取最近，`active = reset_at > now`，仍受限置顶高亮。**不写库、不改账号状态、不代理流量**。排队类错误码 `6020` / `6022` 的精确语义文案**待拍板**，界面按 R7 纪律只标注保守词「排队中」并原样带出 code。
+- **Skill 管理**：扫描 `{data_dir}/skills/<dir>/SKILL.md` 的 frontmatter，清单化展示并逐项启用 / 停用（一并写齐 `user-invocable` / `disable-model-invocation`；**行级重写**、其余字节原样保留，含 CRLF/BOM）；支持跨区域（CN ↔ Global）搬迁补充（冲突保留目标侧）与从本地目录 / zip 导入。
+- **客户端设置托管**：统一读写**被代理的上游客户端**（WorkBuddy 两版 + Trae 四个程序位）各自的 `settings.json`——6 槽位声明式规格表 + 格式指纹（缩进单位 + 行尾）+ **手术式字节级补丁**（改动最小化）+ 备份 / 恢复 + 跨槽位差异；**运行中进程直接拒绝写入**。⚠️ 与本工具自己的代理设置（`~/.buddy-switch/**`）是两个不同的文件，仅名字相近。
+
 ## 验证结果
 
 - `cargo build -p buddy-switch-core` / `-p buddy-switch-gateway` / `-p buddy-switch-server` / `-p buddy-switch-rust`：均通过，0 error / 0 warning。

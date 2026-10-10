@@ -7,7 +7,15 @@ export const en = {
   "nav.sessions": "Sessions",
 
   "sessions.title": "Linked sessions",
-  "sessions.subtitle": "Link and sync session copies across accounts",
+
+  /* ★ Sessions toolbar (prototype `viewSessions`, :3183): title "{client} sessions" + count
+     badge. Client tabs are NOT rendered (session copy is WorkBuddy-only, so a single-option
+     switcher would be a fake control, §3.15.1): the title degrades to static text. */
+  "sessions.toolbar.title": "{client} sessions",
+  "sessions.toolbar.client": "WorkBuddy desktop",
+  /* Card head (prototype `.sg-head`): status badge + "{count} replicas"; plus the a11y label. */
+  "sessions.card.replicaCount": "{count} replicas",
+  "sessions.card.openAria": "Open session group {title}",
 
   "sessions.empty.title": "No sessions copied with this app yet",
   "sessions.empty.description":
@@ -44,12 +52,39 @@ export const en = {
   "sessions.sync.action": "Sync safe items ({count})",
   "sessions.sync.all": "Sync all behind ({count})",
   "sessions.sync.hint": "Appends only what the source added; never deletes existing content",
+  // ★ D2: persistent note (not hover-only). Must keep the word "additive" — users'
+  // biggest fear about "sync" is losing/overwriting their own content.
+  "sessions.sync.additiveNote":
+    "Sync is additive: it only appends what the source added to the target; nothing already in the target is deleted or overwritten.",
   "sessions.sync.toast.done": "Sync finished",
   "sessions.sync.toast.failAll": "Sync failed",
   "sessions.sync.toast.ok": "Synced {n} item(s), appended {lines} line(s)",
   "sessions.sync.toast.failed": "{n} failed",
   "sessions.sync.toast.retryFailed": "Retry failed only",
   "sessions.sync.toast.error": "Sync request failed",
+
+  /* ★ P8 "resolve divergence" (overwrite-based unify, §3.15.2) — the **opposite** of the
+     "safe sync" block above: sync is additive, this **overwrites** the other replicas and
+     discards their divergent lines. Copy must never read like a silent overwrite: with a
+     divergence the user must first pick which copy to keep. */
+  "sessions.unify.action": "Resolve divergence ({count})",
+  "sessions.unify.hint": "Pick which copy to keep; the others are overwritten (auto-backed up first)",
+  "sessions.unify.title": "Choose the copy to keep",
+  "sessions.unify.desc":
+    "These replicas each changed after their common version, so they can't be merged. Pick one to keep; the rest will be overwritten by it.",
+  "sessions.unify.mostComplete": "Most complete",
+  "sessions.unify.overwrite":
+    "This overwrites {n} other replica(s), discarding {lost} line(s) unique to them (auto-backed up first).",
+  "sessions.unify.overwriteUnknown":
+    "This overwrites {n} other replica(s); the number of discarded lines is unknown (auto-backed up first).",
+  "sessions.unify.cancel": "Cancel",
+  "sessions.unify.confirm": "Unify into other replicas",
+  "sessions.unify.toast.done": "Unified",
+  "sessions.unify.toast.failAll": "Unify failed",
+  "sessions.unify.toast.ok": "Unified {n} item(s), discarded {lost} line(s)",
+  "sessions.unify.toast.failed": "{n} failed",
+  "sessions.unify.toast.retryFailed": "Retry failed only",
+  "sessions.unify.toast.error": "Unify request failed",
 
   /* ★ Unified restart confirmation (P8 T03 / §3.15.3). The non-CLI copy defaults to
      "reopen automatically" plus an explicit unsaved-files warning. The CLI copy is the

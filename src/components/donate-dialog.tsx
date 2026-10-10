@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Coffee, ExternalLink } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n";
@@ -12,7 +11,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import { GITHUB_REPOSITORY_URL, openReleaseUrl } from "@/lib/update";
 import donateAlipay from "@/assets/donate-alipay.jpg";
@@ -28,35 +26,29 @@ const DONATE_CHANNELS: { key: string; nameKey: TranslationKey; image: string }[]
 ];
 
 /**
- * 侧栏底部的打赏入口：**位于版本号上方**，点击后弹出收款码。
+ * 打赏入口（顶栏 ⚙ 菜单项驱动）：点击后弹出收款码。
  *
  * ## 为什么做成弹窗而不是直接铺开两张码
  *
- * 侧栏固定 220px，收款码是竖版海报（约 744×1080），铺开会把版本号与运行状态挤出视野；
- * 而打赏是**低频**操作，不值得长期占据侧栏的固定高度。
+ * 收款码是竖版海报（约 744×1080），铺开会把内容挤出视野；而打赏是**低频**操作，
+ * 不值得长期占据固定高度。
  *
- * ## 为什么入口不做成图标按钮
+ * ## 受控形态
  *
- * 侧栏底部已经有状态圆点与更新按钮两处图标入口，再加一枚无文字图标，
- * 用户只能靠猜。这里用「图标 + 文字」的整行按钮，语义自明。
+ * `open` / `onOpenChange` 由 `app-menu.tsx` 的菜单项驱动；本组件**不自带触发按钮**
+ * （与 `AppSettingsDialog` / `SkillManagerDialog` / `ClientSettingsDialog` 同构）。
  */
-export function DonateButton() {
+export function DonateDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const t = useT();
-  const [open, setOpen] = useState(false);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-8 w-full justify-start gap-2 rounded-lg px-2 text-xs font-normal text-sidebar-foreground/70 hover:bg-foreground/[0.04] hover:text-sidebar-foreground"
-        >
-          <Coffee className="size-3.5" aria-hidden="true" />
-          {t("wbSettings.donate.trigger")}
-        </Button>
-      </DialogTrigger>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{t("wbSettings.donate.title")}</DialogTitle>

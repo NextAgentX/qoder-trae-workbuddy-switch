@@ -422,12 +422,28 @@ pub fn preview_import_backup(text: &str, policy: ConflictPolicy) -> Result<Value
 /// 默认冲突策略是 [`ConflictPolicy::KeepLocal`]（D16）⇒ 同一文件连导两次，第二次
 /// 全部「跳过」（**幂等**，§1.5）。
 ///
-/// 逐 scope 独立：某个作用域合并失败（写入异常 / 来件形状不合法）⇒ 计入 `failed` /
-/// `retryable`，**其余已知作用域照常**（部分失败态，§3.6）。
+/// 逐 scope 独立：某个作用域合并失败（写入异常 / 来件形状不合法）⇒ 计入 `failed`，
+/// **其余已知作用域照常**（部分失败态，§3.6）。
+///
+/// ## ★ `only_scopes` = 「只重试失败项」（C1）
+///
+/// 失败单元就是 **scope**（见上方逐 scope 事务），所以重试的最小 honest 粒度是 scope：
+/// 传上次返回的 `retryableScopes` 回来即可**只重跑失败分区**，不碰已成功的分区
+/// （不再整份重来、也不再弹文件选择器）。
+///
+/// - 空 ⇒ 全量导入（首次导入 / 恢复自动备份都走这里）。
+/// - 非空 ⇒ **只处理列出的 scope**，其余**连读都不读**（不是「读了再跳过」），
+///   因此重试不会因为已成功分区的形状异常而再次失败。
+/// - 重试同样**先快照**：重试也是写操作，必须可撤销（D18 不因重试而豁免）。
+///
+/// ⚠️ 重试**不是事务回滚**：一个 scope 内 3 个 section 共用一个 `Result`，若第 2 个
+/// section 写失败，第 1 个**已经落盘**。重试该 scope 时，已落盘的 section 在
+/// `KeepLocal` 下计为「跳过」⇒ 结果依然收敛，且不会丢数据。
 pub fn import_backup(
     text: &str,
     policy: ConflictPolicy,
     selection: &BackupSelection,
+    only_scopes: &[String],
 ) -> Result<Value, String> {
     let envelope = parse_envelope(text)?;
 
@@ -438,20 +454,29 @@ pub fn import_backup(
     restore_update_proxy(&envelope);
 
     let mut per_scope: Vec<Value> = Vec::new();
+    let mut retryable_scopes: Vec<String> = Vec::new();
     let mut failed = 0usize;
-    let mut retryable = 0usize;
 
     for (scope_key, scope_value) in envelope_scopes(&envelope) {
+        // 「只重试失败项」：不在名单里的 scope **整段跳过**（含未知 scope —— 重试
+        // 一个键名非法的分区没有意义，它不是「暂时失败」而是「永远无法导入」）。
+        if !only_scopes.is_empty() && !only_scopes.iter().any(|key| key == &scope_key) {
+            continue;
+        }
+
         // 未知 scope ⇒ **该分区整体拒绝并报错**（不静默跳过、不回落，§1.6）；其余照常。
         let scope = match resolve_scope_key(&scope_key) {
             Ok(scope) => scope,
             Err(error) => {
                 failed += 1;
-                retryable += 1;
+                // ⚠️ **不可重试**：键名非法是来件的结构性缺陷，重试同一个文件必然
+                // 再失败一次。此前这里与合并失败一样 `retryable += 1`，导致前端把
+                // 「重试必然失败」的分区也塞进重试名单（假出口）。
                 per_scope.push(json!({
                     "scope": scope_key,
                     "added": 0, "overwritten": 0, "skipped": 0, "conflicts": 0,
                     "error": error,
+                    "retryable": false,
                 }));
                 continue;
             }
@@ -485,14 +510,18 @@ pub fn import_backup(
                 "overwritten": counts.overwritten,
                 "skipped": counts.skipped,
                 "conflicts": counts.conflicts,
+                "retryable": false,
             })),
             Err(error) => {
                 failed += 1;
-                retryable += 1;
+                // ★ 可重试（写入异常 / 形状不合法）：前端把这批 scope 原样传回即可
+                // **只重试这些分区**，无需重新选文件。
+                retryable_scopes.push(scope_key.clone());
                 per_scope.push(json!({
                     "scope": scope_key,
                     "added": 0, "overwritten": 0, "skipped": 0, "conflicts": 0,
                     "error": error,
+                    "retryable": true,
                 }));
             }
         }
@@ -501,7 +530,9 @@ pub fn import_backup(
     Ok(json!({
         "perScope": per_scope,
         "failed": failed,
-        "retryable": retryable,
+        // 与 `retryableScopes` 同义（前端读后者即可拿到要回传的具体 id）。
+        "retryable": retryable_scopes.len(),
+        "retryableScopes": retryable_scopes,
         "snapshotPath": snapshot_path,
     }))
 }
@@ -558,7 +589,8 @@ pub fn restore_auto_backup(file_name: &str) -> Result<Value, String> {
     let path = resolve_managed_backup_path(file_name)?;
     let text =
         std::fs::read_to_string(&path).map_err(|error| format!("读取备份文件失败：{error}"))?;
-    import_backup(&text, ConflictPolicy::Overwrite, &full_selection())
+    // 恢复是**整份**恢复（不是重试）⇒ 传空名单 = 全量导入。
+    import_backup(&text, ConflictPolicy::Overwrite, &full_selection(), &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,11 +1124,11 @@ mod tests {
         let selection = BackupSelection::default();
 
         let first =
-            import_backup(&text, ConflictPolicy::KeepLocal, &selection).expect("首次导入应成功");
+            import_backup(&text, ConflictPolicy::KeepLocal, &selection, &[]).expect("首次导入应成功");
         assert_eq!(first["failed"], json!(0), "{first}");
 
         let second =
-            import_backup(&text, ConflictPolicy::KeepLocal, &selection).expect("二次导入应成功");
+            import_backup(&text, ConflictPolicy::KeepLocal, &selection, &[]).expect("二次导入应成功");
         let rows = second["perScope"].as_array().unwrap();
         let wb_cn = rows.iter().find(|row| row["scope"] == "wb-cn").unwrap();
         assert_eq!(wb_cn["added"], json!(0), "第二次不得新增（幂等）：{second}");
@@ -1133,7 +1165,7 @@ mod tests {
         .to_string();
 
         let summary =
-            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default()).unwrap();
+            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default(), &[]).unwrap();
         assert_eq!(summary["failed"], json!(2), "两个未知 scope 必须计入失败：{summary}");
         let rows = summary["perScope"].as_array().unwrap();
         for bad_scope in ["foo-cn", "trae-glboal"] {
@@ -1146,11 +1178,84 @@ mod tests {
         // 已知 scope 照常导入（部分失败态）。
         let good = rows.iter().find(|row| row["scope"] == "wb-cn").unwrap();
         assert_eq!(good["added"], json!(1), "已知 scope 应照常导入：{summary}");
+        // ★ 未知 scope **不可重试**：键名非法是来件的结构性缺陷，重试必然再失败。
+        //   （此前它与合并失败一样被计入 `retryable`，前端会把它塞进重试名单 ⇒ 假出口。）
+        assert_eq!(
+            summary["retryable"], json!(0),
+            "未知 scope 不该计入可重试（重试同一个坏键名必然再失败）：{summary}"
+        );
+        assert!(
+            summary["retryableScopes"].as_array().unwrap().is_empty(),
+            "未知 scope 不得进重试名单：{summary}"
+        );
+        for bad_scope in ["foo-cn", "trae-glboal"] {
+            let bad = rows.iter().find(|row| row["scope"] == bad_scope).unwrap();
+            assert_eq!(
+                bad["retryable"], json!(false),
+                "未知 scope {bad_scope} 必须标为不可重试：{summary}"
+            );
+        }
         // ★ 未知 scope 的账号**不得**被塞进任何已知 scope（防「跨库串数据」，R6）。
         assert_eq!(
             crate::modules::account::load_accounts_for(crate::modules::region::Region::Cn).len(),
             1,
             "未知 scope 的记录不得回落到已知 scope：{summary}"
+        );
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// ★★ C1：「重试失败项」是**真重试** —— 只重跑名单内的 scope，且重试本身也先快照。
+    ///
+    /// 覆盖两个曾经**假**的地方：
+    /// 1. `only_scopes` 非空时，**不在名单里的 scope 连读都不读**（不是「读了再跳过」）
+    ///    ⇒ 名单外的坏分区不会让重试整体失败；
+    /// 2. 重试也要产生 `pre-import-` 快照（重试是写操作，必须可撤销，D18）。
+    ///
+    /// 可证伪：把 `only_scopes` 的过滤去掉（本改成 `let _ = only_scopes;`）⇒
+    /// 第一条断言（`trae-cn` 未出现在 `perScope`）即红。
+    #[test]
+    fn import_backup_retry_only_touches_listed_scopes_and_snapshots() {
+        let home = isolated_home("retry-scopes");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        let text = json!({
+            "kind": BACKUP_KIND,
+            "formatVersion": SUPPORTED_FORMAT_VERSION,
+            "includesCredentials": true,
+            "scopes": {
+                "wb-cn": { "accounts": [{ "id": "x", "uid": "u", "nickname": "n", "access_token": "t" }] },
+                "trae-cn": { "accounts": [{ "id": "y", "uid": "v", "nickname": "m", "access_token": "t" }] },
+                // 一个**永远失败**的分区：不在重试名单里，就必须被无视。
+                "foo-cn": { "accounts": [{ "id": "z", "uid": "w", "nickname": "k", "access_token": "t" }] },
+            }
+        })
+        .to_string();
+
+        let summary =
+            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default(), &["trae-cn".to_string()])
+                .unwrap();
+
+        let rows = summary["perScope"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "重试只应处理名单内的 scope，实际处理了 {:?}",
+            rows.iter().map(|r| r["scope"].as_str().unwrap()).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0]["scope"], json!("trae-cn"), "只应重跑 trae-cn：{summary}");
+        assert_eq!(summary["failed"], json!(0), "名单外的坏分区不该让重试失败：{summary}");
+        // wb-cn 未被本次重试触碰（名单外 ⇒ 整段跳过）。
+        assert!(
+            !rows.iter().any(|row| row["scope"] == "wb-cn"),
+            "名单外的 wb-cn 不得被重试处理：{summary}"
+        );
+        // ★ 重试也是写操作 ⇒ 必须同样先快照。
+        let snapshot = summary["snapshotPath"].as_str().unwrap_or_default();
+        assert!(
+            snapshot.contains("pre-import-"),
+            "重试必须同样产生导入前快照（可撤销），实际：{snapshot}"
         );
 
         drop(_guard);
@@ -1216,7 +1321,7 @@ mod tests {
 
         let text = backup_text_with_account("u1", "甲", Some("tok"));
         let summary =
-            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default()).unwrap();
+            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default(), &[]).unwrap();
         let snapshot = summary["snapshotPath"].as_str().expect("必须返回快照路径");
         let path = std::path::Path::new(snapshot);
         assert!(path.is_file(), "导入前必须产生快照：{snapshot}");
@@ -1242,7 +1347,7 @@ mod tests {
 
         let text = backup_text_with_account("u1", "甲", None);
         let summary =
-            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default()).unwrap();
+            import_backup(&text, ConflictPolicy::KeepLocal, &BackupSelection::default(), &[]).unwrap();
         let rows = summary["perScope"].as_array().unwrap();
         let wb_cn = rows.iter().find(|row| row["scope"] == "wb-cn").unwrap();
         assert_eq!(wb_cn["added"], json!(1), "无凭据账号必须能导入（Allow）：{summary}");
@@ -1267,7 +1372,7 @@ mod tests {
 
         let text = backup_text_with_account("u1", "导入", Some("tok-new"));
         let summary =
-            import_backup(&text, ConflictPolicy::Overwrite, &BackupSelection::default()).unwrap();
+            import_backup(&text, ConflictPolicy::Overwrite, &BackupSelection::default(), &[]).unwrap();
         let rows = summary["perScope"].as_array().unwrap();
         let wb_cn = rows.iter().find(|row| row["scope"] == "wb-cn").unwrap();
         assert_eq!(wb_cn["overwritten"], json!(1), "覆盖策略应覆盖：{summary}");
@@ -1401,7 +1506,8 @@ mod tests {
             "损坏文件的预览必须报错"
         );
         assert!(
-            import_backup(broken, ConflictPolicy::KeepLocal, &BackupSelection::default()).is_err(),
+            import_backup(broken, ConflictPolicy::KeepLocal, &BackupSelection::default(), &[])
+                .is_err(),
             "损坏文件的导入必须报错"
         );
         assert!(

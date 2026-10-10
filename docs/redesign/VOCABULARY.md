@@ -52,9 +52,9 @@
 | 旧 | 新 | 为什么改 | 删除时点 |
 |:---|:---|:---|:---|
 | `variant`（散落各处） | `region`（区域）/ `program`（程序位） | **一个词被用来表达两个概念** —— 这是最要命的混淆 | **P2** |
-| `Product`（`App.tsx` 局部类型） | `Product`（`platforms/registry.ts`） | 类型搬家，消除重复定义 | **P2** |
-| `PRODUCT_NAV` / `PRODUCT_LABEL_KEY` / `PRODUCT_HOME`（`App.tsx`） | `PlatformDescriptor` 的字段 | 收进注册表，新增平台不再改 `App.tsx` | **P2** |
-| `TraeVariant`（及 `TraeVariantId`） | `program`（Trae 侧程序位） | 名字里的 `Variant` 是旧的模糊词 | **P2** |
+| `Product`（`App.tsx` 局部类型） | `Product`（`platforms/registry.ts`） | 类型搬家，消除重复定义 | ✅ **P2 已完成**（`App.tsx` 改为 `import`） |
+| `PRODUCT_NAV` / `PRODUCT_LABEL_KEY` / `PRODUCT_HOME`（`App.tsx`） | `PlatformDescriptor` 的字段 | 收进注册表，新增平台不再改 `App.tsx` | ✅ **P2 已完成**（三者均已删除：侧栏由 `DESTINATIONS` + `DEST_META` 生成；显示名与首页走 `platformDescriptor()`） |
+| `TraeVariant`（及 `TraeVariantId`） | `program`（Trae 侧程序位） | 名字里的 `Variant` 是旧的模糊词 | **P2**（`TraeVariantId` 仍在 `trae-types.ts`，改名属收尾项） |
 | 路由 `/trae/accounts` | `/s/trae-cn/accounts` | 让作用域进 URL（唯一真值） | **不删** —— 旧路由保留为**重定向**（D4） |
 | 旧命令名（`checkin` / `trae_checkin`…） | `*_for(scope, …)` | 统一签名 | **不删** —— 保留为**别名转发**（§2.5），且**硬编码自己的 scope** |
 

@@ -99,6 +99,15 @@ export function ProxyPanel() {
             {status.enabled && (
               <p className="mt-1 text-xs text-muted-foreground">{t("proxy.state.unverified")}</p>
             )}
+            {/* ★ E2：关闭态的**说明行**。此前标题下空无一物 ⇒ 用户看到「已关闭」
+                却不知道「默认关闭」是产品选择、以及开启要自己动客户端。 */}
+            {!status.enabled && (
+              <div className="mt-1 space-y-0.5 text-xs text-muted-foreground" data-act="proxy-off-notice">
+                <p className="font-medium text-foreground">{t("proxy.offNotice.title")}</p>
+                <p>{t("proxy.offNotice.default")}</p>
+                <p>{t("proxy.offNotice.howTo")}</p>
+              </div>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <DemoAction>
@@ -147,15 +156,51 @@ export function ProxyPanel() {
               ] as const
             ).map((key) => (
               <li key={key} className="flex items-center gap-1.5">
-                <Ban className="size-3 text-emerald-600" />
+                <Ban className="size-3 text-success" />
                 {t(key)}
               </li>
             ))}
           </ul>
         </div>
 
-        {/* 拦截方式 + 网关地址（断言 3：开启后要看得见「拦截方式」） */}
-        <div className="grid gap-2 text-xs sm:grid-cols-2">
+        {/* ★ 以下四块**只在「已开启」时出现**（原型 `proxyPanelHtml` :2964-2988 的开启态）：
+            关闭态只给「风险 + 不劫持」声明，不摆白名单 / 业务路径 / 引导 —— 否则用户会以为
+            「没开也在代理」，与「默认关」自相矛盾。 */}
+        {status.enabled && (
+          <>
+            {/* ★ E1：开启态 KPI 三格（原型 `.kpi-row`）。
+                ⚠️ 诚实渲染：`stats.known === false`（台账读不到 / 今天还没记过）⇒ 显示「—」，
+                **不得**回落 0。「落盘正文」恒 0 —— 那是**承诺**（只记元数据），不是统计值。 */}
+            <div className="grid grid-cols-3 gap-2" data-act="proxy-kpi">
+              {(
+                [
+                  {
+                    key: "proxy.kpi.requests",
+                    value: status.stats?.known ? status.stats.todayRequests : null,
+                  },
+                  {
+                    key: "proxy.kpi.switches",
+                    value: status.stats?.known ? status.stats.switches : null,
+                  },
+                  // 承诺项：不看 known，恒显「0（不落盘）」。
+                  { key: "proxy.kpi.bodies", value: 0 as number | null },
+                ] as const
+              ).map((cell) => (
+                <div key={cell.key} className="rounded-md border border-border px-3 py-2">
+                  <p className="text-[11px] text-muted-foreground">{t(cell.key)}</p>
+                  <p className="text-sm font-medium tabular-nums">
+                    {cell.key === "proxy.kpi.bodies"
+                      ? t("proxy.kpi.bodiesZero")
+                      : cell.value === null
+                        ? "—"
+                        : cell.value}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {/* 拦截方式 + 网关地址（断言 3：开启后要看得见「拦截方式」） */}
+            <div className="grid gap-2 text-xs sm:grid-cols-2">
           <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
             <span className="text-muted-foreground">{t("proxy.mode.label")}</span>
             <span className="font-medium">{t("proxy.mode.cRedirect")}</span>
@@ -229,6 +274,8 @@ export function ProxyPanel() {
           </div>
           <p className="text-xs text-muted-foreground">{t("proxy.guide.restart")}</p>
         </div>
+          </>
+        )}
       </CardContent>
     </Card>
   );

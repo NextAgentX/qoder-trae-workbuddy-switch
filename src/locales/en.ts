@@ -1,9 +1,11 @@
 import { en as backup } from "./domains/backup.en";
+import { en as clientSettings } from "./domains/clientSettings.en";
 import { en as recycleBin } from "./domains/recycleBin.en";
 import { en as proxy } from "./domains/proxy.en";
 import { en as sessions } from "./domains/sessions.en";
 import { en as shell } from "./domains/shell.en";
 import { en as shared } from "./domains/shared.en";
+import { en as skillManager } from "./domains/skillManager.en";
 import { en as traeComponents } from "./domains/traeComponents.en";
 import { en as traeGateway } from "./domains/traeGateway.en";
 import { en as traePages } from "./domains/traePages.en";
@@ -47,4 +49,6 @@ export const en: Partial<Record<TranslationKey, string>> = {
   ...sessions,
   ...recycleBin,
   ...proxy,
+  ...skillManager,
+  ...clientSettings,
 };

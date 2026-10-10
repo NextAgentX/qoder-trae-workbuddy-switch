@@ -56,6 +56,18 @@ pub enum ErrorCode {
     /// 前端据此弹出授权引导（轮询授权状态、给出三步说明）。**必须走码而不是匹配中文**：
     /// 界面语言可切换，按中文关键词判定会让引导在英文界面下静默失效。
     PermissionDenied,
+    /// 目标客户端正在运行，拒绝写入其 `settings.json`（会被其内存态覆盖）。
+    ///
+    /// 参数 `{slot}`：槽位展示键（i18n 键），由前端渲染成当前语言。
+    ClientSettingsProcessRunning,
+    /// 客户端 `settings.json` 解析失败（损坏 / 非纯 JSON），拒绝在其上做键值级改写。
+    ///
+    /// 参数 `{path}`：出问题的文件路径。
+    ClientSettingsParseFailed,
+    /// 客户端 `settings.json` 写入失败（临时文件校验不过 / 原子替换失败）。
+    ///
+    /// 参数 `{path}`：目标文件路径。
+    ClientSettingsWriteFailed,
 }
 
 impl ErrorCode {
@@ -67,6 +79,9 @@ impl ErrorCode {
             ErrorCode::NetTransportBody => "net.transport.body",
             ErrorCode::NetTransportOther => "net.transport.other",
             ErrorCode::PermissionDenied => "permission.denied",
+            ErrorCode::ClientSettingsProcessRunning => "client.settings.process_running",
+            ErrorCode::ClientSettingsParseFailed => "client.settings.parse_failed",
+            ErrorCode::ClientSettingsWriteFailed => "client.settings.write_failed",
         }
     }
 
@@ -78,6 +93,9 @@ impl ErrorCode {
             "net.transport.body" => Some(ErrorCode::NetTransportBody),
             "net.transport.other" => Some(ErrorCode::NetTransportOther),
             "permission.denied" => Some(ErrorCode::PermissionDenied),
+            "client.settings.process_running" => Some(ErrorCode::ClientSettingsProcessRunning),
+            "client.settings.parse_failed" => Some(ErrorCode::ClientSettingsParseFailed),
+            "client.settings.write_failed" => Some(ErrorCode::ClientSettingsWriteFailed),
             _ => None,
         }
     }

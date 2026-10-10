@@ -1058,6 +1058,25 @@ fn data_dir_base() -> Option<PathBuf> {
     }
 }
 
+/// 某个**程序位**（区域 × 程序）的 userData 目录：`%APPDATA%\<data_dir_names[0]>`。
+///
+/// 与 [`detect_data_dir_for`] 的区别（**不可互换**）：本函数按
+/// [`super::region::program_spec`] 精确取**该程序位自己声明的唯一目录名**，
+/// **不做候选回落**；而 `detect_data_dir_for` 走的是**变体**候选表，
+/// `TRAE_WORK` 那张表里混着 `TRAE SOLO`（**国际版客户端**），缺席时会静默落到它 ——
+/// 取「这个程序位的 settings.json 在哪」必须用本函数。
+///
+/// 目录**不保证存在**；调用方据 `is_file()` / `is_dir()` 判「是否已安装」。
+pub fn user_data_dir_for_program(
+    region: super::region::TraeRegion,
+    program: super::region::TraeProgram,
+) -> Option<PathBuf> {
+    let base = data_dir_base()?;
+    let spec = super::region::program_spec(region, program);
+    let name = *spec.data_dir_names.first()?;
+    Some(base.join(name))
+}
+
 // 这里刻意**没有**「Trae 客户端进程名」这样的单值函数。
 // `TRAE SOLO CN` 与 `Trae CN` 是可以并存的两条产品线，进程名、安装目录、
 // userData 目录各有一套，因此一律以 [`exe_names`] 的候选列表为准。

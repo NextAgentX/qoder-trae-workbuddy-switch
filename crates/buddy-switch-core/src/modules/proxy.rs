@@ -114,6 +114,11 @@ pub fn status_view() -> Value {
             "key": PROXY_SETTING_KEY,
             "value": PROXY_SETTING_VALUE,
         },
+        // ★ E1：开启态 KPI（`P12-ARCH.md` §3.2 已定契约）。
+        //   ⚠️ 计数由**网关进程**写进 `proxy-kpi.json`（`buddy_switch_gateway::proxy_kpi`），
+        //   core 只**读**那份台账 ⇒ 不引入 core→gateway 的运行时依赖。
+        //   「落盘正文恒 0」是**承诺**（只记元数据），不是统计值。
+        "stats": super::proxy_kpi_view::kpi_view(),
     })
 }
 

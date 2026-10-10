@@ -30,6 +30,8 @@ pub mod model_route;
 pub mod outbound;
 pub mod pool;
 pub mod protocol;
+// E1 · 代理 KPI 的真实计数（今日代理请求 / 今日换号；落盘，跨重启不丢）。
+pub mod proxy_kpi;
 pub mod rng;
 pub mod routes;
 pub mod session_headers;

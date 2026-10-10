@@ -190,11 +190,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         navigate(`/s/${scope}/accounts`);
       },
       openDataDir: (scope) => {
-        const parts = scopeParts(scope);
-        const call =
-          parts.product === "workbuddy"
-            ? api.openWorkbuddyDataDir(parts.region)
-            : api.openTraeDataDir(parts.region === "global" ? "global" : "trae_work");
+        /* ⚠️ **不按平台分支**：平台与区域都在 `scope` 里，由参数化命令 `open_data_dir`
+           自己解析（`api.openDataDir`）。写 `product === "workbuddy" ? … : …` 会让
+           新增平台时漏改（§1.2 收敛纪律）。 */
+        const call = api.openDataDir(scope);
         void call.catch((error) => toast.error(api.asError(error)));
       },
     }),
@@ -241,7 +240,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="top-[12%] max-h-[70vh] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-xl"
+        /* 对齐原型 `.palette`（`buddy-switch-prototype.html:470-473`）：
+           宽 `min(600px, 92vw)`、最大高 **62vh**、圆角 **16px**、阴影 `--shadow-lg`（= `shadow-overlay`）。
+           原先 576 / 70vh / 12（`rounded-lg` = 主题的 `--radius`）三处都偏。 */
+        className="top-[12%] max-h-[62vh] w-[min(600px,92vw)] translate-y-0 gap-0 overflow-hidden rounded-[16px] p-0 shadow-overlay sm:max-w-[600px]"
       >
         {/* Radix 要求 Title / Description 存在（无障碍）；视觉上由输入框承担，故 sr-only。 */}
         <DialogTitle className="sr-only">{t("palette.title")}</DialogTitle>

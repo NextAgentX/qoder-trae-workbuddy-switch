@@ -8,6 +8,16 @@
   --background: oklch(1 0 0);
   --foreground: oklch(0.21 0.01 264);
   --card: oklch(1 0 0);
+  /**
+   * ★ `--card-2`：**比 card 更沉的「凹陷面」**（原型 `buddy-switch-prototype.html:57`）。
+   *
+   * 用途在原型里高度收敛（31 处）：输入类控件的底（`scope-trigger` / `search-btn` / `input`）、
+   * 次级按钮底、表头、下拉项、代码块、悬浮窗头尾。
+   * ⚠️ 与 `--muted` / `--accent` 的区别是**语义**：`muted` 是「弱化文字/背景」，
+   * `accent` 是**悬停态**；`card-2` 是「静止时就在 card 上、但要比 card 深一层」的容器。
+   * 之前没有这个令牌，组件各写 `bg-muted/40`、`bg-black/10` 之类 ⇒ 深浅不一。
+   */
+  --card-2: oklch(0.985 0.003 264);
   --card-foreground: oklch(0.21 0.01 264);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.21 0.01 264);
@@ -22,10 +32,20 @@
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.99 0.002 270);
   --border: oklch(0.91 0.006 264);
+  /** ★ `--border-strong`：**悬停 / 强调态**的描边（原型 `:65`）——比 `border` 深一档。 */
+  --border-strong: oklch(0.85 0.008 264);
   --input: oklch(0.91 0.006 264);
   --ring: oklch(0.725 0.133 163.03);
   --brand: oklch(0.725 0.133 163.03);
   --brand-foreground: oklch(0.985 0.002 247.839);
+  /**
+   * ★ `--warning` / `--success`：**语义色**（原型 `:68-69`）。
+   *
+   * 之前这两个状态是用 Tailwind 色板硬编码的（`text-amber-700` / `text-emerald-600`）⇒
+   * 明暗主题下亮度不跟随、也和原型的 `oklch` 不在同一条曲线上。
+   */
+  --warning: oklch(0.62 0.14 65);
+  --success: oklch(0.6 0.14 155);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -40,6 +60,17 @@
   --sidebar-accent-foreground: oklch(0.21 0.01 264);
   --sidebar-border: oklch(0.91 0.006 264);
   --sidebar-ring: oklch(0.725 0.133 163.03);
+  /**
+   * ★ 三级阴影（原型 `:72-74`）：**静止 / 悬停 / 浮层**三档，全站只用这三条。
+   *
+   * ⚠️ 之前是组件里各自硬编码 `shadow-[0_1px_2px_rgba(15,23,42,.025),0_10px_28px_...]`，
+   * 几十处各写各的（数值还都不太一样）⇒ 明暗下观感不一致，改一处改不全。
+   */
+  /* ⚠️ 源令牌刻意**不叫** `--shadow-*`：`@theme inline` 里映射成 `--shadow-card` 等工具类时
+     同名会自引用（`--shadow-card: var(--shadow-card)`）。 */
+  --elevation-1: 0 1px 2px oklch(0.2 0.02 265 / 0.06);
+  --elevation-2: 0 4px 16px oklch(0.2 0.02 265 / 0.08);
+  --elevation-3: 0 24px 60px oklch(0.2 0.02 265 / 0.18);
   --data-series-emerald: oklch(0.62 0.13 163);
   --data-series-teal: oklch(0.66 0.1 190);
   --data-series-indigo: oklch(0.55 0.11 265);
@@ -55,6 +86,8 @@
   --background: oklch(0.208 0.042 265.755);
   --foreground: oklch(0.929 0.013 255.508);
   --card: oklch(0.279 0.041 260.031);
+  /* 深色下「凹陷面」= 原型的 `--card-2`（与侧栏同值，比 card 更深一层）。 */
+  --card-2: oklch(0.245 0.041 262);
   --card-foreground: oklch(0.929 0.013 255.508);
   --popover: oklch(0.279 0.041 260.031);
   --popover-foreground: oklch(0.929 0.013 255.508);
@@ -64,28 +97,44 @@
   --secondary-foreground: oklch(0.929 0.013 255.508);
   --muted: oklch(0.279 0.041 260.031);
   --muted-foreground: oklch(0.704 0.04 256.788);
-  --accent: oklch(0.279 0.041 260.031);
+  /**
+   * ⚠️ 原型的深色 `--accent` 是 `oklch(0.33 0.041 260)` —— **比 `muted` 亮一档**，
+   * 因为它的唯一职责是「悬停底色」，必须能与静止态（`card` / `card-2`）区分开。
+   * 旧值 `0.279`（= muted = card）导致 hover 几乎看不出变化。
+   */
+  --accent: oklch(0.33 0.041 260);
   --accent-foreground: oklch(0.929 0.013 255.508);
   --destructive: oklch(0.704 0.191 22.216);
   --destructive-foreground: oklch(0.985 0.002 247.839);
   --border: oklch(1 0 0 / 10%);
+  --border-strong: oklch(1 0 0 / 18%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.696 0.17 162.48);
   --brand: oklch(0.696 0.17 162.48);
   --brand-foreground: oklch(0.208 0.042 265.755);
+  --warning: oklch(0.79 0.14 78);
+  --success: oklch(0.72 0.15 155);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.279 0.041 260.031);
+  /**
+   * ⚠️ 原型的深色 `--sidebar` 是 `oklch(0.245 0.041 262)` —— **比 `background` 亮、比 `card` 暗**，
+   * 这样侧栏、内容底色、卡片三者才有层次。旧值与 `card` 同值（0.279）⇒ 侧栏和卡片糊成一片
+   * （这是截图里最直观的一处不一致）。
+   */
+  --sidebar: oklch(0.245 0.041 262);
   --sidebar-foreground: oklch(0.929 0.013 255.508);
   --sidebar-primary: oklch(0.696 0.17 162.48);
   --sidebar-primary-foreground: oklch(0.208 0.042 265.755);
-  --sidebar-accent: oklch(0.279 0.041 260.031);
+  --sidebar-accent: oklch(0.33 0.041 260);
   --sidebar-accent-foreground: oklch(0.929 0.013 255.508);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.696 0.17 162.48);
+  --elevation-1: 0 1px 2px oklch(0 0 0 / 0.25);
+  --elevation-2: 0 4px 16px oklch(0 0 0 / 0.3);
+  --elevation-3: 0 24px 60px oklch(0 0 0 / 0.45);
   --data-series-emerald: oklch(0.73 0.13 163);
   --data-series-teal: oklch(0.76 0.1 190);
   --data-series-indigo: oklch(0.77 0.11 265);
@@ -100,6 +149,7 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
+  --color-card-2: var(--card-2);
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
@@ -114,8 +164,12 @@
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  /* 语义色（原型 `:68-69`）：`text-success` / `bg-warning/15` 等工具类由此生成。 */
+  --color-warning: var(--warning);
+  --color-success: var(--success);
   --color-brand: var(--brand);
   --color-brand-foreground: var(--brand-foreground);
   --color-chart-1: var(--chart-1);
@@ -135,6 +189,10 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+  /* ★ 三级高度 → `shadow-card` / `shadow-card-hover` / `shadow-overlay`（原型 `:72-74` 的值）。 */
+  --shadow-card: var(--elevation-1);
+  --shadow-card-hover: var(--elevation-2);
+  --shadow-overlay: var(--elevation-3);
 }
 
 @layer base {
@@ -150,11 +208,32 @@
     min-width: 320px;
     height: 100%;
     overflow: hidden;
-    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    /* 字体栈与原型一致（`buddy-switch-prototype.html:82`）—— 含中文回退 "Microsoft YaHei"，
+       否则 Windows 下中文会落到默认宋体，与原型观感差异明显。 */
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+      "Microsoft YaHei", sans-serif;
     font-synthesis: none;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+  /**
+   * 滚动条（原型 `:95-97`）：细拇指 + 透明轨道。
+   * ⚠️ 不用 `scrollbar-width: thin`（Firefox 专有、会与下面的 WebKit 规则打架），
+   * 原型也只定义了 WebKit 一套。
+   */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 8px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
   }
   #root {
     height: 100%;

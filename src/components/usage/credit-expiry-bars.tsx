@@ -25,7 +25,7 @@ export function CreditExpiryBars({ buckets }: { buckets: ExpiryBucket[] }) {
   return (
     <ChartContainer
       config={{ value: { label: t("wbStats.usage.credits.expiryTitle"), color: "var(--data-series-amber)" } }}
-      className="h-56 w-full"
+      className="h-[170px] w-full"
     >
       <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
         <CartesianGrid vertical={false} strokeDasharray="3 3" />

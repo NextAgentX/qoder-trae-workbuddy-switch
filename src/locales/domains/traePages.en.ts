@@ -52,6 +52,8 @@ export const en = {
   "trae.page.accounts.checkinBatchSuccess": "{n} checked in",
   "trae.page.accounts.checkinBatchAlready": "{n} already checked in",
   "trae.page.accounts.checkinBatchFailed": "{n} failed",
+  // ★ B4: toast action on partial failure — retry only the failed accounts.
+  "trae.page.accounts.checkinRetryFailed": "Retry failed",
 
   // ---- Import local account ----
   "trae.page.accounts.importLocalDone": "Local account imported",

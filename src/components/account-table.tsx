@@ -78,11 +78,11 @@ export function AccountTable<T>({
   openRowLabel,
 }: AccountTableProps<T>) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-border">
-      <table className="w-full border-collapse text-sm">
+    <div className="overflow-x-auto rounded-[12px] border border-border">
+      <table className="w-full border-collapse text-[12.5px]">
         <thead>
-          <tr className="border-b border-border bg-muted/40 text-xs text-muted-foreground">
-            <th scope="col" className="w-10 px-3 py-2 text-left font-medium">
+          <tr className="border-b border-border text-muted-foreground">
+            <th scope="col" className="sticky top-0 z-[1] w-10 bg-card-2 px-3 py-2.5 text-left text-[11.5px] font-medium">
               <Checkbox
                 checked={allSelected ? true : someSelected ? "indeterminate" : false}
                 onCheckedChange={(checked) => onToggleAll(checked === true)}
@@ -94,7 +94,7 @@ export function AccountTable<T>({
                 key={column.key}
                 scope="col"
                 style={column.width ? { width: column.width } : undefined}
-                className={cn("px-3 py-2 font-medium", column.align === "right" ? "text-right" : "text-left")}
+                className={cn("sticky top-0 z-[1] bg-card-2 px-3 py-2.5 text-[11.5px] font-medium", column.align === "right" ? "text-right" : "text-left")}
               >
                 {column.header}
               </th>
@@ -116,11 +116,11 @@ export function AccountTable<T>({
                 }}
                 className={cn(
                   "cursor-pointer border-b border-border/60 last:border-0 hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-none",
-                  isCurrent?.(row) && "bg-primary/5",
+                  isCurrent?.(row) && "bg-primary/[0.07]",
                 )}
               >
                 {/* 可点区 1：勾选框（阻止冒泡，避免顺带打开详情）。 */}
-                <td className="px-3 py-2 align-middle" onClick={(event) => event.stopPropagation()}>
+                <td className="px-3 py-2.5 align-middle text-[11px]" onClick={(event) => event.stopPropagation()}>
                   <Checkbox
                     checked={selected}
                     onCheckedChange={() => onToggleSelect(row)}
@@ -131,7 +131,7 @@ export function AccountTable<T>({
                 {columns.map((column) => (
                   <td
                     key={column.key}
-                    className={cn("px-3 py-2 align-middle", column.align === "right" ? "text-right" : "text-left")}
+                    className={cn("px-3 py-2.5 align-middle text-[11px]", column.align === "right" ? "text-right" : "text-left")}
                   >
                     {column.render(row)}
                   </td>

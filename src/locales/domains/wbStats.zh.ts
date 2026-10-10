@@ -53,6 +53,17 @@ export const zh = {
   "wbStats.gateway.cancel": "取消",
   "wbStats.gateway.confirmOpen": "确认开启",
   "wbStats.gateway.keyPlaceholder": "sk-wb-…（在下方 Key 列表创建）",
+  /* 概览卡三行（原型 viewGateway :3013-3018）：上游凭据校验 / 可用模型 / 账号池。 */
+  "wbStats.gateway.upstreamCreds": "上游账号凭据",
+  "wbStats.gateway.upstreamCredsDesc": "账号池读取上游凭据的有效性",
+  "wbStats.gateway.verify": "校验",
+  "wbStats.gateway.verifyOk": "凭据校验通过",
+  "wbStats.gateway.verifyFail": "凭据校验未通过",
+  "wbStats.gateway.availableModels": "可用模型",
+  "wbStats.gateway.modelCount": "{count} 个",
+  "wbStats.gateway.poolEntries": "账号池",
+  "wbStats.gateway.poolEntryCount": "{count} 个条目",
+  "wbStats.gateway.view": "查看",
   "wbStats.gateway.modelList": "模型列表",
   /* 来源徽标（三级）—— `lib/catalog-source.ts` 的 `BADGE_KEY` 逐字引用。
      徽标前的「来源」标签本身走 `shared.gateway.sourceBar.sourceLabel`（两平台同形）。 */
@@ -125,6 +136,8 @@ export const zh = {
   /* 自动发现说明（P10 §1.7）：只说「客户端会自己读清单」，不承诺清单里的模型一定可用。 */
   "wbStats.gateway.autoDiscover": "客户端会自动从 `/v1/models` 读取模型清单，不需要手填模型名；若你的工具不支持自动发现，从「模型」页复制即可。",
   "wbStats.gateway.noKeyHint": "sk-wb-…（请先在上方创建 Key）",
+  /* 「原始请求（调试用）」标签（原型 `:2929`）：下面是可直接粘贴的 curl 片段。 */
+  "wbStats.gateway.rawRequest": "原始请求（调试用）",
   // 可复制配置片段里的字段标签（各客户端片段共用；片段本身是给外部工具粘贴的，故键名保持英文习惯）
   /* P3：`wbStats.gateway.snippet.*` 四条已删除 —— 字段标签统一到
      `shared.gateway.snippet.*`（两平台共用）。其中 `modelPick` 的值里还写死过
@@ -141,6 +154,8 @@ export const zh = {
   // ---- 积分统计（补全） ----
   "wbStats.credit.bothRegions": "（国内版 + 国际版）",
   "wbStats.credit.refresh": "刷新统计",
+  "wbStats.credit.headBarHint": "积分余额来自上游，可手动刷新",
+  "wbStats.credit.refreshCredits": "刷新积分",
   "wbStats.credit.loadFailed": "统计加载失败",
   "wbStats.credit.retry": "重试",
 
@@ -167,6 +182,7 @@ export const zh = {
   // 趋势视图
   "wbStats.usage.trend.total": "区间总 Token",
   "wbStats.usage.trend.avg": "日均",
+  "wbStats.usage.trend.avgHint": "按自然日平均",
   "wbStats.usage.trend.peak": "峰值",
   "wbStats.usage.trend.models": "模型数",
   "wbStats.usage.trend.stackedTitle": "每日 Token · 按模型拆分",

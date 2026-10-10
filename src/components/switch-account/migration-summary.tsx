@@ -26,6 +26,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useT } from "@/lib/i18n";
 import type { TreeSelectionStats } from "@/lib/session-tree";
 import type { AccountMeta } from "@/lib/types";
+import { accountDisplayName } from "@/components/account-card";
 
 export interface MigrationSummaryProps {
   /** 目标账号。 */
@@ -64,7 +65,7 @@ export function MigrationSummary({
 }: MigrationSummaryProps) {
   const t = useT();
   const targetName =
-    target.nickname || target.email || target.uid || t("wbAccounts.common.unknownAccount");
+    accountDisplayName(target);
 
   /* 迁移内容清单：会话用「已选 N 个会话 / M 个目录」，未选会话时写「未选择任何会话」。 */
   const parts: string[] = [];

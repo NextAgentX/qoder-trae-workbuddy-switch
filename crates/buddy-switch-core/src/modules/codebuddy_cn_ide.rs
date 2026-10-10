@@ -79,7 +79,7 @@ fn active_account_id_from_state() -> Option<String> {
 /// 早期导入），空串注入进去会让客户端无从解析。**必须给默认值，不能透传空串。**
 ///
 /// 只替换「产品域」这一段，`www.` 前缀等其余部分原样保留。
-fn codebuddy_cn_domain_for(raw: &str) -> String {
+pub fn codebuddy_cn_domain_for(raw: &str) -> String {
     let domain = raw.trim();
     if domain.is_empty() {
         return "www.codebuddy.cn".to_string();
@@ -137,7 +137,7 @@ pub fn build_session_json(acc: &Value) -> String {
     .to_string()
 }
 
-fn parse_token_from_secret(secret: &str) -> Option<(Option<String>, String)> {
+pub fn parse_token_from_secret(secret: &str) -> Option<(Option<String>, String)> {
     let trimmed = secret.trim();
     if trimmed.is_empty() {
         return None;
@@ -202,7 +202,7 @@ fn parse_token_from_secret(secret: &str) -> Option<(Option<String>, String)> {
     Some((None, trimmed.to_string()))
 }
 
-fn match_account_for_token(uid: Option<&str>, token: &str) -> Option<Value> {
+pub fn match_account_for_token(uid: Option<&str>, token: &str) -> Option<Value> {
     let accounts = account::load_accounts();
     if let Some(uid) = uid.filter(|s| !s.is_empty()) {
         if let Some(acc) = accounts.iter().find(|a| get_str(a, "uid").as_deref() == Some(uid)) {

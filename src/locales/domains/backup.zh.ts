@@ -68,8 +68,10 @@ export const zh = {
   "backup.import.run": "开始导入",
   "backup.import.result.title": "导入结果",
   "backup.import.result.summary": "新增 {added} · 覆盖 {overwritten} · 跳过 {skipped}",
-  "backup.import.result.failed": "{count} 个账号导入失败",
+  "backup.import.result.failed": "{count} 个分区导入失败",
   "backup.import.result.retry": "重试失败项",
+  "backup.import.result.retryDone": "失败分区已重试导入",
+  "backup.import.result.retryPartial": "仍有 {count} 个分区导入失败",
   "backup.import.result.snapshot": "已自动快照导入前状态，可在「从自动备份恢复」中回退。",
   "backup.import.result.done": "完成",
 

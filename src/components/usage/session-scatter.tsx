@@ -57,7 +57,7 @@ export function SessionScatter({ points }: { points: SessionPoint[] }) {
   if (points.length === 0) return null;
 
   return (
-    <ChartContainer config={CONFIG} className="h-[220px] w-full">
+    <ChartContainer config={CONFIG} className="h-[200px] w-full">
       <ScatterChart margin={{ top: 12, right: 16, bottom: 12, left: 8 }}>
         <CartesianGrid strokeDasharray="3 3" />
         <XAxis

@@ -9,8 +9,10 @@
  *
  * ## ★ 关键取舍（P3-ARCH §6）
  *
- * - **#1 入账不可得**（已核实 `events.kind==="checkin"` 无金额字段、且被裁剪）⇒
- *   每日收支柱**只画消耗侧**（单向），「区间入账」tile 显示 `—` 并注明原因；
+ * - **#1 逐条入账可得、逐日聚合仍不可得**：签到流水**逐条**已能显示「+N」
+ *   （`events[].amount`，来自上游签到状态额度；取不到时显示 `—`，不猜）；但后端
+ *   `daily[]` 只由余额快照推导（**只有消耗侧**）⇒ 每日收支柱仍**只画消耗侧**（单向），
+ *   「区间入账」tile 仍显示 `—` 并注明原因；
  * - **#2 账号 Token 占比环形 → 不渲染**（`TokenStatsSource` 无按账号 Token 分组）；
  * - **#3 网关状态码分布环形 → 不渲染**（用量页不持有该数据源）。
  *   即：原型积分页的两个环形**都不画**（数据不支持就不画）。
@@ -194,10 +196,10 @@ export default function CreditStatsPage() {
       : "";
 
   return (
-    <div className="mx-auto w-full max-w-[1180px] min-w-0 px-4 py-6 sm:px-8 sm:py-9">
+    <div className="mx-auto w-full max-w-[1240px] min-w-0 px-7 pt-[26px] pb-[60px]">
       <header className="mb-4 flex min-w-0 flex-wrap items-start justify-between gap-4 sm:mb-5">
         <div className="min-w-0">
-          <h1 className="text-[28px] font-semibold tracking-tight">{t("wbStats.credit.pageTitle")}</h1>
+          <h2 className="text-xl font-semibold tracking-tight">{t("wbStats.credit.pageTitle")}</h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
             {regionFilterLabel(region)}
             {region === "all" && t("wbStats.credit.bothRegions")}
@@ -254,6 +256,21 @@ export default function CreditStatsPage() {
         />
       ) : (
         <div className="min-w-0 space-y-6">
+          {/* 积分页顶部条（原型 `creditsHeadBar`）：说明 + 「刷新积分」入口。 */}
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <span className="text-xs text-muted-foreground">{t("wbStats.credit.headBarHint")}</span>
+            <div className="grow" />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void load(region, true)}
+              disabled={loading}
+            >
+              {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              {t("wbStats.credit.refreshCredits")}
+            </Button>
+          </div>
+
           <StatTiles tiles={tiles} ariaLabel={t("wbStats.credit.overviewAria")} />
 
           {rangedBars.length > 0 ? (
@@ -312,7 +329,7 @@ export default function CreditStatsPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {stats.events.slice(0, 50).map((event, index) => {
+                      {stats.events.map((event, index) => {
                         const account = displayText(event.accountName) || t("wbStats.usage.credits.unknownAccount");
                         if (event.kind === "usage") {
                           return (
@@ -323,7 +340,7 @@ export default function CreditStatsPage() {
                               <td className="max-w-[160px] truncate px-3 py-2.5" title={account}>
                                 {account}
                               </td>
-                              <td className="px-3 py-2.5 text-right tabular-nums text-amber-600 dark:text-amber-400">
+                              <td className="px-3 py-2.5 text-right tabular-nums text-warning">
                                 -{formatCredits(event.amount)}
                               </td>
                               <td className="px-4 py-2.5 text-muted-foreground">
@@ -338,6 +355,9 @@ export default function CreditStatsPage() {
                             : event.result === "already"
                               ? t("wbStats.usage.credits.checkinAlready")
                               : t("wbStats.usage.credits.checkinError");
+                        // 逐条「+N」：拿到上游额度才显示，拿不到保持「—」（不猜、不摆「+0」）。
+                        const reward =
+                          typeof event.amount === "number" && event.amount > 0 ? event.amount : null;
                         return (
                           <tr key={`checkin-${event.ts}-${index}`} className="border-t border-border/60">
                             <td className="whitespace-nowrap px-4 py-2.5 text-muted-foreground">
@@ -346,7 +366,15 @@ export default function CreditStatsPage() {
                             <td className="max-w-[160px] truncate px-3 py-2.5" title={account}>
                               {account}
                             </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">—</td>
+                            <td
+                              className={
+                                reward === null
+                                  ? "px-3 py-2.5 text-right tabular-nums text-muted-foreground"
+                                  : "px-3 py-2.5 text-right tabular-nums text-success"
+                              }
+                            >
+                              {reward === null ? "—" : `+${formatCredits(reward)}`}
+                            </td>
                             <td className="px-4 py-2.5 text-muted-foreground">
                               {note}
                               {displayText(event.error) ? ` · ${displayText(event.error)}` : ""}

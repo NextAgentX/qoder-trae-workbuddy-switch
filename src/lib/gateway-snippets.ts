@@ -210,3 +210,36 @@ export function gatewaySnippet({
       ].join("\n");
   }
 }
+
+export interface AccessCurlInput {
+  protocol: GatewayProtocolKey;
+  /** **根地址**（去掉 `/v1`）—— 端点路径取自 `protocolOf(protocol).endpoint`（**含** `/v1`）。 */
+  rootUrl: string;
+  /** 示例模型名（与接入片段同一取值）。 */
+  model: string;
+}
+
+/**
+ * 「原始请求（调试用）」curl 片段（原型 `buddy-switch-prototype.html:2903-2910` / `:2929-2930`）。
+ *
+ * 认证头由**协议**决定，与 `gatewaySnippet` **同源**（复用 `protocolOf(protocol).authHeader`）：
+ * Anthropic → `x-api-key`；OpenAI → `Authorization: Bearer`。Key 用环境变量占位而不是脱敏前缀 ——
+ * 那串带省略号（`sk-wb-…`），粘进终端只会报错。
+ */
+export function gatewayCurl({ protocol, rootUrl, model }: AccessCurlInput): string {
+  const proto = protocolOf(protocol);
+  const url = `${rootUrl}${proto.endpoint.replace(/^POST\s+/, "")}`;
+  if (protocol === "anthropic") {
+    return [
+      `curl ${url} \\`,
+      `  -H "${proto.authHeader}: $BUDDY_SWITCH_KEY" \\`,
+      `  -H "anthropic-version: 2023-06-01" \\`,
+      `  -d '{"model":"${model}","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'`,
+    ].join("\n");
+  }
+  return [
+    `curl ${url} \\`,
+    `  -H "${proto.authHeader}: $BUDDY_SWITCH_KEY" \\`,
+    `  -d '{"model":"${model}","messages":[{"role":"user","content":"hi"}]}'`,
+  ].join("\n");
+}

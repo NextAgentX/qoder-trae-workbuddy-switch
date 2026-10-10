@@ -83,6 +83,8 @@ pub struct RelayFailure {
     pub error: GatewayError,
     /// 最后一次尝试的账号展示名（诊断用）。
     pub account: String,
+    /// 最后一次尝试的账号 uid（写日志用；选不出账号时为空）。
+    pub uid: String,
     /// 上游返回体片段（可能为空）。
     pub upstream_message: String,
 }
@@ -148,6 +150,12 @@ pub async fn relay(
 
         let uid = account::get_str(&account_value, "uid").unwrap_or_default();
         let account_name = account::account_display_name(&account_value);
+
+        // ★ E1：走到第 2 轮及以后说明**上一轮没能用这个账号** ⇒ 记一次「换号」。
+        //   判据放在**选号成功之后**：只有真的换到另一个账号才算，「同一账号重试」不计。
+        if attempt > 0 && !uid.is_empty() {
+            state.proxy_kpi.record_switch();
+        }
 
         // 在途租约：占满则标记为已试并换号。
         if !uid.is_empty() {
@@ -232,7 +240,7 @@ pub async fn relay(
                     disabled
                 };
                 if !uid.is_empty() {
-                    tried.insert(uid);
+                    tried.insert(uid.clone());
                     // 会话粘性：这个账号刚失败 ⇒ 立刻**解绑**，下一轮换号重新绑。
                     // 粘性是优化而非约束，绝不能因为粘性而反复撞同一堵墙。
                     if let Some(key) = sticky_key.as_deref() {
@@ -247,6 +255,7 @@ pub async fn relay(
                         message: message.clone(),
                     },
                     account: account_name,
+                    uid,
                     upstream_message: message,
                 });
 
@@ -269,6 +278,7 @@ pub async fn relay(
             region: request.region,
         },
         account: String::new(),
+        uid: String::new(),
         upstream_message: String::new(),
     });
     // 唯一失败出口 ⇒ 在这里记一次即可覆盖全部失败路径（含「没有可用账号」）。

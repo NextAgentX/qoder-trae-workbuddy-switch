@@ -16,6 +16,9 @@ export const en = {
   /* P3: `shared.region.scope.aria` removed (region selector moved to the sidebar). */
   "shared.region.combine.aria": "Combine both regions",
   "shared.region.combine.label": "Combine both regions",
+  /* P3: the merge toggle is a `.seg` of two buttons (prototype `viewUsage` params). */
+  "shared.region.combine.only": "This scope only",
+  "shared.region.combine.all": "Merge all scopes",
 
   // ---- Gateway account pool status (gateway.ts — one card shared by both sides) ----
   "shared.poolStatus.available": "Available",
@@ -104,6 +107,16 @@ export const en = {
   "shared.gateway.pool.preferredMissing": "Preferred account (not in this pool)",
   // Preference, not a hard pin: falls back when the preferred account can't serve.
   "shared.gateway.pool.preferredHint": "A preference, not a hard pin: if it is cooling, dead, or out of credits, another account is used instead — requests are never rejected.",
+  // Table columns and the "pick" column (prototype viewGateway :3057-3069).
+  "shared.gateway.pool.colAccount": "Account",
+  "shared.gateway.pool.colCredits": "Credits",
+  "shared.gateway.pool.colStatus": "Status",
+  "shared.gateway.pool.colPick": "Pick",
+  "shared.gateway.pool.pin": "Pin",
+  "shared.gateway.pool.unpin": "Unpin",
+  "shared.gateway.pool.pinned": "Pinned",
+  // Selection priority and exclusivity note (prototype :3069).
+  "shared.gateway.pool.exclusiveHint": "Priority: explicit pin > sticky session > auto-best. Pinning is exclusive — only one account is pinned at a time.",
 
   // ---- Clipboard (clipboard.ts) ----
   "shared.clipboard.copied": "Copied",
@@ -273,6 +286,11 @@ export const en = {
   "shared.drawer.remark.aria": "Remark for {name}",
   "shared.drawer.remark.editAria": "Edit remark for {name}",
   "shared.drawer.remark.add": "Add remark",
+  "shared.drawer.group.title": "Group",
+  "shared.drawer.group.placeholder": "Enter a custom group name (leave blank to ungroup)",
+  "shared.drawer.group.aria": "Group for {name}",
+  "shared.drawer.group.editAria": "Edit group for {name}",
+  "shared.drawer.group.add": "Set group",
   "shared.drawer.packs.title": "Credits / packs",
   // ★ B5: check-in credits (fields come from the **measured upstream response**).
   "shared.drawer.checkin.title": "Check-in",
@@ -284,6 +302,28 @@ export const en = {
   "shared.drawer.program.installed": "Installed",
   "shared.drawer.program.noDataDir": "No data dir",
   "shared.drawer.program.missing": "Not detected",
+  "shared.drawer.switch.title": "Switch to this account",
+  "shared.drawer.switch.wizard": "Switch via wizard (optionally migrate content)",
+  "shared.drawer.switch.available": "Switchable",
+  "shared.drawer.currentLogin": "Signed in",
+  "shared.drawer.actions.title": "Actions",
+  "shared.drawer.actions.refresh": "Refresh token",
+  "shared.drawer.actions.checkin": "Manual check-in",
+  "shared.drawer.actions.editRemark": "Edit remark",
+  "shared.drawer.actions.editGroup": "Edit group",
+  "shared.drawer.actions.export": "Export",
+  "shared.drawer.actions.permission": "Switch permission diagnostics",
+  "shared.drawer.actions.delete": "Delete account",
+  "shared.drawer.actions.credentialNote": "Credentials are expired or need re-login; no check-in entry until that is resolved.",
+  "shared.drawer.checkin.historyTitle": "Check-in history (last 7 days)",
+  "shared.drawer.checkin.historyDate": "Date",
+  "shared.drawer.checkin.historyResult": "Result",
+  "shared.drawer.checkin.historyAmount": "Credits earned",
+  "shared.drawer.checkin.result.success": "Success",
+  "shared.drawer.checkin.result.already": "Already checked in",
+  "shared.drawer.checkin.result.fail": "Failed",
+  "shared.drawer.checkin.result.none": "Not checked in",
+  "shared.drawer.checkin.historyEmpty": "No check-in records yet",
   "shared.drawer.empty.title": "No details",
   "shared.drawer.empty.description": "No details to show for this account yet; re-check and try again.",
 
@@ -291,6 +331,8 @@ export const en = {
   "shared.batch.selected": "{n} selected",
   "shared.batch.checkin": "Check in",
   "shared.batch.refresh": "Refresh",
+  // Prototype `batch-export`: exports the **selected** accounts (all-accounts export lives in the toolbar).
+  "shared.batch.export": "Export",
   "shared.batch.delete": "Delete",
   "shared.batch.clear": "Clear selection",
   "shared.batch.deleteTitle": "Delete accounts in bulk",

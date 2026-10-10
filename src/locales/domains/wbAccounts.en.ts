@@ -96,14 +96,23 @@ export const en = {
   "wbAccounts.card.currentWorkbuddy": "WorkBuddy current account",
   "wbAccounts.card.currentIde": "CodeBuddy IDE current account",
   "wbAccounts.card.currentCli": "CodeBuddy CLI current account",
+  "wbAccounts.card.currentPlugin": "{client} current account",
+  // ⚠️ This speaks about the **extension not being installed on this machine** (not about an
+  //    "unsupported" app feature) ⇒ it must point to the correct action: install it first.
+  "wbAccounts.card.guidePlugin": "{client} not detected: install the CodeBuddy extension in your editor first, then come back to switch",
   // P5 §2.5: program-slot display names — targeted by `ProgramSpec.label_key` in core `modules/programs.rs`.
+  // ⚠️ Names must be **pairwise distinct** (enforced by the gate): `vscodeCnInject` is the
+  //    **read-only** probe slot, `vscodeCodebuddyPlugin` is the **switchable** slot — both are
+  //    VS Code related, and identical labels leave users unable to tell which one to click.
   "wbAccounts.program.codebuddyCli": "CodeBuddy CLI",
   "wbAccounts.program.codebuddyCnIde": "CodeBuddy CN IDE",
-  "wbAccounts.program.vscodeCnInject": "VS Code CodeBuddy extension",
-  // ⚠️ **Planned (not supported yet)** — must say "not supported yet", **NOT** "client not detected"
-  //    (the latter sends users to install something that still won't work).
-  "wbAccounts.program.plannedVscode": "VS Code CodeBuddy extension",
-  "wbAccounts.program.plannedJetbrains": "JetBrains CodeBuddy extension",
+  "wbAccounts.program.vscodeCnInject": "VS Code CodeBuddy plugin",
+  "wbAccounts.program.vscodeCodebuddyPlugin": "VS Code CodeBuddy extension",
+  "wbAccounts.program.jetbrainsCodebuddyPlugin": "JetBrains CodeBuddy plugin",
+  // ⚠️ Fallback wording of the **Planned (not supported yet)** mechanism. There are currently
+  //    **no** planned entries (both targets shipped), but the mechanism is kept — so this must
+  //    say "not supported yet", **NOT** "client not detected" (the latter sends users to install
+  //    something that still won't work).
   "wbAccounts.program.plannedHint": "Not supported yet",
   "wbAccounts.card.unnamed": "Unnamed account",
   "wbAccounts.card.checkedIn": "Checked in",
@@ -113,6 +122,15 @@ export const en = {
   "wbAccounts.card.priorityAria": "Priority",
   "wbAccounts.card.priorityTip": "Recommended priority",
   "wbAccounts.card.toolsInUse": "{n} tools in use",
+  "wbAccounts.card.currentLogin": "Signed in",
+  "wbAccounts.card.metric.credits": "Credits",
+  "wbAccounts.card.metric.todayTokens": "Today's tokens",
+  "wbAccounts.card.metric.lastUsed": "Last used",
+  "wbAccounts.card.metric.atLeast": "≥{value}",
+  "wbAccounts.card.metric.todayTokensClient": "Client in {input} · out {output}",
+  "wbAccounts.card.metric.todayTokensGateway": "Gateway in {input} · out {output}",
+  "wbAccounts.card.metric.todayTokensTruncated": "Gateway log hit its retention cap; the gateway figure is a lower bound (real usage is higher)",
+  "wbAccounts.card.editGroup": "Set group",
   "wbAccounts.card.manageAria": "Manage account {name}",
   "wbAccounts.card.moreActions": "More account actions",
   "wbAccounts.card.refreshToken": "Refresh token",
@@ -365,11 +383,19 @@ export const en = {
   "wbAccounts.toast.switchIdeLoadingDesc": "Will inject credentials and restart CodeBuddy IDE",
   "wbAccounts.toast.switchIdeUpdated": "CodeBuddy IDE switched",
   "wbAccounts.toast.switchIdeFail": "Failed to switch CodeBuddy IDE",
+  // CodeBuddy extensions inside editors (VS Code / JetBrains): one set of copy for both slots.
+  "wbAccounts.toast.switchPluginLoading": "Switching {client} account…",
+  "wbAccounts.toast.switchPluginLoadingDesc": "Will inject credentials and restart {client}",
+  "wbAccounts.toast.switchPluginUpdated": "{client} switched",
+  "wbAccounts.toast.switchPluginFail": "Failed to switch {client}",
   "wbAccounts.toast.cliIntegrationUpdated": "CodeBuddy CLI integration updated",
   "wbAccounts.toast.cliIntegrationFail": "Failed to connect CodeBuddy CLI",
   "wbAccounts.toast.remarkSaved": "Remark saved",
   "wbAccounts.toast.remarkCleared": "Remark cleared",
   "wbAccounts.toast.remarkSaveFail": "Failed to save remark",
+  "wbAccounts.toast.groupSaved": "Group saved",
+  "wbAccounts.toast.groupCleared": "Removed from group",
+  "wbAccounts.toast.groupSaveFail": "Failed to save group",
   "wbAccounts.toast.guideIdeSetting": "Configure the CodeBuddy IDE path on the Settings page",
   "wbAccounts.toast.guideCliSetting": "Finish CodeBuddy CLI setup on the Settings page",
   "wbAccounts.page.accounts": "Accounts",
@@ -378,9 +404,13 @@ export const en = {
   "wbAccounts.toolbar.sort.priority": "Credit priority",
   "wbAccounts.toolbar.sort.name": "Name",
   "wbAccounts.toolbar.sort.expiry": "Expiry",
+  "wbAccounts.toolbar.sort.recent": "Recently used",
+  "wbAccounts.toolbar.addAccount": "Add account",
   "wbAccounts.toolbar.group.none": "No grouping",
   "wbAccounts.toolbar.group.program": "By program",
   "wbAccounts.toolbar.group.status": "By status",
+  "wbAccounts.toolbar.group.custom": "Custom groups",
+  "wbAccounts.toolbar.groupBucket.ungrouped": "Ungrouped",
   "wbAccounts.toolbar.statusBucket.normal": "Normal",
   "wbAccounts.toolbar.statusBucket.notCheckedIn": "Not checked in today",
   "wbAccounts.toolbar.statusBucket.expired": "Credentials expired",
@@ -389,7 +419,37 @@ export const en = {
   "wbAccounts.table.account": "Account",
   "wbAccounts.table.status": "Status",
   "wbAccounts.table.credits": "Credits",
+  "wbAccounts.table.todayTokens": "Today's tokens",
   "wbAccounts.table.expiry": "Expiry",
   "wbAccounts.table.programs": "Programs",
   "wbAccounts.table.current": "Current",
+
+  // =====================================================================
+  // Client-side rate limits (account × model × reset time, read-only)
+  // =====================================================================
+  // Source: three read-only tables joined from the client's own on-disk data
+  // (see core `client_limits.rs`) — no gateway, no proxying client traffic.
+  // Active entries float to the top; recovered ones are dimmed.
+  "wbAccounts.limits.title": "Client-side rate limits",
+  "wbAccounts.limits.subtitle": "Aggregated from the client's local data: which account is rate-limited on which model, and when it resets.",
+  "wbAccounts.limits.refresh": "Refresh",
+  "wbAccounts.limits.windowLabel": "Scan range",
+  "wbAccounts.limits.window.7": "Last 7 days",
+  "wbAccounts.limits.window.30": "Last 30 days",
+  "wbAccounts.limits.window.all": "All",
+  "wbAccounts.limits.loading": "Reading rate-limit records…",
+  "wbAccounts.limits.loadFailed": "Failed to load",
+  "wbAccounts.limits.empty": "No rate-limit records in the selected range.",
+  "wbAccounts.limits.active": "Limited",
+  "wbAccounts.limits.recovered": "Recovered",
+  "wbAccounts.limits.accountUnknown": "Unknown account",
+  "wbAccounts.limits.modelUnknown": "Unknown model",
+  "wbAccounts.limits.resetAt": "Resets at {time}",
+  "wbAccounts.limits.resetUnknown": "Reset time unknown",
+  "wbAccounts.limits.occurredAt": "Latest {time}",
+  "wbAccounts.limits.summary": "{total} total · {active} still limited",
+  "wbAccounts.limits.code": "Code {code}",
+  "wbAccounts.limits.queued": "Queued",
+  "wbAccounts.limits.queuedHint": "Upstream queue-class error (6020 / 6022): the model is busy or your usage limit is reached. Exact wording is pending confirmation; shown as the raw code for now.",
+  "wbAccounts.limits.session": "Session {id}",
 };

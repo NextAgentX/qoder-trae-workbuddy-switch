@@ -14,12 +14,12 @@ import { Skeleton } from "@/components/ui/skeleton";
  * 各页面自己加载数据时用的就是 `Skeleton`（见 `TokenStatsPage` / `TraeCreditsPage` 等）。
  * 若这里放一个居中转圈，用户会看到「转圈 → 骨架」两次跳变；用同一种骨架语言只跳一次。
  *
- * 容器样式对齐页面外壳（`mx-auto max-w-[1180px] px-6 py-8`），避免加载完成时整块内容位移。
+ * 容器样式对齐页面外壳（`mx-auto max-w-[1240px] px-7 pt-[26px] pb-[60px]`），避免加载完成时整块内容位移。
  */
 export function PageFallback() {
   return (
     <div
-      className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9"
+      className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]"
       // 无障碍：告诉读屏软件这里正在加载，而不是一片沉默的空白。
       aria-busy="true"
       aria-live="polite"

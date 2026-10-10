@@ -17,9 +17,10 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::{
-    account, auth_file, backup, checkin, config, credit_usage, credits, export_import,
-    migrate, oauth, process, programs, refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler,
-    session, switch, token_stats, trae, travel, update,
+    account, auth_file, backup, checkin, client_limits, client_settings, config, credit_usage,
+    credits, diagnostics, export_import, migrate, oauth, process, programs, refresh,
+    region::Region, region::RegionFilter, rotate, schedule, scheduler, session, skill, switch,
+    token_daily, token_stats, trae, travel, update,
 };
 use buddy_switch_gateway::{GatewayConfig, GatewayStatusView};
 
@@ -127,8 +128,34 @@ fn api_routes() -> Router {
         .route("/api/codebuddy-cn-ide/status", get(api_codebuddy_cn_ide_status))
         .route("/api/codebuddy-cn-ide/switch", post(api_codebuddy_cn_ide_switch))
         .route("/api/codebuddy-cn-ide/detect", post(api_codebuddy_cn_ide_detect))
+        .route(
+            "/api/vscode-codebuddy-plugin/status",
+            get(api_vscode_codebuddy_plugin_status),
+        )
+        .route(
+            "/api/vscode-codebuddy-plugin/switch",
+            post(api_vscode_codebuddy_plugin_switch),
+        )
+        .route(
+            "/api/vscode-codebuddy-plugin/detect",
+            post(api_vscode_codebuddy_plugin_detect),
+        )
+        .route(
+            "/api/jetbrains-codebuddy-plugin/status",
+            get(api_jetbrains_codebuddy_plugin_status),
+        )
+        .route(
+            "/api/jetbrains-codebuddy-plugin/switch",
+            post(api_jetbrains_codebuddy_plugin_switch),
+        )
+        .route(
+            "/api/jetbrains-codebuddy-plugin/detect",
+            post(api_jetbrains_codebuddy_plugin_detect),
+        )
         .route("/api/delete", post(api_delete))
         .route("/api/account/remark", post(api_set_account_remark))
+        .route("/api/account/group", post(api_set_account_group))
+        .route("/api/account/token-today", get(api_account_token_today))
         .route(
             "/api/switch/config",
             get(api_switch_config).post(api_save_switch_config),
@@ -155,6 +182,8 @@ fn api_routes() -> Router {
             get(api_get_auto_backup_config).post(api_save_auto_backup_config),
         )
         .route("/api/switch", post(api_switch))
+        // Q1 · 诊断包导出（只读；凭据闸门在 core 内，命中即拒绝发出）。
+        .route("/api/diagnostics/export", post(api_export_diagnostic))
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/replicas", get(api_session_replicas))
@@ -162,7 +191,40 @@ fn api_routes() -> Router {
         .route("/api/sessions/fingerprints", post(api_session_fingerprints))
         // P8 · 安全同步（增量追加）—— **写操作**：只往目标 jsonl 追加，绝不改写已有内容。
         .route("/api/sessions/sync", post(api_session_sync))
+        .route("/api/sessions/unify", post(api_session_unify))
         .route("/api/sessions/copy", post(api_copy_sessions))
+        // 客户端限流可视化（**只读**）：账号 × 模型 × 恢复时刻。
+        .route("/api/client/limits", get(api_client_limits))
+        // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入。
+        // `region` 决定读 / 写哪个 `{data_dir}/skills`（`skill::*` 两宿主同源）。
+        .route("/api/skills", get(api_list_skills))
+        .route("/api/skills/enabled", post(api_set_skill_enabled))
+        .route("/api/skills/copy-cross", post(api_copy_skills_cross))
+        .route("/api/skills/import", post(api_import_skill))
+        .route("/api/skills/open-dir", post(api_open_skills_dir))
+        // 上游客户端 settings.json 统一托管（读 · 编辑 · 备份 · 恢复 · 差异比对）。
+        // ⚠️ 与 `src-tauri/src/commands.rs` 的 6 个同名命令**同契约**（两宿主同步）。两侧都调
+        // 同一个 core `client_settings::*` 函数并原样返回其结果，本层**不自己拼 JSON 形状**。
+        // ⚠️ 无 capability 门控：本模块跨 WorkBuddy / Trae 两个产品线托管**各自客户端**的本地
+        // 设置文件，平台能力表（`capability.rs`）里没有与之对应的能力项，故不套用任何平台能力。
+        .route(
+            "/api/client-settings/slots",
+            get(api_client_settings_slots),
+        )
+        .route("/api/client-settings/read", get(api_client_settings_read))
+        .route(
+            "/api/client-settings/patch",
+            post(api_client_settings_patch),
+        )
+        .route(
+            "/api/client-settings/backups",
+            get(api_client_settings_backups),
+        )
+        .route(
+            "/api/client-settings/restore",
+            post(api_client_settings_restore),
+        )
+        .route("/api/client-settings/diff", post(api_client_settings_diff))
         .route("/api/migrate/account", post(api_migrate_account))
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
@@ -1026,6 +1088,60 @@ async fn api_codebuddy_cn_ide_detect() -> Response {
     }
 }
 
+async fn api_vscode_codebuddy_plugin_status() -> Response {
+    match programs::status("vscode_codebuddy_plugin") {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_vscode_codebuddy_plugin_switch(Json(body): Json<Value>) -> Response {
+    let account_id = body
+        .get("accountId")
+        .or_else(|| body.get("account_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let restart = body.get("restart").and_then(|v| v.as_bool()).unwrap_or(true);
+    match programs::switch("vscode_codebuddy_plugin", account_id, Some(restart)) {
+        Ok(v) => json_ok(v),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_vscode_codebuddy_plugin_detect() -> Response {
+    match programs::detect("vscode_codebuddy_plugin") {
+        Ok(v) => json_ok(v),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_jetbrains_codebuddy_plugin_status() -> Response {
+    match programs::status("jetbrains_codebuddy_plugin") {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_jetbrains_codebuddy_plugin_switch(Json(body): Json<Value>) -> Response {
+    let account_id = body
+        .get("accountId")
+        .or_else(|| body.get("account_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let restart = body.get("restart").and_then(|v| v.as_bool()).unwrap_or(true);
+    match programs::switch("jetbrains_codebuddy_plugin", account_id, Some(restart)) {
+        Ok(v) => json_ok(v),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_jetbrains_codebuddy_plugin_detect() -> Response {
+    match programs::detect("jetbrains_codebuddy_plugin") {
+        Ok(v) => json_ok(v),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
 
 async fn api_delete(Json(body): Json<Value>) -> Response {
     let region = parse_region(body.get("region").and_then(Value::as_str));
@@ -1059,6 +1175,43 @@ async fn api_set_account_remark(Json(body): Json<Value>) -> Response {
         Ok(meta) => json_ok(meta),
         Err(e) => json_err(e, StatusCode::BAD_REQUEST),
     }
+}
+
+/// POST /api/account/group —— 设置账号自定义分组（**字段级更新**）。
+///
+/// 只改 `groupName` 一个键：请求体里带的是脱敏 meta，整条写回会抹掉 token。
+/// `group` 缺失或为空串都表示**移出分组**（core 侧统一 trim 后删键）。
+async fn api_set_account_group(Json(body): Json<Value>) -> Response {
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    let id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+    if id.trim().is_empty() {
+        return json_err("缺少 accountId".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let group = body.get("group").and_then(Value::as_str);
+    match account::set_account_group_for(region, id, group) {
+        Ok(meta) => json_ok(meta),
+        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// GET /api/account/token-today —— 逐账号「今日 Token」（网关 + 客户端两路，按 region）。
+///
+/// 与 `src-tauri/src/commands.rs` 的同名命令**一一对应**（刻意不去重，两宿主行为必须一致）。
+///
+/// ⚠️ 两条诚实边界（由 core 保证，展示层负责如实呈现）：
+/// ① `force=1` 才重扫客户端 `projects` 目录下的 jsonl —— 该扫描要读 500+ 个文件（最大 ~18MB），
+///    故 core 侧有「今日已扫」闸门：不带 `force` 的重复调用只读缓存，不会每次轮询重扫；
+/// ② 网关那路受 `log_keep`（默认 200）截断 ⇒ 响应里的 `gatewayTruncated` 表示该数字只是**下界**，
+///    展示层须写成 `≥N` 并说明，不得当作完整总量。
+async fn api_account_token_today(RawQuery(query): RawQuery) -> Response {
+    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
+    let force = matches!(
+        query_value(query.as_deref(), "force").as_deref(),
+        Some("1") | Some("true")
+    );
+    token_daily::record_client_today(region, force);
+    token_daily::record_gateway_today(region);
+    json_ok(token_daily::account_token_today(region))
 }
 
 /// GET /api/switch/config —— 账号切换与账号列表展示配置。
@@ -1205,6 +1358,8 @@ async fn api_preview_import_backup(Json(body): Json<Value>) -> Response {
 /// POST /api/backup/import —— 导入全局备份（先快照 → 逐 scope 合并 → 汇总）。
 ///
 /// 请求体 `{ fileText, policy, selection }`；`selection` 缺省 ⇒ 全选（D14）。
+/// ★ `onlyScopes`（C1）：非空 ⇒ **只导入这些 scope**（「只重试失败项」）；
+/// 缺省 ⇒ 全量。与 `commands.rs::import_backup` 形状一一对应。
 async fn api_import_backup(Json(body): Json<Value>) -> Response {
     let file_text = body
         .get("fileText")
@@ -1223,8 +1378,38 @@ async fn api_import_backup(Json(body): Json<Value>) -> Response {
             return json_err(format!("导入参数不合法：{error}"), StatusCode::BAD_REQUEST)
         }
     };
-    match backup::import_backup(&file_text, policy, &selection) {
+    let only_scopes: Vec<String> = body
+        .get("onlyScopes")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    match backup::import_backup(&file_text, policy, &selection, &only_scopes) {
         Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/diagnostics/export —— 导出诊断包（Q1；只读）。
+///
+/// ⚠️ 与 `commands.rs::export_diagnostic` 是**同款接线**（刻意不去重），返回形状
+/// 必须一致：`{ name, text }`。凭据闸门在 core（`diagnostics::export_diagnostic`），
+/// 命中即 `Err` ⇒ 两端都不会发出一份含凭据的文件。
+async fn api_export_diagnostic() -> Response {
+    match diagnostics::export_diagnostic() {
+        Ok(text) => {
+            let name = format!(
+                "buddy-switch-diagnostic-{}.json",
+                buddy_switch_core::modules::cst::cst_datetime(config::now_ms())
+                    .format("%Y%m%d-%H%M%S")
+            );
+            json_ok(json!({ "name": name, "text": text }))
+        }
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }
@@ -1475,6 +1660,208 @@ async fn api_session_sync(Json(body): Json<Value>) -> Response {
         .cloned()
         .unwrap_or_default();
     json_ok(session::sync_session_replicas_for(region, &items))
+}
+
+/// POST /api/sessions/unify —— P8 **分歧处理（覆盖式统一）**：把选定保留的那一份覆盖到其余副本。
+///
+/// 与 Tauri 侧 `commands::unify_session_replicas` **同契约**（两宿主同步）。
+/// 批量 + 逐条结果 ⇒ 支持**部分失败**（`PLAN.md` §3.6）；判据在 core
+/// （`session::unify_session_replicas_for`），本处理器只做「鉴权 + 取参数」。
+///
+/// ⚠️ **破坏性写操作**：目标副本原有的分歧内容会被丢弃（`PLAN.md` §3.15.2「不许静默覆盖」）
+/// ⇒ 前端**必须**先二次确认并把 `lostLines` 如实告知；core 会**先备份再覆盖**，备份失败则不覆盖。
+async fn api_session_unify(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    let items = body
+        .get("items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    json_ok(session::unify_session_replicas_for(region, &items))
+}
+
+/// GET /api/client/limits —— 客户端限流台账（**只读**观测：账号 × 模型 × 恢复时刻）。
+///
+/// 与 Tauri 侧 `commands::client_limits` **同契约**（两宿主同步）。判据在 core
+/// （`client_limits::client_limits_for`），本处理器只做「鉴权 + 取参数」。
+///
+/// 查询参数：`region`（cn / global）、`sinceDays`（`0` = 全量；缺省 = 近 7 天）。
+async fn api_client_limits(RawQuery(query): RawQuery) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(query_value(query.as_deref(), "region").as_deref());
+    let since_days = query_value(query.as_deref(), "sinceDays").and_then(|v| v.parse::<i64>().ok());
+    json_ok(client_limits::client_limits_for(region, since_days))
+}
+
+// ---- Skill 管理（cc-switch 式）------------------------------------------------
+// ⚠️ 与 `src-tauri/src/commands.rs` 的 5 个同名命令**同契约**（两宿主同步）。本层只做
+// 「鉴权 + 取参数 + 丢给 core `skill::*`」，**不自己拼 JSON 形状** —— 两侧都调同一个 core
+// 函数，从根上杜绝「一侧透传、另一侧多包一层」的漂移（PRD §9）。
+//
+// 鉴权：5 条命令都读写**用户级文件**（`{data_dir}/skills`），沿用最贴近该语义的既有
+// capability `SessionCopy`（同为「WorkBuddy 桌面才有的用户数据读写」，见 `capability.rs`
+// 的枚举注释）。capability 表在 core（`product_spec`），本层只查表，**默认拒绝**。
+
+/// Skill 管理 5 条命令共用的 capability 门禁（缺能力即 403，不落盘）。
+fn skill_capability_denied() -> Option<Response> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+        .err()
+        .map(|error| json_err(error, StatusCode::FORBIDDEN))
+}
+
+/// GET /api/skills —— 列出该 region 用户级 skills 目录下的 skill 清单（**只读**）。
+async fn api_list_skills(RawQuery(query): RawQuery) -> Response {
+    if let Some(denied) = skill_capability_denied() {
+        return denied;
+    }
+    let region = query_value(query.as_deref(), "region");
+    match skill::list_skills(region) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/skills/enabled —— 启停一个 skill（行级改写官方原生字段）。
+///
+/// 请求体：`{ region?, dirName, enabled }`。
+async fn api_set_skill_enabled(Json(body): Json<Value>) -> Response {
+    if let Some(denied) = skill_capability_denied() {
+        return denied;
+    }
+    let region = body.get("region").and_then(Value::as_str).map(str::to_string);
+    let dir_name = body.get("dirName").and_then(Value::as_str).unwrap_or("");
+    let Some(enabled) = body.get("enabled").and_then(Value::as_bool) else {
+        return json_err("缺少 enabled（布尔）".to_string(), StatusCode::BAD_REQUEST);
+    };
+    match skill::set_skill_enabled(region, dir_name, enabled) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/skills/copy-cross —— 跨 region「合并补齐」搬迁（冲突保留目标侧）。
+///
+/// 请求体：`{ sourceRegion, targetRegion }`（**两者都必须显式给出**）。
+async fn api_copy_skills_cross(Json(body): Json<Value>) -> Response {
+    if let Some(denied) = skill_capability_denied() {
+        return denied;
+    }
+    let source = body.get("sourceRegion").and_then(Value::as_str).map(str::to_string);
+    let target = body.get("targetRegion").and_then(Value::as_str).map(str::to_string);
+    match skill::copy_skills_cross(source, target) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/skills/import —— 从本地目录或 zip 导入一个 skill。
+///
+/// 请求体：`{ region?, sourcePath }`。
+async fn api_import_skill(Json(body): Json<Value>) -> Response {
+    if let Some(denied) = skill_capability_denied() {
+        return denied;
+    }
+    let region = body.get("region").and_then(Value::as_str).map(str::to_string);
+    let source_path = body.get("sourcePath").and_then(Value::as_str).unwrap_or("");
+    match skill::import_skill(region, source_path) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/skills/open-dir —— 在文件管理器中打开该 region 的 skills 目录。
+///
+/// 目录不存在时先创建（避免「打开失败」）；响应形状由 core `skill::prepare_skills_dir`
+/// 统一产出，本层只负责平台相关的 `reveal_dir`。
+async fn api_open_skills_dir(Json(body): Json<Value>) -> Response {
+    if let Some(denied) = skill_capability_denied() {
+        return denied;
+    }
+    let region = body.get("region").and_then(Value::as_str).map(str::to_string);
+    match skill::prepare_skills_dir(region) {
+        Ok((dir, payload)) => match reveal_dir(&dir) {
+            Ok(()) => json_ok(payload),
+            Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+        },
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+// ---- 上游客户端 settings.json 统一托管 ----------------------------------------
+// ⚠️ 与 `src-tauri/src/commands.rs` 的 6 个同名命令**同契约**（两宿主同步）。两侧都调同一个
+// core `client_settings::*` 函数并原样返回其结果，本层**不自己拼 JSON 形状** —— 从根上杜绝
+// 「一侧透传、另一侧多包一层」的漂移（PRD §9）。
+//
+// 无 capability 门控：本模块跨 WorkBuddy / Trae 两个产品线托管**各自客户端**的本地设置文件，
+// 平台能力表里没有与之对应的能力项（不是签到 / 积分 / 会话复制之类），故不套用任何平台能力。
+
+/// GET /api/client-settings/slots —— 列出 6 个槽位（未安装者 `installed:false` **仍在列表**）。
+async fn api_client_settings_slots() -> Response {
+    json_ok(client_settings::list_slots())
+}
+
+/// GET /api/client-settings/read?slot=… —— 原文 + 解析后键值 + 格式指纹。
+///
+/// 解析失败 ⇒ 带 `client.settings.parse_failed` 码的错误，**绝不**返回空对象；
+/// 未安装（文件不存在）**不是错误**（`installed:false`，`text`/`values` 为 `null`）。
+async fn api_client_settings_read(RawQuery(query): RawQuery) -> Response {
+    let slot = query_value(query.as_deref(), "slot").unwrap_or_default();
+    match client_settings::read_settings(&slot) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/client-settings/patch —— 键值级 patch（**格式保持**，模块内部自动备份）。
+///
+/// 请求体：`{ slot, patch }`，`patch` 形如 `{ "<点号路径>": <新值> }`。
+async fn api_client_settings_patch(Json(body): Json<Value>) -> Response {
+    let slot = body.get("slot").and_then(Value::as_str).unwrap_or("");
+    let Some(patch) = body.get("patch") else {
+        return json_err("缺少 patch 对象".to_string(), StatusCode::BAD_REQUEST);
+    };
+    match client_settings::patch_settings(slot, patch) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// GET /api/client-settings/backups?slot=… —— 该槽位的历史备份点（按 id 降序）。
+async fn api_client_settings_backups(RawQuery(query): RawQuery) -> Response {
+    let slot = query_value(query.as_deref(), "slot").unwrap_or_default();
+    match client_settings::list_backups(&slot) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/client-settings/restore —— 整文件恢复（**恢复前对当前文件再备份一次**）。
+///
+/// 请求体：`{ slot, backupId }`。
+async fn api_client_settings_restore(Json(body): Json<Value>) -> Response {
+    let slot = body.get("slot").and_then(Value::as_str).unwrap_or("");
+    let backup_id = body.get("backupId").and_then(Value::as_str).unwrap_or("");
+    match client_settings::restore_backup(slot, backup_id) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/client-settings/diff —— 任选两个槽位比对（仅 A 有 / 仅 B 有 / 值不同）。
+///
+/// 请求体：`{ slotA, slotB }`。
+async fn api_client_settings_diff(Json(body): Json<Value>) -> Response {
+    let slot_a = body.get("slotA").and_then(Value::as_str).unwrap_or("");
+    let slot_b = body.get("slotB").and_then(Value::as_str).unwrap_or("");
+    match client_settings::diff_slots(slot_a, slot_b) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 async fn api_copy_sessions(Json(body): Json<Value>) -> Response {

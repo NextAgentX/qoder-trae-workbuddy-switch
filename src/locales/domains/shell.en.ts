@@ -21,17 +21,58 @@ export const en = {
   "product.navAria": "{product} navigation",
 
   "nav.overview": "Overview",
+  /* Short labels, mirroring the prototype's `DESTINATIONS` (buddy-switch-prototype.html:1139-1146). */
   "nav.accounts": "Accounts",
   "nav.usage": "Usage",
   "nav.tokenStats": "Token usage",
   "nav.credits": "Credits",
-  "nav.apiService": "API service",
+  "nav.apiService": "Gateway",
   "nav.settings": "Settings",
 
   "sidebar.version": "Version",
+  // Brand block tagline (prototype `.brand-text i`, `buddy-switch-prototype.html:163`).
+  "sidebar.brand.tagline": "Multi-platform account manager",
   "sidebar.running": "{product} running",
   "sidebar.notRunning": "{product} not running",
   "sidebar.update": "Update",
+
+  // ---- Top app bar (redesign L1 scope + global actions) ----
+  "topbar.scope.aria": "Switch scope",
+  "topbar.scope.menuLabel": "Scopes (platform × region)",
+  "topbar.scope.sub.loggedIn": "Signed in as {name} · {n} accounts",
+  "topbar.scope.sub.loggedOut": "Not signed in · {n} accounts",
+  "topbar.scope.sub.missing": "Not detected · {n} accounts",
+  // Appended when a scope has accounts needing action (prototype `scope-menu`).
+  "topbar.scope.sub.attention": " · {n} need action",
+  // Footer note of the scope menu (prototype `scope-menu`): what a scope switch actually affects.
+  "topbar.scope.hint": "The scope decides which set of accounts you manage. Switching updates the sidebar, content and stats.",
+  "topbar.run.running": "Running",
+  "topbar.run.stopped": "Not running",
+  "topbar.run.missing": "Not detected",
+  "topbar.search": "Search accounts, pages, or actions",
+  "topbar.refresh": "Refresh current scope",
+  "topbar.theme": "Switch light/dark theme",
+  "topbar.appMenu": "App settings",
+
+  // ---- Page-head scope subtitles (redesign §3.2) ----
+  // Read-only: the only scope switcher lives in the top bar (region is part of L1 scope).
+  "pageHead.overview.signedIn": "{scope} · Signed in as {name}",
+  "pageHead.overview.signedOut": "{scope} · Not signed in",
+  "pageHead.accounts": "{scope} · {n} accounts",
+  "pageHead.accounts.pending": "{scope} · {n} accounts · {m} need action",
+  "pageHead.usage": "{scope} · Token and credit stats in one workbench",
+  "pageHead.gateway": "{scope} · Expose the account pool as OpenAI / Anthropic compatible APIs",
+  "pageHead.settings": "{scope} · Grouped by topic instead of one long scroll",
+  "pageHead.sessions": "{scope} · One session with a copy in each account — who lags, who diverged, sync to whom",
+
+  // ---- Platform capability labels (overview "Capabilities" card; from `Capability` in registry) ----
+  "capability.checkin": "Auto check-in",
+  "capability.travel": "Auto travel",
+  "capability.credits": "Credits",
+  "capability.oauth": "OAuth sign-in",
+  "capability.gateway": "API gateway",
+  "capability.autoRotate": "Auto rotate",
+  "capability.sessionCopy": "Session copy",
 
   // ---- Command palette (⌘K, P6 §3.7) ----
   "palette.entry": "Search or jump",
@@ -139,6 +180,15 @@ export const en = {
   "settings.subnav.diagnostics": "Permissions & diagnostics",
   "settings.subnav.logs": "Logs",
   "settings.subnav.backup": "Backup & restore",
+
+  // ---- Gateway workspace subnav (PLAN §3.9: 6 items, shared by both product lines) ----
+  "gateway.subnav.aria": "Gateway sections",
+  "gateway.subnav.overview": "Overview",
+  "gateway.subnav.keys": "Keys",
+  "gateway.subnav.models": "Models",
+  "gateway.subnav.pool": "Account pool",
+  "gateway.subnav.proxy": "Request proxy",
+  "gateway.subnav.logs": "Request logs",
 
   // ---- Settings "Logs" section (WorkBuddy has no standalone runtime log) ----
   "settings.logs.emptyTitle": "No runtime log in this section",

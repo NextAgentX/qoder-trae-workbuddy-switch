@@ -20,7 +20,7 @@ import type { ModelSlice } from "@/lib/usage-charts";
 import { compactTokens } from "./format";
 import { seriesColor } from "./palette";
 
-export function ModelDonut({ slices }: { slices: ModelSlice[] }) {
+export function ModelDonut({ slices, size = 170 }: { slices: ModelSlice[]; size?: number }) {
   const t = useT();
   if (slices.length === 0) return null;
 
@@ -38,7 +38,7 @@ export function ModelDonut({ slices }: { slices: ModelSlice[] }) {
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-4">
       <div className="relative shrink-0">
-        <ChartContainer config={config} className="h-[170px] w-[170px]">
+        <ChartContainer config={config} className="shrink-0" style={{ width: size, height: size }}>
           <PieChart>
             <Pie
               data={data}
@@ -68,7 +68,6 @@ export function ModelDonut({ slices }: { slices: ModelSlice[] }) {
             <span className="min-w-0 flex-1 truncate" title={item.name}>
               {item.name}
             </span>
-            <span className="shrink-0 tabular-nums text-muted-foreground">{compactTokens(item.value)}</span>
           </div>
         ))}
       </div>

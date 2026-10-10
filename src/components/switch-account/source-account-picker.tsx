@@ -28,6 +28,7 @@ import { Ban, Check, Monitor } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useT, type Translate } from "@/lib/i18n";
+import { platformDescriptor } from "@/lib/platforms/registry";
 import { regionLabel } from "@/lib/region";
 import { scopeParts, type Scope } from "@/lib/scope";
 import { cn } from "@/lib/utils";
@@ -56,7 +57,8 @@ export interface SourceAccountPickerProps {
 /** 作用域展示名：`产品 · 区域`，如「WorkBuddy · 国内版」。 */
 export function scopeLabel(scope: Scope, t: Translate): string {
   const { product, region } = scopeParts(scope);
-  const productLabel = product === "workbuddy" ? t("product.workbuddy") : t("product.trae");
+  /* 产品名走注册表（唯一来源），**不**在本地再写一份 `product === "workbuddy" ? … : …`。 */
+  const productLabel = t(platformDescriptor(product).labelKey);
   return `${productLabel} · ${regionLabel(region)}`;
 }
 

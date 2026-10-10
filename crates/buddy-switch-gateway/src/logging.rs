@@ -14,7 +14,10 @@ pub struct RequestMeta {
     pub endpoint: &'static str,
     pub method: &'static str,
     pub region: Region,
+    /// 命中账号的**展示名**（可能重名 / 为空；仅供人读，不作身份）。
     pub account: String,
+    /// 命中账号的 **uid**（写入时的**精确身份**，供 `token_daily` 精确 join）。
+    pub account_uid: String,
     pub model: String,
     pub status: u16,
     pub latency_ms: i64,
@@ -32,6 +35,7 @@ impl RequestMeta {
             "method": self.method,
             "region": self.region,
             "account": self.account,
+            "accountUid": self.account_uid,
             "model": self.model,
             "status": self.status,
             "latencyMs": self.latency_ms,
@@ -120,5 +124,32 @@ impl RequestLog {
         }
         let content = serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string());
         let _ = core_config::atomic_write(&self.path, &content);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 日志条目必须携带写入时的**精确 uid**（`accountUid`），且 `account`（展示名）语义不变。
+    #[test]
+    fn request_meta_carries_account_uid_alongside_display_name() {
+        let meta = RequestMeta {
+            endpoint: "/v1/chat/completions",
+            method: "POST",
+            region: Region::Cn,
+            account: "重名展示名".to_string(),
+            account_uid: "uid-b".to_string(),
+            model: "hy4".to_string(),
+            status: 200,
+            latency_ms: 12,
+            prompt_tokens: 10,
+            completion_tokens: 2,
+            stream: false,
+        };
+
+        let value = meta.to_value();
+        assert_eq!(value["accountUid"], "uid-b", "必须写入选中账号的精确 uid");
+        assert_eq!(value["account"], "重名展示名", "account 仍是展示名，语义不变");
     }
 }

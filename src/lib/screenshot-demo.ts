@@ -1,9 +1,14 @@
 import type {
-  AccountMeta, AccountStrategyMap, ApiKeyRecord, AppStatus, AutoBackupConfig, AutoBackupEntry, AutoRotateConfig, CatalogSnapshot,
-  CheckinConfig, CheckinLog, CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, CreditExpiry,
+  AccountMeta, AccountStrategyMap, AccountTokenTodayResponse, ApiKeyRecord, AppStatus, AutoBackupConfig, AutoBackupEntry, AutoRotateConfig, CatalogSnapshot,
+  CheckinConfig, CheckinLog, CodeBuddyCliStatus, CodeBuddyCliSwitchResult, CodeBuddyCnIdeStatus, ClientLimitsResponse, CreditExpiry,
+  JetbrainsCodebuddyPluginStatus,
+  VscodeCodebuddyPluginStatus,
+  ClientSettingsBackupsResponse, ClientSettingsDiffResponse, ClientSettingsFingerprint,
+  ClientSettingsProxyGroup, ClientSettingsReadResponse, ClientSettingsSlot, ClientSettingsSlotsResponse,
   CreditOfficialUsageModel, CreditStatistics, GatewayConfig, GatewayLogEntry, GatewayPoolAccount,
   GatewayStatus, GithubConfig, Region, RotateLog, RotateStatus, ScheduleConfig, TokenStatistics,
   Session, SessionReplicaResponse,
+  SkillListResponse,
   TokenStatsGroup, TokenStatsSource,
   TokenStatsTotals, TravelConfig, TravelStatus,
 } from "./types";
@@ -81,8 +86,10 @@ const DEMO_ACCOUNT_KEYS: Record<string, { nickname: TranslationKey; remark?: Tra
 type DemoAccountSeed = Omit<AccountMeta, "nickname" | "remark"> & { id: keyof typeof DEMO_ACCOUNT_KEYS };
 
 const accountSeeds: DemoAccountSeed[] = [
-  { id: "demo-account-a", uid: "demo-user-001", email: "test-a@example.com", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null },
-  { id: "demo-account-b", uid: "demo-user-002", email: "test-b@example.com", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null },
+  // ★ 2026-10-10：补 `lastUsedAt`（epoch 毫秒）⇒ 演示站能看到「最后使用」与「最近使用」排序。
+  //   demo-account-c **刻意缺席** ⇒ 该项省略、且排到最后（演示诚实边界）。
+  { id: "demo-account-a", uid: "demo-user-001", email: "test-a@example.com", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, lastUsedAt: atLocalTime(0, 17, 10), refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null },
+  { id: "demo-account-b", uid: "demo-user-002", email: "test-b@example.com", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, lastUsedAt: atLocalTime(1, 9, 30), refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null },
   { id: "demo-account-c", uid: "demo-user-003", email: "test-c@example.com", enterpriseName: "Demo Workspace", expiresAt: 0, refreshExpiresAt: 0, refreshedAt: 0, createdAt: 0, needsRelogin: false, needsReloginReason: null },
 ];
 
@@ -715,6 +722,367 @@ function demoSessionReplicas(): SessionReplicaResponse {
       },
     ],
     source: "ledger",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 「今日 Token」按账号聚合（演示数据，只读）
+// ---------------------------------------------------------------------------
+
+/**
+ * 演示：「今日 Token」按账号聚合（`get_account_token_today`）。
+ *
+ * 演示数据**刻意覆盖三条诚实边界**（见 `AccountTokenTodayResponse`）：
+ * - `demo-user-001`（有真值）+ `demo-user-003`（**真实 0**）出现在 `accounts`；
+ * - `demo-user-002` **缺席** ⇒ 界面渲染「—」（今日无记录 / 未知，**不是 0**）；
+ * - `gatewayTruncated: true` ⇒ 网关部分是下界 ⇒ 界面渲染 `≥N` 并说明。
+ * 非有限值不会出现在这里（演示数据是「看起来像真的」的样本，不造脏值）。
+ */
+function demoAccountTokenToday(): AccountTokenTodayResponse {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  return {
+    date,
+    accounts: [
+      { uid: "demo-user-001", clientIn: 18400, clientOut: 9200, gatewayIn: 6100, gatewayOut: 2400 },
+      { uid: "demo-user-003", clientIn: 0, clientOut: 0, gatewayIn: 0, gatewayOut: 0 },
+    ],
+    unknownClient: { in: 320, out: 180 },
+    gatewayTruncated: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 客户端限流台账（演示数据，只读）
+// ---------------------------------------------------------------------------
+
+/**
+ * 演示：客户端限流台账（账号 × 模型 × 恢复时刻）。
+ *
+ * 形状与 core `client_limits::ClientLimitEntry` **逐字段一致**。演示数据为**虚构**：
+ * 一条仍受限（`resetAt` 在未来 ⇒ 置顶）、一条已恢复（`resetAt` 在过去 ⇒ 灰显），
+ * 用于呈现排序与状态；`account` / `model` 为 `null` 的条目表示 join 失败（未知兜底）。
+ */
+function demoClientLimits(): ClientLimitsResponse {
+  const now = Date.now();
+  return {
+    region: "cn",
+    since: now - 7 * 24 * 60 * 60 * 1000,
+    now,
+    counts: { scanned: 2, deduped: 2, active: 1 },
+    limits: [
+      {
+        account: "demo-user-001",
+        accountUid: "demo-user-001",
+        model: "deepseek-v4.1-flash",
+        code: 6004,
+        status: 429,
+        resetAt: now + 45 * 60 * 1000,
+        occurredAt: now - 5 * 60 * 1000,
+        active: true,
+        message: "429 您的使用量已超出频率限制，将在 <时间> UTC+8 重置，您也可以切换其他模型继续使用。",
+        sessionId: "demo-session-1",
+        cwd: "/demo/projects/alpha",
+        agent: "cli",
+        region: "cn",
+      },
+      {
+        account: null,
+        accountUid: null,
+        model: "hy4-preview-f",
+        code: 6004,
+        status: 429,
+        resetAt: now - 30 * 60 * 1000,
+        occurredAt: now - 90 * 60 * 1000,
+        active: false,
+        message: "429 usage exceeds frequency limit, your usage will reset at <时间> UTC+8.",
+        sessionId: "demo-session-2",
+        cwd: null,
+        agent: "Explore",
+        region: "cn",
+      },
+    ],
+  };
+}
+
+/**
+ * Skill 清单（演示数据，只读）—— 覆盖「启用 / 停用 / 状态不一致 / 无 frontmatter / 来源徽章」
+ * 五种形态，便于截图一次看全列表的各个分支。
+ *
+ * 演示数据**虚构**：名称与描述都是通用示例，不照抄真实用户的 skill。
+ */
+function demoSkills(region: Region): SkillListResponse {
+  return {
+    region,
+    skills: [
+      {
+        dirName: "design-router",
+        name: "design-router",
+        description: "根据需求自动路由到合适的设计工具。",
+        version: "1.2.0",
+        enabled: true,
+        inconsistent: false,
+        agentCreated: false,
+        hasFrontmatter: true,
+      },
+      {
+        dirName: "ardot-poster",
+        name: "ardot-poster",
+        description: "生成营销海报。",
+        version: "0.9.3",
+        enabled: false,
+        inconsistent: false,
+        agentCreated: false,
+        hasFrontmatter: true,
+      },
+      {
+        dirName: "my-notes",
+        name: "my-notes",
+        description: "把会话要点整理成笔记。",
+        version: null,
+        enabled: true,
+        inconsistent: true,
+        agentCreated: true,
+        hasFrontmatter: true,
+      },
+      {
+        dirName: "raw-scratch",
+        name: "raw-scratch",
+        description: "",
+        version: null,
+        enabled: true,
+        inconsistent: false,
+        agentCreated: false,
+        hasFrontmatter: false,
+      },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 上游客户端 settings.json 托管（演示数据，只读）
+// ---------------------------------------------------------------------------
+//
+// ⚠️ 管的是**被代理的上游客户端**自己的 `settings.json`（不是本工具的 `~/.buddy-switch/**`）。
+// 演示数据**虚构**，但刻意覆盖几个真实分支：**未安装**（仍在列表）、**运行中**（写被拒）、
+// 四种排版风格（2 空格 / 无缩进 / Tab / CRLF），便于一次截图核对面板各状态。
+
+/** 演示槽位：6 个齐列，其中两个**未安装**（覆盖「未安装仍在列表」）。 */
+function demoClientSettingsSlots(): ClientSettingsSlotsResponse {
+  const slots: ClientSettingsSlot[] = [
+    {
+      key: "workbuddy-cn",
+      displayKey: "clientSettings.slot.workbuddyCn",
+      product: "workbuddy",
+      installed: true,
+      path: "C:\\Users\\demo\\.workbuddy\\settings.json",
+    },
+    {
+      key: "workbuddy-global",
+      displayKey: "clientSettings.slot.workbuddyGlobal",
+      product: "workbuddy",
+      installed: false,
+      path: "C:\\Users\\demo\\.workbuddy-ai\\settings.json",
+    },
+    {
+      key: "trae-code-cn",
+      displayKey: "clientSettings.slot.traeCodeCn",
+      product: "trae",
+      installed: true,
+      path: "C:\\Users\\demo\\AppData\\Roaming\\Trae CN\\User\\settings.json",
+    },
+    {
+      key: "trae-code-global",
+      displayKey: "clientSettings.slot.traeCodeGlobal",
+      product: "trae",
+      installed: true,
+      path: "C:\\Users\\demo\\AppData\\Roaming\\Trae\\User\\settings.json",
+    },
+    {
+      key: "trae-work-cn",
+      displayKey: "clientSettings.slot.traeWorkCn",
+      product: "trae",
+      installed: true,
+      path: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO CN\\User\\settings.json",
+    },
+    {
+      key: "trae-work-global",
+      displayKey: "clientSettings.slot.traeWorkGlobal",
+      product: "trae",
+      installed: false,
+      path: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO\\User\\settings.json",
+    },
+  ];
+  return { slots };
+}
+
+/** 演示键值（虚构）：形状与真机同为「顶层键 → 值」，嵌套对象供点号路径编辑演示。 */
+function demoClientSettingsValues(slotKey: string): Record<string, unknown> {
+  if (slotKey.startsWith("workbuddy")) {
+    return {
+      claw: {
+        channels: { wechatmp: { enabled: false }, feishu: { enabled: true } },
+        users: { default: "demo-user" },
+        legacyOwnerUid: null,
+      },
+      http: { proxy: "", proxySupport: "on" },
+      sandbox: { extraAllowWrite: [] },
+      enabledPlugins: ["claw"],
+      autoLaunchDesired: true,
+      enableModelOptimization: { enabled: true },
+    };
+  }
+  return {
+    trae: { network: { proxy: { effectiveMode: "system" } } },
+    window: { autoDetectColorScheme: true },
+    update: { mode: "default", enableWindowsBackgroundUpdates: true },
+    AI: {
+      rules: { importClaudeMd: true },
+      agent: { v2: { browserChromeEnabled: false } },
+      toolcall: { v2: { ide: { command: { mode: "auto" } }, solo: { command: { mode: "auto" } } } },
+    },
+  };
+}
+
+/** 各槽位演示排版指纹（覆盖真机实测的四种风格）。 */
+function demoClientSettingsFingerprint(slotKey: string): ClientSettingsFingerprint {
+  if (slotKey === "trae-code-cn") return { indent: "", newline: "\n" };
+  if (slotKey === "trae-work-cn") return { indent: "\t", newline: "\r\n" };
+  if (slotKey.startsWith("workbuddy")) return { indent: "  ", newline: "\r\n" };
+  return { indent: "  ", newline: "\n" };
+}
+
+/** 演示读取：未安装 ⇒ `installed:false` 且三件套为空（**不伪造**成功）。 */
+function demoClientSettingsRead(slotKey: string): ClientSettingsReadResponse {
+  const all = demoClientSettingsSlots().slots;
+  const slot = all.find((entry) => entry.key === slotKey) ?? all[0];
+  if (!slot.installed) {
+    return {
+      slot: slot.key,
+      displayKey: slot.displayKey,
+      product: slot.product,
+      path: slot.path ?? "",
+      installed: false,
+      running: false,
+      text: null,
+      values: null,
+      keyOrder: [],
+      fingerprint: null,
+    };
+  }
+  const values = demoClientSettingsValues(slot.key);
+  const fingerprint = demoClientSettingsFingerprint(slot.key);
+  return {
+    slot: slot.key,
+    displayKey: slot.displayKey,
+    product: slot.product,
+    path: slot.path ?? "",
+    installed: true,
+    // 运行态：Trae CN 演示为「运行中」（写入会被后端拒绝），其余为「未运行」。
+    running: slot.key === "trae-code-cn",
+    text: JSON.stringify(values, null, fingerprint.indent ?? undefined),
+    values,
+    keyOrder: Object.keys(values),
+    fingerprint,
+  };
+}
+
+/** 演示备份点（虚构，两条，覆盖「有历史备份」列表形态）。 */
+function demoClientSettingsBackups(slotKey: string): ClientSettingsBackupsResponse {
+  const all = demoClientSettingsSlots().slots;
+  const slot = all.find((entry) => entry.key === slotKey) ?? all[0];
+  const dir = `C:\\Users\\demo\\.buddy-switch\\backups\\client-settings\\${slot.key}`;
+  return {
+    slot: slot.key,
+    displayKey: slot.displayKey,
+    dir,
+    backups: [
+      { id: "2026-10-07T09:12:30Z", path: `${dir}\\2026-10-07T09:12:30Z\\settings.json`, size: 1675 },
+      { id: "2026-10-05T21:40:02Z", path: `${dir}\\2026-10-05T21:40:02Z\\settings.json`, size: 1650 },
+    ],
+  };
+}
+
+/** 拍平嵌套对象为点号路径（与 core `client_settings::flatten` 同语义）。 */
+function flattenDemo(value: unknown, prefix: string, out: Map<string, unknown>): void {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      flattenDemo(child, prefix ? `${prefix}.${key}` : key, out);
+    }
+    return;
+  }
+  if (prefix) out.set(prefix, value);
+}
+
+/** 演示用的代理语义映射（与 core `client_settings::PROXY_FIELDS` 同口径）。 */
+const DEMO_PROXY_FIELDS: Record<string, string[]> = {
+  workbuddy: ["http.proxy", "http.proxySupport"],
+  trae: ["trae.network.proxy.effectiveMode"],
+};
+
+/**
+ * 演示比对：按 core `diff_flat` + `merge_proxy_fields` 的口径现算，
+ * 避免写死一份「对不上」的假结果。
+ */
+function demoClientSettingsDiff(slotA: string, slotB: string): ClientSettingsDiffResponse {
+  const all = demoClientSettingsSlots().slots;
+  const a = all.find((entry) => entry.key === slotA) ?? all[0];
+  const b = all.find((entry) => entry.key === slotB) ?? all[0];
+  const aFlat = new Map<string, unknown>();
+  const bFlat = new Map<string, unknown>();
+  if (a.installed) flattenDemo(demoClientSettingsValues(a.key), "", aFlat);
+  if (b.installed) flattenDemo(demoClientSettingsValues(b.key), "", bFlat);
+
+  // 跨产品：代理字段按映射表归并成一组（同产品两侧路径本就相同，不做归并）。
+  const proxyGroups: ClientSettingsProxyGroup[] = [];
+  if (a.product !== b.product) {
+    const aPaths = DEMO_PROXY_FIELDS[a.product] ?? [];
+    const bPaths = DEMO_PROXY_FIELDS[b.product] ?? [];
+    if (aPaths.length > 0 && bPaths.length > 0) {
+      const fields = (flat: Map<string, unknown>, paths: string[]) =>
+        paths.map((path) => ({
+          path,
+          present: flat.has(path),
+          value: flat.has(path) ? flat.get(path) : null,
+        }));
+      const aFields = fields(aFlat, aPaths);
+      const bFields = fields(bFlat, bPaths);
+      const valuesOf = (list: { present: boolean; value: unknown }[]) =>
+        JSON.stringify(list.filter((field) => field.present).map((field) => field.value));
+      proxyGroups.push({
+        semantic: "proxy",
+        a: aFields,
+        b: bFields,
+        same: valuesOf(aFields) === valuesOf(bFields),
+      });
+      // 归并进来的路径不再出现在三类里。
+      for (const path of aPaths) aFlat.delete(path);
+      for (const path of bPaths) bFlat.delete(path);
+    }
+  }
+
+  const onlyA: ClientSettingsDiffResponse["onlyA"] = [];
+  const onlyB: ClientSettingsDiffResponse["onlyB"] = [];
+  const different: ClientSettingsDiffResponse["different"] = [];
+  let same = 0;
+  for (const [path, value] of aFlat) {
+    if (!bFlat.has(path)) onlyA.push({ path, value });
+    else if (JSON.stringify(bFlat.get(path)) === JSON.stringify(value)) same += 1;
+    else different.push({ path, a: value, b: bFlat.get(path) });
+  }
+  for (const [path, value] of bFlat) {
+    if (!aFlat.has(path)) onlyB.push({ path, value });
+  }
+
+  return {
+    onlyA,
+    onlyB,
+    different,
+    counts: { onlyA: onlyA.length, onlyB: onlyB.length, different: different.length, same },
+    proxyGroups,
+    slotA: { key: a.key, displayKey: a.displayKey, path: a.path ?? "", installed: a.installed },
+    slotB: { key: b.key, displayKey: b.displayKey, path: b.path ?? "", installed: b.installed },
   };
 }
 
@@ -1511,6 +1879,42 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       detectedFrom: "state.vscdb",
       statePath: "/demo/codebuddy-cn-ide-state.json",
     } satisfies CodeBuddyCnIdeStatus;
+    /* 编辑器内 CodeBuddy 插件（VS Code / JetBrains）：演示态刻意给**两种档位** ——
+       VS Code 已装且记录了当前账号（渲染「当前账号」角标），JetBrains 已装但未记录
+       （渲染可切换按钮）⇒ 截图与 `build:demo` 冒烟一次覆盖两种形态。 */
+    case "get_vscode_codebuddy_plugin_status": return {
+      installed: true,
+      extensionInstalled: true,
+      running: false,
+      loggedIn: true,
+      dataDir: "/demo/Code",
+      dbPath: "/demo/Code/User/globalStorage/state.vscdb",
+      dbExists: true,
+      activeAccountId: demoAccounts[0].id,
+      activeAccountName: demoAccounts[0].nickname,
+      detectedFrom: "state",
+      statePath: "/demo/vscode-ext-state.json",
+    } satisfies VscodeCodebuddyPluginStatus;
+    case "get_jetbrains_codebuddy_plugin_status": return {
+      installed: true,
+      pluginInstalled: true,
+      running: false,
+      loggedIn: false,
+      configRoot: "/demo/JetBrains",
+      targets: [
+        {
+          configDir: "IntelliJIdea2026.2",
+          pluginInstalled: true,
+          running: false,
+          loggedIn: false,
+          secretPath: "/demo/JetBrains/IntelliJIdea2026.2/options/secret-storage.xml",
+        },
+      ],
+      activeAccountId: null,
+      activeAccountName: null,
+      detectedFrom: "secret-storage",
+      statePath: "/demo/jetbrains-state.json",
+    } satisfies JetbrainsCodebuddyPluginStatus;
     case "switch_codebuddy_cli_account": {
       const target = demoAccounts.find((account) => account.id === args?.accountId);
       if (!target) throw new Error(t("shared.demo.error.accountMissing"));
@@ -1558,6 +1962,27 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       return { sessions: demoSessions(), current: "demo-user-001", source: "db" };
     case "list_session_replicas":
       return demoSessionReplicas();
+    /* 客户端限流台账（只读观测）。演示数据为**虚构**：一条仍受限 + 一条已恢复，
+       用于呈现「仍受限置顶 / 已恢复灰显」的排序与状态（不伪造真实账号数据）。 */
+    case "client_limits": return demoClientLimits();
+    /* 「今日 Token」按账号聚合（只读）。演示数据**如实演示三条诚实边界**：
+       demo-user-002 **刻意缺席** ⇒ 卡片渲染「—」（今日无记录/未知，非 0）；
+       demo-user-003 值为**全 0** ⇒ 渲染真实 `0`；`gatewayTruncated: true` ⇒ 渲染下界 `≥N`。 */
+    case "get_account_token_today": return demoAccountTokenToday();
+    /* Skill 管理清单（只读）。演示数据覆盖启用 / 停用 / 不一致 / 无 frontmatter 四种形态。 */
+    case "list_skills": return demoSkills(args?.region === "global" ? "global" : "cn");
+    /* 上游客户端 settings.json 托管（**只读** 4 条）。演示数据**虚构**，覆盖
+       未安装 / 运行中 / 四种排版等分支（patch / restore 是写操作，不进演示只读面）。 */
+    case "list_client_settings_slots": return demoClientSettingsSlots();
+    case "read_client_settings":
+      return demoClientSettingsRead(String(args?.slot ?? "workbuddy-cn"));
+    case "list_client_settings_backups":
+      return demoClientSettingsBackups(String(args?.slot ?? "workbuddy-cn"));
+    case "diff_client_settings":
+      return demoClientSettingsDiff(
+        String(args?.slotA ?? "workbuddy-cn"),
+        String(args?.slotB ?? "trae-code-cn"),
+      );
     case "get_gateway_config": return demoGatewayConfig();
     case "gateway_status": return demoGatewayStatus();
     case "list_api_keys": return { keys: demoApiKeys() };

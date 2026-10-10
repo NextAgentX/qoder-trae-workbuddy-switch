@@ -24,7 +24,10 @@ export type ErrorCodeId =
   | "net.transport.connect"
   | "net.transport.body"
   | "net.transport.other"
-  | "permission.denied";
+  | "permission.denied"
+  | "client.settings.process_running"
+  | "client.settings.parse_failed"
+  | "client.settings.write_failed";
 
 export const EN_ERROR_TEMPLATES: Partial<Record<ErrorCodeId, string>> = {
   "net.transport.timeout": "Connection timed out: {chain}",
@@ -34,6 +37,11 @@ export const EN_ERROR_TEMPLATES: Partial<Record<ErrorCodeId, string>> = {
   "net.transport.other": "Request failed: {chain}",
   "permission.denied":
     "No permission to write the credential file. Open System Settings → Privacy & Security → App Management and allow this app to control WorkBuddy's data (or grant it Full Disk Access), then retry.",
+  "client.settings.process_running":
+    "The client is running, so writing its settings.json was refused — the change would be overwritten by its in-memory state. Quit the client and retry.",
+  "client.settings.parse_failed":
+    "Failed to parse the client's settings.json ({path}). The file may be corrupted; nothing was written.",
+  "client.settings.write_failed": "Failed to write the client's settings.json ({path}).",
 };
 
 /** 运行期校验：把后端下发的任意字符串收紧为本版本认识的码。 */

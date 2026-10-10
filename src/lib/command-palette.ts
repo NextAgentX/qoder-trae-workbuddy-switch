@@ -137,7 +137,7 @@ const REGION_LABEL_KEY: Record<"cn" | "global", TranslationKey> = {
  */
 export function scopeLabel(scope: Scope, t: Translate): string {
   const parts = scopeParts(scope);
-  const productKey = platformDescriptor(parts.product).labelKey as TranslationKey;
+  const productKey = platformDescriptor(parts.product).labelKey;
   return `${t(productKey)} · ${t(REGION_LABEL_KEY[parts.region])}`;
 }
 

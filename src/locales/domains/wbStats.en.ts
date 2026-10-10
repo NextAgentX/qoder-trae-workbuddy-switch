@@ -48,6 +48,17 @@ export const en = {
   "wbStats.gateway.cancel": "Cancel",
   "wbStats.gateway.confirmOpen": "Confirm open",
   "wbStats.gateway.keyPlaceholder": "sk-wb-… (create one in the Key list below)",
+  /* Overview card rows (prototype viewGateway :3013-3018). */
+  "wbStats.gateway.upstreamCreds": "Upstream account credentials",
+  "wbStats.gateway.upstreamCredsDesc": "Whether the account pool can read valid upstream credentials",
+  "wbStats.gateway.verify": "Verify",
+  "wbStats.gateway.verifyOk": "Credentials verified",
+  "wbStats.gateway.verifyFail": "Credential verification failed",
+  "wbStats.gateway.availableModels": "Available models",
+  "wbStats.gateway.modelCount": "{count}",
+  "wbStats.gateway.poolEntries": "Account pool",
+  "wbStats.gateway.poolEntryCount": "{count} entries",
+  "wbStats.gateway.view": "View",
   "wbStats.gateway.modelList": "Model list",
   "wbStats.gateway.sourceLive": "Live",
   "wbStats.gateway.sourceCached": "Saved",
@@ -116,6 +127,7 @@ export const en = {
   "wbStats.gateway.streamNote": "Streaming (stream) is recommended; non-streaming requests are aggregated by the gateway and returned at once, with higher first-byte latency.",
   "wbStats.gateway.autoDiscover": "The client reads the model list from `/v1/models` automatically — you do not need to fill in model names; if your tool does not support auto-discovery, copy one from the \"Models\" page.",
   "wbStats.gateway.noKeyHint": "sk-wb-… (create a key above first)",
+  "wbStats.gateway.rawRequest": "Raw request (for debugging)",
   // Field labels inside the copyable snippets (shared by all client snippets)
   /* P3: `wbStats.gateway.snippet.*` removed — labels are now shared
      (`shared.gateway.snippet.*`). */
@@ -131,6 +143,8 @@ export const en = {
   // ---- Credit statistics (added) ----
   "wbStats.credit.bothRegions": "(CN + Global)",
   "wbStats.credit.refresh": "Refresh stats",
+  "wbStats.credit.headBarHint": "Credit balances come from upstream; refresh manually",
+  "wbStats.credit.refreshCredits": "Refresh credits",
   "wbStats.credit.loadFailed": "Failed to load statistics",
   "wbStats.credit.retry": "Retry",
 
@@ -153,6 +167,7 @@ export const en = {
 
   "wbStats.usage.trend.total": "Total tokens",
   "wbStats.usage.trend.avg": "Daily average",
+  "wbStats.usage.trend.avgHint": "Averaged by calendar day",
   "wbStats.usage.trend.peak": "Peak",
   "wbStats.usage.trend.models": "Models",
   "wbStats.usage.trend.stackedTitle": "Daily tokens by model",

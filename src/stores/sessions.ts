@@ -29,7 +29,7 @@ import {
   buildSessionsByAccount,
 } from "@/lib/session-replicas";
 import type { SessionGroupView } from "@/lib/session-replicas";
-import type { Region, Session, SessionFingerprint, SyncSessionReplicaItem, SyncSessionReplicaResponse } from "@/lib/types";
+import type { Region, Session, SessionFingerprint, SyncSessionReplicaItem, SyncSessionReplicaResponse, UnifySessionReplicaItem, UnifySessionReplicaResponse } from "@/lib/types";
 import { selectRegionSlice, useAccountsStore } from "@/stores/accounts";
 
 interface SessionsState {
@@ -54,6 +54,16 @@ interface SessionsState {
     region: Region,
     items: SyncSessionReplicaItem[],
   ) => Promise<SyncSessionReplicaResponse>;
+  /**
+   * ★ P8 · **分歧处理（覆盖式统一）**：把选定保留的那一份覆盖到其余副本。
+   *
+   * ⚠️ **会丢弃目标的分歧内容**（后端覆盖前先备份）⇒ 调用方必须先二次确认。
+   * 同样**不吞错、不自动重载**，逐条结果原样返回。
+   */
+  unifyItems: (
+    region: Region,
+    items: UnifySessionReplicaItem[],
+  ) => Promise<UnifySessionReplicaResponse>;
 }
 
 /** 该 region 已加载的账号（从账号 store 读，**不另起一份清单**）。 */
@@ -127,5 +137,10 @@ export const useSessionsStore = create<SessionsState>((set) => ({
      「部分失败」的 toast 与列表状态对不上（刷了一半看着像全成功）。 */
   syncItems(region, items) {
     return api.syncSessionReplicas(items, region);
+  },
+
+  /* ★ P8 分歧处理：同样只转发。**覆盖式**写操作 ⇒ 二次确认在页面侧，不在 store。 */
+  unifyItems(region, items) {
+    return api.unifySessionReplicas(items, region);
   },
 }));

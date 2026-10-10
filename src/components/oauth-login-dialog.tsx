@@ -15,6 +15,7 @@ import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import type { AccountMeta, Region } from "@/lib/types";
 import { useAccountsStore } from "@/stores/accounts";
+import { identityDisplayName } from "@/components/account-card";
 
 interface Props {
   open: boolean;
@@ -143,7 +144,7 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
         {result && (
           <Alert>
             <AlertDescription>
-              {t("wbAccounts.dialog.oauthCollected", { name: result.nickname || result.email || result.id })}
+              {t("wbAccounts.dialog.oauthCollected", { name: identityDisplayName(result) || result.id })}
             </AlertDescription>
           </Alert>
         )}

@@ -22,6 +22,13 @@ export interface AccountMeta {
   refreshExpiresAt: number | null;
   refreshedAt: number | null;
   createdAt: number | null;
+  /**
+   * 该账号**最近一次被实际使用**（切换 / 启动）的时刻，epoch **毫秒**。
+   *
+   * 口径与 `refreshedAt` / `createdAt` **完全一致**（后端 `now_ms()`，数字而非 ISO 字符串，
+   * 见 `account.rs` 的 `touch_last_used_for`）；从未使用过 ⇒ `null`。
+   */
+  lastUsedAt?: number | null;
   needsRelogin: boolean;
   needsReloginReason: string | null;
   /**
@@ -30,8 +37,54 @@ export interface AccountMeta {
    * 后端**原样透传**：未设置时为 `null` 或缺失，前端按「有值才渲染」处理。
    */
   remark?: string | null;
+  /**
+   * 用户自定义分组名（自由文本）。缺省 / `null` = **未分组**。
+   *
+   * 与 `remark` 同为**本地标注**：后端原样透传，未设置时为 `null` 或缺失。
+   */
+  groupName?: string | null;
   /** 该账号所属版本（后端 region 化后返回；缺省视为 "cn"）。 */
   region?: Region;
+}
+
+/**
+ * 「今日 Token」里**单个账号**的用量明细（`get_account_token_today` 的一条）。
+ *
+ * ⚠️ **诚实边界**（UI 必须遵守，见 {@link AccountTokenTodayResponse}）：
+ * 账号**缺失**于返回的 `accounts` 数组 = 「今日无记录 / 未知」；出现在这里的 `0` 是**真实 0**。
+ */
+export interface AccountTokenTodayEntry {
+  /** 账号 uid（与 `AccountMeta.uid` 同源；`AccountMeta.uid` 为 null 的账号不会出现在此）。 */
+  uid: string;
+  /** **客户端自身 CLI 用量**的输入 token 数。 */
+  clientIn: number;
+  /** 客户端自身 CLI 用量的输出 token 数。 */
+  clientOut: number;
+  /** **经本网关**的输入 token 数。 */
+  gatewayIn: number;
+  /** 经本网关的输出 token 数。 */
+  gatewayOut: number;
+}
+
+/**
+ * `get_account_token_today` 的返回 —— 「今日 Token」按账号聚合（对照后端契约，camelCase）。
+ *
+ * ## 三条诚实边界（UI 渲染红线）
+ *
+ * 1. `accounts` 里**缺失**某账号 = 「今日无记录 / 未知」⇒ 必须渲染 **「—」**，**不得**当 0；
+ * 2. 出现在 `accounts` 里的 `0` 是**真实 0**（当日确实没用）；
+ * 3. `gatewayTruncated: true` ⇒ 网关日志已到保留上限，**网关部分只是下界** ⇒
+ *    必须渲染成 **`≥N`** 并说明（tooltip / 行内注），**绝不**把网关数当完整值呈现。
+ */
+export interface AccountTokenTodayResponse {
+  /** 本地日期键，如 `"2026-10-10"`（与签到日志 / 积分统计事件同口径）。 */
+  date: string;
+  /** 逐账号明细；**缺席**即「今日无记录 / 未知」。 */
+  accounts: AccountTokenTodayEntry[];
+  /** 会话所属账号解析不出（未知账号）的汇总。 */
+  unknownClient: { in: number; out: number };
+  /** 网关日志已到保留上限 ⇒ 网关部分为下界。 */
+  gatewayTruncated: boolean;
 }
 
 /** 认证文件 domain 与目标 region 不符时的结构化信息（安全红线 F）。 */
@@ -211,6 +264,284 @@ export interface SyncSessionReplicaResponse {
   results: SyncSessionReplicaResult[];
   okCount: number;
   failCount: number;
+}
+
+/**
+ * P8 · 分歧处理的**一条**任务：把**用户选定保留的那一份**（`sourceCid`）覆盖到 `targetCid`。
+ *
+ * ⚠️ 与 {@link SyncSessionReplicaItem} **语义相反**：同步是**加法**（只追加），
+ * 这里是**覆盖**（目标原有的分歧内容会被丢弃）⇒ UI **必须**二次确认。
+ */
+export interface UnifySessionReplicaItem {
+  /** 用户选定**要保留**的那一份。 */
+  sourceCid: string;
+  /** 被覆盖的副本（它的分歧内容会被丢弃）。 */
+  targetCid: string;
+}
+
+/** 单条统一的结果（**逐条**返回 ⇒ 批量时天然支持部分失败）。 */
+export interface UnifySessionReplicaResult {
+  sourceCid: string;
+  targetCid: string;
+  ok: boolean;
+  /** 是否真的覆盖了（`false` = 本来就一致，未写盘）。 */
+  overwritten?: boolean;
+  /** 覆盖前目标的行数。 */
+  previousLines?: number;
+  /** 覆盖后的行数（= 选定那一份的行数）。 */
+  totalLines?: number;
+  /** ★ 用户**丢掉的**条数（目标相对共同旧版多出来的部分）—— 供 UI 如实告知。 */
+  lostLines?: number;
+  /** 备份路径（覆盖前目标的原文）；`null` = 未覆盖故无备份。 */
+  backup?: string | null;
+  /** 失败原因（`ok: false` 时必有）。 */
+  error?: string;
+}
+
+/** `unify_session_replicas` 的返回（汇总条用 `okCount` / `failCount`）。 */
+export interface UnifySessionReplicaResponse {
+  results: UnifySessionReplicaResult[];
+  okCount: number;
+  failCount: number;
+}
+
+/**
+ * 一条「客户端限流台账」条目（账号 × 模型 × 恢复时刻）。
+ *
+ * 数据源是**客户端自身落盘的三张只读表** join（见 core `client_limits.rs`）；
+ * `account` / `model` 为 `null` 表示 **join 失败**（未知账号 / 未知模型）——
+ * 该条**不会**被丢弃，由界面渲染「未知」。
+ */
+export interface ClientLimitEntry {
+  /** 账号昵称（join 失败为 null）。 */
+  account: string | null;
+  /** 原始 `user_id`（= 云端 uid），便于排障。 */
+  accountUid: string | null;
+  /** 会话所选模型（join 失败为 null）。⚠️ `hy4-preview` 与 `hy4-preview-f` 是两个模型。 */
+  model: string | null;
+  /** 上游错误码（6004 模型级限流 / 6020 / 6022 排队 / …）。 */
+  code: number | null;
+  /** HTTP 状态码（多为 429）。 */
+  status: number | null;
+  /** 恢复时刻（毫秒）；文案漂移解析不出为 null。 */
+  resetAt: number | null;
+  /** 最近一次发生时刻（毫秒）。 */
+  occurredAt: number;
+  /** `resetAt > now` —— 界面主排序依据。 */
+  active: boolean;
+  /** **原始**上游文案（解析失败时保留原文，不静默丢弃）。 */
+  message: string;
+  /** 会话 ID（便于跳转定位）。 */
+  sessionId: string;
+  /** 会话工作目录（可能含真实项目路径）。 */
+  cwd: string | null;
+  /** `providerData.agent`（`cli` / 子代理名）。 */
+  agent: string | null;
+  /** 所属 region（`cn` / `global`）。 */
+  region: string;
+}
+
+/** `client_limits` 的返回（只读观测）。 */
+export interface ClientLimitsResponse {
+  region: string;
+  /** 扫描窗口毫秒下界；`null` 表示全量扫描。 */
+  since: number | null;
+  now: number;
+  counts: { scanned: number; deduped: number; active: number };
+  limits: ClientLimitEntry[];
+}
+
+/** 一个 skill 的视图（core `skill::SkillEntry`，camelCase）。 */
+export interface SkillEntry {
+  /** 目录名（唯一键，启停 / 导入都以它定位）。 */
+  dirName: string;
+  /** frontmatter `name`，缺失回落目录名。 */
+  name: string;
+  /** 优先 `description_zh`；缺失回落 `description`。 */
+  description: string;
+  version: string | null;
+  /** 推导值：**非全停用即启用**。 */
+  enabled: boolean;
+  /** 两个启停字段只写了一半 ⇒ 状态不一致，界面给「修复」入口。 */
+  inconsistent: boolean;
+  agentCreated: boolean;
+  /** 无合法 frontmatter ⇒ 不可启停（不擅自造 frontmatter）。 */
+  hasFrontmatter: boolean;
+}
+
+/** `list_skills` 的返回。 */
+export interface SkillListResponse {
+  region: string;
+  skills: SkillEntry[];
+}
+
+/** `set_skill_enabled` 的返回。 */
+export interface SkillToggleResult {
+  dirName: string;
+  enabled: boolean;
+  /** 本次是否真的改写了文件（幂等重跑为 false）。 */
+  changed: boolean;
+  /** 改前原文的备份路径；无改动 / 备份失败时为 null。 */
+  backup: string | null;
+}
+
+/** `copy_skills_cross` 的返回（合并补齐报告）。 */
+export interface SkillCopyReport {
+  sourceRegion: string;
+  targetRegion: string;
+  copied: string[];
+  skippedConflict: string[];
+  skippedIdentical: string[];
+  changed: boolean;
+  backup: string | null;
+}
+
+/** `import_skill` 的返回。 */
+export interface SkillImportResult {
+  region: string;
+  dirName: string;
+  imported: boolean;
+  conflict: boolean;
+  identical: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 上游客户端 settings.json 统一托管（core `client_settings::*`，camelCase）
+// ---------------------------------------------------------------------------
+
+/** 一个上游客户端槽位（core `client_settings::slot_view`）。 */
+export interface ClientSettingsSlot {
+  /** 稳定标识（前端传参 / 备份目录名）。 */
+  key: string;
+  /** i18n 键（模块级常量表存键不存文案，由前端渲染成当前语言）。 */
+  displayKey: string;
+  /** 所属产品：`workbuddy` / `trae`。 */
+  product: string;
+  /** 该槽位的 `settings.json` 是否存在（未安装者仍在列表内）。 */
+  installed: boolean;
+  /** 解析到的绝对路径；取不到基目录时为 null。 */
+  path: string | null;
+}
+
+/** `list_client_settings_slots` 的返回。 */
+export interface ClientSettingsSlotsResponse {
+  slots: ClientSettingsSlot[];
+}
+
+/** 原文件的排版指纹。`indent = null` 表示**全文无换行**（压缩式）。 */
+export interface ClientSettingsFingerprint {
+  /** 首个成员行的前导空白（`"  "` / `"\t"` / `""`）；无换行 ⇒ null。 */
+  indent: string | null;
+  /** 文中首个换行符（`\r\n` 或 `\n`）。 */
+  newline: string;
+}
+
+/** `read_client_settings` 的返回（原文 + 解析后键值 + 格式指纹）。 */
+export interface ClientSettingsReadResponse {
+  slot: string;
+  displayKey: string;
+  product: string;
+  path: string;
+  installed: boolean;
+  /** 客户端进程是否正在运行（运行中禁止写入）。 */
+  running: boolean;
+  /** 原始文本；未安装为 null。 */
+  text: string | null;
+  /** 解析后的键值；未安装为 null。 */
+  values: unknown | null;
+  /** 顶层键顺序（`values` 已被 BTreeMap 排序，此表保留原顺序）。 */
+  keyOrder: string[];
+  /** 格式指纹；未安装为 null。 */
+  fingerprint: ClientSettingsFingerprint | null;
+}
+
+/** `patch_client_settings` / `restore_client_settings_backup` 的返回。 */
+export interface ClientSettingsWriteResult {
+  slot: string;
+  displayKey: string;
+  product: string;
+  path: string;
+  installed: boolean;
+  /** 本次是否真的改写了文件（幂等重跑为 false）。 */
+  changed: boolean;
+  /** 改前原文的备份路径；无改动 / 备份失败时为 null。 */
+  backup: string | null;
+  /** 本次 patch 涉及的键（点号路径）。 */
+  keys: string[];
+  /** 改写后的全文。 */
+  text: string;
+  /** 改写后的解析键值。 */
+  values: unknown;
+  /** 仅恢复时出现：来源备份点 id。 */
+  restoredFrom?: string;
+}
+
+/** 一个历史备份点。 */
+export interface ClientSettingsBackupEntry {
+  /** 备份点 id（`utc_iso` 时间戳，可含 `-N` 去重后缀）。 */
+  id: string;
+  path: string;
+  size: number;
+}
+
+/** `list_client_settings_backups` 的返回。 */
+export interface ClientSettingsBackupsResponse {
+  slot: string;
+  displayKey: string;
+  /** 该槽位的备份根目录。 */
+  dir: string;
+  backups: ClientSettingsBackupEntry[];
+}
+
+/** 比对里的一条「仅某一侧有」。 */
+export interface ClientSettingsDiffOnlyEntry {
+  /** 拍平后的点号路径。 */
+  path: string;
+  value: unknown;
+}
+
+/** 比对里的一条「值不同」。 */
+export interface ClientSettingsDiffChangedEntry {
+  path: string;
+  a: unknown;
+  b: unknown;
+}
+
+/** 代理语义组里某一侧的单个字段取值（core `merge_proxy_fields`）。 */
+export interface ClientSettingsProxyFieldValue {
+  /** 该槽位里承载该语义的点号路径。 */
+  path: string;
+  /** 该字段在该槽位的文件里是否真实存在（不存在时 `value` 为 null）。 */
+  present: boolean;
+  value: unknown;
+}
+
+/**
+ * 跨产品比对时按 core `PROXY_FIELDS` 归并出的一个语义组（当前只有「代理」）。
+ *
+ * 两侧字段路径本就不同（WorkBuddy 是 `http.proxy` + `http.proxySupport`，
+ * Trae 是 `trae.network.proxy.effectiveMode`），故 `same` 按**有效值集合**判定。
+ * 归并进来的路径**不再**出现在 `onlyA` / `onlyB` / `different` 里。
+ */
+export interface ClientSettingsProxyGroup {
+  /** 语义名（当前恒为 `proxy`）。 */
+  semantic: string;
+  a: ClientSettingsProxyFieldValue[];
+  b: ClientSettingsProxyFieldValue[];
+  /** 两侧有效值集合是否相同。 */
+  same: boolean;
+}
+
+/** `diff_client_settings` 的返回（仅 A 有 / 仅 B 有 / 值不同）。 */
+export interface ClientSettingsDiffResponse {
+  onlyA: ClientSettingsDiffOnlyEntry[];
+  onlyB: ClientSettingsDiffOnlyEntry[];
+  different: ClientSettingsDiffChangedEntry[];
+  counts: { onlyA: number; onlyB: number; different: number; same: number };
+  /** 跨产品比对时归并出的代理语义组；同产品为空数组。 */
+  proxyGroups: ClientSettingsProxyGroup[];
+  slotA: { key: string; displayKey: string; path: string; installed: boolean };
+  slotB: { key: string; displayKey: string; path: string; installed: boolean };
 }
 
 export interface CopyResult {
@@ -512,6 +843,8 @@ export interface CreditStatsCheckinEvent {
   accountName: string;
   result: string;
   error?: string | null;
+  /** 本次签到可得额度（逐条「+N」的 N）；上游没给时为 `null` ⇒ 显示「—」。 */
+  amount?: number | null;
 }
 
 export type CreditStatsEvent = CreditStatsUsageEvent | CreditStatsCheckinEvent;
@@ -683,6 +1016,93 @@ export interface CodeBuddyCnIdeSwitchResult {
   message?: string;
 }
 
+/**
+ * VS Code 内 CodeBuddy 扩展（`tencent-cloud.coding-copilot`）状态。
+ *
+ * 与 [`CodeBuddyCnIdeStatus`] **刻意分开**：一个是桌面客户端，一个是编辑器里的扩展，
+ * 「装了哪个」是两件独立的事（共用加解密流程，但探测目标不同）。
+ */
+export interface VscodeCodebuddyPluginStatus {
+  /** VS Code 用户数据目录是否存在（≠ 扩展已安装）。 */
+  installed: boolean;
+  /** 扩展是否已安装：`<数据目录>/User/globalStorage/<extensionId>` 存在。 */
+  extensionInstalled: boolean;
+  running: boolean;
+  /** `state.vscdb` 里是否存在会话 secret 行（**只查 key、不解密**，仅用于文案）。 */
+  loggedIn: boolean;
+  dataDir: string | null;
+  dbPath: string | null;
+  dbExists: boolean;
+  activeAccountId: string | null;
+  activeAccountName: string | null;
+  detectedFrom?: string;
+  statePath?: string;
+}
+
+/** JetBrains IDE 里一个受支持产品的配置目录（IDEA / PyCharm，含社区版）。 */
+export interface JetbrainsTargetStatus {
+  /** 配置目录名，如 `PyCharm2026.2`（= 切换时的选择键）。 */
+  configDir: string;
+  pluginInstalled: boolean;
+  running: boolean;
+  loggedIn: boolean;
+  secretPath: string;
+}
+
+/**
+ * JetBrains IDE 内 CodeBuddy 插件状态。
+ *
+ * ⚠️ 与 VS Code 不同：本机**可能同时装多个 IDE**（IDEA + PyCharm），
+ * 一次切换会写入**全部装了插件**的产品 ⇒ 状态是「多目标」的（`targets`）。
+ */
+export interface JetbrainsCodebuddyPluginStatus {
+  /** 配置根下存在任一受支持产品的配置目录。 */
+  installed: boolean;
+  /** 其中至少一个装了 CodeBuddy 插件。 */
+  pluginInstalled: boolean;
+  running: boolean;
+  loggedIn: boolean;
+  configRoot: string | null;
+  targets: JetbrainsTargetStatus[];
+  activeAccountId: string | null;
+  activeAccountName: string | null;
+  detectedFrom?: string;
+  statePath?: string;
+}
+
+/**
+ * 两个 CodeBuddy **插件**程序位（VS Code / JetBrains）的切换结果。
+ *
+ * 后端两条命令返回同一个形状（`programs::switch` 统一出口）⇒ 前端也只定义一份，
+ * 避免两处抄写漂移。`dbPath`（VS Code）与 `written`（JetBrains）各自可缺省。
+ */
+export interface CodebuddyPluginSwitchResult {
+  ok: boolean;
+  account: string;
+  accountId: string;
+  dbPath?: string;
+  /** JetBrains：本次实际写入的配置目录名列表。 */
+  written?: string[];
+  restarted?: boolean;
+  closedByUs?: boolean;
+  /** VS Code：写入前是否已存在会话（用于文案）。 */
+  existingSession?: boolean;
+  message?: string;
+}
+
+/** 两个 CodeBuddy 插件程序位的「从本机探测当前登录」结果。 */
+export interface CodebuddyPluginDetectResult {
+  ok: boolean;
+  /** 本机是否读到该插件的登录 secret。 */
+  found: boolean;
+  /** 读到了且能在账号库里匹配到账号。 */
+  matched?: boolean;
+  accountId?: string;
+  account?: AccountMeta;
+  uid?: string | null;
+  message?: string;
+}
+
 // ---------------------------------------------------------------------------
 // API 网关（对应架构设计 A-3.4 / A-3.7）
 // ---------------------------------------------------------------------------
@@ -774,6 +1194,11 @@ export interface ApiKeyRecord {
   region: Region;
   /** 可辨识前缀，如 "sk-wb-a1b2"。 */
   prefix: string;
+  /**
+   * ★ E3：尾部 4 位（如 "9f3c"）。列表显示 `prefix••••••••suffix`。
+   * 旧台账无此字段 ⇒ 空串 ⇒ 展示层**省略尾部**（不报错、不补造）。
+   */
+  suffix?: string;
   createdAt: number;
   revokedAt: number | null;
   revoked: boolean;
@@ -913,6 +1338,11 @@ export interface ImportPreviewScopeRow {
   /** 未知 scope ⇒ 该分区整体拒绝（不静默跳过、不回落，§1.6）。 */
   rejected?: boolean;
   error?: string;
+  /**
+   * ★ C1：本行是否**可重试**。未知 scope 为 `false`（键名非法是来件的结构性缺陷，
+   * 重试同一个文件必然再失败）；合并 / 写入失败为 `true`。
+   */
+  retryable?: boolean;
 }
 
 /** 导入预览（**不落盘**；供安全阀展示，§1.7）。 */
@@ -931,7 +1361,13 @@ export interface ImportPreview {
 export interface ImportSummary {
   perScope: ImportPreviewScopeRow[];
   failed: number;
+  /** 可重试的 scope 数（= `retryableScopes.length`）。 */
   retryable: number;
+  /**
+   * ★ C1：**可重试的具体 scope id**，原样回传给 `importBackup` 的 `onlyScopes`
+   * 即可「只重试失败项」。未知 scope（键名非法）**不在**此列——重试必然再失败。
+   */
+  retryableScopes?: string[];
   /** 导入前强制快照的路径（D18；可「从自动备份恢复」）。 */
   snapshotPath: string;
 }
@@ -985,5 +1421,19 @@ export interface ProxyStatus {
   bizPaths: string[];
   /** 要引导用户设置的**客户端设置键**（应用**只显示**，由用户手动设）。 */
   setting: { key: string; value: string };
+  /**
+   * ★ E1：开启态 KPI（`P12-ARCH.md` §3.2 契约）。
+   *
+   * ⚠️ **诚实边界**：`known === false` 表示「台账读不到 / 今天还没记过」——
+   * 此时 `todayRequests` / `switches` 是 `null`，界面**必须显示「—」，不得当 0**。
+   * 0 的含义是「今天确实一次都没走过」，与「不知道」是两件事。
+   */
+  stats?: {
+    todayRequests: number | null;
+    switches: number | null;
+    /** 恒 `0`：网关只记元数据、**不落盘请求正文**（D29 承诺，不是统计值）。 */
+    persistedBodies: 0;
+    known: boolean;
+  };
 }
 

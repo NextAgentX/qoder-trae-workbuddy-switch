@@ -8,13 +8,25 @@ import {
   RefreshCw,
   Save,
   ScrollText,
+  ShieldAlert,
+  Stethoscope,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { SettingsFieldRow, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 // P7 T03：设置页子导航（9 项）+「备份与恢复」分区 + 通用设置分组（与侧栏弹层共用）。
 import { SETTINGS_SUBNAV, SettingsSubnav, type SettingsSubnavId } from "@/components/settings/settings-subnav";
@@ -30,11 +42,15 @@ import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { regionDescriptor } from "@/lib/region";
+import { scopeOf } from "@/lib/scope";
+import { useScope } from "@/lib/use-scope";
 import type { TranslationKey } from "@/locales/zh";
 import type {
   AutoRotateConfig,
   CheckinConfig,
   CheckinLog,
+  CodeBuddyCliStatus,
+  CodeBuddyCnIdeStatus,
   GatewayConfig,
   Region,
   RotateLog,
@@ -42,6 +58,7 @@ import type {
   ScheduleConfig,
   ScheduleRunResult,
   SwitchConfig,
+  TravelConfig,
 } from "@/lib/types";
 import { DemoAction } from "@/components/demo-action";
 import { useAccountsStore } from "@/stores/accounts";
@@ -251,8 +268,8 @@ function AutoCheckinCard() {
                           tone.tone === "error"
                             ? "text-destructive"
                             : tone.tone === "warning"
-                              ? "text-amber-600"
-                              : "text-emerald-600"
+                              ? "text-warning"
+                              : "text-success"
                         }
                       >
                         {t(tone.textKey)}
@@ -543,8 +560,8 @@ function AutoRotateCard() {
                           tone.tone === "error"
                             ? "text-destructive"
                             : tone.tone === "success"
-                              ? "text-emerald-600"
-                              : "text-amber-600"
+                              ? "text-success"
+                              : "text-warning"
                         }
                       >
                         {tone.text}
@@ -644,6 +661,122 @@ function PermissionCheckCard() {
   );
 }
 
+/**
+ * ★ Q1「危险操作」分区（WorkBuddy 侧）。
+ *
+ * ## 为什么 WB 是这两项，而不是 Trae 的「重置设备标识」
+ *
+ * Trae 的「重置设备标识」改的是 **Trae 客户端自己的** 6 层文件（`machineid` /
+ * `aha/TinyStorage` / `trae-webview` …，`trae/platform.rs::reset_device_identity_for`）。
+ * WorkBuddy 客户端**没有**这套结构，且本工具在网关侧的身份是
+ * `sha256("wb2a:<purpose>:<uid>")` 的**纯函数派生**（`gateway/session_headers.rs`）——
+ * **不落盘、无状态，没有可「重置」的对象**。给它加一个按钮只能重置空气，
+ * 那是本仓最忌的「假控件」。故此处只放**WB 真实存在**的危险面。
+ */
+function DangerZoneCard() {
+  const t = useT();
+  const [exporting, setExporting] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
+
+  /** 导出诊断包：后端已剥离凭据并做纯文本闸门，这里只落盘。 */
+  async function runExportDiagnostic() {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const { name, text } = await api.exportDiagnostic();
+      const blob = new Blob([text], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      toast.success(t("wbSettings.danger.diagSaved", { name }));
+    } catch (e) {
+      toast.error(t("wbSettings.danger.diagFailed"), { description: api.asError(e) });
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  /** 清空网关请求日志（不可撤销 ⇒ 必须二次确认）。 */
+  async function runClearGatewayLogs() {
+    if (clearing) return;
+    setClearing(true);
+    try {
+      await api.clearGatewayLogs();
+      toast.success(t("wbSettings.danger.logsCleared"));
+      await useGatewayStore.getState().loadLogs();
+    } catch (e) {
+      toast.error(t("wbSettings.danger.logsClearFailed"), { description: api.asError(e) });
+    } finally {
+      setClearing(false);
+      setClearOpen(false);
+    }
+  }
+
+  return (
+    <SettingsGroup id="settings-danger" title={t("wbSettings.danger.groupTitle")}>
+      <CardContent className="space-y-0 p-0">
+        <p className="border-b border-border/60 bg-muted/25 px-4 py-3 text-xs leading-5 text-muted-foreground sm:px-5">
+          {t("wbSettings.danger.intro")}
+        </p>
+
+        <SettingsFieldRow
+          label={t("wbSettings.danger.diagLabel")}
+          description={t("wbSettings.danger.diagDesc")}
+          operational
+        >
+          <Button size="sm" variant="outline" onClick={() => void runExportDiagnostic()} disabled={exporting}>
+            {exporting ? <Loader2 className="animate-spin" /> : <Stethoscope />}
+            {exporting ? t("wbSettings.danger.exporting") : t("wbSettings.danger.diag")}
+          </Button>
+        </SettingsFieldRow>
+
+        <SettingsFieldRow
+          label={t("wbSettings.danger.logsLabel")}
+          description={t("wbSettings.danger.logsDesc")}
+          operational
+        >
+          <Button size="sm" variant="destructive" onClick={() => setClearOpen(true)} disabled={clearing}>
+            {clearing ? <Loader2 className="animate-spin" /> : <Trash2 />}
+            {t("wbSettings.danger.logsClear")}
+          </Button>
+        </SettingsFieldRow>
+      </CardContent>
+
+      <Dialog open={clearOpen} onOpenChange={setClearOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="size-4 text-destructive" />
+              {t("wbSettings.danger.logsConfirmTitle")}
+            </DialogTitle>
+            <DialogDescription>{t("wbSettings.danger.logsConfirmDesc")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setClearOpen(false)}>
+              {t("shared.batch.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setClearOpen(false);
+                void runClearGatewayLogs();
+              }}
+            >
+              {t("wbSettings.danger.logsConfirmBtn")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </SettingsGroup>
+  );
+}
+
 function useAuthFile(): string | undefined {
   return useAccountsStore((s) => s.status?.authFile);
 }
@@ -726,6 +859,150 @@ function SwitchBehaviorCard() {
             aria-label={t("wbSettings.switch.pinCurrentLabel")}
           />
         </SettingsFieldRow>
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/**
+ * 自动旅行：**单一真实键** `enabled`（`~/.buddy-switch/auto_travel_config.json`）。
+ *
+ * 与账号页工具栏的开关读写**同一份**配置（`get/save_auto_travel_config`）；原型把该行
+ * 放在「签到与积分」的「积分与轮换」分组下（:1706-1708），此处对齐。
+ */
+function TravelSettingsCard() {
+  const t = useT();
+  const [cfg, setCfg] = useState<TravelConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAutoTravelConfig()
+      .then((value) => {
+        if (!cancelled) setCfg(value);
+      })
+      .catch((e) => {
+        if (!cancelled) toast.error(t("wbSettings.common.saveFailed"), { description: api.asError(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function patch(enabled: boolean) {
+    if (!cfg || saving) return;
+    const previous = cfg;
+    setCfg({ ...cfg, enabled });
+    setSaving(true);
+    try {
+      setCfg(await api.saveAutoTravelConfig({ ...cfg, enabled }));
+      toast.success(enabled ? t("wbSettings.checkin.travelOn") : t("wbSettings.checkin.travelOff"));
+    } catch (e) {
+      setCfg(previous);
+      toast.error(t("wbSettings.common.saveFailed"), { description: api.asError(e) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <SettingsGroup id="settings-travel" title={t("wbSettings.schedule.task.travel.label")}>
+      <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          className="border-b-0"
+          label={t("wbSettings.checkin.travelLabel")}
+          description={t("wbSettings.checkin.travelDesc")}
+          htmlFor="travel-enabled"
+          operational
+        >
+          <Switch
+            id="travel-enabled"
+            checked={cfg?.enabled ?? false}
+            disabled={saving || cfg === null}
+            onCheckedChange={(value) => void patch(value)}
+            aria-label={t("wbSettings.checkin.travelLabel")}
+          />
+        </SettingsFieldRow>
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/**
+ * 客户端检测（**只读**）：三行数据来自真实探测命令，缺数据渲染「未检测到」，绝不写死。
+ *
+ * - WorkBuddy Desktop：`AppStatus.installed` / `version`（当前作用域那一版）；
+ * - CodeBuddy CLI：`get_codebuddy_cli_status` 的 `configured`；
+ * - CodeBuddy CN IDE：`get_codebuddy_cn_ide_status` 的 `installed`。
+ */
+function ClientDetectCard() {
+  const t = useT();
+  const [region] = useScope("workbuddy");
+  const status = useAccountsStore((s) => (region === "global" ? s.global.status : s.status));
+  const fetchAllRegions = useAccountsStore((s) => s.fetchAllRegions);
+  const [cli, setCli] = useState<CodeBuddyCliStatus | null>(null);
+  const [cnIde, setCnIde] = useState<CodeBuddyCnIdeStatus | null>(null);
+
+  useEffect(() => {
+    void fetchAllRegions();
+  }, [fetchAllRegions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // 两个探测各自失败都不影响另一个：失败即保持 null ⇒ 该行显示「未检测到」。
+    void api.getCodebuddyCliStatus().then((value) => {
+      if (!cancelled) setCli(value);
+    }).catch(() => {});
+    void api.getCodebuddyCnIdeStatus().then((value) => {
+      if (!cancelled) setCnIde(value);
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const desktopInstalled = status?.installed ?? Boolean(status?.version);
+  const desktopValue = !desktopInstalled
+    ? t("wbSettings.client.notDetected")
+    : status?.version
+      ? t("wbSettings.client.detectedVersion", { version: status.version })
+      : t("wbSettings.client.detected");
+
+  const rows: { id: string; label: string; desc: string; value: string }[] = [
+    {
+      id: "detect-workbuddy",
+      label: t("wbSettings.client.detectWorkbuddy"),
+      desc: t("wbSettings.client.detectWorkbuddyDesc"),
+      value: desktopValue,
+    },
+    {
+      id: "detect-cli",
+      label: t("wbSettings.client.detectCli"),
+      desc: t("wbSettings.client.detectCliDesc"),
+      value: cli?.configured ? t("wbSettings.client.configured") : t("wbSettings.client.notConfigured"),
+    },
+    {
+      id: "detect-cn-ide",
+      label: t("wbSettings.client.detectCnIde"),
+      desc: t("wbSettings.client.detectCnIdeDesc"),
+      value: cnIde?.installed ? t("wbSettings.client.detected") : t("wbSettings.client.notDetected"),
+    },
+  ];
+
+  return (
+    <SettingsGroup id="settings-client-detect" title={t("wbSettings.client.detectTitle")}>
+      <CardContent className="space-y-0 p-0">
+        {rows.map((row, index) => (
+          <SettingsFieldRow
+            key={row.id}
+            className={index === rows.length - 1 ? "border-b-0" : undefined}
+            label={row.label}
+            description={row.desc}
+          >
+            <span className="text-sm text-muted-foreground">{row.value}</span>
+          </SettingsFieldRow>
+        ))}
       </CardContent>
     </SettingsGroup>
   );
@@ -868,6 +1145,21 @@ function GatewaySettingsCard() {
   return (
     <SettingsGroup id="settings-gateway" title={t("wbSettings.gateway.groupTitle")}>
       <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          label={t("wbSettings.gateway.enabledLabel")}
+          description={t("wbSettings.gateway.enabledDesc")}
+          htmlFor="gw-enabled"
+          operational
+        >
+          <Switch
+            id="gw-enabled"
+            checked={config.enabled}
+            disabled={saving}
+            onCheckedChange={(checked) => void persist({ enabled: checked })}
+            aria-label={t("wbSettings.gateway.enabledLabel")}
+          />
+        </SettingsFieldRow>
+
         <SettingsFieldRow
           label={t("wbSettings.gateway.bindLabel")}
           description={t("wbSettings.gateway.bindDesc")}
@@ -1232,6 +1524,10 @@ function ScheduleCard() {
  */
 export default function SettingsPage() {
   const t = useT();
+  /* 本页是 **WorkBuddy 侧**设置（Trae 侧是 `TraeSettingsPage`）⇒ 平台固定 workbuddy，
+     区域（国内版 / 国际版）仍由作用域承载 —— 与页头只读 `scope-chip` 的来源一致。 */
+  const [region] = useScope("workbuddy");
+  const scope = scopeOf("workbuddy", region);
   /* ★ P0-4a：`section` 的**初始值从 URL 读**（`?section=diagnostics`）——
      否则「未检测到程序位 → 去设置」只能落到设置页**首页**，到不了「权限与诊断」子项
      （原型断言 `P0-4a` 要求点了之后能跳到「权限与诊断」）。
@@ -1244,11 +1540,16 @@ export default function SettingsPage() {
 
   return (
     <div className="mx-auto min-w-0 w-full max-w-5xl px-4 py-6 sm:px-6 sm:py-8">
-      <header className="mb-6 sm:mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight">{t("wbSettings.page.title")}</h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {t("wbSettings.page.subtitle")}
-        </p>
+      {/* 页头（原型 `viewSettings`）：作用域副标题 + 只读 scope-chip。 */}
+      <header className="mb-5 flex items-start gap-4">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("wbSettings.page.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("pageHead.settings", { scope: scopeLabel(t, scope) })}
+          </p>
+        </div>
+        <div className="grow" />
+        <ScopeChip scope={scope} />
       </header>
 
       <div className="flex min-w-0 flex-col gap-6 lg:flex-row lg:gap-8">
@@ -1268,15 +1569,28 @@ export default function SettingsPage() {
             </>
           )}
 
-          {section === "checkin" && <AutoCheckinCard />}
+          {section === "checkin" && (
+            <>
+              <AutoCheckinCard />
+              {/* 「积分与轮换」组：轮换卡原本挂在「客户端」，与原型 :1701-1708 的分组不符
+                  （原型把轮换归在「签到与积分」⇒ 客户端只留检测）。 */}
+              <TravelSettingsCard />
+              <AutoRotateCard />
+            </>
+          )}
 
           {section === "gateway" && <GatewaySettingsCard />}
 
           {section === "schedule" && <ScheduleCard />}
 
-          {section === "client" && <AutoRotateCard />}
+          {section === "client" && <ClientDetectCard />}
 
-          {section === "diagnostics" && <PermissionCheckCard />}
+          {section === "diagnostics" && (
+            <>
+              <PermissionCheckCard />
+              <DangerZoneCard />
+            </>
+          )}
 
           {section === "logs" && (
             <EmptyState

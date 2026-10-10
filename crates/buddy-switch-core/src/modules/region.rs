@@ -289,6 +289,21 @@ pub fn official_usage_cache_file_for(region: Region) -> PathBuf {
     }
 }
 
+/// 每日 Token 记录（账号 × 来源 × 本地日）的 region 化落盘文件。
+///
+/// CN 用 `token_daily.json`，Global 用 `token_daily.global.json`，与
+/// [`official_usage_cache_file_for`] 同一命名习惯。
+///
+/// **为什么必须分家**：记录的归属键是上游账号 `uid`，而两版的账号库（及客户端
+/// 数据目录）各自独立；共用一个文件时，切换视图会让一版的当日用量被另一版读取或
+/// 覆盖（同 [`official_usage_cache_file_for`] 踩过的坑）。
+pub fn token_daily_file_for(region: Region) -> PathBuf {
+    match region {
+        Region::Cn => store_dir().join("token_daily.json"),
+        Region::Global => store_dir().join("token_daily.global.json"),
+    }
+}
+
 /// 账号库文件所在目录（与 `home_dir()` 一致），供诊断文案使用。
 pub fn store_home() -> PathBuf {
     home_dir()

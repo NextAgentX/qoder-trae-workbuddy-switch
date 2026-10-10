@@ -46,14 +46,14 @@ function DivergingTooltip({
       {showInflow ? (
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">{t("wbStats.usage.credits.in")}</span>
-          <span className="font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+          <span className="font-mono tabular-nums text-success">
             +{formatCredits(bar.inAmt)}
           </span>
         </div>
       ) : null}
       <div className="flex items-center justify-between gap-4">
         <span className="text-muted-foreground">{t("wbStats.usage.credits.out")}</span>
-        <span className="font-mono tabular-nums text-amber-600 dark:text-amber-400">
+        <span className="font-mono tabular-nums text-warning">
           -{formatCredits(bar.outAmt)}
         </span>
       </div>
@@ -68,7 +68,7 @@ export function CreditDivergingBar({ bars }: { bars: CreditDailyBar[] }) {
   const data = bars.map((bar) => ({ label: bar.label, up: bar.inAmt, down: -bar.outAmt }));
 
   return (
-    <ChartContainer config={CONFIG} className="h-56 w-full">
+    <ChartContainer config={CONFIG} className="h-[180px] w-full">
       <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barCategoryGap="18%">
         <CartesianGrid vertical={false} strokeDasharray="3 3" />
         <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} />

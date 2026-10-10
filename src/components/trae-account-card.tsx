@@ -44,7 +44,7 @@ export function jwtBadge(status: TraeJwtStatus, hours: number | null, t: Transla
     case "warn":
       return {
         variant: "secondary" as const,
-        className: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+        className: "bg-warning/15 text-warning",
         text: t("trae.comp.card.jwt.warn", { hours: hoursText(hours, t) }),
       };
     case "expired":
@@ -72,7 +72,7 @@ function formatExpiryShort(seconds: number | null, t: Translate): string {
 
 /** 到期语气：临期 / 已过期用琥珀，其余用次要前景色（语义色走 class，不写裸色值）。 */
 function expiryTone(expired: boolean, expiringSoon: boolean): string {
-  return expired || expiringSoon ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground";
+  return expired || expiringSoon ? "text-warning" : "text-muted-foreground";
 }
 
 /** 区域展示名（用于跨区域程序位的**消歧**）。 */
@@ -367,10 +367,12 @@ export function TraeAccountCard({
             <span
               role="status"
               aria-label={t("trae.comp.card.currentOf", { label })}
-              className="inline-flex h-7 items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-2.5 text-xs text-primary shadow-[inset_0_1px_0_rgba(255,255,255,.8)]"
+              /* 与 `account-card` 的「当前账号」同口径（`border-primary/40 bg-primary/15`，无内阴影）：
+                 硬编码的 `inset 0 1px 0 rgba(255,255,255,.8)` 在深色下是一条刺眼白线。 */
+              className="inline-flex h-[26px] items-center gap-1.5 rounded-[8px] border border-primary/40 bg-primary/15 px-2 text-[11px] text-primary"
             >
-              <TraeVariantMark variant={program.variant} size={18} />
-              <Check className="size-3.5" strokeWidth={2.25} />
+              <TraeVariantMark variant={program.variant} size={12} />
+              <Check className="size-3" strokeWidth={2.25} />
             </span>
           </TooltipTrigger>
           <TooltipContent side="top">{t("trae.comp.card.currentOf", { label })}</TooltipContent>
@@ -524,7 +526,7 @@ export function TraeAccountCard({
 
   return (
     <TooltipProvider>
-      <article className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,.025),0_10px_28px_rgba(15,23,42,.035)] transition-shadow hover:shadow-[0_2px_4px_rgba(15,23,42,.04),0_14px_34px_rgba(15,23,42,.055)]">
+      <article className="flex min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-card transition-[border-color,box-shadow] hover:border-border-strong hover:shadow-card-hover">
         <header
           className={cn(
             "relative flex items-center border-b border-border",
@@ -655,7 +657,7 @@ export function TraeAccountCard({
                     </div>
                     <div className={cn("h-1 overflow-hidden rounded-full bg-muted", compact ? "mt-1" : "mt-1.5")} aria-hidden="true">
                       <div
-                        className={cn("h-full rounded-full", item.expiringSoon || item.expired ? "bg-amber-500" : "bg-primary")}
+                        className={cn("h-full rounded-full", item.expiringSoon || item.expired ? "bg-warning" : "bg-primary")}
                         style={{ width: `${ratio}%` }}
                       />
                     </div>

@@ -1,8 +1,9 @@
 import type { ReactNode, Ref } from "react";
-import { LayoutGrid, Search, Table2 } from "lucide-react";
+import { LayoutGrid, Plus, Search, Table2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { DemoAction } from "@/components/demo-action";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -78,6 +79,14 @@ export interface AccountToolbarProps {
 
   /** 平台专属控件插槽（WB：自动签到 / 旅行开关 + 卡片密度 + 刷新；Trae：跳过已签 + 刷新）。 */
   children?: ReactNode;
+
+  /**
+   * 工具栏右侧的**主操作**（如「+ 添加账号」，原型 `viewAccounts` :2428）。
+   *
+   * 由页面注入**同一个**既有入口（WB 页接 OAuth 扫码添加），壳内不含任何平台 / 业务逻辑。
+   * 不传 = 不渲染该按钮（Trae 页）。
+   */
+  addAction?: { label: string; onClick: () => void } | null;
 }
 
 export function AccountToolbar({
@@ -95,12 +104,13 @@ export function AccountToolbar({
   tableViewEnabled = true,
   selection,
   children,
+  addAction,
 }: AccountToolbarProps) {
   const t = useT();
 
   return (
     <TooltipProvider delayDuration={400}>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="mb-3.5 flex flex-wrap items-center gap-2 rounded-[12px] border border-border bg-card px-3 py-2.5">
         {/* ★ 搜索框常驻：**不**放进任何条件分支（IME 约束，见文件头）。 */}
         <div className="relative min-w-[200px] flex-1">
           <Search
@@ -115,7 +125,7 @@ export function AccountToolbar({
             aria-label={t("shared.toolbar.searchAria")}
             autoComplete="off"
             spellCheck={false}
-            className="h-9 pl-8"
+            className="h-8 rounded-[9px] bg-card-2 pl-8"
           />
         </div>
 
@@ -151,13 +161,13 @@ export function AccountToolbar({
         <div
           role="group"
           aria-label={t("shared.toolbar.viewAria")}
-          className="inline-flex items-center gap-0.5 rounded-lg border border-border p-0.5"
+          className="inline-flex items-center gap-0.5 rounded-[10px] bg-muted p-0.5"
         >
           <Button
             type="button"
             variant={view === "card" ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 rounded-md px-2.5 text-xs"
+            className="h-[26px] rounded-md px-2.5 text-xs"
             aria-pressed={view === "card"}
             onClick={() => onViewChange("card")}
           >
@@ -171,7 +181,7 @@ export function AccountToolbar({
                   type="button"
                   variant={view === "table" ? "secondary" : "ghost"}
                   size="sm"
-                  className="h-7 rounded-md px-2.5 text-xs"
+                  className="h-[26px] rounded-md px-2.5 text-xs"
                   aria-pressed={view === "table"}
                   disabled={!tableViewEnabled}
                   onClick={() => onViewChange("table")}
@@ -203,6 +213,28 @@ export function AccountToolbar({
 
         {/* 平台专属控件插槽（含卡片密度开关与刷新按钮）。 */}
         {children}
+
+        {/* ★ 主操作（原型 `viewAccounts` :2428：工具栏行最右侧的 `.btn.primary`）。
+            与「添加与迁移账号」横幅的入口**同一动作**，不重复一套流程。
+            ⚠️ `ml-auto` 必须**同时**给 `DemoAction` 与按钮本身：
+            `DemoAction` 在 demo 模式下会把子元素包进 `<span className="inline-flex">`
+            （见 `demo-action.tsx:44`）——那一层才是 flex 子项，只给按钮加 `ml-auto` 会失效
+            （实测按钮掉到第二行**最左侧**，看起来像布局坏了）；非 demo 下 `DemoAction`
+            直接返回子元素，此时生效的是按钮自己的 `ml-auto`。
+            尺寸按原型 `.btn`（`:208-215`）：高 34、内边距 0 13、圆角 10、字号 12.5。 */}
+        {addAction ? (
+          <DemoAction className="ml-auto">
+            <Button
+              type="button"
+              size="sm"
+              className="ml-auto h-[34px] rounded-[10px] bg-primary px-[13px] text-[12.5px] text-primary-foreground hover:bg-primary/90"
+              onClick={addAction.onClick}
+            >
+              <Plus className="size-4" />
+              {addAction.label}
+            </Button>
+          </DemoAction>
+        ) : null}
       </div>
     </TooltipProvider>
   );

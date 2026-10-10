@@ -4,6 +4,9 @@ import { AlertTriangle, Download, Filter, GitBranch, Loader2, RefreshCw } from "
 import { toast } from "sonner";
 
 import { SessionReplicaView } from "@/components/sessions/session-replica-view";
+import { UnifyReplicasDialog } from "@/components/sessions/unify-replicas-dialog";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -12,9 +15,9 @@ import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf } from "@/lib/scope";
-import { buildSyncItems } from "@/lib/session-replicas";
+import { buildSyncItems, buildUnifyItems } from "@/lib/session-replicas";
 import type { SessionGroupStatus, SessionGroupView } from "@/lib/session-replicas";
-import type { SyncSessionReplicaItem } from "@/lib/types";
+import type { SyncSessionReplicaItem, UnifySessionReplicaItem } from "@/lib/types";
 import { useScope } from "@/lib/use-scope";
 import { useSessionsStore } from "@/stores/sessions";
 
@@ -51,12 +54,14 @@ export default function SessionsPage() {
      这样同一个骨架在 WB 分区下可用，也不必写平台判断。 */
   const product = platformOfPath(location.pathname);
   const [region] = useScope(product);
+  const scope = scopeOf(product, region);
 
   const groups = useSessionsStore((s) => s.groups);
   const loading = useSessionsStore((s) => s.loading);
   const error = useSessionsStore((s) => s.error);
   const load = useSessionsStore((s) => s.load);
   const syncItems = useSessionsStore((s) => s.syncItems);
+  const unifyItems = useSessionsStore((s) => s.unifyItems);
 
   /* region 变化即重载（副本按 region 分文件，P8 ✅ #2）。 */
   useEffect(() => {
@@ -176,14 +181,79 @@ export default function SessionsPage() {
     );
   }
 
+  /* ★ P8 分歧处理：待处理的分歧组（非 null ⇒ 打开对话框）+ 进行中态。 */
+  const [unifyTarget, setUnifyTarget] = useState<SessionGroupView | null>(null);
+  const [unifyBusy, setUnifyBusy] = useState(false);
+
+  /**
+   * ★ P8「分歧处理」：把用户**选定保留的那一份**覆盖到其余副本（**破坏性**）。
+   *
+   * ⚠️ 与「安全同步」**语义相反**：同步是加法，这里**会丢弃**目标的分歧内容。
+   * 二次确认在 [`UnifyReplicasDialog`] 里（选保留哪一份 + 如实报「会丢几条」）；
+   * 本函数只负责**执行 + 汇总**，沿用与同步同一套「部分失败 + 只重试失败项」纪律（§3.6）。
+   */
+  async function runUnify(items: UnifySessionReplicaItem[]) {
+    if (unifyBusy || items.length === 0) return;
+    setUnifyBusy(true);
+    try {
+      const response = await unifyItems(region, items);
+      // 列表状态来自内容指纹 ⇒ 不重载会继续显示「有分歧」（看起来像没生效）。
+      await load(region);
+
+      const failed = response.results
+        .filter((r) => !r.ok)
+        .map((r) => ({ sourceCid: r.sourceCid, targetCid: r.targetCid }));
+      const lost = response.results.reduce((sum, r) => sum + (r.lostLines ?? 0), 0);
+
+      const parts: string[] = [];
+      if (response.okCount > 0) {
+        parts.push(t("sessions.unify.toast.ok", { n: response.okCount, lost }));
+      }
+      if (response.failCount > 0) {
+        parts.push(t("sessions.unify.toast.failed", { n: response.failCount }));
+      }
+      const summary = parts.join(t("shared.punct.comma"));
+
+      const retryAction =
+        failed.length > 0
+          ? {
+              label: t("sessions.unify.toast.retryFailed"),
+              onClick: () => void runUnify(failed),
+            }
+          : undefined;
+
+      if (response.okCount === 0) {
+        toast.error(t("sessions.unify.toast.failAll"), { description: summary, action: retryAction });
+      } else {
+        toast.success(t("sessions.unify.toast.done"), { description: summary, action: retryAction });
+      }
+    } catch (e) {
+      toast.error(t("sessions.unify.toast.error"), { description: api.asError(e) });
+    } finally {
+      setUnifyBusy(false);
+      // 无论成败都收起对话框：失败项留在 toast 的「只重试失败项」里，不必让用户重选。
+      setUnifyTarget(null);
+    }
+  }
+
+  /** 对话框确认：把「选定保留的那一份」换算成覆盖任务（`buildUnifyItems` 会挡住非法输入）。 */
+  function confirmUnify(keepSessionId: string) {
+    if (!unifyTarget) return;
+    void runUnify(buildUnifyItems(unifyTarget, keepSessionId));
+  }
+
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 p-5">
-      <header className="flex items-center gap-3">
-        <div className="min-w-0 flex-1">
-          <h1 className="text-lg font-semibold tracking-[-0.01em]">{t("sessions.title")}</h1>
-          <p className="mt-0.5 text-xs text-muted-foreground">{t("sessions.subtitle")}</p>
+    <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-5 px-7 pt-[26px] pb-[60px]">
+      {/* 页头（原型 `viewSessions`）：28px 标题 + 作用域副标题 + 只读 scope-chip。
+          批量出口仍**只在真有可同步项时**出现（§3.4 规则 1，不摆假控件）。 */}
+      <header className="flex items-start gap-4">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("sessions.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("pageHead.sessions", { scope: scopeLabel(t, scope) })}
+          </p>
         </div>
-        {/* ★ 批量出口**只在真有可同步项时**出现（§3.4 规则 1，不摆假控件）。 */}
+        <div className="grow" />
         {allSyncable.length > 0 ? (
           <Button
             size="sm"
@@ -201,6 +271,7 @@ export default function SessionsPage() {
             {t("sessions.sync.all", { count: allSyncable.reduce((n, x) => n + x.items.length, 0) })}
           </Button>
         ) : null}
+        <ScopeChip scope={scope} />
       </header>
 
       {loading ? (
@@ -222,37 +293,47 @@ export default function SessionsPage() {
         </Card>
       ) : groups.length > 0 ? (
         <>
-          {/* ★ 状态筛选：**至少 2 个可选状态**才渲染（单选项的切换器是假控件，§3.15.1）；
-              且**只列数据里真有的状态**（§3.4 规则 1，不摆假选项）。 */}
-          {availableStatuses.length >= 2 ? (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Filter className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <Button
-                size="sm"
-                variant={statusFilter === "all" ? "default" : "outline"}
-                onClick={() => setStatusFilter("all")}
-                data-status-filter="all"
-              >
-                {t("sessions.filter.all", { count: groups.length })}
-              </Button>
-              {availableStatuses.map((status) => (
+          {/* ★ 工具栏（原型 `viewSessions`，:3183）：标题 =「{客户端} 会话」+ 计数徽标。
+              ⚠️ **不渲染客户端 Tab**（会话复制只有 WorkBuddy ⇒ 单选项是假控件，§3.15.1）
+              ⇒ 标题退化成静态文本。状态筛选**按需出现**：**至少 2 个可选状态**才渲染整条
+              （单选项的切换器依旧是假控件），且**只列数据里真有的状态**（§3.4 规则 1）。 */}
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card px-3 py-2.5">
+            <h2 className="flex items-center gap-2 text-[13.5px] font-semibold">
+              {t("sessions.toolbar.title", { client: t("sessions.toolbar.client") })}
+              <Badge variant="secondary">{groups.length}</Badge>
+            </h2>
+            <div className="grow" />
+            {availableStatuses.length >= 2 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Filter className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <Button
-                  key={status}
                   size="sm"
-                  variant={statusFilter === status ? "default" : "outline"}
-                  onClick={() => setStatusFilter(status)}
-                  data-status-filter={status}
+                  variant={statusFilter === "all" ? "default" : "outline"}
+                  onClick={() => setStatusFilter("all")}
+                  data-status-filter="all"
                 >
-                  {t(`sessions.replica.status.${status}`)}
-                  {` (${statusCounts.get(status) ?? 0})`}
+                  {t("sessions.filter.all", { count: groups.length })}
                 </Button>
-              ))}
-            </div>
-          ) : null}
+                {availableStatuses.map((status) => (
+                  <Button
+                    key={status}
+                    size="sm"
+                    variant={statusFilter === status ? "default" : "outline"}
+                    onClick={() => setStatusFilter(status)}
+                    data-status-filter={status}
+                  >
+                    {t(`sessions.replica.status.${status}`)}
+                    {` (${statusCounts.get(status) ?? 0})`}
+                  </Button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <SessionReplicaView
             groups={filteredGroups}
             onSyncGroup={syncGroup}
             busyGroupKeys={busyGroupKeys}
+            onUnifyGroup={setUnifyTarget}
           />
         </>
       ) : (
@@ -272,6 +353,17 @@ export default function SessionsPage() {
           />
         </Card>
       )}
+
+      {/* ★ P8 分歧处理：**覆盖式**统一 —— 必须「先选保留哪一份、再确认」（§3.15.2）。
+          `group` 为 null ⇒ 不渲染（`UnifyReplicasDialog` 内部亦早退）。 */}
+      <UnifyReplicasDialog
+        group={unifyTarget}
+        onOpenChange={(open) => {
+          if (!open) setUnifyTarget(null);
+        }}
+        busy={unifyBusy}
+        onConfirm={confirmUnify}
+      />
     </div>
   );
 }

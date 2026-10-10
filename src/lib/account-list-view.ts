@@ -22,7 +22,9 @@ export type AccountSortKey = "priority" | "name" | "expiry" | "recent";
 /**
  * 分组键（**分桶**，与「分组筛选」`groupFilter` 语义不同 —— 见 `P4-TOOLBAR-ARCH §1.6`）。
  *
- * ⚠️ `group`（按自定义组）**仅对有分组概念的平台可用**（Trae；WB 的 `AccountMeta` 无 group 字段）。
+ * ⚠️ `group`（按自定义组）**仅对有分组概念的平台可用**。2026-10-10 起 WB 的 `AccountMeta`
+ * 也带 `groupName`（自由文本，缺省=未分组）⇒ 两平台都可「按自定义组」；是否渲染该选项仍由
+ * 各页的 `availableGroups`（数据）决定。
  */
 export type AccountGroupKey = "none" | "program" | "status" | "group";
 
@@ -41,9 +43,9 @@ export type AccountComparator<T> = (a: T, b: T) => number;
  * 平台侧提供的视图配置 —— 差异**全部在这里以数据表达**，共享组件不写平台判断。
  *
  * ⚠️ 与设计稿（`P4-TOOLBAR-ARCH §3.1`）的一处**必要细化**：`comparators` 由
- * `Record` 收成 `Partial<Record>`。原因：WB 的 `AccountMeta` **无 `lastUsed` 字段**
- * ⇒ 不提供 `recent` 排序（决策 #3）。若接口强制要求全部 4 个键，WB 就得写一条
- * **永远不会被调用**的比较器（死代码），或拿 `refreshedAt` 假扮「最近使用」
+ * `Record` 收成 `Partial<Record>`。原因：某平台可能**没有**某排序键的数据支撑
+ * （如 `TraeAccount` 无「最近使用」口径）⇒ 不提供该比较器。若接口强制要求全部 4 个键，
+ * 就得写一条**永远不会被调用**的比较器（死代码），或拿别的字段假扮该排序
  * （正是决策 #3 要禁止的**假选项**）。收成 `Partial` 后，`sortAccounts` 对缺失键
  * **保持原序**（稳定），既无死代码也不造假。
  */

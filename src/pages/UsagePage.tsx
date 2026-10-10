@@ -22,10 +22,13 @@
 import { lazy, Suspense, useState, type ElementType } from "react";
 import { useLocation } from "react-router-dom";
 
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useT } from "@/lib/i18n";
 import { type Product, platformOfPath } from "@/lib/platforms/registry";
+import { scopeOf } from "@/lib/scope";
+import { useScope } from "@/lib/use-scope";
 import type { TranslationKey } from "@/locales/zh";
 
 /* 四个页面**各自 lazy**（见文件头注释）。 */
@@ -57,9 +60,17 @@ const PLATFORM_TABS: Record<Product, UsageTab[]> = {
 };
 
 /** 平台 → 子页面（Token 页 / 积分页）。 */
-const USAGE_PAGES: Record<Product, { tokens: ElementType; credits: ElementType }> = {
-  workbuddy: { tokens: TokenStatsPage, credits: CreditStatsPage },
-  trae: { tokens: TraeTokenStatsPage, credits: TraeCreditsPage },
+const USAGE_PAGES: Record<
+  Product,
+  { tokens: ElementType; credits: ElementType; tokenViews: boolean }
+> = {
+  /* `tokenViews` = 该平台的 Token 页**是否消费 `view` 参数**（四视图）。
+     WB 的 `TokenStatsPage` 接受 `view`；Trae 的 `TraeTokenStatsPage` **不接受** ——
+     ⚠️ 它俩都取到 `trend`，但 Trae 侧**不该被传入**一个它不读的参数：
+     静默忽略一个 prop 会让「以后给 Trae 加 `models` Tab」变成**静默显示错数据**。
+     这与 `PLATFORM_TABS` 同源（Trae 本就没有 models / sessions 两个 Tab）。 */
+  workbuddy: { tokens: TokenStatsPage, credits: CreditStatsPage, tokenViews: true },
+  trae: { tokens: TraeTokenStatsPage, credits: TraeCreditsPage, tokenViews: false },
 };
 
 export default function UsagePage() {
@@ -67,17 +78,31 @@ export default function UsagePage() {
   /* 平台从**路由**推（同 `OverviewPage`）：`/s/trae-cn/usage` 里就带着平台。 */
   const location = useLocation();
   const product = platformOfPath(location.pathname);
+  const [region] = useScope(product);
+  const scope = scopeOf(product, region);
   const tabs = PLATFORM_TABS[product];
   const [tab, setTab] = useState<UsageTab>("trend");
   /* 平台切换后若旧 Tab 在新平台不可用（如从 WB 的「模型」切到 Trae），回落到首个可用视图。 */
   const active = tabs.includes(tab) ? tab : tabs[0];
 
-  const TokenPage = USAGE_PAGES[product].tokens;
-  const CreditPage = USAGE_PAGES[product].credits;
+  const { tokens: TokenPage, credits: CreditPage, tokenViews } = USAGE_PAGES[product];
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 子 Tab 只做**目的地内部**的切换；作用域（区域）不在这里 —— 那是侧栏的事。 */}
+      {/* 页头（原型 `viewUsage`）：作用域副标题 + 只读 scope-chip；子 Tab 只做**目的地内部**的切换。 */}
+      <div className="shrink-0 px-4 pt-6 sm:px-8 sm:pt-9">
+        <header className="mx-auto flex w-full max-w-[1240px] items-start gap-4">
+          <div className="min-w-0">
+            <h1 className="text-[28px] font-semibold tracking-tight">{t("nav.usage")}</h1>
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              {t("pageHead.usage", { scope: scopeLabel(t, scope) })}
+            </p>
+          </div>
+          <div className="grow" />
+          <ScopeChip scope={scope} />
+        </header>
+      </div>
+
       <div className="shrink-0 border-b border-border/60 px-5 pt-4">
         <Tabs value={active} onValueChange={(value) => setTab(value as UsageTab)}>
           <TabsList>
@@ -93,10 +118,16 @@ export default function UsagePage() {
       {/* ⚠️ 不在这里加 `overflow-auto`：子页面**各自有滚动容器**，再套一层会出双滚动条。 */}
       <div className="min-h-0 flex-1">
         <Suspense fallback={<Skeleton className="m-5 h-32" />}>
+          {/*
+            ⚠️ **不写 `product === "workbuddy" ? … : …`**（P2 收敛清单第 5 项）：
+            「哪些视图存在」由 `PLATFORM_TABS` 给出、「用哪个页面」由 `USAGE_PAGES` 给出，
+            两者都已是**按平台的数据**。这里再判一次平台就是**第三份**平台知识，
+            新增平台时必漏改。`tokenViews` 同样是数据（该平台的 Token 页是否消费 `view`）。
+          */}
           {active === "credits" ? (
             <CreditPage />
-          ) : product === "workbuddy" ? (
-            <TokenStatsPage
+          ) : tokenViews ? (
+            <TokenPage
               view={active === "models" ? "models" : active === "sessions" ? "sessions" : "trend"}
             />
           ) : (

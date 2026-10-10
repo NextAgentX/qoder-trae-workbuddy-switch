@@ -47,14 +47,16 @@ function CommandInput({
 }: React.ComponentProps<typeof CommandPrimitive.Input>) {
   return (
     <div
-      className="flex items-center gap-2 border-b border-border/60 px-3"
+      /* 对齐原型 `.palette-input`（`buddy-switch-prototype.html:476`）：内边距 14/16、gap 10、底边。 */
+      className="flex items-center gap-2.5 border-b border-border px-4 py-3.5"
       data-slot="command-input-wrapper"
     >
       <Search className="size-4 shrink-0 text-muted-foreground/70" aria-hidden="true" />
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "flex h-11 w-full bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+          /* 原型 `.palette-input input`（`:478`）：字号 14（= `text-sm`）。 */
+          "flex h-6 w-full bg-transparent p-0 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
           className,
         )}
         {...props}
@@ -68,7 +70,8 @@ function CommandList({ className, ...props }: React.ComponentProps<typeof Comman
   return (
     <CommandPrimitive.List
       data-slot="command-list"
-      className={cn("max-h-[360px] overflow-x-hidden overflow-y-auto p-1", className)}
+      /* 原型 `.palette-list`（`:480`）：内边距 6px。 */
+      className={cn("max-h-[360px] overflow-x-hidden overflow-y-auto p-1.5", className)}
       {...props}
     />
   );
@@ -84,7 +87,8 @@ function CommandGroup({
       data-slot="command-group"
       className={cn(
         "overflow-hidden p-1 text-foreground",
-        "[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground",
+        /* 分组标题对齐原型 `.palette-grp`（`:481`）：内边距 8/10/4、字号 10.5px、字重 500。 */
+        "[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-[10.5px] [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground",
         className,
       )}
       {...props}
@@ -100,8 +104,9 @@ function CommandItem({
   return (
     <CommandPrimitive.Item
       data-slot="command-item"
+      /* 对齐原型 `.palette-item`（`:482-484`）：内边距 9/10、圆角 **10px**（不是比例尺的 12px）、gap 10。 */
       className={cn(
-        "relative flex cursor-default select-none items-center gap-2 rounded-md px-2 py-2 text-sm outline-none",
+        "relative flex cursor-default select-none items-center gap-2.5 rounded-[10px] px-2.5 py-[9px] text-sm outline-none",
         "data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground",
         "data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50",
         className,

@@ -50,6 +50,11 @@ pub async fn handler(
         Err(error) => return openai_error(error),
     };
 
+    // ★ E1：计一次「今日代理请求」。放在**鉴权之后、白名单校验之前** ——
+    //   KPI 问的是「今天有多少请求走到本机网关」，含被白名单拒绝的（那是真实流量）。
+    //   ⚠️ 这是**业务转发**路径；LLM 路由（chat / messages）另有各自行 为，不在此计。
+    state.proxy_kpi.record_request();
+
     // ② ★ 白名单校验 —— **fail-closed**：不在册一律 404（明确拒绝，不静默）。
     let full_path = format!("/{path}");
     if !is_allowed_path(&full_path) {

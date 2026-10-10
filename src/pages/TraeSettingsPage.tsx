@@ -21,7 +21,7 @@ import { toast } from "sonner";
 
 import { DemoAction } from "@/components/demo-action";
 import { HoursEditor } from "@/components/schedule-hours-editor";
-import { TraeVariantSwitch } from "@/components/trae-variant-switch";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -48,6 +48,7 @@ import {
 } from "@/lib/schedule-config";
 import { normalizeTraeGatewayLogs } from "@/lib/trae-gateway";
 import { isAutoDetected, traeProductLabel } from "@/lib/trae-client";
+import { scopeOf } from "@/lib/scope";
 import { useDocumentVisible } from "@/lib/use-document-visible";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import {
@@ -431,7 +432,7 @@ function formatTokens(value: number | null | undefined): string {
 }
 
 function statusTone(status: number): string {
-  if (status >= 200 && status < 300) return "text-emerald-600 dark:text-emerald-400";
+  if (status >= 200 && status < 300) return "text-success";
   if (status >= 400) return "text-destructive";
   return "text-muted-foreground";
 }
@@ -718,13 +719,13 @@ function ProfilesSection({
             <span
               className={cn(
                 "inline-flex items-center gap-1.5 font-medium",
-                data?.clientRunning ? "text-emerald-600" : "text-muted-foreground",
+                data?.clientRunning ? "text-success" : "text-muted-foreground",
               )}
             >
               <span
                 className={cn(
                   "size-2 rounded-full",
-                  data?.clientRunning ? "bg-emerald-500" : "bg-muted-foreground/50",
+                  data?.clientRunning ? "bg-success" : "bg-muted-foreground/50",
                 )}
               />
               {data?.clientRunning ? t("trae.page.settings.running") : t("trae.page.settings.notRunning")}
@@ -1100,17 +1101,22 @@ export default function TraeSettingsPage() {
   // 探测到的是哪条产品线 / 是否为自动探测。产品名由路径推断，推断不出就省略标签。
   const productLabel = traeProductLabel(env);
   const autoDetected = isAutoDetected(env);
+  /* 页头作用域：平台固定 trae，区域来自 `useTraeVariant`（URL 作用域优先）。 */
+  const scope = scopeOf("trae", variant);
 
   return (
     <div className="mx-auto min-w-0 w-full max-w-3xl px-4 py-6 sm:px-6 sm:py-8">
-      <header className="mb-10 sm:mb-12">
-        <h1 className="text-2xl font-semibold tracking-tight">{t("trae.page.settings.title")}</h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {t("trae.page.settings.subtitle")}
-        </p>
-        {/* 区域入口在**标题下方**（两个模块统一的位置）：设置项本身按区域分家，
-            切到这里改的就是对应那个区域的配置。 */}
-        <TraeVariantSwitch className="mt-4" />
+      {/* 页头（原型 `viewSettings`）：作用域副标题 + 只读 scope-chip。
+          区域切换已上移到顶栏的 `ScopeSelector`（L1 作用域），页内不再有区域选择器。 */}
+      <header className="mb-6 flex items-start gap-4 sm:mb-8">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.page.settings.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("pageHead.settings", { scope: scopeLabel(t, scope) })}
+          </p>
+        </div>
+        <div className="grow" />
+        <ScopeChip scope={scope} />
       </header>
 
       {error && (
@@ -1129,7 +1135,7 @@ export default function TraeSettingsPage() {
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
               <span className="flex items-center gap-2">
                 {t("trae.page.settings.installLabel")}
-                <span className={cn("font-medium", env?.installed ? "text-emerald-600" : "text-muted-foreground")}>
+                <span className={cn("font-medium", env?.installed ? "text-success" : "text-muted-foreground")}>
                   {env?.installed
                     ? env.version
                       ? t("trae.page.settings.detectedVersion", { version: env.version })
@@ -1140,7 +1146,7 @@ export default function TraeSettingsPage() {
               </span>
               <span className="flex items-center gap-2">
                 {t("trae.page.settings.runLabel")}
-                <span className={cn("font-medium", env?.running ? "text-emerald-600" : "text-muted-foreground")}>
+                <span className={cn("font-medium", env?.running ? "text-success" : "text-muted-foreground")}>
                   {env?.running ? t("trae.page.settings.running") : t("trae.page.settings.notRunning")}
                 </span>
               </span>

@@ -10,13 +10,19 @@
  *
  * ## P0 阶段的范围（**纯新增，不改任何现有组件**）
  *
- * 本文件目前只声明**平台元数据与能力**：
- * - `PRODUCT_NAV` / `PRODUCT_LABEL_KEY` / `PRODUCT_HOME` **仍留在 `App.tsx`**，
- *   P2（改骨架）时再搬过来 —— 这样 P0 的产物「删掉即回滚」。
- * - `App.tsx` 里的 `type Product` 是**局部定义**，P2 会改为 `import` 本文件的类型。
+ * P0 只声明**平台元数据与能力**，骨架一律不动 —— 这样 P0 的产物「删掉即回滚」。
+ * 当时 `PRODUCT_NAV` / `PRODUCT_LABEL_KEY` / `PRODUCT_HOME` 与 `type Product`
+ * 都**留在 `App.tsx`**，本文件只承诺 P2 收回来。
  *
- * ⚠️ **过渡期的重复（有期限，不是永久设计）**：`Product` 类型暂时在两处各有一份，
- * 结构相同。**P2 必须收敛成一份** —— 见本文件末尾的「P2 收敛清单」。
+ * ## P2 之后（**收敛已完成**）
+ *
+ * 四项重复**都已消除**，本文件是它们的**唯一来源**：
+ * - `Product` 类型：`App.tsx` 改为 `import`（不再有局部定义）；
+ * - 侧栏导航：由 `DESTINATIONS` + `DEST_META` 生成（`PRODUCT_NAV` 已删）；
+ * - 产品显示名：`PlatformDescriptor.labelKey`；
+ * - 产品首页：`PlatformDescriptor.home`。
+ *
+ * ⚠️ **过渡期的重复是有期限的，不是设计** —— 逐项状态见本文件末尾的「P2 收敛清单」。
  */
 
 /** 平台标识。**刻意保持 `trae` 而非 `traework`**：路由前缀 `/trae/...` 与既有键名都依赖它。 */
@@ -64,8 +70,19 @@ export type Capability =
  * ## ★ 为什么分 `available` 与 `planned`
  *
  * - **`available`**：本仓**已支持**（后端有 `ProgramAdapter` + 宿主命令）。
- * - **`planned`**：**计划新增**的目标（`PLAN.md` §3.3 B 表：**VS Code CodeBuddy 插件 / JetBrains IDE 插件**）——
- *   模块清单**无**对应模块 ⇒ **当前不支持**。
+ * - **`planned`**：**计划新增**的目标 —— 后端模块清单**无**对应模块 ⇒ **当前不支持**。
+ *
+ * ## ★ 2026-10-09：`planned` 已清空（两条目标全部落地为 `available`）
+ *
+ * `PLAN.md` §3.3 B 表的两条「待新增」（**VS Code CodeBuddy 插件 / JetBrains IDE 插件**）
+ * 已实现：后端 `modules/vscode_ext.rs` / `modules/jetbrains.rs` 提供
+ * `status` / `switch` / `detect`，并在两张 `PROGRAMS` 表与两端宿主路由里登记
+ * （`tencent-cloud.coding-copilot` 扩展写 `state.vscdb`；JetBrains 写
+ * `options/secret-storage.xml`）。⇒ 本表**不再有 `planned` 条目**。
+ *
+ * ⚠️ **机制保留、列表为空**：`status: "planned"` 与 `PLANNED_PROGRAMS` 仍是「尚未支持」
+ * 的**唯一表达方式**（卡片有对应灰显样式与「尚未支持」措辞），留给下一次新增 ——
+ * 但没有条目时**不要**为了凑断言硬造一条（那会编造出不存在的「计划」）。
  *
  * ⚠️ **`planned` 的说明必须是「尚未支持」，不许用「未检测到客户端」** ——
  * 后者会**引导用户去装，而装了也没用**（原型断言 `verify-behaviors.cjs:1297-1302`
@@ -79,25 +96,58 @@ export interface ProgramSpec {
   readonly status: "available" | "planned";
 }
 
-/** WorkBuddy 侧的程序位表（**顺序即 UI 展示顺序**）。 */
+/**
+ * WorkBuddy 侧的程序位表（**顺序即 UI 展示顺序**）。
+ *
+ * ⚠️ **顺序与后端 `programs.rs::PROGRAMS` 逐字对齐**（单测
+ * `programs_table_lists_the_five_wb_slots` 钉死后端；本表由门禁核对）。
+ *
+ * ⚠️ **显示名两两不同**：`vscode_cn_inject`（只读探测槽，名「VS Code CodeBuddy 插件」）
+ * 与 `vscode_codebuddy_plugin`（可切换槽，名「VS Code CodeBuddy 扩展」）**都是 VS Code
+ * 相关**，但一个是只读观测、一个承担切换 —— 名字若相同，用户根本分不清点哪个。
+ */
 export const WORKBUDDY_PROGRAMS: readonly ProgramSpec[] = [
   { id: "codebuddy_cn_ide", labelKey: "wbAccounts.program.codebuddyCnIde", status: "available" },
   { id: "codebuddy_cli", labelKey: "wbAccounts.program.codebuddyCli", status: "available" },
   { id: "vscode_cn_inject", labelKey: "wbAccounts.program.vscodeCnInject", status: "available" },
-  // ⚠️ 计划新增（`PLAN.md` §3.3 B 表）—— **尚未支持**：卡片上灰显 + 说明原因（不许说「未检测到客户端」）。
-  { id: "vscode_codebuddy_plugin", labelKey: "wbAccounts.program.plannedVscode", status: "planned" },
-  { id: "jetbrains_codebuddy_plugin", labelKey: "wbAccounts.program.plannedJetbrains", status: "planned" },
+  // ★ 2026-10-09 落地：编辑器内 CodeBuddy 插件两个程序位（原 `planned`）。
+  { id: "vscode_codebuddy_plugin", labelKey: "wbAccounts.program.vscodeCodebuddyPlugin", status: "available" },
+  { id: "jetbrains_codebuddy_plugin", labelKey: "wbAccounts.program.jetbrainsCodebuddyPlugin", status: "available" },
 ];
 
-/** 计划新增（**尚未支持**）的程序位。 */
+/** 计划新增（**尚未支持**）的程序位。⚠️ 当前**为空**（两条目标均已落地），机制保留。 */
 export const PLANNED_PROGRAMS: readonly ProgramSpec[] = WORKBUDDY_PROGRAMS.filter(
   (p) => p.status === "planned",
 );
 
 export interface PlatformDescriptor {
   readonly id: Product;
-  /** 展示名文案键。`WorkBuddy` / `TraeWork` 是商标，两种语言下写法相同，但仍走词表。 */
-  readonly labelKey: string;
+  /**
+   * 展示名文案键。`WorkBuddy` / `TraeWork` 是商标，两种语言下写法相同，但仍走词表。
+   *
+   * ⚠️ 类型是 `TranslationKey`（**不是 `string`**）：调用方拿到就能直接 `t(...)`，
+   * 不必再 `as TranslationKey` 断言 —— 断言会把「键名写错」这类错误从编译期推到运行时
+   * （词表查不到 ⇒ 界面直接渲染出键名）。
+   *
+   * ## 为什么存键而不存成品文案
+   *
+   * 本表在**模块加载时**就定型，拿不到 `useT()`。渲染处 `t(platformDescriptor(p).labelKey)`
+   * 现取一次，语言切换才会反映到侧栏 —— 存成中文会让侧栏永远停在启动时的语言。
+   *
+   * ## Trae 分区显示 `TraeWork`（而不是 `Trae`）
+   *
+   * 它管的就是 TraeWork 这条产品线（国内版 `TRAE SOLO CN` 与国际版 `TRAE SOLO`），
+   * 名字与客户端 `product.json` 的 `nameAlias`（`TraeWork CN` / `TraeWork`）
+   * 及系统注册表显示名一致。
+   *
+   * ⚠️ 但**区域（国内版 / 国际版）不写进侧栏** —— 它由分区内部顶部的区域切换器表达。
+   * 把区域名塞进侧栏会让「国内版 / 国际版」看起来像两个独立产品，而它们共用同一组页面。
+   * 同理，程序线（TraeWork / TraeCode）是**账号卡片上的一枚按钮**，也不进侧栏。
+   *
+   * ⚠️ 展示名是 `TraeWork`，而**标识**仍是 `trae`（路由前缀 `/trae/...`）——
+   * 改标识会牵动路由表与全部 `/trae` 链接，两者刻意不绑定。
+   */
+  readonly labelKey: TranslationKey;
   /** 该平台的首页路径（切到该平台且当前路由不属于它时落到这里）。 */
   readonly home: string;
   /** 该平台拥有的区域（**顺序即 UI 展示顺序**）。 */
@@ -296,9 +346,21 @@ export function pathBelongsTo(pathname: string, product: Product): boolean {
 /* ────────────────────────────────────────────────────────────────
  * P2 收敛清单（本文件建立时登记，完成一项勾一项）
  *
- * - [ ] `App.tsx` 的 `type Product` 删除，改为 `import type { Product } from "@/lib/platforms/registry"`
- * - [ ] `App.tsx` 的 `PRODUCT_NAV` 搬到这里（作为 `PlatformDescriptor.nav`）
- * - [ ] `App.tsx` 的 `PRODUCT_LABEL_KEY` 删除（`labelKey` 已在本表）
- * - [ ] `App.tsx` 的 `PRODUCT_HOME` 删除（`home` 已在本表）
- * - [ ] 页面里的 `product === "trae"` 判断逐处改为 `hasCapability(...)`
+ * - [x] `App.tsx` 的 `type Product` 删除，改为 `import type { Product } from "@/lib/platforms/registry"`
+ * - [x] `App.tsx` 的 `PRODUCT_NAV` 删除（侧栏改由 `DESTINATIONS` + `DEST_META` 生成）
+ * - [x] `App.tsx` 的 `PRODUCT_LABEL_KEY` 删除（`PlatformDescriptor.labelKey` 已在本表）
+ * - [x] `App.tsx` 的 `PRODUCT_HOME` 删除（`PlatformDescriptor.home` 已在本表）
+ * - [x] 组件里的平台分支改为**数据 / 能力驱动** —— **能改的已改**：
+ *       · `UsagePage`（可用视图集由 `PLATFORM_TABS` 给出、Token 页由 `USAGE_PAGES` 取，
+ *         不再二次判平台）；
+ *       · 命令面板「打开数据目录」（改走参数化命令 `open_data_dir`，`scope` 自带平台与区域）；
+ *       · `backup-import-preview` / `source-account-picker` 的产品展示名（改走 `labelKey`）。
+ * - [ ] **剩下的 3 处是「结构性差异」，不是「能力差异」—— 刻意不改 `hasCapability`**：
+ *       ① `App.tsx` 的运行状态圆点：WB 读账号 store、Trae 读变体探测 —— **两个数据源**；
+ *       ② `App.tsx` 的 `ScopeSwitch`：Trae 的区域由 `?line=` 承载（含程序位维度）；
+ *       ③ 命令面板的 `refreshScope`：只有 WB 有跨区域账号 store 需要顺带重读。
+ *       ⇒ 判据：`hasCapability` 回答「这个平台**有没有**某功能」；上面几处回答
+ *       「这个平台的**数据 / 控件从哪来**」—— 后者要靠 `PlatformDescriptor` 扩字段
+ *       （形如 PLAN §2.3 的 `loadScopeStatus`），**不是**能力开关。
+ *       ⚠️ 扩字段前先查 `docs/redesign/VOCABULARY.md`（第 7 节规则 4：表里没有的词不许出现在代码里）。
  * ──────────────────────────────────────────────────────────────── */

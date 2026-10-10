@@ -1,4 +1,4 @@
-import { Ban, Check, CircleCheck, Clock3, Coins, Ellipsis, Info, Loader2, PlaneTakeoff, QrCode, RefreshCw, Sparkles, Star, StickyNote, Trash2 } from "lucide-react";
+import { Ban, Check, CircleCheck, Clock3, Coins, Ellipsis, Info, Loader2, PlaneTakeoff, QrCode, RefreshCw, Sparkles, Star, StickyNote, Tag, Trash2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 // P0 · 程序位表（含「计划新增 / 尚未支持」态）—— 展示侧镜像，与后端 `programs.rs` 逐字对齐。
@@ -11,10 +11,12 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyMark } from "@/components/product-marks";
 import { cn } from "@/lib/utils";
 import { ENCRYPTED_CREDENTIAL_REASON } from "@/lib/api";
+import { compactTokens, exactTokens } from "@/components/usage/format";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
+import { formatDate } from "@/lib/format";
 import { useT, type Translate } from "@/lib/i18n";
-import type { AccountMeta, CreditExpiry, CreditResource, TravelStatus } from "@/lib/types";
+import type { AccountMeta, AccountTokenTodayEntry, CreditExpiry, CreditResource, TravelStatus } from "@/lib/types";
 
 /**
  * WorkBuddy 账号卡片。
@@ -34,6 +36,25 @@ import type { AccountMeta, CreditExpiry, CreditResource, TravelStatus } from "@/
  * 可点区口径不再被重复计数污染（PLAN §3.3）。
  */
 
+/**
+ * 头像底色 / 首字色板（**6 选 1**，按账号名哈希稳定选取）。
+ *
+ * ## ★ 为什么全部用「固定 100 / 800 色板」，不用语义色 + `/15`
+ *
+ * 此前其中两条写作 `bg-success/15 text-success`、`bg-warning/15 text-warning`，
+ * 依赖 `--success` / `--warning` 跟明暗主题走。**实测**（oklch → sRGB → WCAG）：
+ * 亮色主题下 `text-success` 压在 `bg-success/15` 上只有 **3.11:1**，
+ * `text-warning` 是 **3.17:1**，**都低于 AA 的 4.5:1** ⇒ 头像首字（12.5px/640）在
+ * 亮色主题下读不清。
+ *
+ * 之所以不能照原型断言的 `L ≤ 0.5` 判罪：原型的判据是**自己写的 `oklch()` 字面量**，
+ * 而真实实现用的是 Tailwind 语义 token —— **oklch 的 L 与 WCAG 亮度不是同一个量**，
+ * 断言体不可直接迁移。只能换算后实测。
+ *
+ * 改用固定色板后：`emerald` 6.03:1、`amber` 6.88:1，且与其余 4 条**完全同构**
+ * （都是固定 100 底 + 800 字），亮/暗主题表现一致，不再有「两条跟随主题、四条不跟随」
+ * 的分裂。
+ */
 const AVATAR_TONES = [
   "bg-emerald-100 text-emerald-800",
   "bg-violet-100 text-violet-800",
@@ -60,6 +81,51 @@ export function formatCredits(value: number): string {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }
 
+/**
+ * 「今日 Token」的**诚实**展示串（卡片与表格**同一份**实现，避免两处口径漂移）。
+ *
+ * 三条边界（见 `AccountTokenTodayResponse`）：
+ * - `entry` 缺失 = 该账号今日**无记录 / 未知** ⇒ **「—」**（**绝不**当 0）；
+ * - 出现在 `entry` 里的 `0` 是**真实 0**（`compactTokens(0)` = `"0"`）；
+ * - `truncated`（网关日志已到保留上限）⇒ 网关部分是**下界** ⇒ 整串渲染成 **`≥N`**。
+ */
+export function formatTodayTokens(
+  entry: AccountTokenTodayEntry | null | undefined,
+  truncated: boolean,
+  t: Translate,
+): string {
+  if (!entry) return "—";
+  const total = entry.clientIn + entry.clientOut + entry.gatewayIn + entry.gatewayOut;
+  const value = compactTokens(total);
+  return truncated ? t("wbAccounts.card.metric.atLeast", { value }) : value;
+}
+
+/**
+ * 「今日 Token」的**明细**（客户端 / 网关 各自 输入·输出），供 tooltip / `title`。
+ *
+ * ⚠️ `truncated` 时**必须**把「下界」的说明一并带上 —— 只给数字不说口径就是误导。
+ * `entry` 缺失时返回空串（无明细可讲）。
+ */
+export function todayTokensBreakdown(
+  entry: AccountTokenTodayEntry | null | undefined,
+  truncated: boolean,
+  t: Translate,
+): string {
+  if (!entry) return "";
+  const parts = [
+    t("wbAccounts.card.metric.todayTokensClient", {
+      input: exactTokens(entry.clientIn),
+      output: exactTokens(entry.clientOut),
+    }),
+    t("wbAccounts.card.metric.todayTokensGateway", {
+      input: exactTokens(entry.gatewayIn),
+      output: exactTokens(entry.gatewayOut),
+    }),
+  ];
+  if (truncated) parts.push(t("wbAccounts.card.metric.todayTokensTruncated"));
+  return parts.join(t("shared.punct.comma"));
+}
+
 export function formatCreditExpiry(ts: number | null, t: Translate): string {
   if (!ts) return t("wbAccounts.card.forever");
   const date = new Date(ts);
@@ -76,7 +142,7 @@ function formatCreditUpdatedAt(ts: number | undefined): string {
 
 function expiryClass(expired: boolean, expiringSoon: boolean): string {
   if (expired) return "text-destructive";
-  if (expiringSoon) return "text-orange-600";
+  if (expiringSoon) return "text-warning";
   return "text-muted-foreground";
 }
 
@@ -104,6 +170,42 @@ export function accountIdentity(account: AccountMeta): string {
   const uid = displayText(account.uid);
   if (uid) return `UID · ${uid}`;
   return `ID · ${displayText(account.id) ?? "—"}`;
+}
+
+/**
+ * ★ B2：**展示用**的账号名 —— 优先昵称，缺昵称才退到脱敏身份。
+ *
+ * ## 为什么不直接用 `accountIdentity`
+ *
+ * 两者取舍相反：`accountIdentity` 把**脱敏邮箱**排在昵称**前面**（卡片主体要的是
+ * 「这是谁」的唯一凭据），而 toast / 向导标题 / 确认页要的恰恰是**好读的名字** ——
+ * 若直接换过去，有昵称的账号会从「张三」变成「z***@workbuddy.ai」，是可见的**退步**。
+ *
+ * ## 为什么必须有它
+ *
+ * 全仓曾有 **14 处** `nickname || email || uid || id` 的裸回落（toast、切换向导标题、
+ * 确认页、迁移摘要…）。展示层虽已脱敏，但这些**回落链绕过了脱敏** ——
+ * nickname 为空时（很常见：新导入的账号）就**泄露完整邮箱**。
+ *
+ * ⇒ 一律改走本函数：**昵称优先 → `accountIdentity`（已脱敏，且有 `UID ·`/`ID ·` 两段回落，
+ * 不会为空）**。既不泄露，也不会渲染出空白。
+ */
+export function accountDisplayName(account: AccountMeta): string {
+  return displayText(account.nickname) || accountIdentity(account);
+}
+
+/**
+ * ★ B2：同上，但接受**只带身份三字段**的轻量对象（`AppStatus.current` 没有 `id`）。
+ *
+ * `AppStatus.current` 的形状是 `{ uid, nickname, email }`，**不是 `AccountMeta`**
+ * （没有 `id`）⇒ 不能直接喂给 `accountIdentity`。这里按同样的优先级
+ * **昵称 → 脱敏邮箱 → `UID · x`** 收口，避免调用方为了图省事又写回裸回落。
+ */
+export function identityDisplayName(
+  person: { uid?: string | null; nickname?: string | null; email?: string | null } | null | undefined,
+): string {
+  if (!person) return "";
+  return displayText(person.nickname) || accountIdentity(person as AccountMeta);
 }
 
 const chipClass = "rounded-md px-1.5 py-0 text-[11px] font-medium";
@@ -210,6 +312,28 @@ interface Props {
   codebuddyCnIdeLoading?: boolean;
   onSwitchCodebuddyCnIde?: (a: AccountMeta) => void;
   /**
+   * 编辑器内 CodeBuddy 插件两个程序位（VS Code / JetBrains）。
+   *
+   * ⚠️ 与 `planned` 的措辞**必须分开**：`planned` = 本应用**尚未支持**（去装客户端也没用）；
+   * 这里是**本机没装**（去装就有用）—— 两者混用会把用户引向错误动作。
+   * `available` 由各自的后端状态命令给出（`installed` / `pluginInstalled`）。
+   */
+  vscodePluginAvailable?: boolean;
+  vscodePluginActive?: boolean;
+  vscodePluginBusy?: boolean;
+  vscodePluginLoading?: boolean;
+  onSwitchVscodePlugin?: (a: AccountMeta) => void;
+  jetbrainsPluginAvailable?: boolean;
+  jetbrainsPluginActive?: boolean;
+  jetbrainsPluginBusy?: boolean;
+  jetbrainsPluginLoading?: boolean;
+  onSwitchJetbrainsPlugin?: (a: AccountMeta) => void;
+  /**
+   * 未检测到编辑器扩展时的出口（与「引导去设置」不同：这是**本机没装编辑器扩展**，
+   * 设置页里没有对应子项 ⇒ 由调用方给一条说明性提示，指针指向「先装扩展」）。
+   */
+  onGuidePlugin?: (programId: string) => void;
+  /**
    * 打开「OAuth 扫码添加」。
    *
    * 只在 `credit.reason === ENCRYPTED_CREDENTIAL_REASON` 时用到：这类账号的凭据
@@ -232,6 +356,16 @@ interface Props {
   onOpenDetail?: (a: AccountMeta) => void;
   /** 「更多 → 编辑备注」：打开抽屉并进入编辑态。 */
   onEditRemark?: (a: AccountMeta) => void;
+  /** 「更多 → 设置分组」：打开抽屉并进入分组编辑态（与备注同一交互）。 */
+  onEditGroup?: (a: AccountMeta) => void;
+  /**
+   * 该账号「今日 Token」明细（`get_account_token_today`）。
+   *
+   * ⚠️ **缺席 = 今日无记录 / 未知** ⇒ 渲染「—」（**绝不当 0**）。
+   */
+  todayTokens?: AccountTokenTodayEntry | null;
+  /** 网关日志已到保留上限 ⇒ 网关部分是下界 ⇒ 「今日 Token」渲染 `≥N`。 */
+  todayTokensTruncated?: boolean;
   featuresDisabled?: boolean;
   /** 紧凑模式：头部缩成一条、按钮图标化、无 footer */
   compact?: boolean;
@@ -251,23 +385,29 @@ function ProductCurrentState({ product, compact = false }: { product: "workbuddy
       aria-label={title}
       title={title}
       className={cn(
-        "inline-flex items-center gap-2 rounded-full border border-primary/25 bg-primary/10 px-2.5 text-primary shadow-[inset_0_1px_0_rgba(255,255,255,.8)]",
-        compact ? "h-7 text-xs" : "h-9",
+        /* 不用硬编码的 `inset 0 1px 0 rgba(255,255,255,.8)`：深色下那是一条刺眼的白线
+           （原型 `.prog.on` 只有底色 + 描边，无内阴影）。 */
+        "inline-flex items-center justify-center border border-primary/40 bg-primary/15 text-primary",
+        /* ⚠️ 与程序位**同一 footprint**（原型 `.prog` 26px / 圆角 8px）：
+           程序位已到 5 个，紧凑头部那一行只有约 156px —— 当前态若仍是带对勾的宽胶囊
+           （每个约 58px），5 个槽位必然折成多行（实测 4 行、卡片高度 208→293px）。
+           ⇒ 紧凑模式只留图标，`aria-label` / tooltip 仍写明「… 当前账号」（信号不丢）。 */
+        compact ? "size-[26px] rounded-[8px]" : "h-[26px] gap-1.5 rounded-[8px] px-2 text-[11px]",
       )}
     >
       {product === "workbuddy" ? (
-        <WorkBuddyMark size={compact ? 18 : 22} />
+        <WorkBuddyMark size={compact ? 14 : 12} />
       ) : product === "codebuddy-cn" ? (
-        <CodeBuddyCnIdeMark size={compact ? 18 : 22} />
+        <CodeBuddyCnIdeMark size={compact ? 14 : 12} />
       ) : (
-        <CodeBuddyMark size={compact ? 18 : 22} />
+        <CodeBuddyMark size={compact ? 14 : 12} />
       )}
-      <Check className={compact ? "size-3.5" : "size-4"} strokeWidth={2.25} />
+      {compact ? null : <Check className="size-3" strokeWidth={2.25} />}
     </span>
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, onEditRemark, featuresDisabled = true, compact = false }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditUpdatedAt, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, onEditRemark, onEditGroup, todayTokens, todayTokensTruncated = false, featuresDisabled = true, compact = false }: Props) {
   const t = useT();
   /**
    * 兜底归一（第三道闸）。
@@ -285,10 +425,111 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
   const visibleResources = resources.slice(0, 2);
   const expiringAmount = credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
 
-  const activeProductCount = [workbuddyActive, codebuddyCliActive, codebuddyCnIdeActive].filter(Boolean).length;
+/**
+ * ★ B1：「使用中 N 个工具」= **程序位全表**里处于激活态的项数。
+ *
+ * ## 为什么要重写
+ *
+ * 旧实现 `[workbuddyActive, codebuddyCliActive, codebuddyCnIdeActive]` 写死 3 个，
+ * **漏了**下方 `programRow` 已经接入的 `vscodePluginActive` / `jetbrainsPluginActive`
+ * ⇒ 一个「只绑了 VSCode 插件」的账号会显示「使用中 0 个工具」，
+ * 可它明明**正在被使用**（徽章、竖条、底色全都亮着）。
+ *
+ * 这不只是漏数，而是**违反本文件自己写的纪律**：紧随其后的 `isCurrentAccount`
+ * 数的是**同样 5 个**信号，两个口径对同一个问题给出不同答案 ⇒ 自相矛盾。
+ *
+ * ## 现在
+ *
+ * 两个值**从同一组信号派生**（`programSlots`），因此「徽章亮 ⇔ 计数 ≥ 1」
+ * 成为**结构上的恒等式**，而不是靠两处手工同步维持。
+ * （`programSlots` 同时驱动 `programRow`，见下方。）
+ */
+const programSlots = [
+  { key: "workbuddy", active: workbuddyActive, available: true },
+  { key: "codebuddy-cli", active: codebuddyCliActive, available: codebuddyCliConfigured },
+  { key: "codebuddy-cn-ide", active: codebuddyCnIdeActive, available: codebuddyCnIdeAvailable },
+  { key: "vscode-plugin", active: vscodePluginActive, available: vscodePluginAvailable },
+  { key: "jetbrains-plugin", active: jetbrainsPluginActive, available: jetbrainsPluginAvailable },
+] as const;
+
+const activeProductCount = programSlots.filter((slot) => slot.active).length;
+
+/**
+ * 「当前登录」= 账号绑定到**任一**程序位（原型 `accountCard` :2493-2495：多对多，不是只看第一个）。
+ *
+ * ⚠️ 与左侧竖条口径一致：竖条 + 徽章是同一信号的**两重表达**，二者必须在同一条件下出现，
+ * 否则会出现「有徽章却无竖条」的矛盾态。判定直接读 `programSlots` ⇒ 与上面的
+ * `activeProductCount` **同源**，不可能再分叉。
+ */
+const isCurrentAccount = programSlots.some((slot) => slot.active);
+
+  /**
+   * 指标行（原型 `.acct-metrics`，`buddy-switch-prototype.html:341`：`积分 used/total · 今日 42.1K · 2 分钟前`）。
+   *
+   * 三项都来自**真实数据源**，逐项按诚实边界渲染：
+   * - **积分 已用/总量**：由 `credit.resources[].used/total` 汇总；未就绪 ⇒ 值渲染「—」；
+   * - **今日 Token**：`get_account_token_today` 按账号聚合；账号**缺席** ⇒ 「—」（**绝不当 0**）；
+   *   网关日志被裁剪（`todayTokensTruncated`）⇒ 下界 `≥N`，明细与下界说明放 tooltip；
+   * - **最后使用**：`AccountMeta.lastUsedAt`（epoch 毫秒）；**缺席则整项省略**（不打印「—」）。
+   *
+   * ⚠️ 整行**始终渲染**（含数据全缺时）—— 不闪不藏，缺值以「—」如实呈现。
+   */
+  const metricResources = credit?.ok ? credit.resources ?? [] : [];
+  const metricCreditUsed =
+    credit?.ok && metricResources.length > 0
+      ? metricResources.reduce((sum, resource) => sum + (Number.isFinite(resource.used) ? resource.used : 0), 0)
+      : null;
+  const metricCreditTotal =
+    credit?.ok && metricResources.length > 0
+      ? metricResources.reduce((sum, resource) => sum + (Number.isFinite(resource.total) ? resource.total : 0), 0)
+      : null;
+  /** 「最后使用」：仅当有真实的 `lastUsedAt`（epoch 毫秒）才渲染该项；否则整项省略。 */
+  const lastUsedAt = typeof account.lastUsedAt === "number" && account.lastUsedAt > 0 ? account.lastUsedAt : null;
+
+  const metricsRow = (
+    <div className={cn("flex flex-wrap gap-x-3.5 gap-y-1 text-[11.5px] text-muted-foreground", compact ? "mb-2.5" : "mb-3")}>
+      <span>
+        {t("wbAccounts.card.metric.credits")}{" "}
+        {metricCreditUsed === null ? (
+          <b className="font-semibold tabular-nums text-foreground">—</b>
+        ) : (
+          <>
+            <b className="font-semibold tabular-nums text-foreground">
+              {formatCredits(metricCreditUsed)}
+            </b>
+            {metricCreditTotal === null ? "" : `/${formatCredits(metricCreditTotal)}`}
+          </>
+        )}
+      </span>
+      <span className="inline-flex items-center gap-1">
+        {t("wbAccounts.card.metric.todayTokens")}{" "}
+        {todayTokens ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <b className="cursor-default font-semibold tabular-nums text-foreground">
+                {formatTodayTokens(todayTokens, todayTokensTruncated, t)}
+              </b>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {todayTokensBreakdown(todayTokens, todayTokensTruncated, t)}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <b className="font-semibold tabular-nums text-foreground">—</b>
+        )}
+      </span>
+      {lastUsedAt !== null && (
+        <span>
+          {t("wbAccounts.card.metric.lastUsed")}{" "}
+          <b className="font-semibold tabular-nums text-foreground">{formatDate(lastUsedAt)}</b>
+        </span>
+      )}
+    </div>
+  );
 
   const statusChips = (
     <>
+      {isCurrentAccount && <Badge variant="secondary" className={cn(chipClass, "border-transparent bg-primary/15 text-primary")}>{t("wbAccounts.card.currentLogin")}</Badge>}
       {todayCheckedIn !== undefined && (
         <Badge variant={todayCheckedIn ? "success" : "secondary"} className={cn(chipClass, !todayCheckedIn && "text-muted-foreground")}><CircleCheck /> {todayCheckedIn ? t("wbAccounts.card.checkedIn") : t("wbAccounts.card.notCheckedIn")}</Badge>
       )}
@@ -308,14 +549,43 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
     </>
   );
 
-  /* 程序位行（**单一定义**，紧凑头部与宽松页脚共用 —— 见文件头）。 */
+  /* 程序位行（**单一定义**，紧凑头部与宽松页脚共用 —— 见文件头）。
+     ⚠️ 尺寸与形状对齐原型 `.prog`（`buddy-switch-prototype.html:345-357`）：
+     高 26px、内边距 0 8px、**圆角 8px（不是胶囊）**、字号 11px、图标 12px。
+     ⚠️ 圆角必须写**字面 8px**：本主题里 `rounded-lg` = `--radius` = 12px、`rounded-xl` = 16px，
+     都不是原型的 8px —— 26px 的方块配 12px 圆角会「近似圆形」，与截图明显不同。 */
   const btnSize = compact ? ("icon" as const) : ("sm" as const);
-  const btnClass = compact ? "size-7 rounded-lg" : "h-7 rounded-full px-2.5 pr-3.5 text-xs";
-  const markSize = compact ? 15 : 18;
+  const btnClass = compact
+    ? "size-[26px] rounded-[8px]"
+    : "h-[26px] rounded-[8px] px-2 text-[11px]";
+  const markSize = compact ? 14 : 12;
   const switchLabel = (label: string) => (compact ? null : <span>{label}</span>);
 
   // WorkBuddy 主程序位：当前账号 → 角标；演示模式 → DemoAction；其余 → 切换按钮。
-  const workbuddyControl = workbuddyActive ? (
+  /**
+ * ★ B5：卡片上的程序位控件 = **注册表 5 项 ∪ {WorkBuddy 主位}**。
+ *
+ * ## 为什么不把主位塞进 `WORKBUDDY_PROGRAMS`
+ *
+ * `registry.ts::WORKBUDDY_PROGRAMS` 与后端 `programs.rs::PROGRAMS` 是**同一份 5 项**
+ * （`codebuddy_cli` / `codebuddy_cn_ide` / `vscode_cn_inject` /
+ * `vscode_codebuddy_plugin` / `jetbrains_codebuddy_plugin`），**都不含主位**。
+ * 而卡片上除了这 5 个，**还多一个 WorkBuddy 主位按钮**（`workbuddyControl`）。
+ *
+ * ⇒ 两侧各差一个 id，但**这个差是刻意的、且合理的**：
+ * WorkBuddy 主位是「**把账号写进客户端自己的认证文件**」，与上面 5 个
+ * 「切换某个外部程序位」**不是一类操作**；把它塞进 `PROGRAMS` 会让后端
+ * `PROGRAMS` 长出一个**没有 adapter** 的空槽，而 `PROGRAMS` 的自动派生
+ * （`status`/`switch`/`detect`/`install_helper` 全覆盖）会因此产生**假能力**。
+ *
+ * 另一条路是给主位补一个真 adapter（工作量在 Rust，且要过
+ * `product_spec_matches_frontend_registry_slug_and_capabilities` 跨语言护栏）——
+ * 收益只是让两个列表长度一致，**不值**。
+ *
+ * ⇒ 定为**显式例外**，并由 `check-scope-registry.cjs` 的 B5 断言把
+ * 「卡片 = 表 ∪ {主位}」这个公式**钉住**，避免后人误把它当 bug「修」掉。
+ */
+const workbuddyControl = workbuddyActive ? (
     <ProductCurrentState product="workbuddy" compact />
   ) : demoModeEnabled ? (
     <DemoAction>
@@ -386,6 +656,115 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
     </Tooltip>
   );
 
+  /**
+   * 编辑器内 CodeBuddy 插件的一个程序位（VS Code / JetBrains）—— 与 `ideControl` **同构**：
+   * 当前账号 ⇒ 角标；已装 ⇒ 可切换；未检测到 ⇒ **可点引导**（不是「点不动的灰按钮」，§3.3）。
+   *
+   * ⚠️ 未检测到的文案**只说「本机没装」**，绝不写「尚未支持」—— 后者是 `planned` 的口径
+   * （本应用还没做，去装客户端也没用），两者混用会把用户引向错误动作。
+   */
+  function pluginControl(opts: {
+    /** 程序位 id（供 `onGuidePlugin` 与门禁锚点使用）。 */
+    id: string;
+    /** 短标签（非紧凑模式显示；与 IDE / CLI 的写法一致）。 */
+    short: string;
+    /** 程序位显示名（词条）—— 与注册表 `labelKey` 同一份文案。 */
+    label: string;
+    available?: boolean;
+    active?: boolean;
+    busy?: boolean;
+    loading?: boolean;
+    onSwitch?: (a: AccountMeta) => void;
+  }) {
+    const { id, short, label, available, active, busy, loading, onSwitch } = opts;
+    if (active) {
+      return (
+        <span
+          role="status"
+          aria-label={t("wbAccounts.card.currentPlugin", { client: label })}
+          title={t("wbAccounts.card.currentPlugin", { client: label })}
+          className={cn(
+            /* 与 `ProductCurrentState` 同一口径（同底色/描边，去掉了硬编码内阴影）。 */
+            "inline-flex items-center justify-center border border-primary/40 bg-primary/15 text-primary",
+            /* 与 `ProductCurrentState` 同一口径：紧凑模式用方形图标（26px / 圆角 8px），
+               否则 5 个槽位会被挤成多行。 */
+            compact ? "size-[26px] rounded-[8px]" : "h-[26px] gap-1.5 rounded-[8px] px-2 text-[11px]",
+          )}
+        >
+          <CodeBuddyMark size={compact ? 14 : 12} />
+          {compact ? null : <Check className="size-3" strokeWidth={2.25} />}
+        </span>
+      );
+    }
+    if (available) {
+      return (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="outline"
+              size={btnSize}
+              className={btnClass}
+              disabled={featuresDisabled || !onSwitch || busy}
+              onClick={() => onSwitch?.(account)}
+              aria-label={loading ? t("wbAccounts.card.switching") : label}
+              aria-busy={loading}
+              data-program-switch={id}
+            >
+              {loading ? (
+                <Loader2 className={compact ? "size-3.5 animate-spin" : "size-4 animate-spin"} />
+              ) : (
+                <CodeBuddyMark size={markSize} />
+              )}
+              {switchLabel(loading ? t("wbAccounts.card.switching") : short)}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{label}</TooltipContent>
+        </Tooltip>
+      );
+    }
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="outline"
+            size={btnSize}
+            className={cn(btnClass, "text-muted-foreground")}
+            disabled={featuresDisabled || !onGuidePlugin}
+            onClick={() => onGuidePlugin?.(id)}
+            aria-label={t("wbAccounts.card.guidePlugin", { client: label })}
+            data-program-missing={id}
+          >
+            <CodeBuddyMark size={markSize} />
+            {switchLabel(short)}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">{t("wbAccounts.card.guidePlugin", { client: label })}</TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  const vscodePluginControl = pluginControl({
+    id: "vscode_codebuddy_plugin",
+    short: "VSC",
+    label: t("wbAccounts.program.vscodeCodebuddyPlugin"),
+    available: vscodePluginAvailable,
+    active: vscodePluginActive,
+    busy: vscodePluginBusy,
+    loading: vscodePluginLoading,
+    onSwitch: onSwitchVscodePlugin,
+  });
+
+  const jetbrainsPluginControl = pluginControl({
+    id: "jetbrains_codebuddy_plugin",
+    short: "JB",
+    label: t("wbAccounts.program.jetbrainsCodebuddyPlugin"),
+    available: jetbrainsPluginAvailable,
+    active: jetbrainsPluginActive,
+    busy: jetbrainsPluginBusy,
+    loading: jetbrainsPluginLoading,
+    onSwitch: onSwitchJetbrainsPlugin,
+  });
+
   /* ★ 计划新增（**尚未支持**）的程序位 —— **必须渲染**（原型断言 `verify-behaviors.cjs:1297-1299`：
      「注册表声明了 planned 的程序位，卡片上却没有对应样式」⇒ 红）。
      ⚠️ 说明必须是「尚未支持」，**不许**用「未检测到客户端」——
@@ -409,11 +788,19 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
     </Tooltip>
   ));
 
+  /* ⚠️ `flex-wrap` + `w-full` 是**必须**的：程序位已到 5 个（WB / IDE / CLI / VS Code / JetBrains），
+       「当前账号」档是带图标+对勾的胶囊 —— 不换行就会溢出卡片、最后一个槽位被裁掉
+       （实测：4 个胶囊同时点亮时 JB 被挤出可视区）；而只加 `min-w-0` 会让本行**收缩到
+       最小内容宽（一个胶囊）**，5 个槽位被压成 5 行（实测卡片高度 208→293px）。
+       ⇒ 必须先**占满整行**（`w-full`）再在行内换行。 */
   const programRow = (
-    <div className="flex shrink-0 items-center gap-1">
+    <div className="flex w-full flex-wrap items-center gap-1">
       {workbuddyControl}
       {ideControl}
       {cliControl}
+      {/* 编辑器内 CodeBuddy 插件（VS Code / JetBrains）：与 IDE 同构的三个档位。 */}
+      {vscodePluginControl}
+      {jetbrainsPluginControl}
       {plannedControls}
     </div>
   );
@@ -443,13 +830,37 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
             onOpenDetail(account);
           }
         }}
-        className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,.025),0_10px_28px_rgba(15,23,42,.035)] transition-shadow hover:shadow-[0_2px_4px_rgba(15,23,42,.04),0_14px_34px_rgba(15,23,42,.055)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+        /* 与原型 `.acct`（`buddy-switch-prototype.html:312-318`）对齐：
+           `border-radius: var(--radius)` = 12px（⇒ `rounded-lg`，不是 `rounded-2xl`）；
+           静止 `var(--shadow-sm)` / 悬停 `var(--shadow-md)` + `border-color: var(--border-strong)`。
+           ⚠️ 原先这里硬编码了一串 `rgba(15,23,42,…)` 阴影 —— 深色下那种「冷灰」阴影在深底上
+           几乎不可见，且与卡片体系里其它阴影不一致。 */
+        className={cn(
+          "relative flex min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-card transition-[border-color,box-shadow] hover:border-border-strong hover:shadow-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+          selected && "border-ring bg-primary/[0.07]",
+        )}
       >
+      {/* ★ 原型 `.acct.is-current::before`（`buddy-switch-prototype.html:321-324`）：
+          「当前账号」用**左侧 3px 竖条**表达 —— 与头部的「当前登录」徽章一起构成两重信号。
+          ⚠️ 竖条只在**左侧两条圆角**上贴合卡片（`rounded-l-lg`），否则四角会露出直角方块。
+          ⚠️ 条件必须与徽章**同为** `isCurrentAccount`（绑定任一程序位）：两者是同一信号的两重表达，
+          否则会出现「有徽章却无竖条」/「有竖条却无徽章」的矛盾态。 */}
+      {isCurrentAccount ? (
+        <span
+          aria-hidden="true"
+          data-current-bar="true"
+          className="pointer-events-none absolute inset-y-0 left-0 w-[3px] rounded-l-lg bg-primary"
+        />
+      ) : null}
       <header
         className={cn(
           "relative flex items-center border-b border-border",
           compact ? "min-h-[52px] px-3.5 py-1.5" : "min-h-[104px] px-5 py-3",
-          workbuddyActive ? "bg-primary/5" : codebuddyCliActive ? "bg-muted/60" : "bg-muted/30",
+          /* ★ B3：底色原先第三档用 `codebuddyCliActive`，即**只绑 IDE/插件**的账号
+             会掉进 `bg-muted/30` 的「非当前」底色 —— 与左侧竖条 + 徽章矛盾
+             （那两重信号用的是 `isCurrentAccount`，覆盖面更广）。
+             现在统一读 `isCurrentAccount`：只要绑了**任一**程序位就是「当前登录」。 */
+          isCurrentAccount ? "bg-primary/5" : "bg-muted/30",
         )}
       >
         <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -505,6 +916,9 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
                 <DropdownMenuItem disabled={featuresDisabled || !onEditRemark} onSelect={() => onEditRemark?.(account)}>
                   <StickyNote />{t("wbAccounts.card.editRemark")}
                 </DropdownMenuItem>
+                <DropdownMenuItem disabled={featuresDisabled || !onEditGroup} onSelect={() => onEditGroup?.(account)}>
+                  <Tag />{t("wbAccounts.card.editGroup")}
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="text-destructive focus:bg-destructive/5 focus:text-destructive" onSelect={() => onDelete(account)}>
                   <Trash2 />{t("wbAccounts.card.deleteAccount")}
@@ -519,15 +933,17 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
             {checkbox}
             <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
             <div className="hidden shrink-0 items-center gap-1 min-[420px]:flex">{statusChips}</div>
-            <div className="ml-auto">{programRow}</div>
+            <div className="ml-auto shrink-0">{programRow}</div>
           </div>
         ) : (
           <div className={cn("relative z-10 flex w-full min-w-0 items-center gap-3", workbuddyActive || codebuddyCliActive ? "pr-[112px]" : "pr-10")}>
             {checkbox}
-            <div className={cn("flex size-12 shrink-0 items-center justify-center rounded-full text-base font-semibold ring-4 ring-white/65", avatarClass)}>{name.charAt(0).toUpperCase()}</div>
+            {/* 原型 `.avatar`（`buddy-switch-prototype.html:327-330`）：32px / 圆角 10px / **无外环**。
+                原先的 `ring-4 ring-white/65` 是硬编码白环 —— 深色下变成一圈白晕，且原型没有它。 */}
+            <div className={cn("flex size-8 shrink-0 items-center justify-center rounded-[10px] text-[12.5px] font-[640]", avatarClass)}>{name.charAt(0).toUpperCase()}</div>
             <div className="min-w-0 flex-1">
-              <h3 className="truncate text-sm font-semibold leading-5" title={name}>{name}</h3>
-              <p className="mt-0.5 truncate text-xs leading-5 text-muted-foreground" title={identity}>{identity}</p>
+              <h3 className="truncate text-[13px] font-semibold leading-5" title={name}>{name}</h3>
+              <p className="mt-0.5 truncate text-[11px] leading-5 text-muted-foreground" title={identity}>{identity}</p>
               <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">{statusChips}</div>
             </div>
           </div>
@@ -535,6 +951,9 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
       </header>
 
       <section className={cn("flex min-w-0 flex-1 flex-col", compact ? "px-3.5 pb-3 pt-3" : "px-5 pb-4 pt-4")}>
+        {/* ★ 指标行（原型 `.acct-metrics` :2510）：徽章之下、积分明细之上的一行小字。
+            始终渲染 —— 积分未就绪时显示「—」，不闪不藏。 */}
+        {metricsRow}
         {creditLoading ? (
           <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{t("wbAccounts.card.loadingCredits")}</div>
         ) : !credit ? (
@@ -598,7 +1017,7 @@ export function AccountCard({ account, onDelete, onCheckin, onRefresh, onSwitch,
                       <span className={cn("whitespace-nowrap tabular-nums", expiryClass(resource.expired, resource.expiringSoon))}>{formatCreditExpiry(resource.expireAt, t)}</span>
                     </div>
                     <div className={cn("h-1 overflow-hidden rounded-full bg-muted", compact ? "mt-1" : "mt-1.5")} aria-hidden="true">
-                      <div className={cn("h-full rounded-full", resource.expiringSoon || resource.expired ? "bg-orange-500" : "bg-primary")} style={{ width: `${ratio}%` }} />
+                      <div className={cn("h-full rounded-full", resource.expiringSoon || resource.expired ? "bg-warning" : "bg-primary")} style={{ width: `${ratio}%` }} />
                     </div>
                   </div>
                 );

@@ -15,7 +15,7 @@ export const zh = {
   // =====================================================================
   // TraeAccountsPage.tsx —— 「账号管理」页
   // =====================================================================
-  "trae.page.accounts.title": "账号管理",
+  "trae.page.accounts.title": "账号",
   "trae.page.accounts.subtitle": "管理 {line} 账号的登录凭据、签到与登录态切换。与 WorkBuddy 的账号库彼此独立。",
   "trae.page.accounts.loadFailed": "无法读取 Trae 数据",
 
@@ -62,6 +62,8 @@ export const zh = {
   "trae.page.accounts.checkinBatchSuccess": "{n} 个签到成功",
   "trae.page.accounts.checkinBatchAlready": "{n} 个已签到",
   "trae.page.accounts.checkinBatchFailed": "{n} 个失败",
+  // ★ B4：部分失败时 toast 的 action —— 可「只重试失败项」，不必把成功的一起重跑。
+  "trae.page.accounts.checkinRetryFailed": "重试失败项",
 
   // ---- 导入本机账号 ----
   "trae.page.accounts.importLocalDone": "已导入本机账号",

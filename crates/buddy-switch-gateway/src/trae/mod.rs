@@ -423,8 +423,10 @@ impl TraeGatewayState {
     /// 记一次请求（计数 + 日志 + 最近错误）。
     ///
     /// 日志条目字段名与 WorkBuddy 网关的 [`RequestMeta::to_value`] 对齐
-    /// （`ts` / `endpoint` / `method` / `account` / `model` / `status` / `latencyMs` /
-    /// `promptTokens` / `completionTokens` / `stream`），只是多了 `error` 与 `variant`。
+    /// （`ts` / `endpoint` / `method` / `account` / `accountUid` / `model` / `status` /
+    /// `latencyMs` / `promptTokens` / `completionTokens` / `stream`），只是多了 `error` 与
+    /// `variant`。Trae 侧 `account` 本就是 uid，故 `accountUid` 与它同值（与 WB 侧
+    /// 「`account`=展示名、`accountUid`=uid」的形状对齐，供 `token_daily` 统一精确归属）。
     /// 这样「Token 统计」页可以用同一套归一化逻辑聚合两侧日志，且能按变体过滤。
     ///
     /// [`RequestMeta::to_value`]: crate::logging::RequestMeta::to_value
@@ -448,6 +450,7 @@ impl TraeGatewayState {
             "endpoint": endpoint,
             "method": "POST",
             "account": uid,
+            "accountUid": uid,
             "model": model,
             "status": status,
             "latencyMs": latency_ms,

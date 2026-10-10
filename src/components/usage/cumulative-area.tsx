@@ -26,7 +26,7 @@ export function CumulativeArea({ points }: { points: AreaPoint[] }) {
   if (points.length === 0) return null;
 
   return (
-    <ChartContainer config={{ value: { label: t("wbStats.usage.trend.cumulativeTitle"), color: "var(--primary)" } }} className="h-56 w-full">
+    <ChartContainer config={{ value: { label: t("wbStats.usage.trend.cumulativeTitle"), color: "var(--primary)" } }} className="h-[170px] w-full">
       <AreaChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
         <defs>
           <linearGradient id="cumulative-fill" x1="0" y1="0" x2="0" y2="1">

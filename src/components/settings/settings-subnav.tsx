@@ -20,7 +20,6 @@
  * 问题会在两个地方各修一遍。
  */
 
-import type { LucideIcon } from "lucide-react";
 import {
   CalendarCheck,
   Clock,
@@ -33,9 +32,8 @@ import {
   UserRound,
 } from "lucide-react";
 
+import { SideSubnav, type SideSubnavItem } from "@/components/shell/side-subnav";
 import { useT } from "@/lib/i18n";
-import { cn } from "@/lib/utils";
-import type { TranslationKey } from "@/locales/zh";
 
 /** 9 个设置分区的标识。 */
 export type SettingsSubnavId =
@@ -49,12 +47,7 @@ export type SettingsSubnavId =
   | "logs"
   | "backup";
 
-export interface SettingsSubnavItem {
-  id: SettingsSubnavId;
-  /** 标签键（应用级导航，落在 `shell` 域）。 */
-  labelKey: TranslationKey;
-  icon: LucideIcon;
-}
+export type SettingsSubnavItem = SideSubnavItem<SettingsSubnavId>;
 
 /** 唯一的一份子导航表（顺序即展示顺序）。 */
 export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
@@ -78,41 +71,17 @@ interface Props {
 }
 
 /**
- * 设置子导航。
- *
- * 窄屏横向滚动（避免把内容挤成一条）、宽屏纵向列表（与内容并排）。
+ * 设置子导航（版式由 `SideSubnav` 统一提供，这里只钉住自己的**表**与**无障碍名**）。
  */
 export function SettingsSubnav({ active, onSelect, items = SETTINGS_SUBNAV, className }: Props) {
   const t = useT();
   return (
-    <nav
-      aria-label={t("settings.subnav.aria")}
-      className={cn(
-        "flex min-w-0 gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0",
-        className,
-      )}
-    >
-      {items.map((item) => {
-        const on = item.id === active;
-        const Icon = item.icon;
-        return (
-          <button
-            key={item.id}
-            type="button"
-            aria-current={on ? "page" : undefined}
-            onClick={() => onSelect(item.id)}
-            className={cn(
-              "flex shrink-0 cursor-pointer items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-[13px] font-medium transition-colors lg:w-full",
-              on
-                ? "bg-foreground/[0.06] text-foreground"
-                : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
-            )}
-          >
-            <Icon className="size-4 shrink-0" aria-hidden="true" />
-            <span className="truncate">{t(item.labelKey)}</span>
-          </button>
-        );
-      })}
-    </nav>
+    <SideSubnav
+      active={active}
+      items={items}
+      onSelect={onSelect}
+      ariaLabel={t("settings.subnav.aria")}
+      className={className}
+    />
   );
 }

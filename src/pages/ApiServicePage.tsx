@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Copy, FolderOpen, Loader2, Power, RefreshCw } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 import { ApiKeyTable } from "@/components/gateway/api-key-table";
@@ -10,7 +11,12 @@ import { ModelList } from "@/components/gateway/model-list";
 // ⚠️ 只接 WB 侧：C 路本期不做 Trae（`proxy.rs` 的 `PROXY_GATEWAY_BASE` 只覆盖 WB 网关端口）。
 import { ProxyPanel } from "@/components/gateway/proxy-panel";
 import { RequestLog } from "@/components/gateway/request-log";
-import { WorkbuddyRegionSwitch } from "@/components/workbuddy-region-switch";
+import {
+  GatewaySubnav,
+  parseGatewaySubnav,
+  type GatewaySubnavId,
+} from "@/components/gateway/gateway-subnav";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { DemoAction } from "@/components/demo-action";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -32,6 +38,7 @@ import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { poolOf, resolveGatewayBaseUrl, resolveGatewayRunning } from "@/lib/gateway";
 import { regionDescriptor } from "@/lib/region";
+import { scopeOf } from "@/lib/scope";
 import { cn } from "@/lib/utils";
 import type { AccountStrategy, ApiKeyRecord, GatewayConfig, Region } from "@/lib/types";
 import { useWorkbuddyRegion } from "@/lib/use-workbuddy-region";
@@ -64,16 +71,21 @@ function representativeKey(keys: ApiKeyRecord[], region: Region): string | null 
  * 模型清单与接入指引各自内置一个 Tabs。用户在模型清单里切到国际版，
  * 上面的账号池还停在国内版 —— 同一页「当前版本」各说各话。
  *
- * 现在与 Trae 侧同一套心智模型：**页头唯一入口（`WorkbuddyRegionSwitch`）→
- * 整页跟随 → 子组件只渲染不选择**。版本由 URL 的 `?region=` 承载（可刷新、可分享、
- * 配合前进后退），见 `useWorkbuddyRegion`。
+ * 现在与 Trae 侧同一套心智模型：**区域来自作用域（L1）→ 整页跟随 → 子组件只渲染不选择**。
+ * 区域由 URL 的 scope 段承载（`/s/wb-global/gateway`，可刷新、可分享、配合前进后退），
+ * 见 `useWorkbuddyRegion`（它是 `useScope("workbuddy")` 的薄封装）。
+ *
+ * ⚠️ **页内不再有区域切换器**：切作用域的唯一入口是顶栏 `ScopeSelector`，
+ * 这里只放一枚只读 `ScopeChip`（与原型 `viewGateway` 一致）。
  */
 export default function ApiServicePage() {
   const t = useT();
-  // 只取当前值：切换动作由页头的 `WorkbuddyRegionSwitch` 自己发起（它才是那个入口）。
+  // 只取当前值：区域来自作用域（URL 优先），页内不再有切换动作。
   const [region] = useWorkbuddyRegion();
+  const scope = scopeOf("workbuddy", region);
   const config = useGatewayStore((s) => s.config);
   const status = useGatewayStore((s) => s.status);
+  const models = useGatewayStore((s) => s.models);
   const keys = useGatewayStore((s) => s.keys);
   const loading = useGatewayStore((s) => s.loading);
   const error = useGatewayStore((s) => s.error);
@@ -85,6 +97,19 @@ export default function ApiServicePage() {
   const [riskOpen, setRiskOpen] = useState(false);
   /** 数据目录按钮是否正在打开（只驱动按钮转圈）。 */
   const [openingDir, setOpeningDir] = useState(false);
+  /** 「上游账号凭据 · 校验」进行中（只驱动按钮转圈）。 */
+  const [verifying, setVerifying] = useState(false);
+  /* ★ 子导航选中项：**初值从 URL 读**（`?sub=logs`），非法值 fail-closed 回 `overview`。
+     与设置页（`?section=`）同一口径：深链能直达某个分区，而不是永远落到第一项。 */
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [sub, setSub] = useState<GatewaySubnavId>(() => parseGatewaySubnav(searchParams.get("sub")));
+
+  /* ★ 子导航切分的**唯一入口**：更新 state **并**写回 URL（`?sub=models`）——
+     概览的「查看」行与左侧子导航都走它，深链因此可刷新、可分享（与设置页 `?section=` 同口径）。 */
+  function goSub(id: GatewaySubnavId) {
+    setSub(id);
+    setSearchParams({ sub: id }, { replace: true });
+  }
 
   useEffect(() => {
     void loadAll();
@@ -158,15 +183,47 @@ export default function ApiServicePage() {
   const baseUrl = resolveGatewayBaseUrl(status, config.bind_addr, config.port);
   const running = resolveGatewayRunning(status);
 
+  /* 概览三行的**真实取数**（原型 :3013-3018）：模型与账号池条目数均来自后端下发，缺数据渲染 0。 */
+  const { pool: poolSummary, accounts: poolAccounts } = poolOf(status, region);
+  const modelCount = models[region]?.models.length ?? 0;
+  const poolCount = poolSummary?.total ?? poolAccounts.length;
+
+  /**
+   * 「上游账号凭据 · 校验」——复用既有的 `checkAuthPermission` 探针（写权限自检）。
+   *
+   * 它是本应用**唯一**的凭据可用性探针：结果如实透出（ok 用后端 message，失败用 error/hint），
+   * 不写死「正常」。
+   */
+  async function onVerifyCreds() {
+    setVerifying(true);
+    try {
+      const res = await api.checkAuthPermission();
+      if (res.ok) {
+        toast.success(t("wbStats.gateway.verifyOk"), { description: res.message });
+      } else {
+        toast.error(t("wbStats.gateway.verifyFail"), {
+          description: res.error ?? res.hint,
+        });
+      }
+    } catch (e) {
+      toast.error(t("wbStats.gateway.verifyFail"), { description: api.asError(e) });
+    } finally {
+      setVerifying(false);
+    }
+  }
+
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-      {/* 版本入口在**标题下方**（两个模块统一的位置）：整页跟随它。 */}
-      <header className="mb-6">
-        <h1 className="text-[28px] font-semibold tracking-tight">{t("wbStats.gateway.title")}</h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {t("wbStats.gateway.desc")}
-        </p>
-        <WorkbuddyRegionSwitch className="mt-4" />
+    <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
+      {/* 页头（原型 `viewGateway`）：作用域副标题 + 只读 scope-chip；区域来自作用域，整页跟随。 */}
+      <header className="mb-5 flex items-start gap-4">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("wbStats.gateway.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("pageHead.gateway", { scope: scopeLabel(t, scope) })}
+          </p>
+        </div>
+        <div className="grow" />
+        <ScopeChip scope={scope} />
       </header>
 
       {error && (
@@ -186,132 +243,197 @@ export default function ApiServicePage() {
         </Alert>
       )}
 
-      {/* 网关 */}
-      <Card className="mb-6 gap-0 py-0">
-        <div className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Power className="size-4 text-muted-foreground" />
-              {t("wbStats.gateway.enableGateway")}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">{t("wbStats.gateway.enableDesc")}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {saving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
-            <DemoAction>
-              <Switch
-                checked={config.enabled}
-                disabled={saving}
-                onCheckedChange={(enabled) => void persist({ enabled })}
-                aria-label={t("wbStats.gateway.enableAria")}
-              />
-            </DemoAction>
-            {/* 与 Trae 页同构：手动重读配置 / 状态 / 池（池是实时状态，不刷新就看不到变化）。 */}
-            <DemoAction>
-              <Button variant="outline" size="sm" onClick={() => void loadAll()}>
-                <RefreshCw />
-                {t("wbStats.gateway.refresh")}
-              </Button>
-            </DemoAction>
-          </div>
-        </div>
+      {/* ---- 主区：子导航 + 分区内容（PLAN §3.9：替代原来的 6 卡纵向堆叠）---- */}
+      <div className="flex min-w-0 flex-col gap-6 lg:flex-row lg:gap-8">
+        <GatewaySubnav active={sub} onSelect={goSub} className="lg:w-44 lg:shrink-0" />
 
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t("wbStats.gateway.bindAddr")}</span>
-            <Select value={config.bind_addr} onValueChange={onBindAddrChange} disabled={saving}>
-              <SelectTrigger size="sm" className="w-52" aria-label={t("wbStats.gateway.bindAddrAria")}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={LOOPBACK}>{t("wbStats.gateway.loopback")}</SelectItem>
-                <SelectItem value={LAN}>{t("wbStats.gateway.lan")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">{t("wbStats.gateway.port")}</span>
-            <DemoAction>
-              <Input
-                className="h-8 w-28"
-                inputMode="numeric"
-                value={portDraft}
-                onChange={(event) => setPortDraft(event.target.value)}
-                onBlur={commitPort}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") commitPort();
-                }}
-                aria-label={t("wbStats.gateway.portAria")}
-              />
-            </DemoAction>
-          </div>
-          <span className="flex items-center gap-1.5 text-xs">
-            {t("wbStats.gateway.status")}
-            <span className={cn("inline-flex items-center gap-1.5 font-medium", running ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
-              <span className={cn("size-2 rounded-full", running ? "bg-emerald-500" : "bg-muted-foreground/50")} />
-              {running ? t("wbStats.gateway.running") : t("wbStats.gateway.stopped")}
-            </span>
-          </span>
-        </div>
+        <div className="min-w-0 flex-1">
+          {/* ---- 概览：服务状态 + 接入地址 + 接入指引 ---- */}
+          {sub === "overview" && (
+            <>
+              {/* 网关 */}
+              <Card className="mb-6 gap-0 py-0">
+                <div className="flex items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <Power className="size-4 text-muted-foreground" />
+                      {t("wbStats.gateway.enableGateway")}
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">{t("wbStats.gateway.enableDesc")}</p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {saving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+                    <DemoAction>
+                      <Switch
+                        checked={config.enabled}
+                        disabled={saving}
+                        onCheckedChange={(enabled) => void persist({ enabled })}
+                        aria-label={t("wbStats.gateway.enableAria")}
+                      />
+                    </DemoAction>
+                    {/* 与 Trae 页同构：手动重读配置 / 状态 / 池（池是实时状态，不刷新就看不到变化）。 */}
+                    <DemoAction>
+                      <Button variant="outline" size="sm" onClick={() => void loadAll()}>
+                        <RefreshCw />
+                        {t("wbStats.gateway.refresh")}
+                      </Button>
+                    </DemoAction>
+                  </div>
+                </div>
 
-        {/* 最近一次失败的原因（与 Trae 页同构）：否则用户只能去翻请求日志才知道为什么 502。 */}
-        {status?.lastError && (
-          <div className="border-t border-border/60 px-5 py-3">
-            <p className="text-xs text-muted-foreground">{t("wbStats.gateway.lastError")}</p>
-            <p className="mt-1 break-words text-xs text-destructive">{status.lastError}</p>
-          </div>
-        )}
-      </Card>
+                <div className="flex flex-wrap items-center gap-x-6 gap-y-3 px-5 py-4">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">{t("wbStats.gateway.bindAddr")}</span>
+                    <Select value={config.bind_addr} onValueChange={onBindAddrChange} disabled={saving}>
+                      <SelectTrigger size="sm" className="w-52" aria-label={t("wbStats.gateway.bindAddrAria")}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={LOOPBACK}>{t("wbStats.gateway.loopback")}</SelectItem>
+                        <SelectItem value={LAN}>{t("wbStats.gateway.lan")}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">{t("wbStats.gateway.port")}</span>
+                    <DemoAction>
+                      <Input
+                        className="h-8 w-28"
+                        inputMode="numeric"
+                        value={portDraft}
+                        onChange={(event) => setPortDraft(event.target.value)}
+                        onBlur={commitPort}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") commitPort();
+                        }}
+                        aria-label={t("wbStats.gateway.portAria")}
+                      />
+                    </DemoAction>
+                  </div>
+                  <span className="flex items-center gap-1.5 text-xs">
+                    {t("wbStats.gateway.status")}
+                    <span className={cn("inline-flex items-center gap-1.5 font-medium", running ? "text-success" : "text-muted-foreground")}>
+                      <span className={cn("size-2 rounded-full", running ? "bg-success" : "bg-muted-foreground/50")} />
+                      {running ? t("wbStats.gateway.running") : t("wbStats.gateway.stopped")}
+                    </span>
+                  </span>
+                </div>
 
-      {/* 接入地址：只显示**当前版本**（版本在页头切换，不在这里并排）。 */}
-      <Card className="mb-6 gap-0 py-0">
-        <div className="flex flex-wrap items-center gap-3 border-b border-border/60 px-5 py-3">
-          <span className="text-sm font-semibold">{t("wbStats.gateway.addr")}</span>
-        </div>
-        <div className="px-5 py-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <span className="text-xs text-muted-foreground">Base URL</span>
-            <code className="rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">{baseUrl}</code>
-            <Button variant="ghost" size="sm" onClick={() => void copyText(baseUrl, t("wbStats.gateway.baseUrlCopied"))}>
-              <Copy />
-              {t("wbStats.gateway.copy")}
-            </Button>
-            {/* 打开的是**当前版本**的数据目录：WorkBuddy 的 CN / 国际数据目录是两个，
-                页头切到哪版就打开哪版（不再并排两行让用户自己认）。 */}
-            <DemoAction>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={openingDir}
-                aria-label={t("wbStats.gateway.openDataDirAria", {
-                  version: regionDescriptor(region).versionLabel,
-                })}
-                onClick={() => void onOpenDataDir()}
-              >
-                {openingDir ? <Loader2 className="animate-spin" /> : <FolderOpen />}
-                {t("wbStats.gateway.openDataDir")}
-              </Button>
-            </DemoAction>
-          </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-            <span>API Key</span>
-            <code className="font-mono">
-              {representativeKey(keys, region) ?? t("wbStats.gateway.keyPlaceholder")}
-            </code>
-          </div>
-        </div>
-      </Card>
+                {/* 最近一次失败的原因（与 Trae 页同构）：否则用户只能去翻请求日志才知道为什么 502。 */}
+                {status?.lastError && (
+                  <div className="border-t border-border/60 px-5 py-3">
+                    <p className="text-xs text-muted-foreground">{t("wbStats.gateway.lastError")}</p>
+                    <p className="mt-1 break-words text-xs text-destructive">{status.lastError}</p>
+                  </div>
+                )}
+              </Card>
 
-      <ApiKeyTable className="mb-6" />
-      {/* 只渲染当前版本的池（版本在页头切换）。Key 表与请求日志**不做版本过滤**：
-          它们是「跨版本的管理视图」，逐行带归属即可（与 Trae 侧同口径）。 */}
-      <RegionPoolCard region={region} />
-      <ModelList region={region} className="mb-6" />
-      <IntegrationGuide baseUrl={baseUrl} region={region} className="mb-6" />
-      {/* P12 · 请求代理（**默认关**）：放在接入说明之后 —— 它是"进阶能力"，
-          且面板里必须**同时**给出风险与不劫持声明（原型断言 2）。 */}
-      <ProxyPanel />
-      <RequestLog />
+              {/* 接入地址：只显示**当前版本**（版本在页头切换，不在这里并排）。 */}
+              <Card className="mb-6 gap-0 py-0">
+                <div className="flex flex-wrap items-center gap-3 border-b border-border/60 px-5 py-3">
+                  <span className="text-sm font-semibold">{t("wbStats.gateway.addr")}</span>
+                </div>
+                <div className="px-5 py-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="text-xs text-muted-foreground">Base URL</span>
+                    <code className="rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs">{baseUrl}</code>
+                    <Button variant="ghost" size="sm" onClick={() => void copyText(baseUrl, t("wbStats.gateway.baseUrlCopied"))}>
+                      <Copy />
+                      {t("wbStats.gateway.copy")}
+                    </Button>
+                    {/* 打开的是**当前版本**的数据目录：WorkBuddy 的 CN / 国际数据目录是两个，
+                        页头切到哪版就打开哪版（不再并排两行让用户自己认）。 */}
+                    <DemoAction>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={openingDir}
+                        aria-label={t("wbStats.gateway.openDataDirAria", {
+                          version: regionDescriptor(region).versionLabel,
+                        })}
+                        onClick={() => void onOpenDataDir()}
+                      >
+                        {openingDir ? <Loader2 className="animate-spin" /> : <FolderOpen />}
+                        {t("wbStats.gateway.openDataDir")}
+                      </Button>
+                    </DemoAction>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    <span>API Key</span>
+                    <code className="font-mono">
+                      {representativeKey(keys, region) ?? t("wbStats.gateway.keyPlaceholder")}
+                    </code>
+                  </div>
+                </div>
+
+                {/* ★ 概览三行（原型 `viewGateway` :3013-3018）：上游凭据校验 + 可用模型 / 账号池（带「查看」深链）。
+                    数字全部来自后端下发，「查看」走 `?sub=` 深链（可刷新、可分享）。 */}
+                <div className="divide-y divide-border/60 border-t border-border/60">
+                  <div className="flex items-center justify-between gap-3 px-5 py-3">
+                    <div className="min-w-0">
+                      <div className="text-sm">{t("wbStats.gateway.upstreamCreds")}</div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {t("wbStats.gateway.upstreamCredsDesc")}
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={verifying}
+                      onClick={() => void onVerifyCreds()}
+                    >
+                      {verifying ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                      {t("wbStats.gateway.verify")}
+                    </Button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 px-5 py-3">
+                    <div className="min-w-0">
+                      <div className="text-sm">{t("wbStats.gateway.availableModels")}</div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {t("wbStats.gateway.modelCount", { count: modelCount })}
+                      </p>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => goSub("models")}>
+                      {t("wbStats.gateway.view")}
+                    </Button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 px-5 py-3">
+                    <div className="min-w-0">
+                      <div className="text-sm">{t("wbStats.gateway.poolEntries")}</div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">
+                        {t("wbStats.gateway.poolEntryCount", { count: poolCount })}
+                      </p>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => goSub("pool")}>
+                      {t("wbStats.gateway.view")}
+                    </Button>
+                  </div>
+                </div>
+              </Card>
+
+              {/* 接入指引：把「怎么用这个网关」放在概览里，一眼可见。 */}
+              <IntegrationGuide baseUrl={baseUrl} region={region} />
+            </>
+          )}
+
+          {/* ---- 密钥 ---- */}
+          {sub === "keys" && <ApiKeyTable />}
+
+          {/* ---- 模型 ---- */}
+          {sub === "models" && <ModelList region={region} />}
+
+          {/* ---- 账号池 ---- */}
+          {/* 只渲染当前版本的池（版本在页头切换）。 */}
+          {sub === "pool" && <RegionPoolCard region={region} />}
+
+          {/* ---- 请求代理（P12 · 默认关）：面板里必须**同时**给出风险与不劫持声明（原型断言 2）。 ---- */}
+          {sub === "proxy" && <ProxyPanel />}
+
+          {/* ---- 请求日志 ---- */}
+          {/* Key 表与请求日志**不做版本过滤**：它们是「跨版本的管理视图」，逐行带归属即可。 */}
+          {sub === "logs" && <RequestLog />}
+        </div>
+      </div>
 
       {/* 非回环监听风险确认 */}
       <Dialog open={riskOpen} onOpenChange={setRiskOpen}>

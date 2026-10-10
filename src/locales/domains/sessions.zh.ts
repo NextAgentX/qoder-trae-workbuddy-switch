@@ -13,9 +13,18 @@ export const zh = {
      它属 P8 功能词条，且 `shell` 域被多个并行任务编辑 —— 放这里避免重键与并发踩踏。 */
   "nav.sessions": "会话",
 
-  /* 会话工作台页头（两平台共用同一套标题）。 */
+  /* 会话工作台页头标题（两平台共用）。作用域副标题在 `shell.zh.ts` 的 `pageHead.sessions`
+     —— 所有页头的「作用域 · 说明」都住在那里，避免同一个约定散落两处。 */
   "sessions.title": "关联会话",
-  "sessions.subtitle": "跨账号会话副本的关联与同步",
+
+  /* ★ 会话页工具栏（原型 `viewSessions`，:3183）：标题 = 「{客户端} 会话」+ 计数徽标。
+     ⚠️ **不渲染客户端 Tab**（会话复制只有 WorkBuddy ⇒ 单选项是假控件，§3.15.1）
+     ⇒ 标题退化成静态文本，功能一点不少；客户端名走 `toolbar.client`（不写死在页面里）。 */
+  "sessions.toolbar.title": "{client} 会话",
+  "sessions.toolbar.client": "WorkBuddy 桌面",
+  /* 卡片头部（原型 `.sg-head`）：状态徽标 +「N 个副本」；以及可点区的无障碍标签。 */
+  "sessions.card.replicaCount": "{count} 个副本",
+  "sessions.card.openAria": "打开会话组 {title}",
 
   /* WorkBuddy 空态（§1.5）：ledger 无登记 ⇒ 结构化空态 + **出口**（去账号页复制）。 */
   "sessions.empty.title": "尚未用本应用复制过会话",
@@ -59,12 +68,35 @@ export const zh = {
   "sessions.sync.action": "同步安全项（{count}）",
   "sessions.sync.all": "同步全部落后项（{count}）",
   "sessions.sync.hint": "只把来源的新增内容追加到目标，不删除目标已有内容",
+  // ★ D2：常驻说明（不只靠 hover 的 title）。文案**必须含「加法」二字** ——
+  //   用户对「同步」最大的恐惧是「我的内容被覆盖」，而这句是唯一的常驻承诺。
+  "sessions.sync.additiveNote": "同步是加法：只往目标追加来源新增的内容，不会删除或覆盖目标已有内容。",
   "sessions.sync.toast.done": "同步完成",
   "sessions.sync.toast.failAll": "同步失败",
   "sessions.sync.toast.ok": "已同步 {n} 项，追加 {lines} 条",
   "sessions.sync.toast.failed": "{n} 项失败",
   "sessions.sync.toast.retryFailed": "只重试失败项",
   "sessions.sync.toast.error": "同步请求失败",
+
+  /* ★ P8「分歧处理」（覆盖式统一，§3.15.2）—— 与上面的「安全同步」**语义相反**：
+     同步是加法（只追加），这里是**覆盖**（目标的分歧内容会被丢弃）。
+     ⚠️ 文案红线（§3.15.2 / §3.5）：**不许**出现「同步到全部副本」这类静默覆盖措辞 ——
+     有分歧时**必须先让用户选保留哪一份**（`verify-behaviors.cjs` 有对应断言）。 */
+  "sessions.unify.action": "处理分歧（{count}）",
+  "sessions.unify.hint": "有分歧时必须先选保留哪一份；会覆盖其余副本（覆盖前自动备份）",
+  "sessions.unify.title": "选择要保留的那一份",
+  "sessions.unify.desc": "这些副本在共同旧版之后各自改过，无法合并。请选择保留哪一份，其余副本会被它覆盖。",
+  "sessions.unify.mostComplete": "内容最全",
+  "sessions.unify.overwrite": "将覆盖其余 {n} 个副本，丢弃 {lost} 条它们独有的内容（覆盖前已自动备份）。",
+  "sessions.unify.overwriteUnknown": "将覆盖其余 {n} 个副本，丢弃的条数未知（覆盖前已自动备份）。",
+  "sessions.unify.cancel": "取消",
+  "sessions.unify.confirm": "统一到其他副本",
+  "sessions.unify.toast.done": "已统一",
+  "sessions.unify.toast.failAll": "统一失败",
+  "sessions.unify.toast.ok": "已统一 {n} 项，丢弃 {lost} 条",
+  "sessions.unify.toast.failed": "{n} 项失败",
+  "sessions.unify.toast.retryFailed": "只重试失败项",
+  "sessions.unify.toast.error": "统一请求失败",
 
   /* ★ 统一重启确认（P8 T03 / §3.15.3）—— 跨程序位**复用同一条**流程。
      非 CLI：默认勾选「自动重开」+ 显式「未保存文件可能丢失」提示。

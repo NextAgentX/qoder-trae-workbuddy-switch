@@ -17,13 +17,15 @@ import {
   UserPlus,
 } from "lucide-react";
 
-import { AccountCard, accountIdentity, avatarTone, formatCredits, formatCreditExpiry, type GuideTarget } from "@/components/account-card";
+import { AccountCard, accountIdentity, accountDisplayName, avatarTone, formatCredits, formatCreditExpiry, formatTodayTokens, todayTokensBreakdown, type GuideTarget } from "@/components/account-card";
 import { AccountBatchBar } from "@/components/account-batch-bar";
 import { AccountTable, type AccountColumn } from "@/components/account-table";
 import { AccountToolbar, type ToolbarOption } from "@/components/account-toolbar";
-import { AccountDetailDrawer, type DetailPack, type DetailProgramBadge, type DetailSection } from "@/components/account-detail-drawer";
+import { AccountDetailDrawer, type DetailActions, type DetailCheckinHistoryRow, type DetailPack, type DetailProgramBadge, type DetailSection, type DetailSwitchTarget } from "@/components/account-detail-drawer";
+import { ClientLimitsCard } from "@/components/client-limits-card";
 import { DemoAction } from "@/components/demo-action";
 import { CodeBuddyCnIdeMark, CodeBuddyMark, WorkBuddyMark } from "@/components/product-marks";
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -33,7 +35,6 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { VariantSwitch, type VariantSwitchItem } from "@/components/variant-switch";
 import {
   Dialog,
   DialogContent,
@@ -67,19 +68,24 @@ import {
 import { copyText } from "@/lib/clipboard";
 import { displayText } from "@/lib/display-text";
 import { formatDate } from "@/lib/format";
-import { REGIONS, regionDescriptor } from "@/lib/region";
+import { regionDescriptor } from "@/lib/region";
 import { scopeOf } from "@/lib/scope";
 import type {
   AccountMeta,
+  AccountTokenTodayEntry,
   AppStatus,
   CheckinConfig,
+  CheckinLog,
   CodeBuddyCliStatus,
   CodeBuddyCnIdeStatus,
   CreditExpiry,
+  CreditStatsEvent,
+  JetbrainsCodebuddyPluginStatus,
   Region,
   SwitchConfig,
   TravelConfig,
   TravelStatus,
+  VscodeCodebuddyPluginStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useCompactMode } from "@/lib/use-compact-mode";
@@ -87,16 +93,42 @@ import { useDocumentVisible } from "@/lib/use-document-visible";
 import { useMediaQuery } from "@/lib/use-media-query";
 import { useScope } from "@/lib/use-scope";
 import { useAccountsStore } from "@/stores/accounts";
-import { useT, type Translate } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
 import { showUndoToast } from "@/lib/undo-toast";
 
 function expiringSoonAmount(credit?: CreditExpiry): number {
   return credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
 }
 
+/** 本地日期键（YYYY-MM-DD）：与后端签到日志 / 积分统计事件的 `date` 同口径（`local_date_string`）。 */
+function localDateKey(ts: number): string {
+  const date = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** 近 7 天本地日期（含今天，倒序）。 */
+function lastSevenDays(): string[] {
+  const days: string[] = [];
+  const base = new Date();
+  for (let i = 0; i < 7; i += 1) {
+    days.push(localDateKey(new Date(base.getFullYear(), base.getMonth(), base.getDate() - i).getTime()));
+  }
+  return days;
+}
+
 function hasExpiringSoonCredits(credit?: CreditExpiry): boolean {
   return credit?.ok === true && expiringSoonAmount(credit) > 0;
 }
+
+/**
+ * 需要走「统一重启确认」的客户端（PLAN §3.15.3）。
+ *
+ * - `cli`：**例外** —— 不重开客户端，但当前 CLI 会话会中断（确认框不渲染「自动重开」）；
+ * - `ide` / `vscode` / `jetbrains`：都是「先关 → 写凭证 → 再开」⇒ 默认勾选自动重开，
+ *   并显式提示未保存文件风险。
+ */
+type SwitchClient = "cli" | "ide" | "vscode" | "jetbrains";
 
 function soonestRelevantExpiry(credit?: CreditExpiry): number {
   const soonestExpiringCredit = (credit?.resources ?? [])
@@ -179,76 +211,43 @@ function regionPresence(status: AppStatus | null, accounts: AccountMeta[]): Regi
   return "absent";
 }
 
-function presenceText(presence: RegionPresence, status: AppStatus | null, t: Translate): string {
-  if (presence === "logged-in") {
-    // 归一是必须的：`t()` 的插值走 `String(params[name])`，脏值会原样变成
-    // 「已登录: [object Object]」（issue #2 用户截图里的那一行）。
-    const name =
-      displayText(status?.current?.nickname) ||
-      displayText(status?.current?.email) ||
-      displayText(status?.current?.uid) ||
-      t("wbAccounts.common.unknownAccount");
-    return t("wbAccounts.page.statusLoggedIn", { name });
-  }
-  if (presence === "installed") return t("wbAccounts.common.notLoggedIn");
-  return t("wbAccounts.common.notDetected");
-}
-
-/**
- * 两个版本的切换条目，交给**共用的** [`VariantSwitch`] 渲染。
- *
- * 与 Trae 账号页的同类条目**同形**（状态圆点 + 版本名 + 第二行状态文字），
- * 差异只在数据来源：这里读**账号库 / 客户端安装状态**，Trae 那边读各客户端进程状态。
- * 改造前两边各写一份 Tab 渲染（Trae 那份的注释里就写着「结构照 WorkBuddy AccountsPage」），
- * 现在合成同一个组件，避免再漂移。
- */
-function useRegionSwitchItems(): VariantSwitchItem[] {
-  const cnStatus = useAccountsStore((s) => s.status);
-  const cnAccounts = useAccountsStore((s) => s.accounts);
-  const globalStatus = useAccountsStore((s) => s.global.status);
-  const globalAccounts = useAccountsStore((s) => s.global.accounts);
-  const t = useT();
-
-  return REGIONS.map((region) => {
-    const status = region === "cn" ? cnStatus : globalStatus;
-    const accounts = region === "cn" ? cnAccounts : globalAccounts;
-    const presence = regionPresence(status, accounts);
-    return {
-      value: region,
-      label: regionDescriptor(region).versionLabel,
-      presence: presence === "logged-in" ? "active" : presence === "installed" ? "idle" : "absent",
-      detail: presenceText(presence, status, t),
-    };
-  });
-}
-
 export default function AccountsPage() {
   /* P1：区域统一走 `useScope`（URL 优先 + localStorage 记忆），不再用组件 state。
      原实现是 `useState<Region>("cn")` —— 刷新即丢，且与统计页互不通信（§1.2 诊断）。 */
-  const [activeRegion, setActiveRegion] = useScope("workbuddy");
+  const [activeRegion] = useScope("workbuddy");
   const fetchAllRegions = useAccountsStore((s) => s.fetchAllRegions);
-  const regionItems = useRegionSwitchItems();
+  const regionAccounts = useAccountsStore((s) =>
+    activeRegion === "cn" ? s.accounts : s.global.accounts,
+  );
   const t = useT();
 
   useEffect(() => {
     void fetchAllRegions();
   }, [fetchAllRegions]);
 
+  const pendingCount = regionAccounts.filter((a) => a.needsRelogin).length;
+
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
-      {/* 版本入口在**标题下方**（两个模块统一的位置）：整页跟随它。 */}
-      <header className="mb-6">
-        <h1 className="text-[28px] font-semibold tracking-tight">{t("wbAccounts.page.title")}</h1>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          {t("wbAccounts.page.subtitle", { product: "WorkBuddy" })}
-        </p>
-        <VariantSwitch
-          className="mt-4"
-          value={activeRegion}
-          onChange={(next) => setActiveRegion(next as Region)}
-          ariaLabel={t("wbAccounts.page.regionSwitchAria")}
-          items={regionItems}
-        />
+    <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
+      {/* 页头：作用域副标题 + 只读 scope-chip（区域已并入 L1 作用域，切作用域走顶栏）。 */}
+      <header className="mb-5 flex items-start gap-4">
+        <div className="min-w-0">
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("wbAccounts.page.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {pendingCount > 0
+              ? t("pageHead.accounts.pending", {
+                  scope: scopeLabel(t, scopeOf("workbuddy", activeRegion)),
+                  n: regionAccounts.length,
+                  m: pendingCount,
+                })
+              : t("pageHead.accounts", {
+                  scope: scopeLabel(t, scopeOf("workbuddy", activeRegion)),
+                  n: regionAccounts.length,
+                })}
+          </p>
+        </div>
+        <div className="grow" />
+        <ScopeChip scope={scopeOf("workbuddy", activeRegion)} />
       </header>
 
       {/* 只渲染当前版本的区块（等价于原先 `TabsContent` 的惰性挂载：
@@ -279,18 +278,32 @@ function RegionPanel({ region }: { region: Region }) {
 
   const [oauthOpen, setOauthOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  /**
+   * 导出目标：`null` = 导出**全部**账号（工具栏入口）；非 `null` = 导出**所选**账号（批量条入口）。
+   *
+   * 与 `exportOpen` 分开是因为它们回答两个问题：「导哪些」与「弹窗开着没」——
+   * 合成一个状态会让「关闭时清空选择」和「打开时带选择」互相踩。
+   */
+  const [exportTargets, setExportTargets] = useState<AccountMeta[] | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [switchAccount, setSwitchAccount] = useState<AccountMeta | null>(null);
   /**
    * 待确认的客户端切换目标（P8 T03 / §3.15.3）。
    *
-   * **所有**客户端切换都走**同一条**确认流程：`isCli` 决定走「CLI 例外」文案（不重开、当前
+   * **所有**客户端切换都走**同一条**确认流程：`client` 决定走「CLI 例外」文案（不重开、当前
    * CLI 会话会中断）还是「需重启」文案（默认勾选自动重开 + 未保存文件风险）。
    *
    * ⚠️ **同一功能在不同客户端行为不一致是缺陷** —— 用户会发现「为什么切 CLI 会提醒、切 IDE
    * 不提醒」，然后**不再相信这个提醒**。故 IDE 与 CLI 共用本状态、共用同一个确认框。
+   *
+   * ★ 2026-10-09：确认对象从 `isCli` 布尔扩成 `client` 四值 —— 新增的编辑器内 CodeBuddy
+   * 插件（VS Code / JetBrains）同样是「需先关再开」，必须走**同一条**确认（否则又出现
+   * 「有的客户端提醒、有的不提醒」）。
    */
-  const [restartConfirm, setRestartConfirm] = useState<{ account: AccountMeta; isCli: boolean } | null>(null);
+  const [restartConfirm, setRestartConfirm] = useState<{
+    account: AccountMeta;
+    client: SwitchClient;
+  } | null>(null);
   const [importing, setImporting] = useState(false);
   const [autoCheckinConfig, setAutoCheckinConfig] = useState<CheckinConfig | null>(null);
   const [autoCheckinSaving, setAutoCheckinSaving] = useState(false);
@@ -308,10 +321,24 @@ function RegionPanel({ region }: { region: Region }) {
   const [switchConfig, setSwitchConfig] = useState<SwitchConfig | null>(null);
   /** 账号 id -> 今日旅行状态（undefined=查询中/未知） */
   const [travelMap, setTravelMap] = useState<Record<string, TravelStatus>>({});
+  /**
+   * 「今日 Token」按账号聚合（`get_account_token_today`）：`uid -> 明细`。
+   *
+   * ⚠️ 用 **Map** 而非缺省对象是刻意的：`accounts` 里**缺席**某 uid = 「今日无记录 / 未知」，
+   * 与「有一行值全 0（真实 0）」是两件事（诚实边界）。`map.get(uid)` 为 `undefined` 即缺席。
+   */
+  const [tokenTodayMap, setTokenTodayMap] = useState<Map<string, AccountTokenTodayEntry>>(new Map());
+  /** 网关日志已到保留上限 ⇒ 网关部分为下界（「今日 Token」渲染 `≥N`）。 */
+  const [tokenTodayTruncated, setTokenTodayTruncated] = useState(false);
   const [codebuddyCli, setCodebuddyCli] = useState<CodeBuddyCliStatus | null>(null);
   const [codebuddyCliSwitchingId, setCodebuddyCliSwitchingId] = useState<string | null>(null);
   const [codebuddyCnIde, setCodebuddyCnIde] = useState<CodeBuddyCnIdeStatus | null>(null);
   const [codebuddyCnIdeSwitchingId, setCodebuddyCnIdeSwitchingId] = useState<string | null>(null);
+  /* ★ 2026-10-09：编辑器内 CodeBuddy 插件两个程序位（VS Code / JetBrains）的安装状态与切换态。 */
+  const [vscodePlugin, setVscodePlugin] = useState<VscodeCodebuddyPluginStatus | null>(null);
+  const [vscodePluginSwitchingId, setVscodePluginSwitchingId] = useState<string | null>(null);
+  const [jetbrainsPlugin, setJetbrainsPlugin] = useState<JetbrainsCodebuddyPluginStatus | null>(null);
+  const [jetbrainsPluginSwitchingId, setJetbrainsPluginSwitchingId] = useState<string | null>(null);
   const [installingCodebuddyCli, setInstallingCodebuddyCli] = useState(false);
   /** 刷新按钮触发的批量签到进行中 */
   const [checkinAllRunning, setCheckinAllRunning] = useState(false);
@@ -400,6 +427,16 @@ function RegionPanel({ region }: { region: Region }) {
    */
   const [checkinDetailMap, setCheckinDetailMap] = useState<Record<string, CheckinStatusEntry>>({});
   const [detailAutoEditRemark, setDetailAutoEditRemark] = useState(false);
+  /** 由「更多 → 设置分组」打开抽屉时，直接进入**分组**编辑态（与备注同一交互）。 */
+  const [detailAutoEditGroup, setDetailAutoEditGroup] = useState(false);
+  /**
+   * ★ 抽屉「签到历史（近 7 天）」的数据源（打开抽屉时拉取）：
+   * - `checkinLogs` = `getCheckinLogs()`：**真实**的日期 + 结果；
+   * - `creditEvents` = `getCreditStatistics()` 的事件流：按**账号 + 日期**匹配签到事件的 `amount`
+   *   ⇒ 拿到「获得积分」。取不到时为 `null`，表格渲染「—」（**绝不**臆造固定奖励）。
+   */
+  const [detailCheckinLogs, setDetailCheckinLogs] = useState<CheckinLog[] | null>(null);
+  const [detailCreditEvents, setDetailCreditEvents] = useState<CreditStatsEvent[] | null>(null);
   /**
    * ★ 跨作用域选择集按 **(scope, id)** 键控（P5 §2.5 第 (4) 条）。
    *
@@ -443,6 +480,7 @@ function RegionPanel({ region }: { region: Region }) {
 
   function openDetail(account: AccountMeta) {
     setDetailAutoEditRemark(false);
+    setDetailAutoEditGroup(false);
     setDetailAccount(account);
     // ★ B5：顺带查一次**签到详情**（抽屉要显示「+100」+ 连签天数 + 日期列表）。
     //   此前只在批量接口里取了「是否已签到」，**详情从没查过** ⇒ 抽屉无从展示。
@@ -452,10 +490,28 @@ function RegionPanel({ region }: { region: Region }) {
       .catch(() => {
         /* 查询失败不阻断抽屉：签到区**不渲染**即可（不摆空数据）。 */
       });
+    // ★ 签到历史（近 7 天）：日期 + 结果来自签到日志；「获得积分」来自积分统计的签到事件。
+    //   两者都**真实**取数；任一失败则该列回落「—」，不臆造。
+    void api
+      .getCheckinLogs()
+      .then((res) => setDetailCheckinLogs(res.logs))
+      .catch(() => setDetailCheckinLogs(null));
+    void api
+      .getCreditStatistics(false, region)
+      .then((stats) => setDetailCreditEvents(stats.events))
+      .catch(() => setDetailCreditEvents(null));
   }
 
   function openRemark(account: AccountMeta) {
     setDetailAutoEditRemark(true);
+    setDetailAutoEditGroup(false);
+    setDetailAccount(account);
+  }
+
+  /** 「更多 → 设置分组」：打开抽屉并进入**分组**编辑态（与 `openRemark` 同一交互）。 */
+  function openGroup(account: AccountMeta) {
+    setDetailAutoEditRemark(false);
+    setDetailAutoEditGroup(true);
     setDetailAccount(account);
   }
 
@@ -465,10 +521,14 @@ function RegionPanel({ region }: { region: Region }) {
    * 为什么不就地处理：IDE 路径与 CLI 接入都是**设置页**的能力，页面里没有第二处入口；
    * 给一句 toast + 跳过去，才能让「未检测到」变成可解决的问题（PLAN §3.3 规则 1）。
    */
-  function onGuideToSetting(target: GuideTarget) {
-    toast.info(
-      target === "ide" ? t("wbAccounts.toast.guideIdeSetting") : t("wbAccounts.toast.guideCliSetting"),
-    );
+  function onGuideToSetting(target?: GuideTarget) {
+    /* 卡片上的「未检测程序位」入口带 `target` ⇒ 给一句针对性 toast；
+       抽屉里的「切换权限诊断」不带 `target` ⇒ 只跳转，不改变既有卡片文案。 */
+    if (target) {
+      toast.info(
+        target === "ide" ? t("wbAccounts.toast.guideIdeSetting") : t("wbAccounts.toast.guideCliSetting"),
+      );
+    }
     /* ★ P0-4a：必须带**子项锚点** ⇒ 直接落到「权限与诊断」（`PermissionCheckCard`），
        而不是设置页首页（那样用户还得自己找子项，原型断言 `P0-4a` 明确要求"跳到权限与诊断"）。 */
     navigate(`/s/${scopeOf("workbuddy", region)}/settings?section=diagnostics`);
@@ -687,9 +747,35 @@ function RegionPanel({ region }: { region: Region }) {
     }
   }
 
+  /**
+   * 编辑器内 CodeBuddy 插件（VS Code / JetBrains）的**安装 / 运行 / 登录态**。
+   *
+   * ⚠️ 只拉 `status`，**不**在挂载时调 `detect`：`detect` 要**解密** secret（macOS 会弹
+   * 钥匙串授权）⇒ 放进每次挂载的轮询路径会骚扰用户；「当前账号」改由本地状态文件给出，
+   * 用户主动点「从本机导入」时才解密（与 `vscode_ext::status` 的注释同一口径）。
+   */
+  async function refreshVscodePluginStatus() {
+    try {
+      setVscodePlugin(await api.getVscodeCodebuddyPluginStatus());
+    } catch {
+      setVscodePlugin(null);
+    }
+  }
+
+  async function refreshJetbrainsPluginStatus() {
+    try {
+      setJetbrainsPlugin(await api.getJetbrainsCodebuddyPluginStatus());
+    } catch {
+      setJetbrainsPlugin(null);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     void refreshCodebuddyCliStatus();
+    /* 两个编辑器插件的状态：与 CLI / IDE 同批拉取（都是**本机只读探测**，无网络）。 */
+    void refreshVscodePluginStatus();
+    void refreshJetbrainsPluginStatus();
     void (async () => {
       if (!api.isDemoMode()) {
         try {
@@ -821,6 +907,33 @@ function RegionPanel({ region }: { region: Region }) {
     void ensureCredits(accounts.map((account) => account.id), region);
   }, [accounts, ensureCredits, region]);
 
+  /**
+   * 「今日 Token」按账号聚合（只读）—— 卡片指标行 / 表格列的数据源。
+   *
+   * ⚠️ 读不到时**清空为「今日无记录」**（卡片 / 表格渲染「—」），**绝不**沿用上一次的数字：
+   * 换 region 后旧数字会张冠李戴（本仓踩过字段张冠李戴的坑）。取数失败不弹错、不打扰用户。
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAccountTokenToday(region)
+      .then((res) => {
+        if (cancelled) return;
+        const map = new Map<string, AccountTokenTodayEntry>();
+        for (const entry of res.accounts ?? []) map.set(entry.uid, entry);
+        setTokenTodayMap(map);
+        setTokenTodayTruncated(Boolean(res.gatewayTruncated));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setTokenTodayMap(new Map());
+        setTokenTodayTruncated(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [region, accounts.length]);
+
   async function onRecheck() {
     await Promise.all([refreshRegionStatus(region), reconcileAccounts(region)]);
   }
@@ -829,7 +942,7 @@ function RegionPanel({ region }: { region: Region }) {
     setImporting(true);
     try {
       const acc = await importLocalStore(region);
-      toast.success(t("wbAccounts.toast.imported"), { description: acc.nickname || acc.email || acc.id });
+      toast.success(t("wbAccounts.toast.imported"), { description: accountDisplayName(acc) });
     } catch (e) {
       toast.error(t("wbAccounts.toast.importFail"), { description: api.asError(e) });
     } finally {
@@ -916,7 +1029,7 @@ function RegionPanel({ region }: { region: Region }) {
           : res.result === "already"
             ? t("wbAccounts.toast.checkedInToday")
             : t("wbAccounts.toast.checkinFail");
-      const description = `${a.nickname || a.email || a.id}${res.error ? `${t("shared.punct.colon")}${res.error}` : ""}`;
+      const description = `${accountDisplayName(a)}${res.error ? `${t("shared.punct.colon")}${res.error}` : ""}`;
       if (res.result === "error") toast.error(label, { description });
       else toast.success(label, { description });
       // 刷新该账号的今日签到状态
@@ -937,7 +1050,7 @@ function RegionPanel({ region }: { region: Region }) {
   async function onRefresh(a: AccountMeta) {
     try {
       const res = await api.refreshAccountToken(a.id, region);
-      const label = a.nickname || a.email || a.id;
+      const label = accountDisplayName(a);
       if (res.needsRelogin) {
         // `needsReloginReason` 是后端给出的**自足**原因（自带「需重新登录…」这一步），
         // 旧实现把它塞进「需重新登录（…）」的括号里 ⇒ 同一句话在一条 toast 里出现两遍
@@ -997,7 +1110,7 @@ function RegionPanel({ region }: { region: Region }) {
   /** 点「切换 CLI」：先走**统一重启确认**（CLI 例外 —— 不重开，但当前 CLI 会话会中断）。 */
   function onSwitchCodebuddyCli(account: AccountMeta) {
     if (codebuddyCliSwitchingId !== null) return;
-    setRestartConfirm({ account, isCli: true });
+    setRestartConfirm({ account, client: "cli" });
   }
 
   /** 用户在确认框里点了「仍要切换」后，真正执行 CLI 切换。 */
@@ -1005,14 +1118,14 @@ function RegionPanel({ region }: { region: Region }) {
     if (codebuddyCliSwitchingId !== null) return;
     setCodebuddyCliSwitchingId(account.id);
     const toastId = toast.loading(t("wbAccounts.toast.switchCliLoading"), {
-      description: t("wbAccounts.toast.switchCliLoadingDesc", { name: account.nickname || account.email || account.id }),
+      description: t("wbAccounts.toast.switchCliLoadingDesc", { name: accountDisplayName(account) }),
     });
     try {
       const result = await api.switchCodebuddyCliAccount(account.id);
       await refreshCodebuddyCliStatus();
       toast.success(t("wbAccounts.toast.switchCliUpdated"), {
         id: toastId,
-        description: `${account.nickname || account.email || account.id}${t("shared.punct.colon")}${result.message || t("wbAccounts.toast.configUpdated")}`,
+        description: `${accountDisplayName(account)}${t("shared.punct.colon")}${result.message || t("wbAccounts.toast.configUpdated")}`,
       });
     } catch (error) {
       toast.error(t("wbAccounts.toast.switchCliFail"), {
@@ -1027,7 +1140,7 @@ function RegionPanel({ region }: { region: Region }) {
   /** 点「切换到 CodeBuddy IDE」：先走**统一重启确认**（IDE 需重启，默认勾选自动重开）。 */
   function onSwitchCodebuddyCnIde(account: AccountMeta) {
     if (codebuddyCnIdeSwitchingId !== null) return;
-    setRestartConfirm({ account, isCli: false });
+    setRestartConfirm({ account, client: "ide" });
   }
 
   /** 用户在确认框里点了确认后，真正执行 IDE 切换（`restart` 由确认框决定）。 */
@@ -1056,6 +1169,119 @@ function RegionPanel({ region }: { region: Region }) {
       });
     } finally {
       setCodebuddyCnIdeSwitchingId(null);
+    }
+  }
+
+  /**
+   * 编辑器内 CodeBuddy 插件（VS Code / JetBrains）两个程序位：**一条**切换实现，参数化客户端。
+   *
+   * ## 为什么合成一条
+   *
+   * 两者只在「切哪个程序位 / 显示什么名字」上不同，时序完全一致（确认 → 关编辑器 →
+   * 写凭证 → 重开）。各写一份必然漂移（一处改了 toast 文案、另一处没改）—— 那正是
+   * §3.15.3「不要各写一套」要防的。
+   *
+   * ## 诚实边界
+   *
+   * `restart=false`（用户取消「自动重开」）时**不得**说「并重启」：文案改用
+   * `sessions.restart.switchingNoRestart`，如实写「稍后手动打开」。
+   */
+  async function runPluginSwitch(
+    account: AccountMeta,
+    restart: boolean,
+    busyId: string | null,
+    setBusy: (id: string | null) => void,
+    label: string,
+    doSwitch: (accountId: string, restart: boolean) => Promise<{ message?: string; account?: string }>,
+    refresh: () => Promise<void>,
+  ) {
+    if (busyId !== null) return;
+    setBusy(account.id);
+    const toastId = toast.loading(t("wbAccounts.toast.switchPluginLoading", { client: label }), {
+      description: restart
+        ? t("wbAccounts.toast.switchPluginLoadingDesc", { client: label })
+        : t("sessions.restart.switchingNoRestart", { client: label }),
+    });
+    try {
+      const result = await doSwitch(account.id, restart);
+      await refresh();
+      toast.success(t("wbAccounts.toast.switchPluginUpdated", { client: label }), {
+        id: toastId,
+        description: result.message || result.account,
+      });
+    } catch (error) {
+      toast.error(t("wbAccounts.toast.switchPluginFail", { client: label }), {
+        id: toastId,
+        description: api.asError(error),
+      });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** 点「切换 VS Code 扩展」：先走**统一重启确认**（写 `state.vscdb` 前 VS Code 必须退出）。 */
+  function onSwitchVscodePlugin(account: AccountMeta) {
+    if (vscodePluginSwitchingId !== null) return;
+    setRestartConfirm({ account, client: "vscode" });
+  }
+
+  function doSwitchVscodePlugin(account: AccountMeta, restart: boolean) {
+    void runPluginSwitch(
+      account,
+      restart,
+      vscodePluginSwitchingId,
+      setVscodePluginSwitchingId,
+      t("wbAccounts.program.vscodeCodebuddyPlugin"),
+      api.switchVscodeCodebuddyPluginAccount,
+      refreshVscodePluginStatus,
+    );
+  }
+
+  /** 点「切换 JetBrains 插件」：同上（IDE 运行中写入会被内存态覆盖 ⇒ 必须先关）。 */
+  function onSwitchJetbrainsPlugin(account: AccountMeta) {
+    if (jetbrainsPluginSwitchingId !== null) return;
+    setRestartConfirm({ account, client: "jetbrains" });
+  }
+
+  function doSwitchJetbrainsPlugin(account: AccountMeta, restart: boolean) {
+    void runPluginSwitch(
+      account,
+      restart,
+      jetbrainsPluginSwitchingId,
+      setJetbrainsPluginSwitchingId,
+      t("wbAccounts.program.jetbrainsCodebuddyPlugin"),
+      api.switchJetbrainsCodebuddyPluginAccount,
+      refreshJetbrainsPluginStatus,
+    );
+  }
+
+  /**
+   * 未检测到编辑器扩展时的出口（§3.3 规则 1：**不摆点不动的灰按钮**）。
+   *
+   * ⚠️ 与「去设置」分开：设置页里**没有**「安装 VS Code / JetBrains 扩展」这类子项 ⇒
+   * 把用户送到设置页帮不上忙。真正指向正确动作的是**说明**：先去编辑器里装扩展。
+   */
+  function onGuidePlugin(programId: string) {
+    const client =
+      programId === "vscode_codebuddy_plugin"
+        ? t("wbAccounts.program.vscodeCodebuddyPlugin")
+        : t("wbAccounts.program.jetbrainsCodebuddyPlugin");
+    toast.info(t("wbAccounts.card.guidePlugin", { client }));
+  }
+
+  /**
+   * 统一重启确认框里的客户端显示名 —— 与注册表 `labelKey` **同一份文案**（不另抄一份）。
+   */
+  function switchClientLabel(client: SwitchClient): string {
+    switch (client) {
+      case "cli":
+        return t("wbAccounts.program.codebuddyCli");
+      case "ide":
+        return t("wbAccounts.program.codebuddyCnIde");
+      case "vscode":
+        return t("wbAccounts.program.vscodeCodebuddyPlugin");
+      default:
+        return t("wbAccounts.program.jetbrainsCodebuddyPlugin");
     }
   }
 
@@ -1102,12 +1328,33 @@ function RegionPanel({ region }: { region: Region }) {
     }
   }
 
+  /**
+   * 保存账号自定义分组（**字段级更新**，与 {@link onSaveRemark} 同一交互 / 同一口径）。
+   *
+   * 成功后重取账号库（后端把空串归一成「未分组」⇒ 让后端返回的 meta 成为唯一真相源）。
+   * 返回布尔值而非抛异常：失败时抽屉保持编辑态，让用户改完重试。
+   */
+  async function onSaveGroup(account: AccountMeta, group: string): Promise<boolean> {
+    try {
+      await api.setAccountGroup(account.id, group, region);
+      await reconcileAccounts(region);
+      toast.success(
+        group.trim() ? t("wbAccounts.toast.groupSaved") : t("wbAccounts.toast.groupCleared"),
+      );
+      return true;
+    } catch (e) {
+      toast.error(t("wbAccounts.toast.groupSaveFail"), { description: api.asError(e) });
+      return false;
+    }
+  }
+
   const creditOrderingReady =
     accounts.length > 0 &&
     accounts.every((account) => Boolean(creditMap[account.id]) && !creditLoadingMap[account.id]);
 
   const cliCurrentAccountId = codebuddyCli?.activeAccountId;
-  // 归一同 `presenceText`：这个值会进 `t()` 的插值（徽标 tooltip 的「当前账号：…」）。
+  // 归一是必须的：`t()` 的插值走 `String(params[name])`，脏值会原样变成
+  // 「已登录: [object Object]」（issue #2 用户截图里的那一行）。
   const workbuddyCurrentName = current
     ? displayText(current.nickname) ||
       displayText(current.email) ||
@@ -1121,6 +1368,10 @@ function RegionPanel({ region }: { region: Region }) {
   const cnIdeCurrentName = codebuddyCnIde?.installed
     ? codebuddyCnIde.activeAccountName || t("wbAccounts.common.notDetected")
     : t("wbAccounts.common.notInstalled");
+  /* ★ 2026-10-09：编辑器内两个插件的「当前账号」——同样来自**本地状态文件**
+     （`status.activeAccountId`），不为了这一行去解密 secret（那会弹钥匙串授权）。 */
+  const vscodePluginCurrentAccountId = vscodePlugin?.activeAccountId;
+  const jetbrainsPluginCurrentAccountId = jetbrainsPlugin?.activeAccountId;
   const codebuddyUsesSettingsEnv = codebuddyCli?.authMode === "settings-env";
 
   /** 账号展示名（表格 / 无障碍标签共用；过 `displayText` 归一，防脏值白屏）。 */
@@ -1138,7 +1389,9 @@ function RegionPanel({ region }: { region: Region }) {
    * - `priority` = 现状写死的「积分优先级」（快过期 / 建议优先靠前）；`creditOrderingReady`
    *   为假时返回 0 ⇒ 稳定排序保持原序（与旧实现的 `: accounts` 分支等价）；
    * - `name` / `expiry` 是新增键；
-   * - **无 `recent`**（决策 #3：`AccountMeta` 无 `lastUsed`，不摆假选项）。
+   * - `recent` = 按 `AccountMeta.lastUsedAt`（epoch 毫秒）**倒序**；从未使用的账号（缺该字段）
+   *   排到最后。⚠️ 2026-10-10 起后端为 `AccountMeta` 记录 `lastUsedAt`，故「最近使用」不再是
+   *   假选项（决策 #3 的原判据「无字段」已不成立 —— 见 `check-scope-registry.cjs` 对应断言）。
    */
   const listConfig = useMemo<AccountListConfig<AccountMeta>>(() => {
     const priorityComparator: AccountComparator<AccountMeta> = (left, right) => {
@@ -1155,6 +1408,10 @@ function RegionPanel({ region }: { region: Region }) {
       wbAccountName(left).localeCompare(wbAccountName(right), undefined, { numeric: true, sensitivity: "base" });
     const expiryComparator: AccountComparator<AccountMeta> = (left, right) =>
       (left.expiresAt ?? Number.POSITIVE_INFINITY) - (right.expiresAt ?? Number.POSITIVE_INFINITY);
+    /* 「最近使用」：按 `lastUsedAt` **倒序**（新的在前）；缺席（从未使用）用 `-Infinity`
+       兜底 ⇒ 一律排到最后，而不是被当成「很久以前」（0 会混进中间去）。 */
+    const recentComparator: AccountComparator<AccountMeta> = (left, right) =>
+      (right.lastUsedAt ?? Number.NEGATIVE_INFINITY) - (left.lastUsedAt ?? Number.NEGATIVE_INFINITY);
     return {
       searchText: (account) =>
         accountSearchText({
@@ -1167,6 +1424,7 @@ function RegionPanel({ region }: { region: Region }) {
         priority: creditOrderingReady ? priorityComparator : () => 0,
         name: nameComparator,
         expiry: expiryComparator,
+        recent: recentComparator,
       },
       /**
        * `pin_current_account` 打开时把当前登录账号整体提到第一位。
@@ -1199,10 +1457,16 @@ function RegionPanel({ region }: { region: Region }) {
           if (checkinMap[account.id] === false) return t("wbAccounts.toolbar.statusBucket.notCheckedIn");
           return t("wbAccounts.toolbar.statusBucket.normal");
         }
+        if (key === "group") {
+          /* 按用户自定义分组名分桶；**空 / 缺省 = 未分组**落到显式「未分组」桶
+             （不给它一个空桶名 ⇒ 必须有一个可读的桶标题）。 */
+          const name = displayText(account.groupName)?.trim();
+          return name ? name : t("wbAccounts.toolbar.groupBucket.ungrouped");
+        }
         return null;
       },
-      availableSorts: ["priority", "name", "expiry"],
-      availableGroups: ["none", "program", "status"],
+      availableSorts: ["priority", "name", "expiry", "recent"],
+      availableGroups: ["none", "program", "status", "group"],
     };
   }, [creditOrderingReady, creditMap, switchConfig, current, cnIdeCurrentAccountId, cliCurrentAccountId, checkinMap, t]);
 
@@ -1221,11 +1485,13 @@ function RegionPanel({ region }: { region: Region }) {
     priority: t("wbAccounts.toolbar.sort.priority"),
     name: t("wbAccounts.toolbar.sort.name"),
     expiry: t("wbAccounts.toolbar.sort.expiry"),
+    recent: t("wbAccounts.toolbar.sort.recent"),
   };
   const groupLabels: Partial<Record<AccountGroupKey, string>> = {
     none: t("wbAccounts.toolbar.group.none"),
     program: t("wbAccounts.toolbar.group.program"),
     status: t("wbAccounts.toolbar.group.status"),
+    group: t("wbAccounts.toolbar.group.custom"),
   };
   const sortOptions: ToolbarOption[] = listConfig.availableSorts.flatMap((key) => {
     const label = sortLabels[key];
@@ -1362,6 +1628,24 @@ function RegionPanel({ region }: { region: Region }) {
       render: (account) => (
         <span className="tabular-nums">{formatCredits(creditMap[account.id]?.totalRemaining ?? 0)}</span>
       ),
+    },
+    {
+      /* 「今日 Token」列：与卡片指标行**同一份**诚实实现（`formatTodayTokens`）——
+         账号缺席 ⇒ 「—」（绝不当 0）；网关被裁剪 ⇒ 下界 `≥N`（`title` 说明下界口径）。 */
+      key: "todayTokens",
+      header: t("wbAccounts.table.todayTokens"),
+      align: "right",
+      render: (account) => {
+        const entry = account.uid ? tokenTodayMap.get(account.uid) : undefined;
+        return (
+          <span
+            className={cn("tabular-nums", !entry && "text-muted-foreground")}
+            title={entry ? todayTokensBreakdown(entry, tokenTodayTruncated, t) : undefined}
+          >
+            {formatTodayTokens(entry, tokenTodayTruncated, t)}
+          </span>
+        );
+      },
     },
     {
       key: "expiry",
@@ -1508,6 +1792,140 @@ function RegionPanel({ region }: { region: Region }) {
       ]
     : [];
 
+  /**
+   * ★ 抽屉：账号是否「当前登录」= 绑定了**任一**程序位（与卡片 / 原型 :3467 同口径）。
+   */
+  const detailIsCurrent = detail
+    ? isWorkbuddyCurrent(detail, current) ||
+      detail.id === cnIdeCurrentAccountId ||
+      detail.id === cliCurrentAccountId ||
+      detail.id === vscodePluginCurrentAccountId ||
+      detail.id === jetbrainsPluginCurrentAccountId
+    : false;
+
+  /**
+   * ★ 抽屉「切换到此账号」程序位（可点）。
+   *
+   * 每个程序的 `onSwitch` 只在**可用**时提供 —— 不可用的渲染成「未检测到」的禁用项，
+   * 不把用户引向一个必然失败的切换（与卡片 `.prog.off` 的措辞同一纪律）。
+   * 回调全部复用页面**既有**的切换处理函数（各程序位自己的确认流程）。
+   */
+  const detailSwitchTargets: DetailSwitchTarget[] = detail
+    ? [
+        {
+          key: "workbuddy",
+          label: "WorkBuddy",
+          current: isWorkbuddyCurrent(detail, current),
+          available: true,
+          onSwitch: () => setSwitchAccount(detail),
+        },
+        {
+          key: "ide",
+          label: "CodeBuddy IDE",
+          current: detail.id === cnIdeCurrentAccountId,
+          available: Boolean(codebuddyCnIde?.installed),
+          busy: codebuddyCnIdeSwitchingId !== null,
+          loading: codebuddyCnIdeSwitchingId === detail.id,
+          onSwitch: codebuddyCnIde?.installed ? () => onSwitchCodebuddyCnIde(detail) : undefined,
+        },
+        {
+          key: "cli",
+          label: "CodeBuddy CLI",
+          current: detail.id === cliCurrentAccountId,
+          available: Boolean(codebuddyCli?.configured && !codebuddyCli.migrationRequired && !codebuddyCli.syncPending),
+          busy: codebuddyCliSwitchingId !== null,
+          loading: codebuddyCliSwitchingId === detail.id,
+          onSwitch:
+            codebuddyCli?.configured && !codebuddyCli.migrationRequired && !codebuddyCli.syncPending
+              ? () => onSwitchCodebuddyCli(detail)
+              : undefined,
+        },
+        {
+          key: "vscode",
+          label: t("wbAccounts.program.vscodeCodebuddyPlugin"),
+          current: detail.id === vscodePluginCurrentAccountId,
+          available: Boolean(vscodePlugin?.extensionInstalled),
+          busy: vscodePluginSwitchingId !== null,
+          loading: vscodePluginSwitchingId === detail.id,
+          onSwitch: vscodePlugin?.extensionInstalled ? () => onSwitchVscodePlugin(detail) : undefined,
+        },
+        {
+          key: "jetbrains",
+          label: t("wbAccounts.program.jetbrainsCodebuddyPlugin"),
+          current: detail.id === jetbrainsPluginCurrentAccountId,
+          available: Boolean(jetbrainsPlugin?.pluginInstalled),
+          busy: jetbrainsPluginSwitchingId !== null,
+          loading: jetbrainsPluginSwitchingId === detail.id,
+          onSwitch: jetbrainsPlugin?.pluginInstalled ? () => onSwitchJetbrainsPlugin(detail) : undefined,
+        },
+      ]
+    : [];
+
+  const detailExpired =
+    detail != null && typeof detail.expiresAt === "number" && detail.expiresAt < Date.now();
+
+  /**
+   * ★ 抽屉「操作」区：回调全部复用页面**既有**处理函数（刷新 / 签到 / 导出 / 权限诊断 / 删除）。
+   * 「手动签到」按 F5 口径门控（过期 / 需重登不给入口）—— 与卡片菜单、批量签到同一条规则。
+   */
+  const detailActions: DetailActions | null = detail
+    ? {
+        onRefresh: () => onRefresh(detail),
+        onCheckin: () => onCheckin(detail),
+        showCheckin: checkinMap[detail.id] === false && !detailExpired && !detail.needsRelogin,
+        onExport: () => {
+          setExportTargets([detail]);
+          setExportOpen(true);
+        },
+        onPermission: () => onGuideToSetting(),
+        onDelete: () => onDelete(detail),
+        credentialUnavailable: Boolean(detail.needsRelogin || detailExpired),
+      }
+    : null;
+
+  /**
+   * ★ 抽屉「签到历史（近 7 天）」。
+   *
+   * 日期 + 结果来自 `getCheckinLogs()`（真实）；「获得积分」按**账号 + 日期**取积分统计的签到事件
+   * `amount`，取不到时为 `null` ⇒ 渲染「—」（**绝不**臆造固定奖励）。
+   */
+  const detailCheckinHistory: DetailCheckinHistoryRow[] | null =
+    detail && detailCheckinLogs
+      ? lastSevenDays().map((day) => {
+          const log = detailCheckinLogs
+            .filter(
+              (entry) =>
+                localDateKey(entry.ts) === day &&
+                (entry.accountId === detail.id ||
+                  (entry.accountId == null && Boolean(detail.email) && entry.email === detail.email)),
+            )
+            .sort((left, right) => right.ts - left.ts)[0];
+          const event = (detailCreditEvents ?? []).find(
+            (item) => item.kind === "checkin" && item.date === day && item.accountId === detail.id,
+          );
+          const amount = event && event.kind === "checkin" ? event.amount ?? null : null;
+          if (!log) {
+            return { date: day, resultLabel: t("shared.drawer.checkin.result.none"), tone: "none", amount };
+          }
+          if (log.result === "success") {
+            return { date: day, resultLabel: t("shared.drawer.checkin.result.success"), tone: "ok", amount };
+          }
+          if (log.result === "already") {
+            return { date: day, resultLabel: t("shared.drawer.checkin.result.already"), tone: "warn", amount };
+          }
+          return { date: day, resultLabel: t("shared.drawer.checkin.result.fail"), tone: "fail", amount };
+        })
+      : null;
+
+  /**
+   * 已勾选的账号（按当前列表顺序）—— 批量条上的动作共用这一份，避免各处再 filter 一遍。
+   */
+  const selectedAccounts = useMemo(
+    () => accounts.filter((a) => selectedKeys.has(selectionKey(a.id))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [accounts, selectedKeys, scope],
+  );
+
   return (
     <>
       {/* 产品状态徽标 */}
@@ -1579,10 +1997,12 @@ function RegionPanel({ region }: { region: Region }) {
 
       {/* 空态（未安装 / 未登录） */}
       {loading && accounts.length === 0 ? (
-        /* 区块**首次加载**用 `<Skeleton>`（§3.6），形状接近真实卡片栅格（不是一行文字）。 */
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))] gap-5">
+        /* 区块**首次加载**用 `<Skeleton>`（§3.6），形状接近真实卡片栅格（不是一行文字）。
+           ⚠️ 栅格必须与下面真实的卡片栅格**同列数**（`.g3`：3 / 2 / 1），
+           否则加载完成瞬间列数会跳变（骨架 2 列 → 内容 3 列）。 */
+        <div className="grid grid-cols-1 gap-3 min-[761px]:grid-cols-2 min-[1101px]:grid-cols-3">
           {[0, 1, 2].map((index) => (
-            <Skeleton key={index} className="h-44 w-full rounded-2xl" />
+            <Skeleton key={index} className="h-44 w-full rounded-lg" />
           ))}
         </div>
       ) : showEmpty ? (
@@ -1596,7 +2016,7 @@ function RegionPanel({ region }: { region: Region }) {
         />
       ) : (
         <>
-          <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-[0_6px_20px_rgba(15,23,42,.025)]">
+          <div className="relative mb-6 overflow-visible rounded-2xl border border-border bg-muted/30 px-5 py-5 shadow-card">
             <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-2xl">
               <div className="absolute -right-12 -top-20 size-44 rounded-full border-[28px] border-slate-400/[0.035]" />
             </div>
@@ -1756,6 +2176,9 @@ function RegionPanel({ region }: { region: Region }) {
                 onToggleAll: toggleVisibleSelection,
                 label: allVisibleSelected ? t("shared.toolbar.deselectAll") : t("shared.toolbar.selectAll"),
               }}
+              /* ★ 工具栏主操作（原型 :2428）：接**同一个**既有入口 ——
+                 「添加与迁移账号」横幅的 OAuth 扫码添加（不另起一套流程）。 */
+              addAction={{ label: t("wbAccounts.toolbar.addAccount"), onClick: () => setOauthOpen(true) }}
             >
               <div className="ml-auto flex items-center gap-1">
                 <div className="mr-1 flex items-center gap-2.5">
@@ -1890,6 +2313,10 @@ function RegionPanel({ region }: { region: Region }) {
                           </Badge>
                         </div>
                       )}
+                      {/* ★ 卡片视图用原型 `.grid.g3`（`buddy-switch-prototype.html:242-247`）：
+                          宽屏**恰好 3 列等宽**、间距 12px，逐级降为 2 列 / 1 列。
+                          ⚠️ 原先用 `auto-fit + minmax(340px,1fr)` —— 列数随容器宽度**连续变化**，
+                          同一屏可能排出 2/3/4 列，与原型「固定 3 列」的节奏完全不同。 */}
                       {effectiveView === "table" ? (
                         <AccountTable
                           columns={columns}
@@ -1907,7 +2334,7 @@ function RegionPanel({ region }: { region: Region }) {
                           openRowLabel={(account) => t("shared.table.openRowAria", { name: wbAccountName(account) })}
                         />
                       ) : (
-                        <div className={cn("grid min-w-0 items-start gap-5", compact ? "grid-cols-[repeat(auto-fit,minmax(min(100%,300px),1fr))]" : "grid-cols-[repeat(auto-fit,minmax(min(100%,340px),1fr))]")}>
+                        <div className="grid min-w-0 grid-cols-1 items-start gap-3 min-[761px]:grid-cols-2 min-[1101px]:grid-cols-3">
                           {bucket.items.map((a) => (
                             <AccountCard
                               key={a.id}
@@ -1919,6 +2346,8 @@ function RegionPanel({ region }: { region: Region }) {
                               onRefresh={onRefresh}
                               todayCheckedIn={checkinMap[a.id]}
                               travelStatus={travelMap[a.id]}
+                              todayTokens={a.uid ? tokenTodayMap.get(a.uid) : undefined}
+                              todayTokensTruncated={tokenTodayTruncated}
                               credit={creditMap[a.id]}
                               creditLoading={creditLoadingMap[a.id]}
                               creditUpdatedAt={creditUpdatedAtMap[a.id]}
@@ -1934,12 +2363,24 @@ function RegionPanel({ region }: { region: Region }) {
                               codebuddyCnIdeBusy={codebuddyCnIdeSwitchingId !== null}
                               codebuddyCnIdeLoading={codebuddyCnIdeSwitchingId === a.id}
                               onSwitchCodebuddyCnIde={onSwitchCodebuddyCnIde}
+                              vscodePluginAvailable={Boolean(vscodePlugin?.extensionInstalled)}
+                              vscodePluginActive={a.id === vscodePluginCurrentAccountId}
+                              vscodePluginBusy={vscodePluginSwitchingId !== null}
+                              vscodePluginLoading={vscodePluginSwitchingId === a.id}
+                              onSwitchVscodePlugin={onSwitchVscodePlugin}
+                              jetbrainsPluginAvailable={Boolean(jetbrainsPlugin?.pluginInstalled)}
+                              jetbrainsPluginActive={a.id === jetbrainsPluginCurrentAccountId}
+                              jetbrainsPluginBusy={jetbrainsPluginSwitchingId !== null}
+                              jetbrainsPluginLoading={jetbrainsPluginSwitchingId === a.id}
+                              onSwitchJetbrainsPlugin={onSwitchJetbrainsPlugin}
+                              onGuidePlugin={onGuidePlugin}
                               onAddPlaintextAccount={() => setOauthOpen(true)}
                               onGuideToSetting={onGuideToSetting}
                               selected={selectedKeys.has(selectionKey(a.id))}
                               onToggleSelect={toggleSelect}
                               onOpenDetail={openDetail}
                               onEditRemark={openRemark}
+                              onEditGroup={openGroup}
                               featuresDisabled={false}
                             />
                           ))}
@@ -1951,14 +2392,26 @@ function RegionPanel({ region }: { region: Region }) {
               )}
             </div>
           </section>
+
+          {/*
+            客户端限流台账（**只读**观测）：账号 × 模型 × 恢复时刻。
+            与账号强相关、无需切页；与网关无关，故不放「API 服务」页（PRD S4「挂载位置已定」）。
+          */}
+          <section className="mt-7 min-w-0">
+            <ClientLimitsCard region={region} />
+          </section>
         </>
       )}
 
       <OAuthLoginDialog open={oauthOpen} onOpenChange={setOauthOpen} region={region} />
       <ExportAccountsDialog
         open={exportOpen}
-        onOpenChange={setExportOpen}
-        accounts={accounts}
+        onOpenChange={(open) => {
+          setExportOpen(open);
+          // 关闭即清掉「导出所选」的目标：下次从工具栏进来仍是「全部」，不残留上一次的范围。
+          if (!open) setExportTargets(null);
+        }}
+        accounts={exportTargets ?? accounts}
         onExported={onExported}
         region={region}
       />
@@ -1995,25 +2448,33 @@ function RegionPanel({ region }: { region: Region }) {
       />
 
       {/* 统一重启确认（P8 T03 / §3.15.3）：**所有**客户端切换走同一条流程。
-          CLI 例外（`isCli`）⇒ 不渲染「自动重开」，文案如实写「当前 CLI 会话会中断」；
-          IDE ⇒ 「需重启」文案 + 默认勾选自动重开。 */}
+          CLI 例外（`client === "cli"`）⇒ 不渲染「自动重开」，文案如实写「当前 CLI 会话会中断」；
+          「先关再开」的三个客户端（IDE / VS Code 扩展 / JetBrains 插件）⇒ 「需重启」文案 +
+          默认勾选自动重开 + 未保存文件风险。 */}
       <RestartConfirmDialog
         open={restartConfirm !== null}
         onOpenChange={(o) => {
           if (!o) setRestartConfirm(null);
         }}
-        clientLabel={
-          restartConfirm?.isCli
-            ? t("wbAccounts.program.codebuddyCli")
-            : t("wbAccounts.program.codebuddyCnIde")
-        }
-        isCli={restartConfirm?.isCli ?? false}
+        clientLabel={switchClientLabel(restartConfirm?.client ?? "ide")}
+        isCli={(restartConfirm?.client ?? "ide") === "cli"}
         onConfirm={(restart) => {
           const target = restartConfirm;
           setRestartConfirm(null);
           if (!target) return;
-          if (target.isCli) void doSwitchCodebuddyCli(target.account);
-          else void doSwitchCodebuddyCnIde(target.account, restart);
+          switch (target.client) {
+            case "cli":
+              void doSwitchCodebuddyCli(target.account);
+              return;
+            case "ide":
+              void doSwitchCodebuddyCnIde(target.account, restart);
+              return;
+            case "vscode":
+              doSwitchVscodePlugin(target.account, restart);
+              return;
+            default:
+              doSwitchJetbrainsPlugin(target.account, restart);
+          }
         }}
       />
 
@@ -2119,6 +2580,14 @@ function RegionPanel({ region }: { region: Region }) {
         packs={detailPacks}
         sections={detailSections}
         programs={detailPrograms}
+        /* ★ 头部「当前登录」徽章 + 可点「切换到此账号」程序位 + 向导入口（原型 :3475 / :3480-3486）。 */
+        current={detailIsCurrent}
+        switchTargets={detailSwitchTargets}
+        onWizardSwitch={detail ? () => setSwitchAccount(detail) : undefined}
+        /* ★ 「操作」区（原型 :3518-3527）：刷新 / 签到 / 导出 / 权限诊断 / 删除（复用页面既有处理函数）。 */
+        actions={detailActions}
+        /* ★ 「签到历史（近 7 天）」（原型 :3428）：日期 / 结果来自签到日志，金额来自积分统计（缺失「—」）。 */
+        checkinHistory={detailCheckinHistory}
         // ★ B5：签到积分（**有数据才渲染**；查询未回来 / 失败时为 `null`）。
         checkin={
           detail && checkinDetailMap[detail.id]
@@ -2131,6 +2600,10 @@ function RegionPanel({ region }: { region: Region }) {
         remark={detail ? displayText(detail.remark)?.trim() || "" : ""}
         onSaveRemark={detail ? (remark) => onSaveRemark(detail, remark) : undefined}
         autoEditRemark={detailAutoEditRemark}
+        /* ★ 自定义分组（与备注**同一交互**）：注入 `onSaveGroup` ⇒ 抽屉渲染「分组」区块。 */
+        group={detail ? displayText(detail.groupName)?.trim() || "" : ""}
+        onSaveGroup={detail ? (group) => onSaveGroup(detail, group) : undefined}
+        autoEditGroup={detailAutoEditGroup}
         empty={{
           title: t("shared.drawer.empty.title"),
           description: t("shared.drawer.empty.description"),
@@ -2148,6 +2621,15 @@ function RegionPanel({ region }: { region: Region }) {
         busy={batchBusy}
         onCheckin={() => void batchCheckin()}
         onRefresh={() => void batchRefresh()}
+        /* 原型 `batch-export`：导出**所选**账号（工具栏那枚是「全部」，两者范围不同）。 */
+        onExport={
+          selectedAccounts.length > 0
+            ? () => {
+                setExportTargets(selectedAccounts);
+                setExportOpen(true);
+              }
+            : undefined
+        }
         onDelete={() => setBatchDeleteOpen(true)}
         onClear={clearSelection}
       />

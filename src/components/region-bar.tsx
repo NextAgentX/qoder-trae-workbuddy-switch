@@ -1,4 +1,3 @@
-import { Switch } from "@/components/ui/switch";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
@@ -16,13 +15,18 @@ interface RegionBarProps {
 }
 
 /**
- * 合并态开关（**视图参数**，不是作用域）。
+ * 合并态切换（**视图参数**，不是作用域）—— `.seg` 双按钮形态（同原型 `viewUsage` 的 params 段）。
  *
- * ## 为什么从「三选一」变成「一个开关」
+ * ## 为什么这里是「仅本作用域 / 合并全部作用域」两个按钮，而不是一个开关
  *
- * 改造前这里渲染 `cn / global / all` 三个 Tab。但 **区域已经上移到侧栏**
- * （`ScopeSwitch`，P2）—— 页面里再放一个区域选择器，就有了**两个「看起来能切」的控件**，
- * 用户不确定哪个生效（§3.1 的纪律）。
+ * 原型 `viewUsage` 的合并控件就是一个 `.seg`：
+ * `<button>仅本作用域</button><button>合并全部作用域</button>`。
+ * 用两段式分段控件把「当前是哪一档」直接显出来，比「开关 + 标签」更一目了然。
+ *
+ * ## 为什么区域不在这里选
+ *
+ * 区域（`cn` ↔ `global`）**已经上移到侧栏**（`ScopeSwitch`，P2）—— 页面里再放一个区域选择器，
+ * 就有了**两个「看起来能切」的控件**，用户不确定哪个生效（§3.1 的纪律）。
  *
  * ## 为什么 `all` 留下
  *
@@ -37,21 +41,34 @@ interface RegionBarProps {
  */
 export function RegionBar({ value, onChange, disabled, className }: RegionBarProps) {
   const t = useT();
+  const options = [
+    { merge: false, label: t("shared.region.combine.only") },
+    { merge: true, label: t("shared.region.combine.all") },
+  ];
   return (
-    <label
-      className={cn(
-        "flex min-w-0 items-center gap-2 text-xs text-muted-foreground",
-        disabled && "opacity-60",
-        className,
-      )}
+    <div
+      className={cn("flex gap-1 rounded-lg bg-muted p-1", disabled && "opacity-60", className)}
+      role="group"
+      aria-label={t("shared.region.combine.aria")}
     >
-      <Switch
-        checked={value}
-        onCheckedChange={onChange}
-        disabled={disabled}
-        aria-label={t("shared.region.combine.aria")}
-      />
-      <span className="truncate">{t("shared.region.combine.label")}</span>
-    </label>
+      {options.map((option) => (
+        <button
+          key={option.merge ? "all" : "only"}
+          type="button"
+          className={cn(
+            "cursor-pointer rounded-md px-2.5 py-1.5 text-xs transition-colors",
+            value === option.merge
+              ? "bg-background font-medium text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+            disabled && "cursor-not-allowed",
+          )}
+          onClick={() => onChange(option.merge)}
+          disabled={disabled}
+          aria-pressed={value === option.merge}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }

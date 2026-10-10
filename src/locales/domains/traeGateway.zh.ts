@@ -1,8 +1,7 @@
 /**
- * 文案域：**Trae 产品线 · 产品线切换与网关管理**（中文，键的权威之一）。
+ * 文案域：**Trae 网关管理**（中文，键的权威之一）。
  *
  * 归属文件：
- * `src/components/trae-variant-bar.tsx`、`src/components/trae-variant-switch.tsx`、
  * `src/components/gateway/trae-model-list.tsx`、`src/components/gateway/trae-request-log.tsx`、
  * `src/components/gateway/trae-integration-guide.tsx`、
  * `src/components/gateway/trae-api-key-table.tsx`
@@ -10,26 +9,12 @@
  *
  * ⚠️ 命名空间用 `trae`（不是 `traeGateway`）：与另两个 Trae 域共用前缀、靠二级段区分。
  *
- * 键前缀：`trae.gateway.`（产品线切换器用 `trae.variant.*`）
+ * ⚠️ `trae.variant.*`（产品线状态条 / 切换器）已随组件删除 —— 区域切换统一上移到顶栏
+ * `ScopeSelector`，页头只留只读 `ScopeChip`（文案在 `shell.zh.ts`）。
+ *
+ * 键前缀：`trae.gateway.`
  */
 export const zh = {
-  // =====================================================================
-  // trae-variant-bar.tsx —— 产品线状态条（账号页）
-  // =====================================================================
-  "trae.variant.bar.loggedIn": "已登录: {name}",
-  "trae.variant.bar.notLoggedIn": "未登录",
-  "trae.variant.bar.notDetected": "未检测到",
-
-  // =====================================================================
-  // trae-variant-switch.tsx —— 产品线切换器
-  // =====================================================================
-  "trae.variant.switch.aria": "选择 Trae 版本",
-  "trae.variant.switch.running": "运行中",
-  "trae.variant.switch.installed": "已安装",
-  "trae.variant.switch.notDetected": "未检测到",
-  "trae.variant.switch.tip": "{label}：{state}",
-  "trae.variant.switch.tipVersion": "{label}：{state} · v{version}",
-
   // =====================================================================
   // gateway/trae-model-list.tsx —— 模型清单
   // =====================================================================

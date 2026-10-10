@@ -15,6 +15,18 @@
  * **显隐**（`companion_set_visible`）、**聚焦**（`companion_jump`）。四态行渲染
  * （含标题数据防线、悬停信息卡）在 {@link CompanionRow}。
  *
+ * ## ★ 键盘可达性（§1.7 —— 独立窗口，**自管焦点**）
+ *
+ * `decorations(false)` 的独立窗口没有系统标题栏，主窗口的焦点管理一条都不适用
+ * （`P9-ARCH §1.7` / `P5-P12-TASKS` 附 B **A8**）。这里钉死五条：
+ *
+ * 1. **焦点入口**：内容就绪后把焦点落到**第一个可聚焦行**（空态则落「刷新」，
+ *    再退关闭按钮）—— 不能依赖 OS 默认聚焦；
+ * 2. **重新可见**：隐藏 = 不销毁，重新 `show` 时 DOM 焦点已丢 ⇒ 监听可见性事件**送回入口**；
+ * 3. **行可聚焦**：每行是原生 `<button>`（Tab / Enter / Space 原生可用，见 `companion-row`）；
+ * 4. **拖动不抢焦点**：拖拽手柄走 `data-tauri-drag-region`（原生拖动，**不产生可聚焦元素**）；
+ * 5. **Esc**：隐藏窗口（回到「可从侧栏 / 托盘重开」）。
+ *
  * ## 状态语言（§3.6）
  *
  * 首次加载 → `<Skeleton>`；无数据源 / 无会话 → `<EmptyState>`（四要素含出口「刷新」）；
@@ -23,6 +35,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
+import { listen } from "@tauri-apps/api/event";
 import { Inbox, TriangleAlert, X } from "lucide-react";
 
 import { CompanionRow } from "@/components/companion/companion-row";
@@ -62,6 +75,11 @@ export function CompanionApp() {
   const [feedback, setFeedback] = useState<CompanionFeedback | null>(null);
   // 防重入：一次只允许一个 `companion_jump` 在途（用 ref 而非 state，避免多余重渲染）。
   const jumpingRef = useRef(false);
+  // ★ P9 §1.7 键盘可达性：`decorations(false)` 的独立窗口不能依赖 OS 默认聚焦 ⇒ 自管焦点入口。
+  const contentRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  // 只做**一次**首次聚焦：之后焦点归用户掌控（避免每次刷新都把焦点抢回第一行）。
+  const didInitialFocusRef = useRef(false);
 
   // 悬浮窗是 `transparent(true)`（圆角卡片外观，见 `companion.rs`），但 webview 内容背景
   // 默认不透明 —— 圆角会被 html / body 的方角背景盖住，透明窗口就白设了。这里把两层背景
@@ -87,6 +105,45 @@ export function CompanionApp() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  // 内容区（行列表 / 空态）的**第一个可聚焦元素** —— 行是 `<button>`，空态是「刷新」按钮。
+  // 取不到（骨架期）再退到关闭按钮，保证键盘用户**一定有入口**（§1.7 焦点入口）。
+  const focusEntry = useCallback(() => {
+    const first = contentRef.current?.querySelector<HTMLElement>("button");
+    (first ?? closeRef.current)?.focus();
+  }, []);
+
+  // 首次内容就绪后聚焦一次：`decorations(false)` ⇒ 不能依赖 OS 默认聚焦，必须自管。
+  // 骨架期（`loading && !snapshot`）不聚焦 —— 那时还没有可聚焦行。
+  const showSkeleton = loading && !snapshot;
+  useEffect(() => {
+    if (showSkeleton || didInitialFocusRef.current) return;
+    didInitialFocusRef.current = true;
+    focusEntry();
+  }, [showSkeleton, focusEntry]);
+
+  // 重新可见 ⇒ 把焦点送回入口：窗口是「隐藏而非销毁」，重新 show 时 webview 内的
+  // DOM 焦点已丢失（OS 的 `set_focus` 只给窗口焦点，不回填元素焦点）。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<boolean>("companion-visibility", (event) => {
+      if (disposed || !event.payload) return;
+      focusEntry();
+    })
+      .then((fn) => {
+        // 订阅在卸载后才返回 ⇒ 立刻退订（与 `useCompanionStatus` 同一防泄漏写法）。
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        /* 非 Tauri 环境（演示 / 截图）：Esc 与 Tab 仍工作，只是不再随可见性重置焦点 */
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [focusEntry]);
 
   const items = snapshot?.items ?? [];
   // 头部徽标 = 「待确认」计数：**完全由快照数据决定**，前端不做业务判断（P9 §1.4）。
@@ -127,7 +184,7 @@ export function CompanionApp() {
   );
 
   let content: ReactNode;
-  if (loading && !snapshot) {
+  if (showSkeleton) {
     content = <CompanionSkeleton label={t("shared.companion.loading")} />;
   } else if (!snapshot && error) {
     // 读取失败 ≠ 没有会话：给**失败空态**（含出口），不静默吞错。
@@ -173,13 +230,14 @@ export function CompanionApp() {
           {waitingCount > 0 ? (
             <span
               data-tauri-drag-region
-              className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-medium leading-4 text-amber-600"
+              className="rounded-full bg-warning/15 px-1.5 text-[10px] font-medium leading-4 text-warning"
             >
               {t("shared.companion.badge.waiting", { count: waitingCount })}
             </span>
           ) : null}
           <span data-tauri-drag-region className="h-4 min-w-0 flex-1" />
           <Button
+            ref={closeRef}
             type="button"
             variant="ghost"
             size="icon"
@@ -191,7 +249,10 @@ export function CompanionApp() {
           </Button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">{content}</div>
+        {/* 内容区带 ref：焦点入口在这里找**第一个可聚焦元素**（行 `<button>` / 空态「刷新」）。 */}
+        <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto">
+          {content}
+        </div>
 
         {feedback ? (
           <p

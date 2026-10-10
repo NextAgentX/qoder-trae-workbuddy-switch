@@ -168,8 +168,13 @@ export function ModelList({ region, className }: { region: Region; className?: s
               showUpstream={false}
               labels={labels}
             />
-            {/* 计数 = available && !disabled，与出口 ① 同源；无暴露项时不渲染（§3.4 规则 1）。 */}
-            {served > 0 && (
+            {/* 计数 = available && !disabled，与出口 ① 同源。
+                ★ Q5/D39：守卫是 `total > 0`（**有清单就显示**），不是 `served > 0` ——
+                `served === 0` 不是「无数据」，而是「**全部被禁用**」这一真实且正需被看见的状态。
+                旧守卫恰好在最该出现的场景下把整条信息藏了起来，且与下一行「两个出口」说明
+                **恒渲染**的处理自相矛盾（那里同样认为「禁用生效了必须看得见」）。
+                文案沿用既有词条，不新增措辞（避免踩「禁止 N 个模型可用」的反向断言）。 */}
+            {total > 0 && (
               <p className="mt-3 text-xs text-muted-foreground" data-act="gw-model-count">
                 {t("shared.gateway.models.count", { served, total })}
               </p>

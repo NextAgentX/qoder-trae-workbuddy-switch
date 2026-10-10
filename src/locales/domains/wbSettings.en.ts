@@ -34,6 +34,11 @@ export const en = {
   "wbSettings.checkin.resultSuccess": "Checked in",
   "wbSettings.checkin.resultAlready": "Already checked in",
   "wbSettings.checkin.resultFailed": "Failed",
+  // Auto travel (real key: `enabled` in `auto_travel_config.json`).
+  "wbSettings.checkin.travelLabel": "Enable auto travel",
+  "wbSettings.checkin.travelDesc": "Gain extra credits through travel tasks",
+  "wbSettings.checkin.travelOn": "Auto travel enabled",
+  "wbSettings.checkin.travelOff": "Auto travel disabled",
 
   // ---- CodeBuddy CLI auto rotate ----
   "wbSettings.rotate.groupTitle": "CodeBuddy CLI auto rotate",
@@ -64,6 +69,20 @@ export const en = {
   "wbSettings.rotate.actionDisabled": "Disabled",
   "wbSettings.rotate.actionError": "Error",
 
+  // ---- Client detection (read-only; from real probe commands) ----
+  "wbSettings.client.detectTitle": "Client detection",
+  "wbSettings.client.detectWorkbuddy": "WorkBuddy Desktop",
+  "wbSettings.client.detectWorkbuddyDesc": "Detect install path and version",
+  "wbSettings.client.detectCli": "CodeBuddy CLI",
+  "wbSettings.client.detectCliDesc": "Availability of the CLI tool",
+  "wbSettings.client.detectCnIde": "CodeBuddy CN IDE",
+  "wbSettings.client.detectCnIdeDesc": "Connection status of the CN IDE",
+  "wbSettings.client.detected": "Detected",
+  "wbSettings.client.detectedVersion": "Detected · {version}",
+  "wbSettings.client.notDetected": "Not detected",
+  "wbSettings.client.configured": "Connected",
+  "wbSettings.client.notConfigured": "Not connected",
+
   // ---- Permission check ----
   "wbSettings.permission.groupTitle": "Permission check",
   "wbSettings.permission.authFileMissing": "Auth file path not available",
@@ -81,6 +100,29 @@ export const en = {
   "wbSettings.permission.guideStep3Drag": "into",
   "wbSettings.permission.guideStep3Post": " the Full Disk Access list (even without a prompt, dropping it takes effect), then turn on its toggle",
   "wbSettings.permission.guideStep4": "Come back to this page and click \"Check permission\", or just retry switching",
+
+  // ---- Danger zone (Q1) ----
+  // ⚠️ Deliberately **no** "reset device identity": that rewrites Trae client's own 6 layers.
+  //   WorkBuddy has no such structure, and this tool's gateway identity is a pure
+  //   sha256-derived value (not persisted ⇒ nothing to reset).
+  "wbSettings.danger.groupTitle": "Danger zone",
+  "wbSettings.danger.intro": "The actions below affect local data. Make sure you know the consequences first.",
+  "wbSettings.danger.diagLabel": "Export diagnostic bundle",
+  "wbSettings.danger.diagDesc":
+    "Bundles version, platform, which data sources are readable, and a gateway config summary — handy for reporting problems. Contains no credentials and no session content.",
+  "wbSettings.danger.diag": "Export diagnostic bundle",
+  "wbSettings.danger.exporting": "Exporting…",
+  "wbSettings.danger.diagSaved": "Diagnostic bundle saved: {name}",
+  "wbSettings.danger.diagFailed": "Failed to export diagnostic bundle",
+  "wbSettings.danger.logsLabel": "Clear gateway request logs",
+  "wbSettings.danger.logsDesc": "Deletes every gateway request record on this machine. Useful when troubleshooting the proxy. Cannot be undone.",
+  "wbSettings.danger.logsClear": "Clear logs",
+  "wbSettings.danger.logsCleared": "Gateway request logs cleared",
+  "wbSettings.danger.logsClearFailed": "Failed to clear gateway request logs",
+  "wbSettings.danger.logsConfirmTitle": "Clear gateway request logs?",
+  "wbSettings.danger.logsConfirmDesc":
+    "Every gateway request record on this machine will be deleted and cannot be recovered. Accounts, settings, and credentials are not affected.",
+  "wbSettings.danger.logsConfirmBtn": "Clear logs",
 
   // ---- Account switching ----
   "wbSettings.switch.groupTitle": "Account switching",
@@ -119,6 +161,8 @@ export const en = {
   "wbSettings.gateway.bodiesDesc": "Privacy risk; off by default, only metadata such as time / model / status code is logged",
   "wbSettings.gateway.invalidPort": "Port must be an integer between 1 and 65535",
   "wbSettings.gateway.invalidKeep": "Entries kept must be an integer between 0 and 10000",
+  "wbSettings.gateway.enabledLabel": "Enable local gateway",
+  "wbSettings.gateway.enabledDesc": "Serve OpenAI / Anthropic compatible endpoints on 127.0.0.1",
 
   // ---- Scheduled tasks ----
   "wbSettings.schedule.groupTitle": "Scheduled tasks",

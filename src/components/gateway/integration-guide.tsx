@@ -8,6 +8,7 @@ import { copyText } from "@/lib/clipboard";
 import {
   GATEWAY_PROTOCOLS,
   accessTools,
+  gatewayCurl,
   gatewaySnippet,
   protocolOf,
   type GatewayProtocolKey,
@@ -77,6 +78,8 @@ export function IntegrationGuide({
   const key = representativeKey(keys, region) ?? t("wbStats.gateway.noKeyHint");
   const model = catalog?.models[0]?.id ?? t("shared.gateway.snippet.modelPlaceholder");
   const snippet = gatewaySnippet({ t, protocol, tool: activeTool, baseUrl, rootUrl, key, model });
+  /* 「原始请求（调试用）」：认证头随协议 Tab 变化（Anthropic → x-api-key；OpenAI → Bearer）。 */
+  const curl = gatewayCurl({ protocol, rootUrl, model });
 
   async function onCopy() {
     await copyText(snippet, t("wbStats.gateway.codeCopied"));
@@ -141,6 +144,11 @@ export function IntegrationGuide({
               用户**不需要**在片段里手填模型名 —— 片段里的 `Model:` 只是「契约字段」，
               不是「必须自己查」的东西。只说事实，不承诺「清单里的模型一定可用」（§3.17.3 陷阱 3）。 */}
           <p className="mt-1 text-xs text-muted-foreground">{t("wbStats.gateway.autoDiscover")}</p>
+          {/* 「原始请求（调试用）」（原型 `:2929-2930`）：方法 + URL + 协议对应的认证头，可直接粘贴核验。 */}
+          <p className="mt-3 text-xs text-muted-foreground">{t("wbStats.gateway.rawRequest")}</p>
+          <pre className="mt-1.5 min-w-0 overflow-x-auto rounded-[10px] bg-card-2 p-3 font-mono text-xs leading-6">
+            {curl}
+          </pre>
         </div>
       </Tabs>
     </Card>

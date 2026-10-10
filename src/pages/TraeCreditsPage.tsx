@@ -14,7 +14,7 @@ import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 
 import { DemoAction } from "@/components/demo-action";
-import { TraeVariantSwitch } from "@/components/trae-variant-switch";
+
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,9 +82,9 @@ function StatMetric({
         className={cn(
           "mt-3 max-w-full truncate text-[26px] font-semibold leading-8 tracking-[-0.025em] tabular-nums",
           tone === "up"
-            ? "text-emerald-600 dark:text-emerald-400"
+            ? "text-success"
             : tone === "down"
-              ? "text-amber-600 dark:text-amber-400"
+              ? "text-warning"
               : "text-foreground",
         )}
         style={{ fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif' }}
@@ -223,11 +223,11 @@ export default function TraeCreditsPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[1180px] px-6 py-8 sm:px-8 sm:py-9">
+    <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
       <header className="mb-6">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h1 className="text-[28px] font-semibold tracking-tight">{t("trae.stats.credits.title")}</h1>
+            <h2 className="text-xl font-semibold tracking-tight">{t("trae.stats.credits.title")}</h2>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
               {t("trae.stats.credits.subtitle")}
             </p>
@@ -239,9 +239,6 @@ export default function TraeCreditsPage() {
             </Button>
           </DemoAction>
         </div>
-        {/* 区域入口在**标题下方**（两个模块统一的位置）：整页跟随它。
-            侧栏已合并为单个 `Trae` 入口，区域的选择在这里。 */}
-        <TraeVariantSwitch className="mt-4" />
       </header>
 
       {error && (

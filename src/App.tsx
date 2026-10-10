@@ -1,20 +1,18 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ComponentType, type ElementType } from "react";
+import { Suspense, lazy, useEffect, useMemo, useState, type ComponentType, type ElementType } from "react";
 import { BrowserRouter, HashRouter, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
-import { ArrowUp, GitBranch, LayoutDashboard, MessagesSquare, Monitor, Search, Server, Settings, User } from "lucide-react";
+import { ArrowUp, GitBranch, LayoutDashboard, MessagesSquare, Monitor, Server, Settings, User } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import * as api from "@/lib/api";
 import type { UpdateInfo } from "@/lib/types";
 import { PageFallback } from "@/components/page-fallback";
-import { StatusDot, AppIconMark, TraeVariantMark, WorkBuddyMark } from "@/components/product-marks";
-import { DonateButton } from "@/components/donate-dialog";
-import { AppSettingsEntry } from "@/components/app-settings";
+import { AppIconMark, StatusDot } from "@/components/product-marks";
+import { TopBar } from "@/components/shell/top-bar";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import { CommandPalette } from "@/components/command-palette/command-palette";
 import { FirstRunHint } from "@/components/first-run-hint";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster } from "@/components/ui/sonner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { demoModeEnabled, pagesDemoHostingEnabled } from "@/lib/demo-mode";
@@ -22,6 +20,7 @@ import { useT } from "@/lib/i18n";
 import type { TranslationKey } from "@/locales/zh";
 import { planScopeShortcuts, scopeShortcutTarget } from "@/lib/scope-shortcuts";
 import { useShortcutsEnabled } from "@/lib/shortcut-preference";
+import { useScopeStatus } from "@/lib/use-scope-status";
 import { useCompanionVisibility } from "@/lib/use-companion-visibility";
 import { TRAE_VARIANTS_KEY, loadTraeVariantStatuses } from "@/lib/trae-variant-status";
 import type { TraeVariantStatus } from "@/lib/trae-types";
@@ -62,38 +61,37 @@ const SessionsPage = lazy(() => import("@/pages/SessionsPage"));
 const TraeSessionsPage = lazy(() => import("@/pages/TraeSessionsPage"));
 /* P0 收敛清单第 1 项：`Product` 的类型定义**已搬进注册表**，这里改为 import。
    （原来 App.tsx 里有一份局部 `type Product`，两处重复 —— 现在只剩一处。） */
-import { DESTINATION_CAPABILITY, type Destination, DESTINATIONS, destinationOfLegacyPath, hasCapability, type Product, platformOfPath } from "@/lib/platforms/registry";
-import { REGIONS, regionDescriptor } from "@/lib/region";
-import { parseScope, type Scope, SCOPES, scopeOf, scopeParts } from "@/lib/scope";
+import { DESTINATION_CAPABILITY, type Destination, DESTINATIONS, destinationOfLegacyPath, hasCapability, platformDescriptor, type Product, platformOfPath } from "@/lib/platforms/registry";
+import { parseScope, type Scope, SCOPES, scopeOf, scopeParts, writeLastScope } from "@/lib/scope";
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useScope } from "@/lib/use-scope";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import { useCreditAutoRefresh } from "@/lib/use-credit-auto-refresh";
 import { useWorkbuddyStatusRefresh } from "@/lib/use-workbuddy-status-refresh";
 import { useAccountsStore } from "@/stores/accounts";
+import { useGatewayStore } from "@/stores/gateway";
 import { useSessionsStore } from "@/stores/sessions";
 
 /**
  * 产品分区。
  *
- * WorkBuddy 与 Trae 是两套完全独立的体系（独立账号库、独立客户端、独立配置），
- * 侧栏一次只展示其中一个产品的导航与页面，由顶部的产品 Tab 决定。
+ * WorkBuddy 与 Trae 是两套完全独立的体系（独立账号库、独立客户端、独立配置）。
+ * **平台不再是一个「切换器」**：它已并入顶栏的作用域（L1 = 平台 × 区域）——
+ * 选 `wb-*` 即进 WorkBuddy，选 `trae-*` 即进 Trae，侧栏与内容区随之跟随。
  *
- * ## ★ Trae 只占**一个**侧栏分区，两条产品线在分区内部切换
+ * ## ★ Trae 只占**一个**作用域维度，两条产品线在页面内部切换
  *
  * `TRAE SOLO CN`（界面名 `Trae Work`）与 `Trae CN` 确实可以同机并存、各有独立
- * 安装目录与账号库，但**这不意味着侧栏要排三个 Tab**：
+ * 安装目录与账号库，但**这不意味着要排三个作用域**：
  *
- * - 侧栏的职责是「选产品」，而 Trae 的两条线**共用全部页面与路由**
- *   （`/trae/accounts` 等）。把它们拆成两个顶级分区，等于让同一组页面
- *   在侧栏出现两遍，用户要在两个看起来一样的入口之间做无意义的二选一。
- * - 变体是**数据维度**而非**页面维度**，因此正确的载体是 Trae 页面内部的
- *   产品线切换器（见 `TraeAccountsPage` 的变体 Tab），而不是侧栏。
- * - 侧栏 220px 宽度下三个 Tab 连产品名都排不下（详见 `ProductSwitch` 的注释），
- *   压成纯图标后两条 Trae 又几乎无法区分 —— 这本身就是「不该有三个 Tab」的信号。
+ * - Trae 的两条线**共用全部页面与路由**（`/s/trae-cn/accounts` 等）。把它们拆成
+ *   两个顶级入口，等于让同一组页面出现两遍，用户要在两个看起来一样的入口之间
+ *   做无意义的二选一。
+ * - 产品线（程序位）是**数据维度**而非**页面维度**，因此正确的载体是 Trae 页面
+ *   内部的程序位切换器（见 `TraeAccountsPage`），而不是作用域。
  *
- * 变体仍然由 URL 的 `?line=` 承载（`useTraeVariant`）：它决定 Trae 分区内部
- * 看哪条线，并且刷新 / 分享 / 前进后退都能保持。
+ * Trae 的**区域**（cn/global）则属于作用域，由 URL 承载（`useTraeVariant`
+ * 路径优先、回落旧 `?line=`），刷新 / 分享 / 前进后退都能保持。
  */
 
 /* `interface NavItem` 随 `PRODUCT_NAV` 一并删除（P2）：
@@ -127,37 +125,11 @@ import { useSessionsStore } from "@/stores/sessions";
  * 两条线的页面结构完全相同，再造一套路由只会让每个页面组件被迫复制一份。
  */
 
-/**
- * 产品显示名对应的**文案键**（侧栏顶部产品切换器与导航无障碍标签的唯一来源）。
- *
- * 存键而不存成品文案：这是模块级常量，拿不到 `useT()`。渲染处 `t(PRODUCT_LABEL_KEY[…])`
- * 一秒翻译一次，语言切换才会反映到侧栏 —— 存成中文会让侧栏永远停在启动时的语言。
- *
- * Trae 分区显示 **`TraeWork`**：它管的就是 TraeWork 这条产品线
- * （国内版 `TRAE SOLO CN` 与国际版 `TRAE SOLO`），名字与客户端
- * `product.json` 的 `nameAlias`（`TraeWork CN` / `TraeWork`）及系统注册表显示名一致。
- *
- * 但**区域（国内版 / 国际版）仍然不写进侧栏**：它由分区内部顶部的区域切换器表达。
- * 把区域名塞进侧栏会让「国内版 / 国际版」看起来像两个独立产品，
- * 而它们共用同一组页面、同一套账号管理方式。同理，程序线（TraeWork / TraeCode）
- * 是**账号卡片上的一枚按钮**，也不进侧栏。
- *
- * 注意 `Product` 的**标识**仍是 `trae`（路由前缀 `/trae/...` 与 `PRODUCT_NAV` 的键都不动）：
- * 本次只改展示名，改标识会牵动路由表与全部 `/trae` 链接。
- */
-const PRODUCT_LABEL_KEY: Record<Product, TranslationKey> = {
-  // 产品名**刻意不翻译**：`WorkBuddy` / `TraeWork` 是商标，两种语言下写法相同，
-  // 因此这两个键的 zh/en 值一致。走词表而非硬编码，是为了让「语言切换后侧栏整体重渲染」
-  // 这件事在所有文案上保持一致行为，不给未来的改名留特例。
-  workbuddy: "product.workbuddy",
-  trae: "product.trae",
-};
-
-/** 产品首页：切到某产品时，若当前路由不属于它，就落到这里。 */
-const PRODUCT_HOME: Record<Product, string> = {
-  workbuddy: "/",
-  trae: "/trae/accounts",
-};
+/* 产品显示名（`PRODUCT_LABEL_KEY`）与产品首页（`PRODUCT_HOME`）**已随 P2 删除** ——
+   两者都在注册表的 `PlatformDescriptor` 里（`labelKey` / `home`），
+   本文件只从 `platformDescriptor(product)` 现取。原先两份常量的完整理由
+   （为什么存文案键、Trae 分区为何显示 `TraeWork`、区域为何不进侧栏）已随字段迁到
+   `registry.ts` 的 `PlatformDescriptor.labelKey` 注释，**不在两处各留一份**。 */
 
 /**
  * 路由 → 产品。
@@ -250,12 +222,17 @@ function ScopedDestination() {
   return <Page />;
 }
 
+/**
+ * 侧栏导航项（原型 `.nav-item`，`buddy-switch-prototype.html:166-175`）—— 逐值对齐：
+ * 高 38px、内边距 `0 10px`、圆角 10px、字号 13px；悬停 `foreground 6%`；
+ * **选中 `primary 16%` + 图标转 primary + 字重 550**（原型还额外强调图标，不只是背景）。
+ */
 function navLinkClass({ isActive }: { isActive: boolean }): string {
   return cn(
-    "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
+    "group flex h-[38px] items-center gap-2.5 rounded-[10px] px-2.5 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-sidebar-ring/50",
     isActive
-      ? "bg-foreground/[0.06] font-medium text-foreground"
-      : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
+      ? "bg-primary/15 font-[550] text-foreground [&>svg]:text-primary"
+      : "text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground",
   );
 }
 
@@ -298,135 +275,6 @@ function useTraeVariantRunning(active: boolean): Record<string, boolean> {
 }
 
 /**
- * 侧栏顶部的**作用域选择器**（P2）—— 区域轴。
- *
- * ## 为什么上移到这里（§3.1）
- *
- * 改造前「切区域」的入口散在**各页面内部**：账号页 `VariantSwitch`、统计页 `RegionBar`、
- * API 页 `WorkbuddyRegionSwitch`。同一个操作在三处出现、各自实现、各自记状态
- * ⇒ 「账号页切国际版、进统计页又变回国内版」。
- *
- * 现在上移到**侧栏标题下方**（`ProductSwitch` 之下），配合 `useScope` 的
- * 「URL 为唯一真值」：切一次，**整页跟随**。
- *
- * ⚠️ **上移之后，页面内不应再有区域选择器** —— 两个「看起来能切」的控件会让用户
- * 不确定哪个生效（§3.1 纪律）。移除页面内的是后续步骤。
- *
- * ⚠️ **只给 WorkBuddy**：Trae 的区域由它自己的 `?line=` 承载（那里还要同时表达
- * **程序位**，语义比单区域复杂）。在 P2 阶段不去动它 —— 等 P3 合并页面时统一。
- *
- * ⚠️ **macOS 避让**：本组件在侧栏**内部**，而侧栏已由 `hasUnifiedTitleBar` 加了 `pt-20`
- * 为红绿灯让位，因此这里不需要额外处理；但**不能把它提到侧栏之外**，否则会撞上红绿灯区。
- */
-function ScopeSwitch({ product }: { product: Product }) {
-  const [region, setRegion] = useScope(product);
-  return (
-    <div
-      className="mb-4 flex gap-1 rounded-lg bg-sidebar-accent/40 p-1"
-      role="tablist"
-      aria-label="区域"
-    >
-      {REGIONS.map((r) => (
-        <button
-          key={r}
-          type="button"
-          role="tab"
-          aria-selected={region === r}
-          onClick={() => setRegion(r)}
-          className={cn(
-            "flex-1 truncate rounded-md px-2 py-1 text-[11.5px] transition-colors",
-            region === r
-              ? "bg-background text-foreground shadow-sm"
-              : "text-sidebar-foreground/60 hover:text-sidebar-foreground",
-          )}
-        >
-          {regionDescriptor(r).versionLabel}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** 侧栏顶部的产品切换：下方的导航与主区域页面都跟随它。 */
-function ProductSwitch({
-  product,
-  onChange,
-}: {
-  product: Product;
-  onChange: (next: Product) => void;
-}) {
-  const t = useT();
-
-  /*
-   * 两个产品 Tab：**图标 + 文字**。
-   *
-   * ## 为什么现在是两个而不是三个
-   *
-   * 曾经这里是三个 Tab（WorkBuddy / Trae Work / Trae CN），因为两条 Trae 产品线
-   * 可以同机并存。但侧栏固定 220px、扣掉 `px-3` 后 tablist 只有 195px，
-   * 三等分每格约 60px，而 12px 字号下 `WorkBuddy` = 65px、`Trae Work` = 56px、
-   * `Trae CN` = 43px —— **三个全都放不下**。当时的妥协是压成纯图标 + Tooltip。
-   *
-   * 但纯图标本身就是一个更强的信号：**用户分不清两个几乎一样的 Trae 图标该点哪个**。
-   * 两条线共用全部页面与路由，拆成两个顶级入口本来就多一层无意义的二选一，
-   * 因此合并成一个 `Trae`。产品线的选择下沉到 Trae 页面内部（那里宽度充足，
-   * 可以完整展示 `Trae Work` / `Trae CN` 并带各自的运行状态）。
-   *
-   * ## 为什么两个 Tab 也**不能等分**（浏览器实测，别再改回 `grid-cols-2`）
-   *
-   * 合并成两个后，`grid-cols-2` 的等分**仍然放不下** `WorkBuddy`：
-   * tablist 外框 195px、扣 `p-1` 后内容区 187px、`gap-0.5` 占 2px ⇒ 每格 92px；
-   * 再减 `px-2`（16px）+ 图标 15px + `gap-1.5`（6px），**留给文字的只有 55px**，
-   * 而 12px/500 的 `WorkBuddy` 实测 `scrollWidth = 64px` —— 短 9px，被截成 `WorkBu…`。
-   *
-   * 因此改成**按内容自适应并居中**（`grid-cols-[auto_auto]` + `justify-center`）。
-   * **实测（2026-09-21，1333×900，`px-1.5`）**：`WorkBuddy` 格 97px、`TraeWork` 格 85px，
-   * 加 2px 间隙共 184px ≤ 内容区 193px，**余量 9px**；两个标签的
-   * `scrollWidth == clientWidth`（64/64、52/52）⇒ **均未被截断**。
-   *
-   * 刻意**不**用「缩字号 / 压 padding 硬塞进等分格」：要等分放下 `WorkBuddy`，
-   * `padX + gap` 只能有 13px（12px 字号）或 16px（11px 字号），余量仅 1~3px；
-   * 换 DPI / 字体回退时会再次截断，不可靠。按内容排布不依赖这点余量。
-   *
-   * label 上的 `truncate` 保留，作为将来产品名变长时的兜底（当前不触发）。
-   *
-   * 两个图标仍然如实反映「这是两个独立体系」——这正是 WorkBuddy 侧的做法。
-   * 注意第二格的标签是 **`TraeWork`**（本分区管的产品线），而它内部的**区域**
-   * （国内版 / 国际版）与**程序位**（TraeWork / TraeCode）都在页面里选，见
-   * `useTraeVariant` 与账号页的状态条 —— 侧栏只表达「进哪个产品分区」。
-   */
-  return (
-    <Tabs
-      value={product}
-      onValueChange={(value) => onChange(value as Product)}
-      className="mb-3 shrink-0"
-    >
-      <TabsList
-        className="grid h-9 w-full grid-cols-[auto_auto] justify-center gap-0.5 rounded-xl border border-sidebar-border bg-sidebar-accent/60 p-1"
-        aria-label={t("product.switchAria")}
-      >
-        <TabsTrigger
-          value="workbuddy"
-          className="h-7 w-full min-w-0 gap-1.5 rounded-lg px-1.5 text-xs font-medium data-[state=active]:bg-primary/15 data-[state=active]:shadow-none"
-        >
-          <WorkBuddyMark size={15} />
-          <span className="truncate">{t(PRODUCT_LABEL_KEY.workbuddy)}</span>
-        </TabsTrigger>
-        <TabsTrigger
-          value="trae"
-          className="h-7 w-full min-w-0 gap-1.5 rounded-lg px-1.5 text-xs font-medium data-[state=active]:bg-primary/15 data-[state=active]:shadow-none"
-        >
-          {/* 两个产品的图标各自如实呈现；Trae 分区用 TraeWork 的图标
-              （这里不区分区域与程序位，都在页面内部选）。 */}
-          <TraeVariantMark variant="trae_work" size={15} />
-          <span className="truncate">{t(PRODUCT_LABEL_KEY.trae)}</span>
-        </TabsTrigger>
-      </TabsList>
-    </Tabs>
-  );
-}
-
-/**
  * 侧栏左下角的「会话悬浮窗」入口（P9 · T04）。
  *
  * ## 为什么是**开关**，而不是第二个切换器
@@ -460,17 +308,21 @@ function CompanionToggle() {
           type="button"
           variant="ghost"
           size="icon"
+          /* 几何与原型 `.mini-btn`（`buddy-switch-prototype.html:188-192`）一致：20px、**圆角 999（胶囊）**、图标 11px。
+             颜色**保留开关语义**（开=实心 primary，与原型静止态一致；关=弱化），
+             —— 原型那两枚是普通动作按钮，这一枚是「显示/隐藏悬浮窗」的开关，
+             若一律涂成实心就丢掉了开关状态这个信号。 */
           className={cn(
-            "size-5 shrink-0 rounded-md p-0",
+            "size-5 shrink-0 rounded-full p-0",
             visible
-              ? "text-sidebar-foreground"
+              ? "bg-primary text-primary-foreground hover:bg-primary/90"
               : "text-sidebar-foreground/40 hover:text-sidebar-foreground/70",
           )}
           aria-label={label}
           aria-pressed={visible}
           onClick={() => setVisible(!visible)}
         >
-          <Monitor className="size-3" aria-hidden="true" />
+          <Monitor className="size-[11px]" aria-hidden="true" />
         </Button>
       </TooltipTrigger>
       <TooltipContent side="top">{label}</TooltipContent>
@@ -485,9 +337,9 @@ function CompanionToggle() {
  * `status.version` 来自 `update::APP_VERSION`，此前挂在「WorkBuddy」名下会让人
  * 误以为它是 WorkBuddy 客户端的版本号。状态圆点跟随当前选中的产品。
  *
- * **只负责内容**：底部区块的边框、外边距与水平内边距归 `Layout` 里的那个
- * `<section>`——同一块里还要放打赏入口（见 `DonateButton`），而它在 webui 下
- * **仍然显示**（版本行则不显示），把容器留在 `Layout` 才能只写一处。
+ * **自带容器**：`.sidebar-foot`（顶部边框 + 上间距）在本组件内 —— 侧栏底部现在
+ * 只有它一项（应用级入口已收进顶栏 ⚙ 菜单，见 `AppMenu`），容器随它一起走。
+ * webui 下整行不渲染（没有桌面运行态可展示）。
  */
 function AppFooter({
   product,
@@ -523,46 +375,48 @@ function AppFooter({
   }, []);
 
   const hasUpdate = Boolean(info?.ok && info.hasUpdate && info.latest);
-  const productLabel = t(PRODUCT_LABEL_KEY[product]);
+  const productLabel = t(platformDescriptor(product).labelKey);
 
   return (
     <>
-      <div className="flex items-center gap-2 text-[13px] text-sidebar-foreground">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="inline-flex">
-              <StatusDot on={running} />
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="top">
-            {t(running ? "sidebar.running" : "sidebar.notRunning", { product: productLabel })}
-          </TooltipContent>
-        </Tooltip>
-        <span className="min-w-0 flex-1 truncate">{t("sidebar.version")}</span>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {/* 这里固定显示「版本」二字而非产品名：产品名已在侧栏顶部 Tab 与标题栏出现，
-              重复一遍反而挤占了版本号的位置。版本号用更小字号并保持 tabular-nums，
-              让数字在版本号变化时纵向对齐、不跳动。 */}
-          <span className="shrink-0 text-[11px] tabular-nums text-sidebar-foreground/50">v{version || "?"}</span>
-          {/* P9 T04：会话悬浮窗入口（桌面端；与原型版本行的 `.mini-btn` 同位）。
-              它是**可见性开关**，与托盘 / 窗口内关闭按钮收敛到同一份偏好 —— 不新增第二个切换器。 */}
-          {api.isDesktop() ? <CompanionToggle /> : null}
-          {hasUpdate && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon"
-                  className="size-5 rounded-full p-0"
-                  aria-label={t("sidebar.update")}
-                  onClick={() => setDialogOpen(true)}
-                >
-                  <ArrowUp className="size-3" strokeWidth={2.5} aria-hidden="true" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="top">{t("sidebar.update")}</TooltipContent>
-            </Tooltip>
-          )}
+      <div className="mt-auto border-t border-sidebar-border pt-2.5">
+        <div className="flex items-center gap-2 px-1 text-[11.5px] text-muted-foreground">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <StatusDot on={running} />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {t(running ? "sidebar.running" : "sidebar.notRunning", { product: productLabel })}
+            </TooltipContent>
+          </Tooltip>
+          {/* 版本号用 tabular-nums，让数字变化时纵向对齐、不跳动。 */}
+          <span className="min-w-0 flex-1 truncate tabular-nums text-sidebar-foreground/70">
+            v{version || "?"}
+          </span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            {/* P9 T04：会话悬浮窗入口（桌面端；与原型版本行的 `.mini-btn` 同位）。
+                它是**可见性开关**，与托盘 / 窗口内关闭按钮收敛到同一份偏好 —— 不新增第二个切换器。 */}
+            {api.isDesktop() ? <CompanionToggle /> : null}
+            {hasUpdate && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon"
+                    /* 与 `.mini-btn` 同几何（20px / 胶囊 / 图标 11px）。 */
+                    className="size-5 rounded-full p-0"
+                    aria-label={t("sidebar.update")}
+                    onClick={() => setDialogOpen(true)}
+                  >
+                    <ArrowUp className="size-[11px]" strokeWidth={2.5} aria-hidden="true" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">{t("sidebar.update")}</TooltipContent>
+              </Tooltip>
+            )}
+          </div>
         </div>
       </div>
       <UpdateInstallDialog
@@ -579,22 +433,30 @@ function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
 
-  /** 每个产品各自记住上次停留的页面，来回切换不会丢上下文。 */
-  const lastPathRef = useRef<Record<Product, string>>({ ...PRODUCT_HOME });
-
   /**
-   * 当前的产品分区。
+   * 当前产品分区（来自路由前缀）。
    *
    * 路径只能回答「是 WorkBuddy 还是 Trae」，回答不了「Trae 里是看哪条产品线」——
-   * 两条线共用 `/trae/...`。因此变体由 URL 里的 `?line=` 查询参数承载，
-   * 但它**不再是分区维度**：它决定 Trae 页面内部展示哪条线，
-   * 由 `TraeAccountsPage` 等页面自己读取（见 `useTraeVariant`）。
+   * 两条线共用 `/trae/...`。产品线的选择由页面内部读取（见 `useTraeVariant`）。
    */
-  const [traeVariant, setTraeVariant] = useTraeVariant();
   const product: Product = productFromPath(location.pathname);
 
-  /* P6：命令面板（⌘K）的开关状态。入口有两个 —— 侧栏「搜索或跳转」按钮与全局 ⌘K。
-     状态放在 `Layout`（而非 `App`）里，是为了与侧栏入口共享、且都处于 Router 上下文内。 */
+  /**
+   * ★ 当前作用域（L1）= 平台 × 区域，顶栏与侧栏都读它。
+   *
+   * - **平台**来自路由；**区域**也来自 URL（`/s/{scope}/{dest}` 的路径段优先）。
+   * - Trae 侧区域走 `useTraeVariant`（它还要兼容旧 `?line=`），WorkBuddy 侧走 `useScope`。
+   *   两者同源：都存在 URL 里，切一次**整页跟随**（§3.1）。
+   */
+  const [wbRegion] = useScope(product);
+  const [traeRegion] = useTraeVariant();
+  const navRegion = product === "trae" ? traeRegion : wbRegion;
+  const scope = scopeOf(product, navRegion);
+  /** 四个作用域的环境状态（顶栏作用域菜单的唯一取数来源）。 */
+  const { statuses, refreshTrae } = useScopeStatus();
+
+  /* P6：命令面板（⌘K）的开关状态。入口有两个 —— 顶栏搜索按钮与全局 ⌘K。
+     状态放在 `Layout`（而非 `App`）里，是为了与顶栏入口共享、且都处于 Router 上下文内。 */
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   /* P6：作用域快捷键规划。降级（>5 个作用域或用户关闭）⇒ 空绑定 ⇒ 序号提示同步消失。 */
@@ -606,11 +468,10 @@ function Layout() {
 
   /* P2：**侧栏由注册表生成** —— 平台之间只差 scope（§3.1「侧栏固定 6 项」）。
      改造前是两套硬编码的 `PRODUCT_NAV`（5:5），新增目的地要改两处。
-     ⚠️ scope 取「当前区域」，所以切区域时侧栏链接**跟着变**（URL 成为唯一真值）。
+     ⚠️ 路径由**当前作用域**拼出，所以切作用域时侧栏链接**跟着变**（URL 成为唯一真值）。
      P8：入口先按**能力门控**过滤（`DESTINATION_CAPABILITY` + `hasCapability`）——
      缺能力的平台**不渲染**该入口（Trae 无 `sessionCopy` ⇒ 无「会话」），
      但**不封路由**：URL 直达仍由页面自己给空态（§3.2 规则 2）。 */
-  const [navRegion] = useScope(product);
   /**
    * ★ P8：侧栏「会话」徽章 = **待同步组数**（`behind` + `diverge`）。
    *
@@ -623,19 +484,52 @@ function Layout() {
     () => sessionGroups.filter((g) => g.status === "behind" || g.status === "diverge").length,
     [sessionGroups],
   );
+  /**
+   * ★ 侧栏徽章的数据源 —— **只读已加载的 store**（原型 `renderNav` 的三枚徽章）。
+   *
+   * ⚠️ **不在 `App` 里主动 load**：会话要读一遍 jsonl、网关密钥要打一次宿主接口 ——
+   * 为了三枚徽章让应用每次冷启动都做这些事，代价与收益不成比例。
+   * 未加载 ⇒ 不显示徽章（诚实，不臆造 `0`）。
+   *
+   * ① 账号数：来自 `useScopeStatus`（顶栏作用域菜单的同一份事实，**不额外取数**）；
+   *    有「需处理」账号（凭据已过期 / 需重登）时转警示色（原型 `warn: expiredCount > 0`）；
+   * ② 网关密钥数：网关 store 的 `keys`（**只有进过网关页才非空**）；
+   * ③ 会话待同步组数：`behind + diverge`，恒警示色（有事要处理）。
+   */
+  const gatewayKeys = useGatewayStore((s) => s.keys);
+
+  function navBadge(dest: Destination): { n: number; warn: boolean } | null {
+    if (dest === "accounts") {
+      /* 与顶栏作用域菜单**同源**（`useScopeStatus`）：数出与「N 个需处理」不会再对不上。
+         `attentionCount` 为 `null`（未知）时按「无警示」处理 —— 不拿未知冒充有事。 */
+      const n = statuses[scope].accountCount;
+      const attention = statuses[scope].attentionCount ?? 0;
+      return n > 0 ? { n, warn: attention > 0 } : null;
+    }
+    if (dest === "sessions") {
+      return pendingSyncCount > 0 ? { n: pendingSyncCount, warn: true } : null;
+    }
+    if (dest === "gateway") {
+      return gatewayKeys.length > 0 ? { n: gatewayKeys.length, warn: false } : null;
+    }
+    return null;
+  }
+
   const scopedNav = useMemo(
     () =>
       DESTINATIONS.filter((dest) => {
         const capability = DESTINATION_CAPABILITY[dest];
         return capability === undefined || hasCapability(product, capability);
       }).map((dest) => ({
+        dest,
         to: `/s/${scopeOf(product, navRegion)}/${dest}`,
         labelKey: DEST_META[dest].labelKey,
         icon: DEST_META[dest].icon,
-        // ★ P8：仅「会话」条目带待同步徽章；**>0 才带**（`null` = 不渲染）。
-        badge: dest === "sessions" && pendingSyncCount > 0 ? pendingSyncCount : null,
+        badge: navBadge(dest),
       })),
-    [product, navRegion, pendingSyncCount],
+    // `navBadge` 读到的事实都在下面这几个依赖里（含 `statuses` / 网关密钥 / 待同步数）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [product, navRegion, pendingSyncCount, statuses, gatewayKeys],
   );
 
   const appVersion = useAccountsStore((s) => s.status?.version || s.global.status?.version);
@@ -643,13 +537,10 @@ function Layout() {
     Boolean(s.status?.running || s.global.status?.running),
   );
   const traeRunning = useTraeVariantRunning(product === "trae");
-  // Trae 分区的状态圆点跟随**当前选中的那条产品线**（而不是「Trae 是否有任意一条在跑」）：
-  // 在「Trae Work 已关闭、Trae CN 在运行」时，只探「Trae 是否运行」会显示错误的绿灯。
-  const running =
-    product === "workbuddy" ? workbuddyRunning : Boolean(traeRunning[traeVariant]);
+  // Trae 分区的状态圆点跟随**当前选中的区域**（而不是「Trae 是否有任意一条在跑」）：
+  // 在「Trae CN 已关闭、Trae 国际版在运行」时，只探「Trae 是否运行」会显示错误的绿灯。
+  const running = product === "workbuddy" ? workbuddyRunning : Boolean(traeRunning[traeRegion]);
 
-  const hasUnifiedTitleBar =
-    api.isDesktop() && typeof navigator !== "undefined" && navigator.userAgent.includes("Macintosh");
   useCreditAutoRefresh();
   useWorkbuddyStatusRefresh();
 
@@ -703,129 +594,128 @@ function Layout() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [shortcutPlan, currentDest, navigate]);
 
-  useEffect(() => {
-    lastPathRef.current[product] = location.pathname;
-  }, [product, location.pathname]);
+  /**
+   * 切作用域（顶栏作用域菜单的唯一入口）：写「上次作用域」记忆 + 导航到
+   * `/s/{scope}/{dest}`——**URL 仍是唯一真值**，记忆只决定下次冷启动落到哪。
+   */
+  function selectScope(next: Scope) {
+    if (next === scope) return;
+    writeLastScope(window.localStorage, next);
+    navigate(scopeShortcutTarget(next, currentDest));
+  }
 
-  function switchProduct(next: Product) {
-    if (next === product) return;
-    // Trae 内部的产品线由 `?line=` 保持，切走再切回来时**不应该被重置**——
-    // 用户上次看的是 Trae CN，回来时就还该是 Trae CN。这里的 `setTraeVariant`
-    // 只在切**向** Trae 且 URL 尚无该参数时兜底（默认变体不写进 URL，
-    // 因此这一步通常是空操作，保留它是为了「切走时 URL 上残留了别的产品的参数」
-    // 这类边界不会让变体漂到错误的值）。
-    if (next === "trae") setTraeVariant(traeVariant);
-    navigate(lastPathRef.current[next] || PRODUCT_HOME[next]);
+  /**
+   * 刷新「当前作用域」的账号与状态（顶栏 ⟳）。
+   *
+   * - **WorkBuddy**：走账号 store 自己的命令（`refreshRegionStatus` + `reconcileAccounts`），
+   *   与命令面板的「刷新当前作用域」同口径；
+   * - **Trae**：走 `useScopeStatus` 聚合快照的 `refreshTrae`（顶栏状态的数据源）。
+   */
+  function refreshCurrentScope() {
+    if (product === "workbuddy") {
+      const store = useAccountsStore.getState();
+      void store.refreshRegionStatus(navRegion);
+      void store.reconcileAccounts(navRegion).catch(() => undefined);
+    } else {
+      void refreshTrae();
+    }
   }
 
   return (
-    <div className="flex h-screen min-h-0 overflow-hidden bg-background">
-      {hasUnifiedTitleBar ? (
-        <div
-          data-tauri-drag-region
-          className="fixed inset-x-0 top-0 z-50 h-8"
-          aria-hidden="true"
-        />
-      ) : null}
-      <aside
-        className={cn(
-          "flex min-h-0 w-[220px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 pb-4",
-          hasUnifiedTitleBar ? "pt-20" : "pt-4",
-        )}
-      >
-        <div className="flex items-center gap-2.5 px-1 pb-5">
-          <AppIconMark size={36} className="drop-shadow-sm" />
-          <div className="min-w-0">
-            <div
-              className="truncate text-[15px] leading-5 tracking-[-0.02em] text-sidebar-foreground/90"
-              style={{
-                fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif',
-                fontWeight: 640,
-              }}
-            >
-              Buddy Switch
-            </div>
-            {demoModeEnabled && (
-              <Badge variant="secondary" className="mt-1 h-5 border-0 px-1.5 text-[10px] text-sidebar-foreground/60 shadow-none">
-                {t("app.demoBadge")}
-              </Badge>
-            )}
-          </div>
-        </div>
+    <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
+      {/* ══ 顶部应用栏（L0/L1）：作用域 + 运行态 + 搜索 + 刷新 + 主题 + 应用设置 ══ */}
+      <TopBar
+        scope={scope}
+        statuses={statuses}
+        shortcutBindings={shortcutPlan.bindings}
+        onSelectScope={selectScope}
+        searchLabel={t("palette.entry")}
+        onOpenSearch={() => setPaletteOpen(true)}
+        onRefresh={refreshCurrentScope}
+      />
 
-        <ProductSwitch product={product} onChange={switchProduct} />
-        {/* P2：作用域选择器上移到侧栏标题下方（§3.1）。只给 WorkBuddy ——
-            Trae 的区域由它自己的 `?line=` 承载（那里还带程序位维度）。 */}
-        {product === "workbuddy" ? <ScopeSwitch product={product} /> : null}
-
-        {/* P6：命令面板入口。它是**搜索/跳转**按钮（不是作用域切换器）——
-            切作用域的控件仍只有上方的 ProductSwitch / ScopeSwitch（§1.5 纪律）。 */}
-        <button
-          type="button"
-          onClick={() => setPaletteOpen(true)}
-          className="mb-2 flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted-foreground outline-none transition-colors hover:bg-foreground/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring/50"
-        >
-          <Search className="size-4 shrink-0" aria-hidden="true" />
-          <span className="min-w-0 flex-1 truncate text-left">{t("palette.entry")}</span>
-          <kbd className="shrink-0 rounded border border-sidebar-border px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground/70">
-            ⌘K
-          </kbd>
-        </button>
-
-        <nav
-          className="flex min-h-0 flex-1 flex-col gap-0.5"
-          aria-label={t("product.navAria", { product: t(PRODUCT_LABEL_KEY[product]) })}
-        >
-          {scopedNav.map((item) => (
-            <NavLink key={item.to} to={item.to} className={navLinkClass}>
-              <item.icon className="size-4" />
-              {t(item.labelKey)}
-              {/* ★ P8：待同步组数（`behind` + `diverge`）—— **>0 才渲染**（不摆「0」）。 */}
-              {item.badge !== null ? (
-                <Badge
-                  variant="secondary"
-                  className="ml-auto h-5 border-0 px-1.5 text-[10px] tabular-nums shadow-none"
-                  data-badge="pending-sync"
-                >
-                  {item.badge}
+      <div className="flex min-h-0 flex-1">
+        {/* ══ 侧栏（L2 目的地）：品牌 + 导航 + 版本行。不随产品换血（§3.2） ══ */}
+        <aside className="flex min-h-0 w-[240px] shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 pb-3 pt-3.5">
+          {/* 品牌块（原型 `.brand` / `.brand-mark`，`:155-163`）：32px 图标底 + 双行文案。
+              ⚠️ 图标必须带 `primary 18%` 底色 —— 原型不是「裸图标」。 */}
+          <div className="flex items-center gap-2.5 px-1.5 pb-4">
+            <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-primary/15 text-primary">
+              <AppIconMark size={17} />
+            </span>
+            <div className="min-w-0">
+              <div
+                className="truncate text-[13.5px] leading-5 tracking-[-0.01em] text-sidebar-foreground"
+                style={{
+                  fontFamily: '"Bricolage Grotesque Variable", "SF Pro Display", ui-sans-serif, sans-serif',
+                  fontWeight: 650,
+                }}
+              >
+                Buddy Switch
+              </div>
+              {demoModeEnabled ? (
+                <Badge variant="secondary" className="mt-0.5 h-4 border-0 px-1.5 text-[10px] text-sidebar-foreground/60 shadow-none">
+                  {t("app.demoBadge")}
                 </Badge>
-              ) : null}
-            </NavLink>
-          ))}
-        </nav>
+              ) : (
+                <div className="truncate text-[10.5px] leading-4 text-muted-foreground">
+                  {t("sidebar.brand.tagline")}
+                </div>
+              )}
+            </div>
+          </div>
 
-        {/* 侧栏底部区块：**通用设置**入口紧贴**版本号上方**，打赏在其上。
-            选择这一位置的依据是「这里是侧栏唯一不随产品切换的区域」，因此**应用级设置**
-            （外观 / 开机自启 / 自动更新）的入口固定在此：两个产品分区走同一份实现，
-            见 `AppSettingsEntry`。它也不属于 `PRODUCT_NAV`，所以不会把
-            「侧栏 5 项 / 路由 5:5」的既有约束变成 6:6。
-            打赏在 webui 下**也显示**（版本行不显示），因此容器放在这里、
-            由各子项共用边框与内边距，而不是塞进 `AppFooter`。 */}
-        <section className="mt-auto flex flex-col gap-2.5 border-t border-sidebar-border px-2 pt-3 text-xs">
-          <DonateButton />
-          <AppSettingsEntry />
+          <nav
+            className="flex min-h-0 flex-1 flex-col gap-[3px]"
+            aria-label={t("product.navAria", { product: t(platformDescriptor(product).labelKey) })}
+          >
+            {scopedNav.map((item) => (
+              <NavLink key={item.to} to={item.to} className={navLinkClass}>
+                <item.icon className="size-4" />
+                {t(item.labelKey)}
+                {/* ★ 侧栏徽章（原型 `renderNav`）：账号数 / 网关密钥数 / 会话待同步数。
+                  一律 **`>0` 才渲染**（不摆「0」，§3.4 规则 1）；`warn` ⇒ 用警示色
+                  （账号「有需重登」、会话「有待同步」—— 都是「有事要处理」）。 */}
+                {item.badge !== null ? (
+                  /* 徽章逐值对齐原型 `.nav-badge`（`:176-182`）：min-w 20 / 高 18 / 内边距 0 6 /
+                     圆角 999（**胶囊**，不是方角）/ 字号 10.5。 */
+                  <span
+                    data-badge={item.dest === "sessions" ? "pending-sync" : `count-${item.dest}`}
+                    className={cn(
+                      "ml-auto grid h-[18px] min-w-[20px] place-items-center rounded-full px-1.5 text-[10.5px] tabular-nums",
+                      item.badge.warn
+                        ? "bg-warning/20 text-warning"
+                        : "bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {item.badge.n}
+                  </span>
+                ) : null}
+              </NavLink>
+            ))}
+          </nav>
+
+          {/* 侧栏底部只剩版本行 —— 应用级入口（通用设置 / 客户端设置 / Skill / 打赏）
+              已收进顶栏 ⚙ 菜单（`AppMenu`），不再占侧栏固定高度。 */}
           {api.isWebui() && !demoModeEnabled ? null : (
             <AppFooter product={product} running={running} version={appVersion} />
           )}
-        </section>
-      </aside>
-      <main
-        className={cn(
-          "min-w-0 flex-1 overflow-y-auto bg-background overscroll-contain",
-          hasUnifiedTitleBar && "pt-16 [&>div]:pt-4",
-        )}
-      >
-        {/* P6：首次引导条（可关闭 + 持久化；内容由真实绑定派生，降级项不列）。 */}
-        <FirstRunHint />
-        {/* 懒加载页面在这里挂起。Suspense **必须留在路由层**：
-            放在更外层会让侧栏一起被 fallback 替换（切页时整屏闪），
-            放在页面内部则页面自己的 chunk 还没到、根本没人接住 Suspense。 */}
-        <Suspense fallback={<PageFallback />}>
-          <Outlet />
-        </Suspense>
-      </main>
+        </aside>
 
-      {/* P6：命令面板（Radix Dialog + cmdk）。挂在 Layout 内 ⇒ 与侧栏入口共享开关状态。 */}
+        {/* ══ 内容区（L3 视图参数）：懒加载页面 ══ */}
+        <main className="min-w-0 flex-1 overflow-y-auto bg-background overscroll-contain">
+          {/* P6：首次引导条（可关闭 + 持久化；内容由真实绑定派生，降级项不列）。 */}
+          <FirstRunHint />
+          {/* 懒加载页面在这里挂起。Suspense **必须留在路由层**：
+              放在更外层会让侧栏一起被 fallback 替换（切页时整屏闪），
+              放在页面内部则页面自己的 chunk 还没到、根本没人接住 Suspense。 */}
+          <Suspense fallback={<PageFallback />}>
+            <Outlet />
+          </Suspense>
+        </main>
+      </div>
+
+      {/* P6：命令面板（Radix Dialog + cmdk）。挂在 Layout 内 ⇒ 与顶栏入口共享开关状态。 */}
       <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   );

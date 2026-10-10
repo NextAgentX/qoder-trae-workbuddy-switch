@@ -22,6 +22,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
+import { platformDescriptor } from "@/lib/platforms/registry";
 import { regionDescriptor } from "@/lib/region";
 import { parseScope, scopeParts } from "@/lib/scope";
 import type { BackupConflictPolicy, ImportPreview } from "@/lib/types";
@@ -46,7 +47,8 @@ export function backupScopeLabel(scope: string, t: Translate): string {
   const parsed = parseScope(raw);
   if (!parsed) return raw ?? "";
   const parts = scopeParts(parsed);
-  const product = t(parts.product === "workbuddy" ? "product.workbuddy" : "product.trae");
+  /* 产品名走注册表（唯一来源），**不**在本地再写一份 `product === "workbuddy" ? … : …`。 */
+  const product = t(platformDescriptor(parts.product).labelKey);
   return `${product} · ${regionDescriptor(parts.region).versionLabel}`;
 }
 

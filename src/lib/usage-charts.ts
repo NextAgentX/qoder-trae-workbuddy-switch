@@ -244,11 +244,70 @@ export function mergeSources(sources: TokenStatsSource[]): TokenStatsSource {
   };
 }
 
-/** 取最近 `range` 天的逐日点（按日期升序）。 */
+/** 本地日期键 `YYYY-MM-DD`（与后端逐日桶同口径，不走 `toISOString` —— 那会偏时区）。 */
+function dateKey(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/**
+ * ★ A1：最近 `range` 个**日历日**的日期键（升序，恒 `range` 项）。
+ *
+ * 给「日均」这类**需要知道窗口天数**的调用方用 —— 分母必须是**窗口天数**，
+ * 不能是「有数据的天数」（否则 5 天数据显示成「日均 300」，而真实 30 天日均是 50）。
+ */
+export function calendarWindowKeys(range: UsageRange, now: number = Date.now()): string[] {
+  return Array.from({ length: range }, (_, offset) =>
+    dateKey(new Date(now - (range - 1 - offset) * DAY_MS)),
+  );
+}
+
+/**
+ * ★ A1：取**最近 `range` 个日历日**的逐日点（升序），**缺失日补 0**。
+ *
+ * ## 为什么不 `.slice(-range)`
+ *
+ * `daily` 是**稀疏**的：后端 `token_stats.rs` 的 `daily: HashMap<String, Totals>`
+ * 只在**有记录的日子**落条目（`.or_default()` 不会给缺失日补键）⇒
+ * 「最近 N 天」不等于「数组最后 N 项」。
+ *
+ * 旧实现 `slice(-range)` 的两个实测后果：
+ * 1. `daily` 只有 5 天数据而 `range=30` ⇒ **只出 5 列**（原型断言要求 `cols.length === 30`）；
+ * 2. `range=7` 时首列落在 **59 天前** —— 却配着「近 7 天」的标签 ⇒ **图文不符**。
+ *
+ * ## 修法
+ *
+ * 按 `Date.now()` 倒推 N 个**日历日**建轴，缺失日补 0（与 `expiryBuckets` 补 0、
+ * `heatmap` 补 0 同一手法）。**后端不动** —— 前端补齐即可，避免动 `HashMap` 契约。
+ *
+ * ⚠️ 补 0 会改变下游的「空态」判定路径（过去「只有 5 天数据」可能让某些图判空），
+ * 这是**预期**的：现在 0 天的柱子**本就该显示为 0**，而不是让窗口悄悄缩成 5 天。
+ */
 function lastDays(daily: TokenStatsGroup[], range: UsageRange): TokenStatsGroup[] {
-  return [...daily]
-    .sort((left, right) => left.key.localeCompare(right.key))
-    .slice(-range);
+  const byKey = new Map(daily.map((point) => [point.key, point]));
+  const days: TokenStatsGroup[] = [];
+  for (let offset = range - 1; offset >= 0; offset -= 1) {
+    const key = dateKey(new Date(Date.now() - offset * DAY_MS));
+    // 缺失日补 0（`records: 0`）—— 这是「当天确实没有记录」，不是「读不到」。
+    // 补的是**零值分组**，各分项字段一并归零，避免下游读到 `undefined`。
+    days.push(byKey.get(key) ?? emptyDay(key));
+  }
+  return days;
+}
+
+/** 一个「当天无记录」的零值日（补 0 用；字段与 `TokenStatsGroup` 严格同形）。 */
+function emptyDay(key: string): TokenStatsGroup {
+  return {
+    key,
+    total: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    uncachedInput: 0,
+    records: 0,
+    cacheHitRate: null,
+  };
 }
 
 function shortLabel(date: string): string {
@@ -333,17 +392,30 @@ function alignSeries(series: TokenStatsGroup[], days: TokenStatsGroup[]): number
 /**
  * 模型 · 占比 + 迷你趋势线（契约 3 / 7）。
  *
- * `value` 优先取区间内 `dailyByModel` 之和；无明细时回落 `models[].total`。
- * 结果按 value 降序，只保留 value > 0 的模型。
+ * ★ A2：**只取 `dailyByModel`**（区间内明细），**不再回落 `models[].total`**。
+ *
+ * ## 为什么去掉回落
+ *
+ * 旧实现无明细时回落 `model.total`。但 `model.total` 是**全时段累计**，
+ * 与其余模型的「窗口内」值混进同一张占比图 ⇒ **时间口径不一致**。
+ * 更要命的是**同源不一致**：堆叠柱只取 `dailyByModel` 的 key，环形图却遍历 `source.models`
+ * ⇒ 实测 `models=[m-a:10, m-orphan:99]`、`dailyByModel` 只有 `m-a` 时，
+ * **堆叠 1 段、环形 2 扇区**，原型断言「扇区数 === 模型数」判红。
+ *
+ * ## 无明细的模型怎么办
+ *
+ * **不产扇区**。理由：它没有窗口内的值，硬给一个数就是**编造**；
+ * 而「它在窗口内是否被用过」正是这张图要回答的问题。
+ * 代价是「一个模型都没出现在 `dailyByModel`」时环形图为空 ——
+ * 那种情况下堆叠柱同样没有分段，两图**自洽**（原型断言两处都等于 `modelDays.length`）。
  */
 export function modelSlices(source: TokenStatsSource, range: UsageRange): ModelSlice[] {
   const days = lastDays(source.daily, range);
   const dailyByModel = source.dailyByModel ?? {};
-  const slices: ModelSlice[] = source.models.map((model) => {
-    const series = dailyByModel[model.key];
-    const spark = series && days.length > 0 ? alignSeries(series, days) : [];
-    const value = spark.length > 0 ? spark.reduce((acc, item) => acc + item, 0) : model.total;
-    return { name: model.key, value, spark };
+  const slices: ModelSlice[] = Object.keys(dailyByModel).map((name) => {
+    const series = dailyByModel[name];
+    const spark = days.length > 0 ? alignSeries(series, days) : [];
+    return { name, value: spark.reduce((acc, item) => acc + item, 0), spark };
   });
   return slices.filter((slice) => slice.value > 0).sort((left, right) => right.value - left.value);
 }

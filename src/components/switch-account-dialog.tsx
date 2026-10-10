@@ -47,7 +47,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { accountIdentity } from "@/components/account-card";
+import { accountIdentity, accountDisplayName, identityDisplayName } from "@/components/account-card";
 import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
 import { MigrationSummary } from "@/components/switch-account/migration-summary";
 import { SessionTree } from "@/components/switch-account/session-tree";
@@ -288,7 +288,7 @@ export function SwitchAccountDialog({
         try {
           const status = await api.getStatus(r);
           const name =
-            status.current?.nickname || status.current?.email || status.current?.uid || null;
+            identityDisplayName(status.current) || null;
           return [r, name];
         } catch {
           return [r, null];
@@ -439,7 +439,7 @@ export function SwitchAccountDialog({
         copySessionIds: copySessions ? [...selected] : undefined,
       });
       const nickname =
-        account.nickname || account.email || account.uid || t("wbAccounts.common.unknownAccount");
+        accountDisplayName(account);
       if (res.sessionCopy?.copied.length) {
         parts.push(t("wbAccounts.dialog.copiedSessions", { n: res.sessionCopy.copied.length }));
       }
@@ -553,7 +553,7 @@ export function SwitchAccountDialog({
   }, [error, t]);
 
   const targetName =
-    account?.nickname || account?.email || account?.uid || t("wbAccounts.common.unknownAccount");
+    (account ? accountDisplayName(account) : t("wbAccounts.common.unknownAccount"));
   const sourceName = scopeCurrent[sourceRegion] ?? null;
   const runDisabled = busy || (copySessions && selected.size === 0);
 
@@ -649,7 +649,7 @@ export function SwitchAccountDialog({
                   {/* 降级警告：索引库不可读 / 不完整。仍允许勾选（降级扫描已列出
                       projects 下的 jsonl），但必须明确告诉用户数据可能缺失。 */}
                   {sessionWarning && (
-                    <div className="text-xs text-amber-700 dark:text-amber-400">
+                    <div className="text-xs text-warning">
                       {sessionWarning}
                     </div>
                   )}
@@ -833,7 +833,7 @@ function MigrateOption({
         <div className="text-sm font-medium">{title}</div>
         <div
           className={
-            warn ? "text-xs text-amber-700 dark:text-amber-400" : "text-xs text-muted-foreground"
+            warn ? "text-xs text-warning" : "text-xs text-muted-foreground"
           }
         >
           {desc}

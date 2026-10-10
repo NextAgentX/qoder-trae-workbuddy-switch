@@ -1,6 +1,7 @@
 import { useLocation, useNavigate } from "react-router-dom";
 import { GitBranch } from "lucide-react";
 
+import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -8,7 +9,6 @@ import { useT } from "@/lib/i18n";
 import { platformDescriptor, platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf } from "@/lib/scope";
 import { useScope } from "@/lib/use-scope";
-import type { TranslationKey } from "@/locales/zh";
 
 /**
  * Trae 侧的「会话」目的地 —— **结构化空态**（`P8-ARCH.md` §1.3）。
@@ -31,17 +31,32 @@ export default function TraeSessionsPage() {
   const location = useLocation();
   const product = platformOfPath(location.pathname);
   const [region] = useScope(product);
-  /* 产品名走注册表（唯一来源），**不**写死 `TraeWork` —— 与 `PRODUCT_LABEL_KEY` 同一纪律。 */
-  const productLabel = t(platformDescriptor(product).labelKey as TranslationKey);
+  const scope = scopeOf(product, region);
+  /* 产品名走注册表（唯一来源），**不**写死 `TraeWork` —— 与侧栏产品切换器同一纪律。 */
+  const productLabel = t(platformDescriptor(product).labelKey);
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 p-5">
-      <header className="flex items-center gap-3">
+    <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-5 px-7 pt-[26px] pb-[60px]">
+      {/* 页头（原型 `viewSessions` 的 Trae 分支）：28px 标题 + 作用域副标题 + 只读 scope-chip。 */}
+      <header className="flex items-start gap-4">
         <div className="min-w-0">
-          <h1 className="text-lg font-semibold tracking-[-0.01em]">{t("sessions.title")}</h1>
-          <p className="mt-0.5 text-xs text-muted-foreground">{t("sessions.subtitle")}</p>
+          <h1 className="text-[28px] font-semibold tracking-tight">{t("sessions.title")}</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {t("pageHead.sessions", { scope: scopeLabel(t, scope) })}
+          </p>
         </div>
+        <div className="grow" />
+        <ScopeChip scope={scope} />
       </header>
+
+      {/* ★ 工具栏标题行（与 WorkBuddy 会话页结构对齐，原型 `viewSessions` :3183）。
+          ⚠️ 本页**不加载**任何会话数据 ⇒ **不渲染计数徽标**：报告一个编出来的「0」等于臆造
+          （§3.5 不假承诺）。仅保留「{客户端} 会话」这一静态标题，与下方「不支持」空态一致。 */}
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card px-3 py-2.5">
+        <h2 className="text-[13.5px] font-semibold">
+          {t("sessions.toolbar.title", { client: productLabel })}
+        </h2>
+      </div>
 
       <Card className="gap-0 py-0">
         {/* 四要素（§3.6）：图标 + 标题 + **说明原因** + 出口。

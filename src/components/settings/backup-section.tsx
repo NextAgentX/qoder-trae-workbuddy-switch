@@ -363,6 +363,42 @@ export function BackupSection() {
     }
   }
 
+  /**
+   * ★ C1「重试失败项」= **真重试**：只把失败的那几个 scope 再导一次。
+   *
+   * 此前这个按钮的 `onClick` 是 `chooseFile` —— 打开文件选择器、整份重来（覆盖语义），
+   * 与文案承诺的「只重试失败项」相反，属安全相关的**假控件**。
+   *
+   * 三个要点：
+   * 1. 复用 `fileTextRef` 里**同一份**文件文本 —— 不需要用户再选一次文件；
+   * 2. 只传 `retryableScopes`（后端逐 scope 事务 ⇒ 失败单元就是 scope），
+   *    已成功的分区**连读都不读**，不会被重新覆盖；
+   * 3. 未知 scope（键名非法）不在重试名单里 —— 那是来件的结构性缺陷，重试必然再失败。
+   */
+  async function retryFailed() {
+    const text = fileTextRef.current;
+    const scopes = result?.retryableScopes ?? [];
+    // 三重守卫：没有源文本 / 没有可重试分区 / 正在跑 —— 都不该发请求。
+    if (!text || scopes.length === 0 || pending) return;
+    setPending(true);
+    setImportError("");
+    try {
+      const summary = await api.importBackup(text, conflict, buildSelectionState(), scopes);
+      setResult(summary);
+      if (summary.failed === 0) {
+        toast.success(t("backup.import.result.retryDone"));
+      } else {
+        // 仍有失败 ⇒ 如实说明，不假装「重试成功」。
+        toast.error(t("backup.import.result.retryPartial", { count: summary.failed }));
+      }
+      void loadAuto();
+    } catch (e) {
+      setImportError(api.asError(e));
+    } finally {
+      setPending(false);
+    }
+  }
+
   function finishImport() {
     setResult(null);
     setPreview(null);
@@ -564,8 +600,15 @@ export function BackupSection() {
                   <AlertTriangle />
                   <AlertDescription className="flex flex-wrap items-center gap-2">
                     <span>{t("backup.import.result.failed", { count: result.failed })}</span>
-                    {result.retryable > 0 && (
-                      <Button size="sm" variant="outline" onClick={chooseFile} disabled={reading}>
+                    {/* ★ C1：真重试（`retryFailed`），不再是「重新选文件、整份重来」。 */}
+                    {(result.retryableScopes?.length ?? 0) > 0 && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void retryFailed()}
+                        disabled={reading || pending}
+                      >
+                        {pending ? <Loader2 className="animate-spin" /> : null}
                         {t("backup.import.result.retry")}
                       </Button>
                     )}

@@ -1,27 +1,10 @@
 /**
- * 文案域：**Trae 产品线 · 产品线切换与网关管理**（英文）。
+ * 文案域：**Trae gateway management**（英文）。
  *
  * ⚠️ 不写类型注解：键名合法性由 `src/locales/en.ts` 单点校验。域文件保持零依赖。
  * 键必须与 `traeGateway.zh.ts` **一一对应**（缺哪条就回落中文）。
  */
 export const en = {
-  // =====================================================================
-  // trae-variant-bar.tsx —— variant status bar (accounts page)
-  // =====================================================================
-  "trae.variant.bar.loggedIn": "Signed in: {name}",
-  "trae.variant.bar.notLoggedIn": "Not signed in",
-  "trae.variant.bar.notDetected": "Not detected",
-
-  // =====================================================================
-  // trae-variant-switch.tsx —— variant switcher
-  // =====================================================================
-  "trae.variant.switch.aria": "Select Trae version",
-  "trae.variant.switch.running": "Running",
-  "trae.variant.switch.installed": "Installed",
-  "trae.variant.switch.notDetected": "Not detected",
-  "trae.variant.switch.tip": "{label}: {state}",
-  "trae.variant.switch.tipVersion": "{label}: {state} · v{version}",
-
   // =====================================================================
   // gateway/trae-model-list.tsx —— model list
   // =====================================================================
