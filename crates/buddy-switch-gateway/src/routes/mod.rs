@@ -6,6 +6,7 @@ pub mod health;
 pub mod messages;
 pub mod models;
 pub mod relay;
+pub mod responses;
 pub mod status;
 
 use axum::body::Bytes;

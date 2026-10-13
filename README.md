@@ -133,7 +133,7 @@ webui 默认监听 `127.0.0.1:57890`。界面与桌面 App 完全一致——同
 
 | 能力 | 说明 |
 | --- | --- |
-| 兼容协议 | OpenAI 兼容（`/v1/models`、`/v1/chat/completions`）与 Anthropic 兼容（`/v1/messages`），均支持 SSE 流式 |
+| 兼容协议 | OpenAI 兼容（`/v1/models`、`/v1/chat/completions`、`/v1/responses`）与 Anthropic 兼容（`/v1/messages`），均支持 SSE 流式 |
 | 监听配置 | 默认仅监听 `127.0.0.1`；改为 `0.0.0.0` 需二次风险确认 |
 | 默认端口 | WorkBuddy 网关 `57891`；Trae 网关 `7864`（Trae 另有本地 MITM 代理端口 `8899`，登录态捕获依赖它） |
 | API Key | 可创建多个 Key，归属到具体区域；列表只显示前缀，**不落明文、不回显 hash**；支持吊销与删除 |

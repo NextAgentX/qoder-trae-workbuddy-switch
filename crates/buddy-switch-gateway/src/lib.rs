@@ -66,7 +66,7 @@ use tokio::sync::oneshot;
 /// 组装网关对外路由（**不含 fallback**）。
 ///
 /// 挂载：`GET /healthz`、`GET /v1/models`、`GET /status`、
-/// `POST /v1/chat/completions`、`POST /v1/messages`。
+/// `POST /v1/chat/completions`、`POST /v1/messages`、`POST /v1/responses`。
 /// 鉴权在各自 handler 内完成（Key 绑定 region）；`/healthz` 免鉴权。
 pub fn router(state: GatewayState) -> axum::Router {
     use axum::routing::{get, post};
@@ -80,9 +80,16 @@ pub fn router(state: GatewayState) -> axum::Router {
         .route("/status", get(routes::status::handler))
         .route("/v1/chat/completions", post(routes::chat::handler))
         .route("/v1/messages", post(routes::messages::handler))
+        // Responses API（issue #21）：与 chat/messages 共用同一条中继，只差协议层。
+        .route("/v1/responses", post(routes::responses::handler))
         // P12 T03 · **业务请求转发**（本地路由）：白名单内的业务路径走 `relay` 的治理层
         // （选号 / 在途 / 冷却 / 熔断 / 换号），**不另写轮换逻辑**。白名单外一律 404。
-        .route("/biz/{*path}", post(routes::biz::handler))
+        //
+        // ⚠️ 通配符**必须**用 axum 0.7 的 `*path`，**不是** 0.8 的 `{*path}`：
+        //   0.7 的 path-router 会把 `{*path}` 判为非法 catch-all，在**构建期 panic**
+        //   （报错信息 "catch-all parameters are only allowed at the end of a route"
+        //   具有误导性，真因是花括号不被识别）⇒ 整个网关起不来，且 `cargo check` 全绿。
+        .route("/biz/*path", post(routes::biz::handler))
         .layer(axum::extract::DefaultBodyLimit::max(body_limit))
         .with_state(state)
     // 注意：不设 fallback，避免与宿主 merge 时的 fallback 冲突
@@ -323,7 +330,7 @@ impl<P: GatewayProduct> GatewayHost<P> {
 /// WorkBuddy 网关产品线（[`GatewayProduct`] 的 WB 实现）。
 ///
 /// **路径所有权**：`GET /healthz`、`GET /v1/models`、`GET /status`、
-/// `POST /v1/chat/completions`、`POST /v1/messages`（见 [`router`]）。
+/// `POST /v1/chat/completions`、`POST /v1/messages`、`POST /v1/responses`（见 [`router`]）。
 pub struct WbGateway;
 
 /// WorkBuddy 网关的进程内共享状态（惰性初始化，读一次配置）。
@@ -338,9 +345,12 @@ impl GatewayProduct for WbGateway {
         "/status",
         "/v1/chat/completions",
         "/v1/messages",
+        // issue #21：OpenAI Responses API —— 与 chat/messages 共用中继，路径独立。
+        "/v1/responses",
         // P12 T03 · 业务转发 —— **WB 独有**（Trae 业务域不可配，见 spike 的 H0）。
         // ⚠️ 写**精确的 axum 路径**（本表是「路径所有权」声明，不是前缀表）。
-        "/biz/{*path}",
+        // ⚠️ 通配符用 axum 0.7 语法 `*path`（**不是** 0.8 的 `{*path}`）。
+        "/biz/*path",
     ];
 
     fn shared_state() -> GatewayState {
@@ -393,13 +403,20 @@ mod tests {
 
     /// P12 T03：业务转发路由**必须**在册，且**真的挂在 `router()` 里**。
     ///
-    /// 可证伪：删掉 `router()` 里的 `.route("/biz/{*path}", …)` ⇒ 本用例变红。
+    /// 可证伪：删掉 `router()` 里的 `.route("/biz/*path", …)` ⇒ 本用例变红。
     /// ⚠️ **只看 `router()` 的函数体** —— 若直接扫整个文件，本测试里那行字符串会让断言
     /// **恒真**（典型的假断言：把被测逻辑删掉它也绿）。
+    ///
+    /// ★★ 本用例**曾经放过一个致命 bug**：路由一度写成 axum **0.8** 的 `/biz/{*path}`，
+    /// 而本仓锁的是 **axum 0.7** ⇒ `router()` 在**构建期panic**，网关完全起不来，
+    /// 但 `cargo check` 全绿、上面那条字符串断言也全绿（它只查「字符串在不在」，
+    /// 管不了「axum 认不认这个语法」）。
+    /// ⇒ 断言必须**升级为真的构建 router**（下面 [`router_builds_and_biz_route_matches`]
+    /// 承担），字符串检查只保留为「声明与实现不脱节」的辅助。
     #[test]
     fn business_route_is_owned_and_mounted() {
         assert!(
-            WbGateway::OWNED_PATHS.contains(&"/biz/{*path}"),
+            WbGateway::OWNED_PATHS.contains(&"/biz/*path"),
             "业务转发路径未声明所有权"
         );
         let src = include_str!("lib.rs");
@@ -413,9 +430,80 @@ mod tests {
             .and_then(|rest| rest.split("/// 已启动的网关监听句柄").next())
             .expect("找不到 router 函数体（结构已变，请更新本断言）");
         assert!(
-            body.contains(r#".route("/biz/{*path}", post(routes::biz::handler))"#),
+            body.contains(r#".route("/biz/*path", post(routes::biz::handler))"#),
             "router() 里没挂业务转发路由 —— handler 写了但没人调（本项目已出过三次同类事故）"
         );
+    }
+
+    /// issue #21：Responses 路由**必须**在册，且**真的挂在 `router()` 里**。
+    ///
+    /// 可证伪：删掉 `router()` 里的 `.route("/v1/responses", …)` ⇒ 本用例变红。
+    /// 与 [`business_route_is_owned_and_mounted`] 同款：只扫 `router()` 函数体，
+    /// 避免本文件其它字符串（含文档注释）让断言**恒真**。
+    #[test]
+    fn responses_route_is_owned_and_mounted() {
+        assert!(
+            WbGateway::OWNED_PATHS.contains(&"/v1/responses"),
+            "Responses 路径未声明所有权"
+        );
+        let src = include_str!("lib.rs");
+        let body = src
+            .split("pub fn router(state: GatewayState) -> axum::Router {")
+            .nth(1)
+            .and_then(|rest| rest.split("/// 已启动的网关监听句柄").next())
+            .expect("找不到 router 函数体（结构已变，请更新本断言）");
+        assert!(
+            body.contains(r#".route("/v1/responses", post(routes::responses::handler))"#),
+            "router() 里没挂 Responses 路由 —— handler 写了但没人调（本项目已出过三次同类事故）"
+        );
+    }
+
+    /// ★★ **axum 路由语法护栏**：`router()` 必须**真的能构建出来**，且业务路由**真的能匹配**。
+    ///
+    /// ## 为什么必须有这条（血的教训）
+    ///
+    /// `cargo check` / `cargo build` **全绿**、`OWNED_PATHS` 声明齐全、字符串断言也全绿，
+    /// 但axum **0.7** 不认 0.8 的 `{*path}` 语法 ⇒ `router()` **构建期 panic**
+    /// ⇒ **网关根本起不来**（用户侧表现为「网关功能完全无法运行」）。
+    /// **编译期完全测不出来**，只有「真的去构建 / 真的发一个请求」才能暴露。
+    ///
+    /// 可证伪：把 `router()` 里的 `/biz/*path` 改回 `/biz/{*path}` ⇒ 本用例 panic 变红。
+    #[tokio::test]
+    async fn router_builds_and_biz_route_matches() {
+        // 隔离 home：避免构建状态时读写真实`~/.buddy-switch/`。
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-router-syntax-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var(buddy_switch_core::modules::config::BUDDY_SWITCH_HOME_ENV, &home);
+
+        // ① 构建 router：语法非法会在这里 panic（这正是原 bug 的触发点）。
+        let state = GatewayState::new(GatewayConfig::default());
+        let app = router(state);
+
+        // ② 真打一条业务请求：通配符没真正生效（404 / 405）也要红。
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/biz/v1/user/checkin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            response.status() != axum::http::StatusCode::NOT_FOUND
+                && response.status() != axum::http::StatusCode::METHOD_NOT_ALLOWED,
+            "/biz/*path 未真正匹配业务请求（得到 {}）—— 通配符语法可能又写错了",
+            response.status()
+        );
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// 两平台各自的路径所有权**互不相同**（各挂自己的健康检查 / 状态路径），

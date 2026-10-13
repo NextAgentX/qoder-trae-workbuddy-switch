@@ -132,7 +132,7 @@ Expose the current account's model quota to other local AI tools (Cursor, Claude
 
 | Capability | Description |
 | --- | --- |
-| Compatible protocols | OpenAI-compatible (`/v1/models`, `/v1/chat/completions`) and Anthropic-compatible (`/v1/messages`), both supporting SSE streaming |
+| Compatible protocols | OpenAI-compatible (`/v1/models`, `/v1/chat/completions`, `/v1/responses`) and Anthropic-compatible (`/v1/messages`), both supporting SSE streaming |
 | Listen configuration | Binds to `127.0.0.1` only by default; changing it to `0.0.0.0` requires an explicit second risk confirmation |
 | Default ports | WorkBuddy gateway `57891`; Trae gateway `7864` (Trae also has a local MITM proxy port `8899`, which login-state capture depends on) |
 | API keys | Multiple keys can be created, each belonging to a specific region; the list shows only the prefix and **never stores plaintext or echoes the hash**; keys can be revoked and deleted |

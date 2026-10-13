@@ -3,4 +3,5 @@
 pub mod anthropic;
 pub mod openai;
 pub mod reasoning;
+pub mod responses;
 pub mod usage_tap;
