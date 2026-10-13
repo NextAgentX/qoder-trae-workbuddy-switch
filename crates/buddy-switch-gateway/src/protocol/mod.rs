@@ -2,4 +2,5 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod reasoning;
 pub mod usage_tap;

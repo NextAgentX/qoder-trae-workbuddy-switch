@@ -125,6 +125,7 @@ pub struct CompletionAccumulator {
     pub created: Option<i64>,
     pub role: Option<String>,
     pub content: String,
+    pub reasoning: String,
     pub tool_calls: Vec<ToolCallAccum>,
     pub finish_reason: Option<String>,
     pub prompt_tokens: Option<u64>,
@@ -179,6 +180,10 @@ impl CompletionAccumulator {
                 if let Some(role) = delta.get("role").and_then(Value::as_str) {
                     self.role = Some(role.to_string());
                 }
+            }
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                let delta_text = crate::protocol::reasoning::reasoning_delta(&self.reasoning, reasoning);
+                self.reasoning.push_str(delta_text);
             }
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 self.content.push_str(content);
@@ -262,6 +267,9 @@ impl CompletionAccumulator {
         if let Some(content) = message.get("content").and_then(Value::as_str) {
             accumulator.content.push_str(content);
         }
+        if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+            accumulator.reasoning.push_str(reasoning);
+        }
         if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
             for tool_call in tool_calls {
                 let function = tool_call.get("function");
@@ -306,6 +314,9 @@ impl CompletionAccumulator {
             "role".to_string(),
             json!(self.role.clone().unwrap_or_else(|| "assistant".to_string())),
         );
+        if !self.reasoning.is_empty() {
+            message.insert("reasoning_content".to_string(), json!(self.reasoning));
+        }
         if self.tool_calls.is_empty() {
             message.insert("content".to_string(), json!(self.content));
         } else {
@@ -446,5 +457,45 @@ mod tests {
             .map(|chunk| String::from_utf8_lossy(chunk).to_string())
             .collect();
         assert!(text.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[test]
+    fn from_sse_dedupes_snapshot_reasoning() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"AB\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"AB\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ABC\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let accum = CompletionAccumulator::from_sse(sse);
+        assert_eq!(accum.reasoning, "ABC", "快照序列聚合后只保留全文，不重复拼接");
+
+        let completion = accum.to_openai_completion("m");
+        assert_eq!(
+            completion["choices"][0]["message"]["reasoning_content"],
+            "ABC"
+        );
+    }
+
+    #[test]
+    fn from_sse_concatenates_incremental_reasoning() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"A\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"B\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"C\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let accum = CompletionAccumulator::from_sse(sse);
+        assert_eq!(accum.reasoning, "ABC", "真增量序列完整拼接");
+    }
+
+    #[test]
+    fn to_openai_completion_omits_reasoning_when_empty() {
+        let accum = CompletionAccumulator {
+            content: "hello".to_string(),
+            ..Default::default()
+        };
+        let completion = accum.to_openai_completion("m");
+        assert!(completion["choices"][0]["message"].get("reasoning_content").is_none());
     }
 }

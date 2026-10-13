@@ -171,11 +171,13 @@ pub async fn handler(
                     .to_value(),
                 );
                 // 流式也要回填成本账本，否则「账本择优」在实际流量上等于未启用。
+                // 组合顺序：上游字节流 -> UsageTap (旁观原始字节记账) -> ReasoningDelta (快照差分) -> SsePassthrough (补发 [DONE])
                 let sink = relay::pool_usage_sink(&state, &uid, &model);
-                sse_response(SsePassthrough::new(crate::protocol::usage_tap::UsageTap::new(
-                    response.bytes_stream(),
-                    sink,
-                )))
+                sse_response(SsePassthrough::new(
+                    crate::protocol::reasoning::ReasoningDelta::new(
+                        crate::protocol::usage_tap::UsageTap::new(response.bytes_stream(), sink),
+                    ),
+                ))
             } else {
                 let text = response.text().await.unwrap_or_default();
                 let accumulator = CompletionAccumulator::from_sse(&text);
