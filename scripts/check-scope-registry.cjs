@@ -1075,7 +1075,8 @@ check("★ 账号页只渲染**本区域**的程序位（国内版不得出现�
       );
     }
   }
-  if (!/onSwitchTo\?\.\(account,\s*program\.variant\)/.test(card)) {
+  // 第三参 `label`（程序位可见短名）可选：切换目标仍必须是区域限定的 `program.variant`。
+  if (!/onSwitchTo\?\.\(account,\s*program\.variant(?:,\s*label)?\)/.test(card)) {
     throw new Error("切换目标不是区域限定的 `program.variant`（用 `program.program` 会丢客户端）");
   }
   return "programsFor 按区域过滤 · 卡片无跨区域分支 · 切换目标 = program.variant";
