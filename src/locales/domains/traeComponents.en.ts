@@ -152,6 +152,8 @@ export const en = {
   // trae-oauth-login-dialog.tsx —— OAuth web login
   // =====================================================================
   "trae.comp.oauth.title": "OAuth web login · {variant}",
+  "trae.comp.oauth.programLabel": "Client to sign in with",
+  "trae.comp.oauth.programHint": "The device credential is read from the selected client; both program slots share the current region's account library — this only decides which client initiates the authorization. If one client is not installed, pick the other.",
   "trae.comp.oauth.desc.lead": "Sign in to",
   "trae.comp.oauth.desc.mid": "in your browser and authorize. The app catches the callback automatically and adds the account to",
   "trae.comp.oauth.desc.tail": "'s account library — no token pasting needed.",

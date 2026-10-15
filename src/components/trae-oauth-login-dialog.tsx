@@ -13,8 +13,32 @@ import {
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
-import { traeVariantLabel, type TraeAccount } from "@/lib/trae-types";
+import {
+  traeVariantLabel,
+  type TraeAccount,
+  type TraeRegionId,
+  type TraeVariantId,
+} from "@/lib/trae-types";
 import { useTraeVariant } from "@/lib/use-trae-variant";
+
+/**
+ * 每个区域可发起 OAuth 登录的**程序位**（按变体标识给后端）。
+ *
+ * ## 为什么必须有它
+ *
+ * OAuth 授权 URL 的 `device_id` 必须与**对应客户端**的 icube 设备凭证同源：
+ * 「TraeWork」（TRAE SOLO）与「Trae」（合并版 IDE 客户端）是两个不同的客户端、
+ * 两份数据目录。只按区域发起登录时后端固定落该区域主程序（国内 = TraeWork），
+ * 本机没装它就会在取设备凭证那一步直接报错 —— 用户明明装着 Trae 却加不了账号。
+ *
+ * 默认选中**主程序**（数组首项）：与历史行为一致；装了合并版客户端的用户
+ * 手动切到「Trae」即可。两条程序位落**同一本区域账号库**，这里选的只是
+ * 「用哪个客户端的设备身份去授权」。
+ */
+const PROGRAM_OPTIONS: Record<TraeRegionId, readonly TraeVariantId[]> = {
+  cn: ["trae_work", "trae_merged"],
+  global: ["global", "global_trae_merged"],
+};
 
 /**
  * 前端独立超时（秒）。
@@ -60,7 +84,7 @@ interface Props {
 
 export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
   /**
-   * 当前产品线 —— **与页面同源**（`?line=` 承载，见 `useTraeVariant`）。
+   * 当前**区域** —— **与页面同源**（`?line=` 承载，见 `useTraeVariant`）。
    *
    * 刻意在这里自己取、而不是新增一个 prop：
    *
@@ -70,8 +94,13 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
    * 3. 后端「按变体分家」是全链路的：授权页、账号库、数据目录都跟着它走，
    *    所以它必须由本组件直接持有，而不是靠调用方转述。
    */
-  const [variant] = useTraeVariant();
-  const variantLabel = traeVariantLabel(variant);
+  const [region] = useTraeVariant();
+  /**
+   * 本次登录选用的**程序位**。区域只决定账号库，程序位决定「拿哪个客户端的
+   * 设备凭证去授权」—— 不给用户选，就等于替他绑死了主程序位。
+   */
+  const [program, setProgram] = useState<TraeVariantId>(PROGRAM_OPTIONS[region][0]);
+  const variantLabel = traeVariantLabel(program);
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -138,8 +167,11 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
       setResult(null);
       setRemaining(null);
       timedOutRef.current = false;
+      // 程序位回到该区域的默认（主程序）：区域可能在上次打开后已切换，
+      // 沿用旧选中值可能拿到「另一区域」的变体，把账号发到别的体系去。
+      setProgram(PROGRAM_OPTIONS[region][0]);
     }
-  }, [open]);
+  }, [open, region]);
 
   // 轮询登录结果
   useEffect(() => {
@@ -262,7 +294,7 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
     setLaunching(true);
     setLaunchNote("");
     try {
-      await api.launchTraeClient(variant);
+      await api.launchTraeClient(program);
       setLaunchNote(t("trae.comp.oauth.launchOk", { variant: variantLabel }));
     } catch (e) {
       setLaunchNote(api.asError(e));
@@ -281,7 +313,7 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
     settledRef.current = false;
     setRemaining(null);
     try {
-      const res = await api.traeOAuthStart(variant);
+      const res = await api.traeOAuthStart(program);
       setLoginId(res.loginId);
       setUri(res.verificationUri);
       setPort(res.port);
@@ -343,6 +375,31 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
 
         {!loginId && !result && (
           <div className="space-y-3">
+            {/*
+              程序位选择：OAuth 的 device_id 与所选客户端的设备凭证同源，
+              本机没装 TraeWork（TRAE SOLO）时选「Trae」即可用合并版客户端登录。
+              会话开始后锁定 —— 设备身份在 `start` 那一刻已随会话定死，中途换选
+              只会造成「界面显示 A、实际授权用 B」的错位，必须重新发起。
+            */}
+            <div className="space-y-1.5">
+              <p className="text-sm font-medium">{t("trae.comp.oauth.programLabel")}</p>
+              <div className="grid grid-cols-2 gap-2" role="group" aria-label={t("trae.comp.oauth.programLabel")}>
+                {PROGRAM_OPTIONS[region].map((id) => (
+                  <Button
+                    key={id}
+                    type="button"
+                    variant={id === program ? "default" : "outline"}
+                    className="w-full"
+                    aria-pressed={id === program}
+                    disabled={busy}
+                    onClick={() => setProgram(id)}
+                  >
+                    {traeVariantLabel(id)}
+                  </Button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">{t("trae.comp.oauth.programHint")}</p>
+            </div>
             <Button onClick={start} disabled={busy} className="w-full">
               {busy ? t("trae.comp.oauth.startBusy", { variant: variantLabel }) : t("trae.comp.oauth.start", { variant: variantLabel })}
             </Button>
