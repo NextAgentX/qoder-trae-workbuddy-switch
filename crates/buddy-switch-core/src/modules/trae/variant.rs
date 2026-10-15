@@ -278,7 +278,7 @@ impl TraeVariant {
     /// 它凭空造了 `Trae AI` / `TraeWork AI` 这类客户端根本不用的名字，
     /// 而且 `Trae AI` 会同时指国际 TraeCode 与国际合并版 ⇒ 撞名。
     ///
-    /// 护栏：`region::tests::六个程序位的展示名两两不同` +
+    /// 护栏：`region::tests::在役程序位的展示名两两不同` +
     /// 跨语言门禁（兜底表 vs `region.rs`）。
     pub fn display_name(self) -> &'static str {
         match self {

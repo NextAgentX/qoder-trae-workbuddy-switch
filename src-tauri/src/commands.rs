@@ -458,9 +458,11 @@ pub fn accounts_import(
 /// ★ 参数化命令：从本机客户端登录态导入当前账号 —— `scope` 同时决定平台与区域。
 ///
 /// 合并旧 `import_local`（WB，读 WorkBuddy 认证文件）与 `trae_import_local_account`
-/// （Trae，读 Trae userData 登录态）。两者都是**区域纯**的：读取**该区域客户端**的登录态
-/// 并写入**该区域**账号库 —— 读哪个客户端由 `scope` 决定，**不**用
-/// `detected_variant` / `detect_data_dir` 猜测活跃客户端。
+/// （Trae，读 Trae userData 登录态）。**写侧**是区域纯的：账号库按区域分家，
+/// 导入写入**该区域**账号库。Trae 的**读侧**（读哪个客户端的 userData）在区域内
+/// 按程序位表逐个尝试（[`trae::handlers::import_local_account_for_region`]）——
+/// scope 无程序位维度，而「本机哪条线登录着」只有读侧探测才知道；折叠到区域
+/// 主程序会让只装了 TraeCode CN 的机器误报「未检测到【TraeWork CN】客户端」。
 ///
 /// ## 名字为何**不**沿用 §2.3 的 `import_local`
 ///
@@ -489,9 +491,9 @@ pub async fn accounts_import_local(scope: String) -> Result<Value, String> {
             .map_err(|error| format!("导入本机账号失败: {error}"))?
         }
         Product::Trae => {
-            let variant = trae_variant_of_region(require_trae_region(scope)?);
+            let region = require_trae_region(scope)?;
             tauri::async_runtime::spawn_blocking(move || {
-                trae::handlers::import_local_account_for(variant)
+                trae::handlers::import_local_account_for_region(region)
             })
             .await
             .map_err(|error| format!("导入本机账号失败: {error}"))?

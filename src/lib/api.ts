@@ -2301,9 +2301,10 @@ export function traeDeleteAccount(
  * 客户端已登录时读 `Cloud-IDE-JWT`：账号已存在则**覆盖刷新 JWT**（保留名字与分组），
  * 不存在则新建。因此重复点击是安全的，不会产生重复条目。
  *
- * `variant` 决定读**哪条产品线**的 userData（`"trae_work"` / `"trae_cn"`）：
- * Trae 多条产品线可同机并存，不指定时后端按默认变体处理（保持向后兼容）。
- * 分区页会把当前管理的产品线传进来，避免「在 Trae Work 分区导入却读了 Trae CN」。
+ * 后端在**区域内全部程序位**里按序尝试（账号库按区域分家，写侧区域纯；本机哪条线
+ * 登录着只有读侧探测才知道）——只装了 TraeCode CN 的机器也能直接导入，不会误报
+ * 「未检测到【TraeWork CN】客户端」。`variant` 只用于折叠出**区域**作用域
+ * （scope 模型 `trae-cn` / `trae-global` 没有程序位维度，程序位在服务端回退）。
  */
 export function traeImportLocalAccount(variant?: TraeVariantId | null): Promise<{
   userId: string;

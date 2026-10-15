@@ -1758,15 +1758,17 @@ function RegionPanel({ region }: { region: Region }) {
             remainingText: formatCredits(resource.remaining),
             totalText: formatCredits(resource.total),
             usedText: t("wbAccounts.card.used", { n: formatCredits(resource.used) }),
+            // 到期文案不再区分「几天内」——是否临期只体现在**颜色**上（见 `DetailPack.expiringSoon`）。
             expiryText: resource.expired
               ? t("wbAccounts.card.expired")
-              : resource.expiringSoon
-                ? t("wbAccounts.card.expiresIn7")
-                : resource.expireAt
-                  ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(resource.expireAt, t) })
-                  : t("wbAccounts.card.forever"),
+              : resource.expireAt
+                ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(resource.expireAt, t) })
+                : t("wbAccounts.card.forever"),
             expired: resource.expired,
-            expiringSoon: resource.expiringSoon,
+            // ★「3 天内到期」用黄色警示。后端 `expiringSoon` 是 7 天口径，且卡片徽章还在用，
+            //   不动它 —— 抽屉的 3 天口径在这里就地判定（WB 侧 `expireAt` 是毫秒）。
+            expiringSoon:
+              !resource.expired && resource.expireAt != null && resource.expireAt - Date.now() <= 3 * 86_400_000,
             ratio: resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0,
           }))
       : [];

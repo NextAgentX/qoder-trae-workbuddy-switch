@@ -53,19 +53,26 @@ import { cn } from "@/lib/utils";
 const PROGRAMS = allPrograms();
 
 /**
- * 区域标识 → 程序位：`cn` 落到该区域的**主程序**（TraeWork）。
+ * 区域标识 → 程序位：`cn` / `global` 落到该区域**在役**的程序位
+ * （2026-10-15 收敛后 = 合并版客户端 `trae_merged` / `global_trae_merged`）。
  *
- * 与后端 `TraeVariant::parse("cn") == TraeWork` **同向**（见 Rust 侧该函数的说明：
- * 区域标识必须落到主程序才安全，否则「保存登录态」这类程序级操作会读错客户端）。
+ * 与后端「区域标识落到该区域主程序」**同向** —— 收敛前主程序是 TraeWork、
+ * 收敛后在役的只剩合并版，区域标识就该落合并版：新建 Key 默认绑定
+ * 在役程序位，而不是退役的 TraeWork。
  *
  * 用途有两处，都不能省：
- * 1. `Select` 的 value 必须是选项集合里的值，否则下拉显示空白（页面只有区域维度）；
- * 2. 归属列展示 —— 否则「两把行为完全相同的 Key」一个显示「国内版」、一个显示「TraeWork」。
+ * 1. `Select` 的 value 必须是选项集合里的值，否则下拉显示空白（页面只有区域维度）
+ *    —— 选项集合（`PROGRAMS`）已收敛为合并版两条，区域标识若归一到
+ *    `trae_work` 就不在集合里，正是这个症状；
+ * 2. 归属列展示 —— 否则「两把行为完全相同的 Key」一个显示「国内版」、一个显示「Trae CN」。
  *
- * `global` / `trae_work` / `trae_cn` / `global_trae_code` 原样返回（它们本来就是程序位标识）。
+ * 遗留程序位标识（`trae_work` / `trae_cn` / `global_trae_code`）**原样返回**：
+ * 旧 Key 的归属是历史事实，展示层靠 `programLabelOf` 的回落渲染它们（不归一、不改写）。
  */
 function normalizeProgramId(variant: TraeVariantId): TraeVariantId {
-  return variant === "cn" ? "trae_work" : variant;
+  if (variant === "cn") return "trae_merged";
+  if (variant === "global") return "global_trae_merged";
+  return variant;
 }
 
 /**

@@ -2287,7 +2287,20 @@ pub fn overview() -> Value {
 /// 的目录「同源」，但它读的从来是 `profiles*/current_account.txt`，与客户端数据目录
 /// **没有任何关系**（`dataDir` 才是那个字段）。现已删掉该说法。
 pub fn overview_for(variant: TraeVariant) -> Value {
-    let current = client_login_uid_for(variant).or_else(|| current_account_for(variant));
+    // 记账兜底**必须以「该变体的客户端数据目录存在」为前提**（2026-10-15 用户报障）。
+    //
+    // 兜底的本意（见上节）：客户端信封解不开/不存在时，记账 uid 仍是「上一次确知的
+    // 状态」。但「数据目录根本不存在」= 客户端**从未启动过**，此时记账文件里即使有值
+    // 也是陈旧遗留（旧布局迁移、卸载重装、换机器都会留下）—— 把它报成「当前登录」，
+    // 前端就会把**没装的那个程序位**当成「该账号当前登录着」，点「保存登录态」朝它写，
+    // 最后炸出「未找到 Trae 客户端数据目录」（实测现场：本机只装 Trae CN，却残留着
+    // 默认变体的 `profiles/current_account.txt`，TraeWork 程序位被误判为当前登录）。
+    // 数据目录存在时行为不变 —— 「TraeWork 登录了还显示未登录」的原始修复不受影响。
+    let current = client_login_uid_for(variant).or_else(|| {
+        snapshot_data_dir_for(variant)
+            .filter(|dir| dir.is_dir())
+            .and_then(|_| current_account_for(variant))
+    });
     // 「当前账号」是**两个事实**，刻意不合并成一个字段：
     // `currentAccount` 是**身份**（uid，前端拿它做 `logins[x] === account.userId` 这类相等比较），
     // `currentAccountName` 只是**展示名**（账号库里的 `name`；库里没有该 uid 时为 `null`，
@@ -3003,6 +3016,56 @@ mod tests {
         );
         // 展示名键必须仍在（值可以是 null：账号库还没采集到这条记录）。
         assert!(value.get("currentAccountName").is_some(), "currentAccountName 键不得缺失");
+    }
+
+    /// ★ 记账兜底**不得**在「客户端数据目录不存在」时生效（2026-10-15 用户报障）。
+    ///
+    /// 现场复现：本机只装 Trae CN（装在自定义目录），却残留着默认变体（TraeWork）的
+    /// `profiles/current_account.txt`。兜底无门槛时 [`overview_for`] 会把遗留 uid
+    /// 报成「当前登录」⇒ 前端把**没装的** TraeWork 程序位当成该账号的登录处，
+    /// 「保存登录态」朝它写 ⇒ 炸出「未找到 Trae 客户端数据目录」。
+    ///
+    /// 反例（改坏会红）：把 `overview_for` 的兜底改回无条件 `current_account_for(variant)`
+    /// ⇒ 本用例第一段断言红。
+    #[cfg(windows)]
+    #[test]
+    fn overview_ignores_the_ledger_when_the_client_data_dir_is_absent() {
+        // 下划线前缀：抑制 unused 告警，同时 `TempEnv` 的 Drop（还原环境变量）
+        // 仍按作用域结束时的顺序生效 —— 环境隔离必须覆盖整个测试体。
+        let _env = crate::modules::trae::test_support::TempEnv::empty();
+        let variant = TraeVariant::TraeWork;
+
+        // 前置：记账文件**存在**（陈旧遗留），但客户端数据目录从未出现。
+        set_current_account_for(variant, "u-stale").unwrap();
+        assert_eq!(
+            current_account_for(variant).as_deref(),
+            Some("u-stale"),
+            "前置：记账文件必须写得进去"
+        );
+        assert!(
+            platform::detect_data_dir_for(variant)
+                .map(|dir| !dir.is_dir())
+                .unwrap_or(true),
+            "前置：临时 APPDATA 下不得已有客户端数据目录"
+        );
+
+        let value = overview_for(variant);
+        assert_eq!(
+            value.get("currentAccount").and_then(Value::as_str),
+            None,
+            "客户端数据目录不存在时，记账遗留不得报成「当前登录」"
+        );
+
+        // 对照：数据目录出现（哪怕只是空目录）⇒ 兜底恢复生效 ——「信封读不出时仍信
+        // 记账」的原始修复（TraeWork 登录了还显示未登录）不受本门槛影响。
+        let dir = platform::detect_data_dir_for(variant).expect("写侧取值点必须回退到主候选");
+        std::fs::create_dir_all(&dir).unwrap();
+        let value = overview_for(variant);
+        assert_eq!(
+            value.get("currentAccount").and_then(Value::as_str),
+            Some("u-stale"),
+            "数据目录存在时记账兜底必须仍然生效"
+        );
     }
 
     /// ★ 展示端**不得**走明文兜底：客户端没有登录态时，日志里的旧 token 不算「已登录」。

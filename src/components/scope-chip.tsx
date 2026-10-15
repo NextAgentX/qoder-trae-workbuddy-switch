@@ -40,7 +40,9 @@ export function ScopeMark({
   return product === "workbuddy" ? (
     <WorkBuddyMark size={size} className={cn(radius, className)} />
   ) : (
-    <TraeVariantMark variant="trae_work" size={size} className={cn(radius, className)} />
+    // 2026-10-15 程序位收敛：Trae 平台标识用**在役**的合并版客户端图标
+    // （`trae_merged` → Trae 图标），不再用退役 TraeWork 的图标。
+    <TraeVariantMark variant="trae_merged" size={size} className={cn(radius, className)} />
   );
 }
 

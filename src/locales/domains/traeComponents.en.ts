@@ -109,7 +109,7 @@ export const en = {
   // P4: "used / expiry" text for the drawer `DetailPack` (mirrors the WorkBuddy drawer).
   "trae.comp.card.package.used": "Used {n}",
   "trae.comp.card.package.expired": "Expired",
-  "trae.comp.card.package.expiringSoon": "Expires within 7 days",
+  // "expiring soon" keys removed: expiry urgency is now color-only (warning yellow when ≤3 days left).
 
   // ---- Action explanations (used as menu-item titles) ----
   // P4: the footer "Save login state" / "Refresh JWT" buttons moved back into the menu;
@@ -152,6 +152,8 @@ export const en = {
   // trae-oauth-login-dialog.tsx —— OAuth web login
   // =====================================================================
   "trae.comp.oauth.title": "OAuth web login · {variant}",
+  "trae.comp.oauth.programLabel": "Client to sign in with",
+  "trae.comp.oauth.programHint": "The device credential is read from the selected client; both program slots share the current region's account library — this only decides which client initiates the authorization. If one client is not installed, pick the other.",
   "trae.comp.oauth.desc.lead": "Sign in to",
   "trae.comp.oauth.desc.mid": "in your browser and authorize. The app catches the callback automatically and adds the account to",
   "trae.comp.oauth.desc.tail": "'s account library — no token pasting needed.",

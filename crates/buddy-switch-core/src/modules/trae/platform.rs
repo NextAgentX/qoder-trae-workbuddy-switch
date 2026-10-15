@@ -86,11 +86,13 @@ pub(crate) fn hidden_command(program: &str) -> std::process::Command {
 /// 各一份，`%APPDATA%` 下也各有一份 userData）。漏掉它就会出现
 /// 「明明装了却提示未安装」，以及「装的是 Trae CN、切换的却是 SOLO CN 的登录态」。
 ///
-/// ## 值来自**程序位表**（`region::all_program_specs`），顺序按「区域 → 程序」
+/// ## 值覆盖**全部客户端**（含已退役的程序位），顺序按「区域 → 程序」
 ///
 /// 摊平口径在 2026-09-28（issue #3）从 [`TraeVariant::all`]（**只含国内两条**）
-/// 换成 [`super::region::all_program_specs`]（**全部程序位**，issue #20 后为
-/// 3 程序 × 2 区域 = 6 条）。
+/// 换成 [`super::region::all_program_specs`]；2026-10-15 程序位表收敛（每区域
+/// 只留合并版）后，本表**刻意不再与在役表相等** —— `TRAE SOLO CN` / `TRAE SOLO`
+/// 这两个退役客户端的名字必须保留：它们的**数据原样保留**、用户机器上也可能
+/// 还装着，跨变体探测（`env_status` / `detected_variant` / 关停）不得缩水。
 /// 换口径的直接后果：国际版 TraeCode 的 `Trae.exe` / `Trae` 仍留在候选里，
 /// 却**不再**冒充国内 TraeCode 的次候选（那条静默跨区误判已修，见
 /// [`super::variant::GLOBAL_TRAE_CODE_SPEC`] 与 `TRAE_CN_SPEC` 的说明）。
@@ -431,7 +433,10 @@ fn region_status(region: super::region::TraeRegion) -> Value {
 /// ⇒ 本函数是**单射**：六个 `(区域, 程序)` 组合 → 六个不同变体。
 ///
 /// 反向映射（`client_settings::program_of_variant`）与它互为逆，有单测钉住双向一致。
-fn variant_for_program(
+///
+/// `pub(crate)`：除本模块的状态聚合外，[`super::handlers::import_local_account_for_region`]
+/// 也要用它把「区域内的程序位表」摊平成变体序列（导入本机账号的读侧回退链）。
+pub(crate) fn variant_for_program(
     region: super::region::TraeRegion,
     program: super::region::TraeProgram,
 ) -> super::variant::TraeVariant {
@@ -453,23 +458,19 @@ fn variant_for_program(
 /// 一旦漂移就会出现「某个程序位的 exe 永远探测不到」这类静默故障。
 /// 编译期无法校验（`cfg` 分支 + 静态切片），故放一条测试。
 ///
-/// ## 摊平基准是**程序位表**（6 条 = 3 程序 × 2 区域），不是 [`TraeVariant::all`]（2 个）
+/// ## 摊平基准是**程序位表**（2026-10-15 收敛后 2 条 = 每区域 1 个合并版）
 ///
-/// 2026-09-28（issue #3）换的基准：`all()` 只含国内两条程序位，
-/// 用它当基准会让两个国际程序位的名字（`TRAE SOLO.exe` / `Trae.exe`）
-/// **在跨变体探测里凭空消失** —— 症状是「国际版客户端在跑，'关闭全部 Trae'
-/// 却说没有」。程序位表才是完整口径。
+/// 2026-09-28（issue #3）把基准从 [`TraeVariant::all`]（只含国内两条）换成
+/// [`super::region::all_program_specs`]（当时的全部程序位）。
 ///
-/// ## ⚠️ 必须**按序去重**再比对（issue #20）
+/// ## ⚠️ 收敛后两表的关系是「**子集**」而不是「相等」
 ///
-/// 表里合并版 `Trae` 与遗留 `TraeCode` 的候选名**逐字相同**（同一个客户端，
-/// 见 `region` 模块头）⇒ 直接摊平会得到 6 个名字、而 `exe_names()` 只有 4 个。
-/// 去重是**语义正确**的：跨变体探测要的是「本机可能叫哪些名字」的集合，
-/// 重复项没有任何意义。
-///
-/// 但去重会让这条护栏**变松**（表里少写一条、多写一条重复项都看不出来），
-/// 因此另有一条用例专门钉「合并版与遗留 TraeCode 指向同一客户端」
-/// （`region::tests::合并版与遗留traecode指向同一客户端`）。
+/// 2026-10-15 程序位表收敛（每区域只留合并版，TraeWork / 遗留 TraeCode 退役），
+/// 但 [`EXE_NAMES`] / [`data_dir_names`] **刻意保留全部 4 个客户端的名字** ——
+/// 跨变体探测（`env_status` / `detected_variant` / 「关闭全部 Trae」）必须仍能
+/// 找到退役客户端：它们的**数据原样保留**，用户机器上也可能还装着。
+/// 因此本用例断「在役表 ⊆ 常量表」+「退役名字仍在常量表里」，
+/// 而不是旧的「逐字相等」。
 ///
 /// [`TraeVariant::all`]: super::variant::TraeVariant::all
 #[cfg(test)]
@@ -489,19 +490,34 @@ fn flattened_candidates_match_variant_table() {
             }
         }
     }
-    // 前置：去重确实发生了（否则这条用例没在测它声称测的东西）。
-    assert_eq!(
-        super::region::all_program_specs()
-            .iter()
-            .map(|s| s.exe_names.len())
-            .sum::<usize>(),
-        from_table_exe.len() + 2,
-        "程序位表应恰有 2 条重复的 exe 候选（合并版 Trae 与遗留 TraeCode 各 2 条）"
-    );
-    assert_eq!(data_dir_names(), from_table_dir.as_slice(), "userData 目录名候选与程序位表漂移");
-    // exe 名只在 Windows 上与表逐字相同（非 Windows 去过 `.exe`）。
+    // 在役表的每个候选都必须在常量表里 —— 否则该客户端在跨变体探测里凭空消失
+    // （症状：「国际版客户端在跑，'关闭全部 Trae' 却说没有」）。
+    for name in &from_table_dir {
+        assert!(
+            data_dir_names().contains(name),
+            "在役程序位的 userData 目录名 `{name}` 不在常量表里 —— 探测会漏掉它"
+        );
+    }
+    for name in &from_table_exe {
+        assert!(
+            exe_names().contains(name),
+            "在役程序位的 exe 名 `{name}` 不在常量表里 —— 探测会漏掉它"
+        );
+    }
+    // 退役客户端的名字必须**仍然**在常量表里（数据原样保留 ⇒ 探测口径不缩水）。
+    for retired in ["TRAE SOLO CN", "TRAE SOLO"] {
+        assert!(
+            data_dir_names().contains(&retired),
+            "退役客户端的目录名 `{retired}` 不得从常量表移除 —— 装着它的机器仍要能被探测到"
+        );
+    }
     if cfg!(target_os = "windows") {
-        assert_eq!(exe_names(), from_table_exe.as_slice(), "exe 名候选与程序位表漂移");
+        for retired in ["TRAE SOLO CN.exe", "TRAE SOLO.exe"] {
+            assert!(
+                exe_names().contains(&retired),
+                "退役客户端的 exe 名 `{retired}` 不得从常量表移除"
+            );
+        }
     }
 }
 
@@ -541,6 +557,63 @@ fn secondary_drive_roots() -> Vec<PathBuf> {
         .map(|letter| PathBuf::from(format!("{}:\\Programs", letter as char)))
         .filter(|dir| dir.is_dir())
         .collect()
+}
+
+/// 注册表卸载项里登记的 Trae 安装目录（**兜底候选来源**，仅 Windows）。
+///
+/// ## 为什么现在加（[`detect_install`] 处旧注释的取舍已变化）
+///
+/// 旧设计刻意不查注册表，理由是「每次探测都付一个子进程，而常见位置已覆盖」。
+/// 现在的付费方式改成了**两级**：标准安装根（[`windows_install_roots`]）命中的
+/// 机器永远不会走到这里；只有标准根全部落空的机器（自定义安装目录，实测
+/// `C:\0000000\soft\Trae CN` —— 用户报障「导入本机账号 / 环境状态都说未检测到客户端」
+/// 的根因）才会在探测末尾付出一次 `reg query`。且结果做**进程级缓存**——
+/// 安装目录在进程生命周期内不会变，一个进程至多付一次。
+///
+/// Trae 的安装器（Inno Setup / NSIS 系）都会在
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<产品键>` 下登记
+/// `InstallLocation`；对整棵子树按值名过滤即可，不必逐键枚举解析。
+/// HKLM 两处（64 位 + WOW6432Node）一并查，覆盖「装给所有用户」的机器。
+///
+/// 过滤条件取「值里含 `trae`（大小写不敏感）」：卸载子树里还有别的软件，
+/// 不能整树收编；而 Trae 任何安装目录名都含产品名，误杀面为零。
+/// `is_dir()` 过滤掉已卸载但键残留的陈旧条目。
+#[cfg(windows)]
+fn registry_install_dirs() -> &'static Vec<PathBuf> {
+    static CACHE: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let roots = [
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ];
+        for root in roots {
+            let output = hidden_command("reg")
+                .args(["query", root, "/s", "/v", "InstallLocation"])
+                .output();
+            let Ok(output) = output else { continue };
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                // 行形如 `    InstallLocation    REG_SZ    C:\0000000\soft\Trae CN\`。
+                let Some((name, value)) = line.split_once("REG_SZ") else {
+                    continue;
+                };
+                if !name.trim().eq_ignore_ascii_case("InstallLocation") {
+                    continue;
+                }
+                let dir = value.trim();
+                if dir.is_empty() || !dir.to_ascii_lowercase().contains("trae") {
+                    continue;
+                }
+                let dir = PathBuf::from(dir);
+                if dir.is_dir() && !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+        dirs
+    })
 }
 
 /// 从「可执行文件所在目录」推导版本号。
@@ -780,19 +853,19 @@ pub fn detect_install(custom: &[String]) -> InstallProbe {
         }
     }
 
-    // 刻意**不查询注册表卸载项**：
+    // 注册表兜底**只付两级代价中的一级**（2026-10-15 更新，取代旧的「刻意不查」设计）：
     //
-    // 1. 参考实现用 `reg query /s /f TRAE` 兜底，代价是每次探测都起一个子进程
-    //    （Windows 上还会有控制台窗口闪烁），且在受限环境（沙箱、企业策略）里会被拦截；
-    // 2. [`candidate_exe_paths`] 已覆盖全部**常见**安装位置（`%LOCALAPPDATA%\Programs`、
+    // 1. 旧设计担心「每次探测都起一个子进程」。现在注册表候选由
+    //    [`candidate_paths_for`] 追加在标准根之后，且 [`registry_install_dirs`]
+    //    带**进程级缓存** —— 标准根命中的机器与「进程内非首次探测」都不付费，
+    //    一个进程至多付一次 `reg query`。
+    // 2. [`candidate_exe_paths`] 仍先覆盖全部**常见**安装位置（`%LOCALAPPDATA%\Programs`、
     //    `ProgramFiles` / `ProgramFiles(x86)` / `ProgramW6432`，以及非系统盘的
-    //    `<盘符>:\Programs`）；
-    // 3. 真正需要注册表兜底的场景只剩「装在任意自定义目录」（例如 `D:\Apps\Trae\`），
-    //    而该场景已有**更好的**手段：用户在设置里显式指定 `trae_path`
-    //    （见本函数开头的 `custom` 分支），且报错文案会主动提示这一点。
-    //
-    // 换句话说，注册表兜底换来的是「极少数用户少点一次设置」，代价是
-    // 「所有用户每次探测都付一次子进程」。这里选择不付。
+    //    `<盘符>:\Programs`）。
+    // 3. 注册表兜的是「装在任意自定义目录」（例如 `C:\0000000\soft\Trae CN\`）——
+    //    实测只装 Trae CN 且装在自定义目录的机器上，旧设计会让环境状态、
+    //    「从本机导入」入口全部误报「未检测到客户端」。设置里显式指定
+    //    `trae_path`（本函数开头的 `custom` 分支）仍是**优先级最高**的手段。
     InstallProbe {
         installed: false,
         exe: None,
@@ -843,6 +916,15 @@ fn candidate_paths_for(names: &[&'static str], exes: &[&'static str]) -> Vec<Pat
                 for &exe in exes {
                     out.push(root.join(name).join(exe));
                 }
+            }
+        }
+        // 兜底：注册表卸载项登记的**自定义安装目录**（`registry_install_dirs`）。
+        // 放在标准根之后 —— 标准根命中的机器在前面循环里就有真实存在的候选，
+        // 追加在这里不改变任何既有命中顺序；落空的机器才走到这里。
+        // 首次调用会付一次 `reg query` 子进程（有进程级缓存，至多一次）。
+        for dir in registry_install_dirs() {
+            for &exe in exes {
+                out.push(dir.join(exe));
             }
         }
     }
@@ -2325,6 +2407,10 @@ mod tests {
     /// ⚠️ 第 3 条在 issue #20 之后**不再是「同一区域内的唯一解」**：合并版 `Trae`
     /// 与遗留 `TraeCode` 共享同一个变体（`trae_cn` / `global_trae_code`），
     /// 两者都能通过 `variant_for_program` 的往返 —— 这是刻意的（同一个客户端）。
+    ///
+    /// 2026-10-15 程序位表收敛后，`variants_status` 只下发每区域**一条**
+    /// （合并版），本用例随之只对在役程序位断言；退役组合的映射
+    /// （`variant_for_program` 的全部 6 个臂）仍由编译器穷尽性保证存在。
     #[test]
     fn 全部程序位已建模且自洽() {
         use super::super::region::{TraeProgram, TraeRegion};
@@ -2365,9 +2451,10 @@ mod tests {
                 );
             }
         }
-        // 前置：必须真的把 6 个程序位都过了一遍，否则本用例会**恒真**。
-        // 6 = 2 区域 × 3 程序（TraeWork / TraeCode / 合并版 Trae，issue #20）。
-        assert_eq!(checked, 6, "应有 6 个程序位（2 区域 × 3 程序）");
+        // 前置：必须真的把在役程序位都过了一遍，否则本用例会**恒真**。
+        // 2 = 2 区域 × 1 程序位（2026-10-15 收敛后每区域只留合并版 Trae；
+        // 退役程序位不再出现在 variants 状态里，见 region.rs 程序位收敛一节）。
+        assert_eq!(checked, 2, "应有 2 个在役程序位（2 区域 × 1 合并版客户端）");
     }
 
     /// 区域状态带出的「站点域」（`consoleBase`）必须**按区域分家**，且与授权页域**同源**。
@@ -2558,32 +2645,35 @@ mod tests {
     /// 而区域页必须用本区域的目录；且**本区域**里也还得选对来源 ——
     /// 「最近活跃」与「首个存在」在本机不是同一个目录。
     ///
-    /// ## 反例（改坏会红）
+    /// ## 2026-10-15 收敛后的形态
     ///
-    /// 把 `writeDataDir` 也接到 `select_data_dir_for`（即与 `dataDir` 同源）⇒ 第 2 条断言红。
+    /// 在役程序位只剩合并版（变体 [`TraeVariant::TraeMerged`]），其 userData 候选
+    /// 只有 `Trae CN` 一个目录 ⇒ 「活跃 ≠ 首个存在」的分叉在**在役表**上构造不出来。
+    /// 该分叉语义（`select_data_dir_for` vs `detect_data_dir_for`）仍由本模块
+    /// 后续的 `SelectionGrid` 用例（遗留 TraeWork 变体的双候选 fixture）钉住 ——
+    /// 变体轴未删，那些用例依然成立。本用例改为钉住：合并版程序位把
+    /// `dataDir` / `writeDataDir` **都**接到本区域自己的目录上，
+    /// 且 `writeDataDirExists` 如实反映存在性。
     #[cfg(windows)]
     #[test]
     fn variants_status_exposes_the_write_side_dir_next_to_the_active_one() {
         let exp = chrono::Utc::now().timestamp() + 3600;
         let env = crate::modules::trae::test_support::TempEnv::empty();
-        let variant = crate::modules::trae::variant::TraeVariant::TraeWork;
+        let variant = crate::modules::trae::variant::TraeVariant::TraeMerged;
         let names = data_dir_names_for(variant);
-        assert!(
-            names.len() >= 2,
-            "本用例需要至少两个候选目录才能构造「活跃 ≠ 首个存在」"
+        assert_eq!(
+            names,
+            ["Trae CN"],
+            "前置：合并版只有一个 userData 候选（若候选增多，分叉场景应恢复双目录构造）"
         );
 
-        // 全部候选都存在：**首位**装着登录态但不活跃，**末位**活跃但无登录态 —— 真机同形。
-        let mut cells = vec![(true, false, false); names.len()];
-        cells[0] = (true, true, false);
-        cells[names.len() - 1] = (true, false, true);
-        let grid = crate::modules::trae::icube::test_support::write_selection_grid(
+        // 单候选目录：存在、有登录态、活跃。
+        let _grid = crate::modules::trae::icube::test_support::write_selection_grid(
             &env.appdata(),
             variant,
-            &cells,
+            &[(true, true, true)],
             exp,
         );
-        assert!(grid.selectors_diverge, "前置：两个选择器必须分叉，否则本用例证明不了什么");
 
         let value = variants_status();
         let cn = value["variants"]
@@ -2597,7 +2687,7 @@ mod tests {
             .expect("programs 应是数组")
             .iter()
             .find(|item| item["variant"].as_str() == Some(variant.as_str()))
-            .expect("cn 区域应有 TraeWork 程序位");
+            .expect("cn 区域应有合并版 Trae 程序位");
 
         // 只比 basename：绝对路径前缀依赖临时目录，比较它只会让断言更脆。
         let basename = |item: &Value, key: &str| -> String {
@@ -2610,18 +2700,13 @@ mod tests {
         };
         assert_eq!(
             basename(program, "dataDir"),
-            names[names.len() - 1],
-            "dataDir 的语义是「最近活跃」那一份（保持既有含义不变）"
+            names[0],
+            "dataDir 的语义是「最近活跃」那一份（保持既有含义不变）；单候选下即唯一目录"
         );
         assert_eq!(
             basename(program, "writeDataDir"),
             names[0],
             "writeDataDir 必须是写侧（首个存在的候选）—— 区域页核对「登录态在哪」用的是它"
-        );
-        assert_ne!(
-            basename(program, "dataDir"),
-            basename(program, "writeDataDir"),
-            "前置：本 fixture 下两个目录必须分叉"
         );
         assert_eq!(
             program["writeDataDirExists"],

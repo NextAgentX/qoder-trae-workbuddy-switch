@@ -199,7 +199,9 @@ export function formatCreditExpiry(ts: number | null, t: Translate): string {
   if (!ts) return t("wbAccounts.card.forever");
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return t("wbAccounts.card.forever");
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+  // 精确到分钟（与 Trae 卡片 `shortTime` 同格式）——积分多在整点过期，只给日期看不出何时失效。
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function accountIdentity(account: AccountMeta): string {

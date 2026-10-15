@@ -13,8 +13,34 @@ import {
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
-import { traeVariantLabel, type TraeAccount } from "@/lib/trae-types";
+import {
+  traeVariantLabel,
+  type TraeAccount,
+  type TraeRegionId,
+  type TraeVariantId,
+} from "@/lib/trae-types";
 import { useTraeVariant } from "@/lib/use-trae-variant";
+
+/**
+ * 每个区域可发起 OAuth 登录的**程序位**（按变体标识给后端）。
+ *
+ * ## 为什么必须有它
+ *
+ * OAuth 授权 URL 的 `device_id` 必须与**对应客户端**的 icube 设备凭证同源，
+ * 因此登录前必须确定「用哪个客户端的设备身份去授权」。
+ *
+ * ## 2026-10-15 程序位收敛
+ *
+ * 每区域在役的程序位只剩**合并版客户端**一个（国内 `Trae CN`、国际 `Trae`），
+ * 遗留程序位（TraeWork / TraeCode）已从界面退役（用户决策：只保留 Trae）。
+ * 每个区域只有一项 ⇒ 下面的选择器不再渲染，`program` 恒等于唯一选项 ——
+ * 保留这份表是因为「发起点」仍需要一个显式的变体标识传给后端，
+ * 将来若恢复多程序位也只改这里。
+ */
+const PROGRAM_OPTIONS: Record<TraeRegionId, readonly TraeVariantId[]> = {
+  cn: ["trae_merged"],
+  global: ["global_trae_merged"],
+};
 
 /**
  * 前端独立超时（秒）。
@@ -60,7 +86,7 @@ interface Props {
 
 export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
   /**
-   * 当前产品线 —— **与页面同源**（`?line=` 承载，见 `useTraeVariant`）。
+   * 当前**区域** —— **与页面同源**（`?line=` 承载，见 `useTraeVariant`）。
    *
    * 刻意在这里自己取、而不是新增一个 prop：
    *
@@ -70,8 +96,13 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
    * 3. 后端「按变体分家」是全链路的：授权页、账号库、数据目录都跟着它走，
    *    所以它必须由本组件直接持有，而不是靠调用方转述。
    */
-  const [variant] = useTraeVariant();
-  const variantLabel = traeVariantLabel(variant);
+  const [region] = useTraeVariant();
+  /**
+   * 本次登录选用的**程序位**。区域只决定账号库，程序位决定「拿哪个客户端的
+   * 设备凭证去授权」—— 不给用户选，就等于替他绑死了主程序位。
+   */
+  const [program, setProgram] = useState<TraeVariantId>(PROGRAM_OPTIONS[region][0]);
+  const variantLabel = traeVariantLabel(program);
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -138,8 +169,11 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
       setResult(null);
       setRemaining(null);
       timedOutRef.current = false;
+      // 程序位回到该区域的默认（主程序）：区域可能在上次打开后已切换，
+      // 沿用旧选中值可能拿到「另一区域」的变体，把账号发到别的体系去。
+      setProgram(PROGRAM_OPTIONS[region][0]);
     }
-  }, [open]);
+  }, [open, region]);
 
   // 轮询登录结果
   useEffect(() => {
@@ -262,7 +296,7 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
     setLaunching(true);
     setLaunchNote("");
     try {
-      await api.launchTraeClient(variant);
+      await api.launchTraeClient(program);
       setLaunchNote(t("trae.comp.oauth.launchOk", { variant: variantLabel }));
     } catch (e) {
       setLaunchNote(api.asError(e));
@@ -281,7 +315,7 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
     settledRef.current = false;
     setRemaining(null);
     try {
-      const res = await api.traeOAuthStart(variant);
+      const res = await api.traeOAuthStart(program);
       setLoginId(res.loginId);
       setUri(res.verificationUri);
       setPort(res.port);
@@ -343,6 +377,34 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
 
         {!loginId && !result && (
           <div className="space-y-3">
+            {/*
+              程序位选择：OAuth 的 device_id 与所选客户端的设备凭证同源。
+              2026-10-15 收敛后每区域只剩合并版一个程序位 ⇒ 单选项时**整块隐藏**
+              （渲染一枚永远「选中自己」的按钮只会占地方、制造「还有别的可切」的错觉）；
+              `program` 状态与 `start` 的传参逻辑保持不变 —— 将来恢复多程序位时，
+              恢复这段 JSX 即可，无需动数据流。
+            */}
+            {PROGRAM_OPTIONS[region].length > 1 && (
+              <div className="space-y-1.5">
+                <p className="text-sm font-medium">{t("trae.comp.oauth.programLabel")}</p>
+                <div className="grid grid-cols-2 gap-2" role="group" aria-label={t("trae.comp.oauth.programLabel")}>
+                  {PROGRAM_OPTIONS[region].map((id) => (
+                    <Button
+                      key={id}
+                      type="button"
+                      variant={id === program ? "default" : "outline"}
+                      className="w-full"
+                      aria-pressed={id === program}
+                      disabled={busy}
+                      onClick={() => setProgram(id)}
+                    >
+                      {traeVariantLabel(id)}
+                    </Button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">{t("trae.comp.oauth.programHint")}</p>
+              </div>
+            )}
             <Button onClick={start} disabled={busy} className="w-full">
               {busy ? t("trae.comp.oauth.startBusy", { variant: variantLabel }) : t("trae.comp.oauth.start", { variant: variantLabel })}
             </Button>
