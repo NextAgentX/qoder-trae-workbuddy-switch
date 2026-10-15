@@ -187,7 +187,8 @@ export async function loadTraeVariantLogins(
   statuses: TraeVariantStatus[],
 ): Promise<TraeVariantLogins> {
   // 每个程序位都带标识（2026-09-28 起 `TraeProgramStatus.variant` 非空），
-  // 因此这里不再有「跳过未建模程序位」的过滤 —— 四个程序位各取一次登录态。
+  // 因此这里不再有「跳过未建模程序位」的过滤 —— 在役程序位（2026-10-15 收敛后
+  // 每区域 1 条，共 2 条）各取一次登录态。
   const targets: TraeVariantId[] = statuses.flatMap((item) =>
     item.programs.map((program) => program.variant),
   );

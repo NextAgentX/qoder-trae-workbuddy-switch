@@ -132,10 +132,11 @@ function regionLoginName(
 
 async function loadTraeScopeSnapshot(): Promise<TraeScopeSnapshot> {
   const statuses = await loadTraeVariantStatuses();
-  // 三次请求互不依赖：登录态按程序位、账号数按区域（国内取任一条国内程序位即可）。
+  // 三次请求互不依赖：登录态按程序位、账号数按区域（国内取任一条国内程序位即可；
+  // 2026-10-15 收敛后用合并版 `trae_merged`，账号库是区域级的，取哪条程序位等价）。
   const [logins, cnAccounts, globalAccounts] = await Promise.all([
     loadTraeVariantLogins(statuses),
-    api.getTraeAccounts("trae_work").catch(() => null),
+    api.getTraeAccounts("trae_merged").catch(() => null),
     api.getTraeAccounts("global").catch(() => null),
   ]);
 

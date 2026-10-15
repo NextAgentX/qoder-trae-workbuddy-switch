@@ -1356,10 +1356,11 @@ function traeDemoCheckinResults() {
 function demoTraeEnv(): TraeEnvStatus {
   return {
     installed: true, running: true, version: "1.107.1",
-    // 演示数据刻意用「装在非系统盘」的真实形态：这正是自动探测要覆盖的场景，
-    // 也让「同机多产品线」的能力在截图里可见。平台是 win32，路径就用 Windows 形态。
-    path: "D:\\Programs\\TRAE SOLO CN\\TRAE SOLO CN.exe",
-    dataDir: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO CN",
+    // 演示数据刻意用「装在非系统盘」的真实形态：这正是自动探测要覆盖的场景。
+    // 2026-10-15 程序位收敛后，真机的自动探测在合并版客户端（Trae CN）上落地，
+    // 演示数据与它同形（不再展示退役的 TRAE SOLO CN 路径）。平台是 win32。
+    path: "D:\\Programs\\Trae CN\\Trae CN.exe",
+    dataDir: "C:\\Users\\demo\\AppData\\Roaming\\Trae CN",
     dataDirExists: true, platform: "win32", configuredPath: null,
     // `configuredPath` 为空 ⇒ 本字段恒 `false`（后端同款语义）：演示站上
     // 设置页的「路径已失效」提示因此不出现，符合「没填就没有失效」。
@@ -1371,24 +1372,23 @@ function demoTraeEnv(): TraeEnvStatus {
     configuredPathsExist: { cn: false, global: false },
     // 变体字段必须与真实 HTTP 响应同形状：fixture 少一个键，演示站就看不到
     // 产品线标签，而这个差异只会在真机暴露。
-    variant: "trae_work", variantLabel: t("trae.program.traeWork"),
+    variant: "trae_merged", variantLabel: t("trae.program.traeCn"),
   };
 }
 
 /**
- * 演示数据：**两条** Trae 产品线并排。
+ * 演示数据：**两个区域**并排（2026-10-15 收敛后每区域 1 条在役程序位）。
  *
- * 刻意让两条线的状态不同（一条运行中、一条未运行），这样截图/演示站上
- * 「并排两个图标各自独立」这件事才看得出来 —— 两条都同状态的话，
- * 分不清是「两条独立探测」还是「同一条画了两遍」。
+ * 刻意让两个区域的状态不同（国内已装且在跑、国际未安装），截图/演示站上
+ * 「区域与程序是两层、各区域状态独立」这件事才看得出来。
  */
 /**
  * 演示用的**区域 + 程序位**状态。
  *
  * 形状自 2026-09-21 起改为「按区域列条目、条目内含程序位」：区域才是账号体系的分界，
- * 程序位只决定客户端。演示数据刻意让两个区域状态不同（国内装齐两条程序、
- * 国际只装了 TraeWork），这样截图/演示站上能看出**区域与程序是两层**，
- * 而不是「同一条线画了两遍」。
+ * 程序位只决定客户端。2026-10-15 程序位收敛后**每区域只有合并版 1 条**（与真机
+ * `variants_status` 同形）：国内已装且在跑，国际未安装 —— 截图/演示站上能看出
+ * **区域与程序是两层**、且两个区域状态独立，而不是「同一条线画了两遍」。
  */
 function demoTraeVariants(): TraeVariantsStatus {
   /** 程序位展示名走词表（`shared.demo.trae.program.*`）；`variant` 是回传后端的标识，保持英文。 */
@@ -1428,42 +1428,22 @@ function demoTraeVariants(): TraeVariantsStatus {
         installed: true,
         running: true,
         version: "1.107.1",
-        path: "D:\\Programs\\TRAE SOLO CN\\TRAE SOLO CN.exe",
-        dataDir: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO CN",
+        path: "D:\\Programs\\Trae CN\\Trae CN.exe",
+        dataDir: "C:\\Users\\demo\\AppData\\Roaming\\Trae CN",
         dataDirExists: true,
-        writeDataDir: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO CN",
+        writeDataDir: "C:\\Users\\demo\\AppData\\Roaming\\Trae CN",
         writeDataDirExists: true,
         programs: [
-          program(
-            "trae_work",
-            "shared.demo.trae.program.work",
-            "shared.demo.trae.program.workCn",
-            "trae_work",
-            true,
-            true,
-            "D:\\Programs\\TRAE SOLO CN\\TRAE SOLO CN.exe",
-            "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO CN",
-          ),
-          program(
-            "trae_code",
-            "shared.demo.trae.program.code",
-            "shared.demo.trae.program.codeCn",
-            "trae_cn",
-            true,
-            false,
-            "D:\\Programs\\Trae CN\\Trae CN.exe",
-            "C:\\Users\\demo\\AppData\\Roaming\\Trae CN",
-          ),
-          // 合并后的客户端（issue #20）：与上面的 TraeCode **同名同物**（客户端复用目录名），
-          // 但变体是它**自己的** `trae_merged`（快照目录 / Key 归属 / 日志分档各自独立）。
-          // 演示数据让它已安装、未运行 —— 卡片上三枚按钮的状态各不相同。
+          // 2026-10-15 程序位收敛：每区域在役的只有合并版一条（与真机
+          // `variants_status` 同形）。TraeWork / 遗留 TraeCode 已退役，
+          // 演示数据不得再把它们摆上界面 —— 那会展示一个真机上不存在的按钮。
           program(
             "trae",
             "shared.demo.trae.program.trae",
             "shared.demo.trae.program.codeCn",
             "trae_merged",
             true,
-            false,
+            true,
             "D:\\Programs\\Trae CN\\Trae CN.exe",
             "C:\\Users\\demo\\AppData\\Roaming\\Trae CN",
           ),
@@ -1473,42 +1453,17 @@ function demoTraeVariants(): TraeVariantsStatus {
         variant: "global",
         variantLabel: t("trae.region.global"),
         consoleBase: "https://www.trae.ai",
-        installed: true,
+        installed: false,
         running: false,
-        version: "1.107.1",
-        path: "C:\\Users\\demo\\AppData\\Local\\Programs\\TRAE SOLO\\TRAE SOLO.exe",
-        dataDir: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO",
-        dataDirExists: true,
-        writeDataDir: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO",
-        writeDataDirExists: true,
+        version: null,
+        path: null,
+        dataDir: null,
+        dataDirExists: false,
+        writeDataDir: null,
+        writeDataDirExists: false,
         programs: [
-          program(
-            "trae_work",
-            "shared.demo.trae.program.workGlobalLabel",
-            "shared.demo.trae.program.workGlobal",
-            "global",
-            true,
-            false,
-            "C:\\Users\\demo\\AppData\\Local\\Programs\\TRAE SOLO\\TRAE SOLO.exe",
-            "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO",
-          ),
-          // 国际版 TraeCode：**已建模但本机未安装**（issue #3 之前的形态是
-          // `variant: null` = 未建模 ⇒ 按钮禁用）。现在它有真实标识
-          // `global_trae_code`，只是 `installed: false` —— 演示数据保持
-          // 「未安装」以便截图里能看到禁用态，但**不再**用 `null` 表达。
-          program(
-            "trae_code",
-            "shared.demo.trae.program.codeGlobalLabel",
-            "shared.demo.trae.program.codePending",
-            "global_trae_code",
-            false,
-            false,
-            "",
-            "",
-          ),
-          // 合并版国际客户端（issue #20）：与上面的国际 TraeCode 同名同物，
-          // 变体是它自己的 `global_trae_merged`。演示数据同样保持「未安装」，
-          // 与 CN 区域形成对比。
+          // 国际区域只有合并版一条，且保持「未安装」—— 与 CN 区域形成对比，
+          // 截图里仍能看出「两个区域状态独立」（收敛前的对比意图不变）。
           program(
             "trae",
             "shared.demo.trae.program.traeGlobalLabel",
@@ -1559,7 +1514,7 @@ function localizedStubs(stubs: readonly { capability: string; label: Translation
 function demoTraeCapabilities(): TraeCapabilities {
   return {
     platform: "win32", processControl: true, clientDetection: true,
-    userDataDir: "C:\\Users\\demo\\AppData\\Roaming\\TRAE SOLO CN",
+    userDataDir: "C:\\Users\\demo\\AppData\\Roaming\\Trae CN",
     machineGuidReset: true, scheduledTask: true,
     // 产品级不支持项（WorkBuddy 有、Trae 无），形状与 `platform::Unsupported` 逐字一致。
     unsupported: localizedStubs(CAPABILITY_STUBS.capabilities),
@@ -1901,18 +1856,21 @@ function demoTraeClientModels(args?: Record<string, unknown>): TraeClientModelLi
 }
 
 /**
- * 演示用的 Trae 多 Key 列表（**4 个程序位各一把** + 一条历史归属）。
+ * 演示用的 Trae 多 Key 列表：**在役合并版一把 + 遗留归属两把 + 一条历史归属**。
  *
- * 刻意覆盖全部 4 个程序位（`trae_work` / `trae_cn` / `global` / `global_trae_code`
- * 中的前三个，第四个本机未装国际版 TraeCode，演示里也不假装有），
- * 加一条**改造前建的历史 Key**（存的是区域标识 `cn`，且已吊销）：
- * 截图要能看出「归属程序位」列与「状态」列的差异，否则演示站会掩盖归属列的存在。
+ * 第 1 条绑定**在役**程序位 `trae_merged`（2026-10-15 收敛后新建 Key 的默认归属）；
+ * 第 2 / 3 条绑定**退役**程序位（`trae_cn` / `global`）—— 旧用户的存量 Key 就是
+ * 这个形态，归属列靠 `programLabelOf` 的回落渲染（`traeVariantLabel`），
+ * 截图要能看出「旧归属照常显示、不崩也不空白」；第 4 条是**改造前建的历史 Key**
+ * （存的是区域标识 `cn`，且已吊销）。
  *
- * ⚠️ **回归证据（2026-09-30 方向反转，别照着旧注释改回去）**：
- * 那条历史 Key 存的是 `cn`，后端 `TraeVariant::parse("cn")` 落**区域主程序 TraeWork**，
- * 因此它与第一条**必须都显示「TraeWork」**。旧注释要求它显示「国内版」——
- * 那个口径已随「归属列改回程序位」作废（程序位现在真的决定 `/v1/models` 与 `function`）。
- * 若哪天有人把归属列改回按区域取名，这条会显示成「国内版」，与第一条并列成一处**假差异**。
+ * ## 归属列的期望值（2026-10-15 收敛后）
+ *
+ * 第 1 条显示 `Trae CN`（在役合并版）；第 4 条后端 `TraeVariant::parse("cn")` 仍落
+ * 遗留主程序 TraeWork（变体轴未动，旧数据语义不变），故显示 `TraeWork CN` ——
+ * **这是一处正确的历史差异**（旧 Key 绑的就是退役程序位），不是假差异。
+ * 若哪天有人把归属列改回按区域取名，第 1 与第 4 条会并列显示「国内版」，
+ * 那才是回归。
  *
  * 明文 / hash 一律不出现（与真实 `list_response` 的脱敏白名单一致）。
  */
@@ -1923,7 +1881,7 @@ function demoTraeApiKeys(): { keys: TraeApiKeyRecord[] } {
      所以这里也必须是 `sk-trae-0a1b` + `cdef`，**不是**带省略号的整串。 */
   return {
     keys: [
-      { id: "demo-trae-key-1", name: t("shared.demo.trae.key.cursorCn"), variant: "trae_work", prefix: "sk-trae-9f2c", suffix: "7d31", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
+      { id: "demo-trae-key-1", name: t("shared.demo.trae.key.cursorCn"), variant: "trae_merged", prefix: "sk-trae-9f2c", suffix: "7d31", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
       { id: "demo-trae-key-2", name: t("shared.demo.trae.key.continueCode"), variant: "trae_cn", prefix: "sk-trae-6d18", suffix: "a0e9", createdAt: atLocalTime(2, 20, 12), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 58) },
       { id: "demo-trae-key-3", name: t("shared.demo.trae.key.cherryGlobal"), variant: "global", prefix: "sk-trae-4b7e", suffix: "2f4a", createdAt: atLocalTime(2, 9, 40), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 41) },
       { id: "demo-trae-key-4", name: t("shared.demo.trae.key.legacy"), variant: "cn", prefix: "sk-trae-0a1b", suffix: "cdef", createdAt: atLocalTime(9, 8, 0), revokedAt: atLocalTime(1, 12, 30), revoked: true, lastUsedAt: atLocalTime(3, 10, 5) },
