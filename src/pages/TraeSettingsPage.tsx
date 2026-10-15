@@ -74,6 +74,8 @@ import {
   type TraeLogsResponse,
   type TraeProfileInfo,
   type TraeProfilesOverview,
+  type TraeProgramStatus,
+  type TraeRegionId,
   type TraeSettings,
   type TraeVariantId,
   type TraeVariantStatus,
@@ -97,6 +99,64 @@ function CapabilityBadge({ labelKey, supported }: { labelKey: TranslationKey; su
       {supported ? "" : t("trae.page.settings.capabilityUnsupported")}
     </Badge>
   );
+}
+
+// ---------------------------------------------------------------------------
+// 程序位选中态（设置页各程序级区块共用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 本区域的**程序位**选中态：自动选中「写侧数据目录存在」的程序位，允许显式覆盖。
+ *
+ * ## 为什么设置页需要它（2026-10-15 用户报障）
+ *
+ * 设置页的「登录态快照」「重置设备标识」「运行日志」都是**程序级**数据
+ * （读写指定客户端的 userData），但页面此前把 `useTraeVariant` 返回的**区域**值
+ * （`cn` / `global`）直接当变体传给后端 —— 服务端把区域折叠到主程序 TraeWork，
+ * 于是在只装 TraeCode CN 的机器上：数据目录显示 TraeWork 的回退值（一个
+ * **并不存在**的 `...\TRAE SOLO CN`）、快照列表读 TraeWork 的空目录、
+ * 备份/重置全部打在没装的客户端上。
+ *
+ * ## 自动选中为什么看**写侧**目录
+ *
+ * `writeDataDirExists` 与后端快照读写是同一个取值点（`snapshot_data_dir_for`：
+ * 首个**存在**的候选）——「装了但从未启动过」的程序位 userData 压根没有，
+ * 快照存不出也恢复不进，不该当选（与账号卡片 `hasDataDir` 同一口径）。
+ * 全部都不存在时回落第一个程序位：保持「有得选」，错误交由后端给可操作提示。
+ *
+ * 用户显式选择存 `override`；**区域切换后旧选择自动失效**（新区域的程序位表里
+ * 没有那个变体 ⇒ 落回自动选中），不需要额外的清理 effect。
+ *
+ * 状态探测复用 `TRAE_VARIANTS_KEY` 那份缓存 —— 侧栏圆点、账号页已在用，
+ * 本 hook 不会多发探测请求。
+ */
+function useTraeProgramVariant(region: TraeRegionId): {
+  /** 本区域的程序位清单（顺序与后端一致：TraeWork 在前）。 */
+  programs: TraeProgramStatus[];
+  /** 生效的程序位变体（自动选中或用户覆盖）。 */
+  programVariant: TraeVariantId;
+  /** 生效程序位的展示名（选择器当前值 / 文案里点明操作目标用）。 */
+  programLabel: string;
+  /** 用户显式切换程序位。 */
+  select: (variant: TraeVariantId) => void;
+} {
+  const { data: statuses } = useCachedResource<TraeVariantStatus[]>(
+    TRAE_VARIANTS_KEY,
+    loadTraeVariantStatuses,
+  );
+  const [override, setOverride] = useState<TraeVariantId | null>(null);
+  const programs = findRegionStatus(statuses ?? TRAE_VARIANT_FALLBACK, region)?.programs ?? [];
+  const auto = programs.find((program) => program.writeDataDirExists) ?? programs[0] ?? null;
+  const programVariant: TraeVariantId =
+    override !== null && programs.some((program) => program.variant === override)
+      ? override
+      : (auto?.variant ?? region);
+  return {
+    programs,
+    programVariant,
+    programLabel: programs.find((program) => program.variant === programVariant)?.label ?? "",
+    select: setOverride,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -129,12 +189,12 @@ const KIND_LABEL: Record<TraeLogKind, TranslationKey> = {
  * 日志作为「排障用的设置类信息」下沉到设置页，能力本身完整保留
  * （类型/日期/关键字筛选、自动刷新、复制、导出 CSV）。
  */
-function RuntimeLogsSection() {
+function RuntimeLogsSection({ variant }: { variant: TraeVariantId }) {
   const t = useT();
   // 运行日志按产品线分家（`checkin` / `switch` 两条来源各读各的，`app` 刻意共用）。
-  // 变体取自侧栏分区，不由探测推导 —— 探测回答「本机哪条线最近活跃」，
-  // 不回答「用户此刻想管哪条线」。
-  const [variant] = useTraeVariant();
+  // 变体由页面传入（`useTraeProgramVariant` 的**程序位**值，自动选中写侧目录
+  // 存在的那个）—— ⚠️ 不能用 `useTraeVariant` 的区域值：那会被后端折叠到主程序
+  // TraeWork，只装 TraeCode CN 的机器永远读到空日志（2026-10-15 用户报障同类）。
   const [kind, setKind] = useState<string>("all");
   const [date, setDate] = useState<string>("all");
   const [keywordDraft, setKeywordDraft] = useState("");
@@ -685,15 +745,22 @@ function ProfilesSection({
   data,
   loading,
   busy,
-  variant,
+  programVariant,
+  programs,
+  onProgramChange,
   onReload,
   onRun,
 }: {
   data: TraeProfilesOverview | null;
   loading: boolean;
   busy: string | null;
-  /** 当前产品线：快照按变体分家，备份/恢复/删除都必须带上它。 */
-  variant: TraeVariantId;
+  /** 生效的**程序位**变体：快照/备份/恢复/删除都打在这个客户端上（见 `useTraeProgramVariant`）。
+   *  ⚠️ 不能传区域值（`cn` / `global`）—— 那会被后端折叠到主程序 TraeWork。 */
+  programVariant: TraeVariantId;
+  /** 本区域程序位清单（选择器数据源，来自 `useTraeProgramVariant`）。 */
+  programs: TraeProgramStatus[];
+  /** 用户切换程序位。 */
+  onProgramChange: (variant: TraeVariantId) => void;
   onReload: () => void;
   onRun: (key: string, label: string, action: () => Promise<unknown>) => Promise<void>;
 }) {
@@ -742,10 +809,37 @@ function ProfilesSection({
             {t("trae.page.settings.snapshotCount", { count: profiles.length })}
           </span>
         </div>
-        <Button variant="ghost" size="sm" onClick={onReload} disabled={loading}>
-          <RefreshCw className={cn(loading && "animate-spin")} />
-          {t("trae.page.settings.refresh")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <span className="text-[12.5px] text-muted-foreground">
+            {t("trae.page.settings.programLabel")}
+          </span>
+          {/* 程序位选择器：本区块的数据目录 / 快照列表 / 备份恢复删除全部跟着它走。
+              自动选中「写侧数据目录存在」的那个（见 `useTraeProgramVariant`），
+              这里允许显式换 —— 例如要删另一条线的旧快照时。 */}
+          <Select
+            value={programVariant}
+            onValueChange={(next) => onProgramChange(next as TraeVariantId)}
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-40"
+              aria-label={t("trae.page.settings.programLabel")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {programs.map((program) => (
+                <SelectItem key={program.variant} value={program.variant}>
+                  {program.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button variant="ghost" size="sm" onClick={onReload} disabled={loading}>
+            <RefreshCw className={cn(loading && "animate-spin")} />
+            {t("trae.page.settings.refresh")}
+          </Button>
+        </div>
       </SettingsRow>
 
       {data?.dataDir && (
@@ -775,7 +869,7 @@ function ProfilesSection({
               disabled={!backupSlot.trim() || busy === "backup"}
               onClick={() =>
                 void onRun("backup", t("trae.page.settings.backup"), () =>
-                  api.traeBackupProfile(backupSlot.trim(), variant),
+                  api.traeBackupProfile(backupSlot.trim(), programVariant),
                 ).then(() => setBackupSlot(""))
               }
             >
@@ -876,7 +970,7 @@ function ProfilesSection({
                 if (!target) return;
                 setPendingRestore(null);
                 void onRun(`restore-${target.slot}`, t("trae.page.settings.restore"), () =>
-                  api.traeRestoreProfile(target.slot, variant),
+                  api.traeRestoreProfile(target.slot, programVariant),
                 );
               }}
             >
@@ -910,7 +1004,7 @@ function ProfilesSection({
                 if (!target) return;
                 setPendingDelete(null);
                 void onRun(`delete-${target.slot}`, t("trae.page.settings.delete"), () =>
-                  api.traeDeleteProfile(target.slot, variant),
+                  api.traeDeleteProfile(target.slot, programVariant),
                 );
               }}
             >
@@ -951,6 +1045,10 @@ export default function TraeSettingsPage() {
   const t = useT();
   // 快照按产品线分家（`paths::profiles_dir_for`），故这里也必须带上变体。
   const [variant] = useTraeVariant();
+  // ★ 程序位（TraeWork / TraeCode / 合并版）：登录态快照、重置设备都是**程序级**
+  //   操作，目标客户端由它决定。此前把区域值直接当变体传后端 ⇒ 恒折叠到主程序
+  //   TraeWork —— 只装 TraeCode CN 的机器上数据目录/快照/备份全是错的（2026-10-15 报障）。
+  const program = useTraeProgramVariant(variant);
   const [saving, setSaving] = useState(false);
   /**
    * 排程（自动签到）的保存中标志，与上面的 `saving` **刻意分开**：
@@ -993,17 +1091,17 @@ export default function TraeSettingsPage() {
     const [envData, capabilityData, profileData] = await Promise.all([
       api.getTraeEnv(),
       api.getTraeCapabilities(),
-      api.getTraeProfiles(variant),
+      api.getTraeProfiles(program.programVariant),
     ]);
     return { env: envData, capabilities: capabilityData, profiles: profileData };
-  }, [variant]);
+  }, [program.programVariant]);
 
   const {
     data: pageSnapshot,
     loading,
     error,
     refresh: load,
-  } = useCachedResource<SettingsPageSnapshot>(`trae:settings-page:${variant}`, loadSnapshot);
+  } = useCachedResource<SettingsPageSnapshot>(`trae:settings-page:${program.programVariant}`, loadSnapshot);
 
   /** 设置项本身：与账号页共用 `trae:settings`，写入一律走 `patchSettings`（乐观更新）。 */
   const { data: settings, patch: patchSettings } = useCachedResource<TraeSettings>(
@@ -1098,7 +1196,7 @@ export default function TraeSettingsPage() {
   async function runResetDevice() {
     setResetBusy(true);
     try {
-      const report = await api.traeResetDevice(variant);
+      const report = await api.traeResetDevice(program.programVariant);
       setResetReport(report);
       toast.success(t("trae.page.settings.resetDone"), {
         description: t("trae.page.settings.resetLayers", {
@@ -1486,7 +1584,9 @@ export default function TraeSettingsPage() {
           data={profiles}
           loading={loading}
           busy={busy}
-          variant={variant}
+          programVariant={program.programVariant}
+          programs={program.programs}
+          onProgramChange={program.select}
           onReload={() => void load()}
           onRun={runProfileAction}
         />
@@ -1612,7 +1712,7 @@ export default function TraeSettingsPage() {
           </SettingsFieldRow>
           </CardContent>
         </SettingsGroup>
-        <RuntimeLogsSection />
+        <RuntimeLogsSection variant={program.programVariant} />
           </>
         )}
 
@@ -1664,6 +1764,11 @@ export default function TraeSettingsPage() {
           <DialogHeader>
             <DialogTitle>{t("trae.page.settings.resetLabel")}</DialogTitle>
             <DialogDescription>{t("trae.page.settings.resetDialogDesc")}</DialogDescription>
+            {/* 点明操作目标：重置是**程序级**操作，打在自动选中（或用户切换后）的
+                那个客户端上 —— 不点明的话，「我以为重置的是 Trae CN」这类歧义没法防。 */}
+            <DialogDescription>
+              {t("trae.page.settings.programLabel")}: {program.programLabel || program.programVariant}
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setResetOpen(false)}>
