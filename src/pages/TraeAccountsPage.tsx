@@ -1549,15 +1549,17 @@ export default function TraeAccountsPage() {
           remainingText: formatCredits(item.remaining),
           totalText: formatCredits(item.total),
           usedText: t("trae.comp.card.package.used", { n: formatCredits(item.used) }),
+          // 到期文案不再区分「几天内」——是否临期只体现在**颜色**上（见 `DetailPack.expiringSoon`）。
           expiryText: item.expired
             ? t("trae.comp.card.package.expired")
-            : item.expiringSoon
-              ? t("trae.comp.card.package.expiringSoon")
-              : item.expireAt
-                ? t("trae.comp.card.expiry.short", { date: shortTime(item.expireAt) })
-                : t("trae.comp.card.expiry.permanent"),
+            : item.expireAt
+              ? t("trae.comp.card.expiry.short", { date: shortTime(item.expireAt) })
+              : t("trae.comp.card.expiry.permanent"),
           expired: item.expired,
-          expiringSoon: item.expiringSoon,
+          // ★「3 天内到期」用黄色警示。后端 `expiringSoon` 是 7 天口径且卡片徽章还在用，不动它；
+          //   抽屉的 3 天口径在这里就地判定（Trae 侧 `expireAt` 是秒）。
+          expiringSoon:
+            !item.expired && item.expireAt != null && item.expireAt > 0 && item.expireAt * 1000 - Date.now() <= 3 * 86_400_000,
           ratio: item.total > 0 ? Math.min(100, Math.max(0, (item.remaining / item.total) * 100)) : 0,
         }))
     : [];

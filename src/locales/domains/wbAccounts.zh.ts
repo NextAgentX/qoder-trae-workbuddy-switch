@@ -186,7 +186,8 @@ export const zh = {
   // 故 `creditPacks` / `expireSoon` / `nextExpiry` / `creditsForever` / `updated` /
   // `expiringSoonTitle` / `resourceTitle` / `creditsUnit` / `noCredits` 一并删除。
   "wbAccounts.card.expired": "已到期",
-  "wbAccounts.card.expiresIn7": "7 天内到期",
+  // 「N 天内到期」的文案键已删：临期不再用文字区分，改为 ≤3 天时把日期行**标黄**
+  // （见 `DetailPack.expiringSoon` 的装配口径，AccountsPage）。
   "wbAccounts.card.expiresOn": "到期 {date}",
   "wbAccounts.card.used": "已用 {n}",
 

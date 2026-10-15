@@ -109,7 +109,7 @@ export const en = {
   // P4: "used / expiry" text for the drawer `DetailPack` (mirrors the WorkBuddy drawer).
   "trae.comp.card.package.used": "Used {n}",
   "trae.comp.card.package.expired": "Expired",
-  "trae.comp.card.package.expiringSoon": "Expires within 7 days",
+  // "expiring soon" keys removed: expiry urgency is now color-only (warning yellow when ≤3 days left).
 
   // ---- Action explanations (used as menu-item titles) ----
   // P4: the footer "Save login state" / "Refresh JWT" buttons moved back into the menu;

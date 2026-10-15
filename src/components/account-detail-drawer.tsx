@@ -216,6 +216,10 @@ export interface AccountDetailDrawerProps {
   checkinHistory?: DetailCheckinHistoryRow[] | null;
 }
 
+/**
+ * 积分包到期文案的颜色。`expired` / `expiringSoon` 的**口径由调用方装配**（抽屉只认布尔）：
+ * 当前约定 `expiringSoon` = 剩余 ≤ 3 天（黄色警示；已到期才是红色）。
+ */
 function packTone(pack: DetailPack): string {
   if (pack.expired) return "text-destructive";
   if (pack.expiringSoon) return "text-warning";
