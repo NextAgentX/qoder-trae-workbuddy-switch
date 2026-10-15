@@ -43,13 +43,13 @@ function programStub(
  * 各自维护一份占位表迟早漂移（曾经由 `TraeVariantBar` 私有持有）。
  *
  * 程序位的 `variant` 是**切换时要回传给后端的标识**：
- * 国内两条历史程序位是 `trae_work` / `trae_cn`，国际版两条是 `global`（TraeWork）
- * 与 `global_trae_code`（TraeCode）。
+ * 2026-10-15 程序位收敛后，每个区域在役的只有**合并版客户端**一个程序位 ——
+ * 国内是 `trae_merged`（`Trae CN`），国际是 `global_trae_merged`（`Trae`）。
  *
- * ⚠️ 2026-10-13（issue #20）起每个区域有**三条**程序位：上面两条 + 合并版 `trae`。
- * 合并版有**自己的变体**（`trae_merged` / `global_trae_merged`）—— 变体是快照目录 /
- * Key 归属 / 日志分档的派生来源，与遗留 `trae_code` 共用会让两条程序位的快照
- * 挤进同一个目录（用户报障原文）。因此本表现在有 **6 个互不相同**的变体。
+ * ⚠️ 遗留程序位（`trae_work` / `trae_cn` / `global` / `global_trae_code`）已从
+ * **界面程序位表**退役（用户 2026-10-15 决策：只保留 Trae，TraeWork 不要了），
+ * 但它们的**变体**在后端仍全部建模 —— 旧数据（快照目录 / Key 归属 / 日志分档）
+ * 原样保留、不迁移不删除，旧版本的本项目也仍能读取。
  *
  * ⚠️ 2026-09-28（issue #3）之前，国际版 TraeCode 未建模 ⇒ 这里填 `null`、
  * 按钮禁用。现在每个程序位都已建模，**每个占位都必须带标识** ——
@@ -81,12 +81,10 @@ export const TRAE_VARIANT_FALLBACK: TraeVariantStatus[] = [
     writeDataDir: null,
     writeDataDirExists: false,
     programs: [
-      // 展示名规则：**国内版带 ` CN` 后缀、国际版不带后缀**（用户 2026-10-13 更正）。
-      programStub("trae_work", "TraeWork CN", "trae.program.traeWorkCn", "trae_work"),
-      programStub("trae_code", "TraeCode CN", "trae.program.traeCodeCn", "trae_cn"),
-      // 合并后的客户端（issue #20）：客户端现在就叫 `Trae`。
-      // `variant` 是它**自己的**标识 `trae_merged`（与 `trae_code` 的 `trae_cn` 分开）——
-      // 变体决定快照目录 / Key 归属 / 日志分档，共用会让两条程序位的快照挤进同一个目录。
+      // 2026-10-15 程序位收敛后，国内在役的只有合并版客户端（issue #20 合并产物），
+      // 客户端现在就叫 `Trae CN`。`variant` 是它**自己的**标识 `trae_merged` ——
+      // 变体决定快照目录 / Key 归属 / 日志分档。遗留程序位
+      // （`trae_work` / `trae_cn`）已从界面退役，但后端变体全部保留（旧数据不动）。
       programStub("trae", "Trae CN", "trae.program.traeCn", "trae_merged"),
     ],
   },
@@ -106,11 +104,9 @@ export const TRAE_VARIANT_FALLBACK: TraeVariantStatus[] = [
     writeDataDir: null,
     writeDataDirExists: false,
     programs: [
-      programStub("trae_work", "TraeWork", "trae.program.traeWorkGlobal", "global"),
-      // ⚠️ 2026-10-13（issue #20）：国际 TraeCode 的展示名**保留家族名**（`TraeCode AI`）。
-      // 曾经叫 `Trae AI`，与下面的国际合并版撞名 —— Key 归属下拉会出现两个同名选项。
-      programStub("trae_code", "TraeCode", "trae.program.traeCodeGlobal", "global_trae_code"),
-      // 合并版国际客户端：国际版不带后缀 ⇒ `Trae`；变体是它**自己的** `global_trae_merged`。
+      // 2026-10-15 程序位收敛后，国际在役的只有合并版客户端；国际版不带后缀 ⇒ `Trae`；
+      // 变体是它**自己的** `global_trae_merged`。遗留程序位（`global` / `global_trae_code`）
+      // 已从界面退役，但后端变体全部保留（旧数据不动）。
       programStub("trae", "Trae", "trae.program.traeGlobal", "global_trae_merged"),
     ],
   },
@@ -221,13 +217,13 @@ export function findRegionStatus(
 }
 
 /**
- * 本区域下的**程序位**（顺序稳定：TraeWork 在前），供「按程序位取数据」的卡片使用。
+ * 本区域下的**程序位**（2026-10-15 收敛后每区域 1 个：合并版），供「按程序位取数据」的卡片使用。
  *
  * ## 为什么取的是 {@link TRAE_VARIANT_FALLBACK} 而不是再探测一次
  *
  * 本函数要回答的是「这个区域**有哪些**程序位」，而这是一个**结构性事实**
- * （每个区域三条：TraeWork / TraeCode / 合并版 Trae —— 后两条是同一个客户端，
- * 见 `TraeProgramId` 的说明），与「装了没 / 在不在跑」无关。
+ * （收敛后每区域只剩合并版一个程序位，见 `TraeProgramId` 的说明），与
+ * 「装了没 / 在不在跑」无关。
  * `TRAE_VARIANT_FALLBACK` 正是这份结构表（区域切换器在后端不可用时也用它），
  * 复用它就**不会**多出第二份会漂移的程序位清单。
  *
@@ -258,13 +254,13 @@ export function regionPrograms(region: TraeRegionId): { variant: TraeVariantId; 
  * （目前是 API Key 的「归属程序位」下拉：一把 Key 绑定一个 `variant`，由它决定
  * `/v1/models` 列哪份清单、请求体带哪个 `function`）。
  *
- * ## ⚠️ 去重现在是**安全网**，不再是必需（issue #20 收尾后）
+ * ## ⚠️ 去重现在是**安全网**（2026-10-15 收敛后每区域只剩 1 个程序位）
  *
- * 上一版里合并版 `trae` 与遗留 `trae_code` **共用变体**，不去重会出现两个 value
- * 完全相同的选项（`Select` 选中态指向第一个、点第二个像"没反应"）。
- * 现在两者各有自己的变体（`trae_merged` / `trae_cn`），6 个变体互不相同 ⇒ 去重
- * 不再触发。**保留它**是因为「同一个变体被两个程序位引用」这件事一旦再次发生，
- * 症状（下拉里两个一样的选项）极难定位，而这段守卫的成本只是几行循环。
+ * 历史上这里出现过「合并版 `trae` 与遗留 `trae_code` 共用变体」的缺陷，不去重会
+ * 出现两个 value 完全相同的选项（`Select` 选中态指向第一个、点第二个像"没反应"）。
+ * 收敛后在役程序位只有 2 个、变体互不相同 ⇒ 去重不再触发。**保留它**是因为
+ * 「同一个变体被两个程序位引用」这件事一旦再次发生，症状（下拉里两个一样的选项）
+ * 极难定位，而这段守卫的成本只是几行循环。
  *
  * ⚠️ 与 {@link regionPrograms} 同样：`installed` 在兜底表里恒为 `false`，
  * 不能拿它禁用控件；本函数只提供 `variant`（回传标识）与 `label`（展示名）。

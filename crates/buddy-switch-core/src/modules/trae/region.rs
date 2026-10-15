@@ -43,31 +43,44 @@
 //! （出现「装了 A、读了 B 的目录」），因此 [`ProgramSpec`] 的候选名一律
 //! **精确逐字比对**，不重叠由单测钉住。
 //!
-//! ### 唯一登记在案的重叠：`Trae`（合并版）× `TraeCode`（issue #20）
+//! ### 历史重叠：`Trae`（合并版）× `TraeCode`（issue #20）—— 两格均已退役
 //!
 //! 2026-10-13 客户端把 TraeWork 与 TraeCode 合并成**一个**客户端，落点就是
 //! `Trae CN` / `Trae` —— 与旧的 **TraeCode** 逐字同名（本机 `migration-job.json`
 //! 实证：`sourceAppName = "TRAE SOLO CN"`、`targetDataPath = …\Trae CN`）。
-//! 也就是说 `Trae` 与 `TraeCode` **物理上是同一个客户端**，候选名必然重叠。
+//! 也就是说 `Trae` 与 `TraeCode` **物理上是同一个客户端**。
 //!
-//! 这不是缺陷，而是「合并」这一事实的投影；两条程序位因此**刻意共享**
-//! 同一份候选名、同一个 [`super::variant::TraeVariant`] 与同一个快照目录
-//! （见 [`super::paths::profiles_dir_for_program`]）—— 否则会把同一个客户端的
-//! 登录态拆进两套快照/两本账号库。重叠由单测**显式白名单**钉住（白名单外新增重叠仍会红）。
+//! issue #20 曾把两者都列为程序位（刻意共享候选名）；**2026-10-15 按用户决策
+//! 全部撤下**：界面只保留**合并版**一条程序位（见 [`programs_of`]）——
+//! 「一个客户端摆两个按钮」没有信息量，只会让人疑惑点哪个。
+//! 遗留 `TraeCode` 的**数据**（快照目录 `profiles_trae_cn/`、绑定了该变体的
+//! Key、记账）一律**原样保留**：变体表（[`super::variant`]）与
+//! `program_spec(region, TraeCode)` 查询都还在，旧版本程序按原布局读写不受影响。
 //!
-//! 另一条重叠（`TRAE SOLO` ∈ TraeWork ∩ Global TraeWork）是**待修缺陷**，
-//! 与上面这条性质不同，见 [`super::variant::TRAE_WORK_SPEC`] 的说明。
+//! ## 程序位收敛（2026-10-15，用户决策）
+//!
+//! 程序位表收敛为**每区域一个**：合并版客户端（国内 `Trae CN` / 国际 `Trae`）。
+//! TraeWork（`TRAE SOLO CN`）与遗留 TraeCode 两格从界面退役 —— 它们的**数据**
+//! （快照目录、账号库记录、记账文件）不迁移、不删除：
+//!
+//! - TraeWork 的快照在 `profiles/`（默认变体目录），userData 在 `%APPDATA%\TRAE SOLO CN`
+//!   —— 新版本只是不再在界面上提供这一格，文件原样在原处；
+//! - 遗留 TraeCode 的快照在 `profiles_trae_cn/`，既有迁移（`region_migrate`）会把
+//!   可搬的搬进合并版槽位，搬不动的（客户端级目录名相同）天然兼容；
+//! - **旧版本的本项目**按原布局读写全部这些文件，不受本次收敛影响（布局零变化）。
+//!
+//! 变体轴（[`super::variant::TraeVariant`] 的 6 个取值）**保持不变** —— 变体决定
+//! 快照目录 / Key 归属 / 日志分档，退役的只是「程序位」这一层界面入口。
 //!
 //! ## 程序位是否都真的接上了（2026-09-28 issue #3；2026-10-13 issue #20）
 //!
-//! 本模块一直有 4 个 [`ProgramSpec`]，但**第 4 个（Global × TraeCode）曾经接不上**：
-//! `platform::variant_for_program` 对它返回 `None`，于是界面上那一格永远是
-//! 「未检测到」。issue #3 报的「不支持 TraeCode」就是这一格。
-//!
-//! 现在 6 个程序位（3 程序 × 2 区域）都映射到 [`super::variant::TraeVariant`] 的一个取值
-//! （`TraeWork` / `Trae` / `Global` / `GlobalTraeCode` —— 合并版 `Trae` 与遗留
-//! `TraeCode` **共用**后两者），探测、启动、切换、登录态快照四件事因此都按程序位分家。
-//! 判据见 `platform::tests::全部程序位已建模且自洽`。
+//! 历史：本模块曾有 4 个 [`ProgramSpec`]，第 4 个（Global × TraeCode）一度接不上
+//! （`platform::variant_for_program` 返回 `None`，界面上永远是「未检测到」）；
+//! issue #3 修复后 6 个组合（3 程序 × 2 区域）都映射到
+//! [`super::variant::TraeVariant`] 的一个取值。2026-10-15 程序位表收敛后，
+//! **界面程序位**只剩每区域一个（合并版），但全部 6 个组合的映射
+//! （[`program_spec`] / [`super::platform::variant_for_program`]）**仍然保留** ——
+//! 旧数据与旧版本程序的兼容面一点没少。
 //!
 //! ⚠️ 唯一**推断**（非实测）的是 `TraeCode` 国际版的 `packageType`：本机未装该客户端。
 //! 它只被 [`super::variant::OAuthLine::from_package_type`] 消费，而那个分派
@@ -92,8 +105,10 @@
 //! ⚠️ 更正记录（2026-10-13，用户更正）：此前的约定是「**国际版带 `AI` 后缀**」，
 //! 那是**错的** —— 它凭空造了 `Trae AI` / `TraeWork AI` 这类客户端根本不用的名字，
 //! 而且 `Trae AI` 会同时指国际 TraeCode 与国际合并版（撞名）。
-//! 六个名字**两两不同**有两条护栏（本模块的 `六个程序位的展示名两两不同` +
+//! 六个名字**两两不同**有两条护栏（本模块的 `在役程序位的展示名两两不同` +
 //! 跨语言门禁 `check-scope-registry.cjs`，后者还要求与前端兜底表逐字一致）。
+//! 2026-10-15 收敛后本模块只**在役** 2 个程序位名；全部 6 个变体名仍由
+//! [`super::variant::TraeVariant::display_name`] 保留（供旧数据/旧版本兼容）。
 //!
 //! ## 区域名：**客户端自己的产品名**（用户 2026-10-13 定）
 //!
@@ -333,6 +348,11 @@ pub struct ProgramSpec {
     pub proc_names: &'static [&'static str],
 }
 
+/// ⛔ **已从程序位表退役**（2026-10-15，用户决策：界面只保留合并版客户端）。
+///
+/// 仅 [`program_spec`] 的兼容查询还能取到它 —— 绑定了 TraeWork 的旧数据
+/// （快照在 `profiles/`、userData 在 `%APPDATA%\TRAE SOLO CN`）原样保留、
+/// 不迁移不删除；旧版本的本项目按原布局照常读写。
 const CN_TRAE_WORK: ProgramSpec = ProgramSpec {
     region: TraeRegion::Cn,
     program: TraeProgram::TraeWork,
@@ -344,6 +364,9 @@ const CN_TRAE_WORK: ProgramSpec = ProgramSpec {
     proc_names: &["TRAE SOLO CN"],
 };
 
+/// ⛔ **已从程序位表退役**（2026-10-15）：与 [`CN_TRAE`] 物理上是同一个客户端
+/// （逐字段相同），界面上「一个客户端摆两个按钮」没有意义。其快照目录
+/// `profiles_trae_cn/` 原样保留（可搬的已由 `region_migrate` 搬进合并版槽位）。
 const CN_TRAE_CODE: ProgramSpec = ProgramSpec {
     region: TraeRegion::Cn,
     program: TraeProgram::TraeCode,
@@ -374,6 +397,8 @@ const CN_TRAE: ProgramSpec = ProgramSpec {
     proc_names: &["Trae CN"],
 };
 
+/// ⛔ **已从程序位表退役**（2026-10-15，用户决策）：与 [`CN_TRAE_WORK`] 同批，
+/// 界面只保留合并版客户端；数据原样保留、不迁移不删除。
 const GLOBAL_TRAE_WORK: ProgramSpec = ProgramSpec {
     region: TraeRegion::Global,
     program: TraeProgram::TraeWork,
@@ -385,6 +410,9 @@ const GLOBAL_TRAE_WORK: ProgramSpec = ProgramSpec {
     proc_names: &["TRAE SOLO"],
 };
 
+/// ⛔ **已从程序位表退役**（2026-10-15）：与 [`GLOBAL_TRAE`] 物理上是同一个客户端，
+/// 与 [`CN_TRAE_CODE`] 同批退役；数据原样保留、不迁移不删除。
+///
 /// 国际版 TraeCode：**本机未安装**，`nameAlias` / `packageType` 无从实测，
 /// 因此 `package_type` 留 `None`、别名按同族命名规则推断并在此显式标注「待实测」。
 /// 猜测只影响诊断文案；候选名（目录 / exe / 进程）是客户端通用命名，风险可控。
@@ -430,20 +458,16 @@ const GLOBAL_TRAE: ProgramSpec = ProgramSpec {
     proc_names: &["Trae"],
 };
 
-/// 全部程序位（3 程序 × 2 区域 = 6 条），顺序稳定：先区域、后程序线。
+/// 界面上**在役**的全部程序位（2026-10-15 收敛后：每区域 1 个 = 合并版客户端，共 2 条）。
 ///
-/// ⚠️ 其中 `Trae` 与 `TraeCode` 两条**候选名逐字相同**（同一个客户端，见模块头
-/// 「唯一登记在案的重叠」）⇒ 本函数的返回值**含重复候选名**，把它摊平成候选表时
-/// 必须先按序去重（`platform::tests::flattened_candidates_match_variant_table` 就是这么做且注明了理由）。
-pub fn all_program_specs() -> [&'static ProgramSpec; 6] {
-    [
-        &CN_TRAE_WORK,
-        &CN_TRAE_CODE,
-        &CN_TRAE,
-        &GLOBAL_TRAE_WORK,
-        &GLOBAL_TRAE_CODE,
-        &GLOBAL_TRAE,
-    ]
+/// 退役的 4 条（两条 TraeWork + 两条遗留 TraeCode）**不在此表**，但仍可经
+/// [`program_spec`] 查到（兼容面见模块头「程序位收敛」）。
+///
+/// 历史：收敛前本表 6 条，其中 `Trae` 与 `TraeCode` 两条**候选名逐字相同**
+/// （同一个客户端）⇒ 摊平成候选表时必须按序去重。收敛后重叠不再存在于本表
+/// （候选名重叠只保留在 [`super::variant`] 的变体表里，供旧数据兼容）。
+pub fn all_program_specs() -> [&'static ProgramSpec; 2] {
+    [&CN_TRAE, &GLOBAL_TRAE]
 }
 
 /// 取某个程序位的描述符。
@@ -458,11 +482,14 @@ pub fn program_spec(region: TraeRegion, program: TraeProgram) -> &'static Progra
     }
 }
 
-/// 某个区域下的全部程序位（界面按区域渲染程序控件时遍历它）。
-pub fn programs_of(region: TraeRegion) -> [&'static ProgramSpec; 3] {
+/// 某个区域下的**在役**程序位（界面按区域渲染程序控件时遍历它）。
+///
+/// 2026-10-15 收敛后每区域只有**一条**：合并版客户端。TraeWork 与遗留 TraeCode
+/// 已退役（数据原样保留，见 [`all_program_specs`] / 模块头「程序位收敛」）。
+pub fn programs_of(region: TraeRegion) -> [&'static ProgramSpec; 1] {
     match region {
-        TraeRegion::Cn => [&CN_TRAE_WORK, &CN_TRAE_CODE, &CN_TRAE],
-        TraeRegion::Global => [&GLOBAL_TRAE_WORK, &GLOBAL_TRAE_CODE, &GLOBAL_TRAE],
+        TraeRegion::Cn => [&CN_TRAE],
+        TraeRegion::Global => [&GLOBAL_TRAE],
     }
 }
 
@@ -621,9 +648,9 @@ mod tests {
     ///
     /// 反例（改坏会红）：把任意两条 `display_name` 改成同一个值 ⇒ 立刻变红。
     #[test]
-    fn 六个程序位的展示名两两不同() {
+    fn 在役程序位的展示名两两不同() {
         let specs = all_program_specs();
-        assert_eq!(specs.len(), 6, "前置：应恰有 6 条程序位，否则本用例会恒真");
+        assert_eq!(specs.len(), 2, "前置：应恰有 2 条在役程序位，否则本用例会恒真");
         let mut seen: Vec<(&str, TraeProgram, TraeRegion)> = Vec::new();
         for spec in specs {
             if let Some((name, other_program, other_region)) = seen
@@ -678,18 +705,20 @@ mod tests {
         }
     }
 
-    /// 程序位的候选名（目录 / exe / 进程）**必须两两互不重叠**，唯一例外**显式白名单**。
+    /// 程序位的候选名（目录 / exe / 进程）**必须两两互不重叠**。
     ///
     /// 这是本模块存在的理由之一：改造前国内/国外候选名混在一张表里按序取首个，
     /// 用包含关系匹配就会「装了 A、读了 B 的目录」。谁把它们合并回去，这里会红。
     ///
-    /// ## 白名单：合并版 `Trae` × 遗留 `TraeCode`（issue #20）
+    /// ## 历史白名单已清空（2026-10-15）
     ///
-    /// 两者**物理上是同一个客户端**（同名 `Trae CN` / `Trae`，见模块头），
-    /// 因此候选名必然重叠。这里断的是「重叠集合**恰好等于**这 6 项」，
-    /// 而不是「随便重叠都行」——白名单外的任何新增重叠仍会红。
+    /// issue #20 时代合并版 `Trae` × 遗留 `TraeCode`（物理上同一个客户端）曾以
+    /// 6 项白名单登记在案；程序位表收敛（每区域只留合并版）后两条 TraeCode 格
+    /// 退出本表 ⇒ **重叠集合应为空**。候选名重叠仍存在于 [`super::variant`] 的
+    /// **变体表**里（6 个变体全保留，供旧数据兼容）—— 那边有自己的护栏
+    /// （`variant_of_name` 精确匹配 + 自身单测）。
     #[test]
-    fn 程序位候选名互不重叠除登记在案的重叠() {
+    fn 程序位候选名互不重叠() {
         let specs = all_program_specs();
         let mut overlaps: Vec<String> = Vec::new();
         for (i, a) in specs.iter().enumerate() {
@@ -710,19 +739,9 @@ mod tests {
                 }
             }
         }
-        overlaps.sort();
-        let mut expected = vec![
-            "exe 名:Trae CN.exe:Cn/TraeCode:Cn/Trae",
-            "exe 名:Trae.exe:Global/TraeCode:Global/Trae",
-            "userData 目录名:Trae CN:Cn/TraeCode:Cn/Trae",
-            "userData 目录名:Trae:Global/TraeCode:Global/Trae",
-            "进程名:Trae CN:Cn/TraeCode:Cn/Trae",
-            "进程名:Trae:Global/TraeCode:Global/Trae",
-        ];
-        expected.sort();
-        assert_eq!(
-            overlaps, expected,
-            "候选名重叠集合变了 —— 白名单外的新重叠必须先修掉（或显式登记理由）"
+        assert!(
+            overlaps.is_empty(),
+            "在役程序位的候选名不得重叠（变体表里的历史重叠不在本断言范围）: {overlaps:?}"
         );
 
         // 反向：CN 与 Global 的同名程序**不能**共用候选名（差一个后缀也算）。
@@ -732,21 +751,21 @@ mod tests {
         );
     }
 
-    /// `programs_of` 必须给出该区域的**三条**程序线（遗留两条 + 合并版），
-    /// 且每条都归属本区域。
+    /// `programs_of` 必须给出该区域的**一条**程序位（合并版客户端），
+    /// 且归属本区域。2026-10-15 收敛：TraeWork / 遗留 TraeCode 已退役。
     #[test]
     fn 按区域取程序位() {
         for region in TraeRegion::all() {
             let got = programs_of(region);
-            assert_eq!(got.len(), 3, "每个区域应有 3 条程序线（Work / Code / 合并版 Trae）");
+            assert_eq!(got.len(), 1, "每个区域应只有 1 条在役程序位（合并版客户端）");
             for spec in got {
                 assert_eq!(spec.region, region, "程序位归属漂了: {:?}", spec.program);
             }
-            // 合并版必须在列表里 —— 漏掉它就等于「合并后的客户端在界面上不存在」，
-            // 正是 issue #20 报的那个症状。
+            // 必须是**合并版** —— 退役的两格若混回来，界面会重新出现
+            // 「一个客户端两个按钮」。
             assert!(
                 got.iter().any(|s| s.program == TraeProgram::Trae),
-                "{region:?} 的程序位列表缺少合并版 Trae"
+                "{region:?} 的程序位不是合并版客户端"
             );
         }
     }

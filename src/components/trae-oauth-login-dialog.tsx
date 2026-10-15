@@ -26,18 +26,20 @@ import { useTraeVariant } from "@/lib/use-trae-variant";
  *
  * ## 为什么必须有它
  *
- * OAuth 授权 URL 的 `device_id` 必须与**对应客户端**的 icube 设备凭证同源：
- * 「TraeWork」（TRAE SOLO）与「Trae」（合并版 IDE 客户端）是两个不同的客户端、
- * 两份数据目录。只按区域发起登录时后端固定落该区域主程序（国内 = TraeWork），
- * 本机没装它就会在取设备凭证那一步直接报错 —— 用户明明装着 Trae 却加不了账号。
+ * OAuth 授权 URL 的 `device_id` 必须与**对应客户端**的 icube 设备凭证同源，
+ * 因此登录前必须确定「用哪个客户端的设备身份去授权」。
  *
- * 默认选中**主程序**（数组首项）：与历史行为一致；装了合并版客户端的用户
- * 手动切到「Trae」即可。两条程序位落**同一本区域账号库**，这里选的只是
- * 「用哪个客户端的设备身份去授权」。
+ * ## 2026-10-15 程序位收敛
+ *
+ * 每区域在役的程序位只剩**合并版客户端**一个（国内 `Trae CN`、国际 `Trae`），
+ * 遗留程序位（TraeWork / TraeCode）已从界面退役（用户决策：只保留 Trae）。
+ * 每个区域只有一项 ⇒ 下面的选择器不再渲染，`program` 恒等于唯一选项 ——
+ * 保留这份表是因为「发起点」仍需要一个显式的变体标识传给后端，
+ * 将来若恢复多程序位也只改这里。
  */
 const PROGRAM_OPTIONS: Record<TraeRegionId, readonly TraeVariantId[]> = {
-  cn: ["trae_work", "trae_merged"],
-  global: ["global", "global_trae_merged"],
+  cn: ["trae_merged"],
+  global: ["global_trae_merged"],
 };
 
 /**
@@ -376,30 +378,33 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess }: Props) {
         {!loginId && !result && (
           <div className="space-y-3">
             {/*
-              程序位选择：OAuth 的 device_id 与所选客户端的设备凭证同源，
-              本机没装 TraeWork（TRAE SOLO）时选「Trae」即可用合并版客户端登录。
-              会话开始后锁定 —— 设备身份在 `start` 那一刻已随会话定死，中途换选
-              只会造成「界面显示 A、实际授权用 B」的错位，必须重新发起。
+              程序位选择：OAuth 的 device_id 与所选客户端的设备凭证同源。
+              2026-10-15 收敛后每区域只剩合并版一个程序位 ⇒ 单选项时**整块隐藏**
+              （渲染一枚永远「选中自己」的按钮只会占地方、制造「还有别的可切」的错觉）；
+              `program` 状态与 `start` 的传参逻辑保持不变 —— 将来恢复多程序位时，
+              恢复这段 JSX 即可，无需动数据流。
             */}
-            <div className="space-y-1.5">
-              <p className="text-sm font-medium">{t("trae.comp.oauth.programLabel")}</p>
-              <div className="grid grid-cols-2 gap-2" role="group" aria-label={t("trae.comp.oauth.programLabel")}>
-                {PROGRAM_OPTIONS[region].map((id) => (
-                  <Button
-                    key={id}
-                    type="button"
-                    variant={id === program ? "default" : "outline"}
-                    className="w-full"
-                    aria-pressed={id === program}
-                    disabled={busy}
-                    onClick={() => setProgram(id)}
-                  >
-                    {traeVariantLabel(id)}
-                  </Button>
-                ))}
+            {PROGRAM_OPTIONS[region].length > 1 && (
+              <div className="space-y-1.5">
+                <p className="text-sm font-medium">{t("trae.comp.oauth.programLabel")}</p>
+                <div className="grid grid-cols-2 gap-2" role="group" aria-label={t("trae.comp.oauth.programLabel")}>
+                  {PROGRAM_OPTIONS[region].map((id) => (
+                    <Button
+                      key={id}
+                      type="button"
+                      variant={id === program ? "default" : "outline"}
+                      className="w-full"
+                      aria-pressed={id === program}
+                      disabled={busy}
+                      onClick={() => setProgram(id)}
+                    >
+                      {traeVariantLabel(id)}
+                    </Button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">{t("trae.comp.oauth.programHint")}</p>
               </div>
-              <p className="text-xs text-muted-foreground">{t("trae.comp.oauth.programHint")}</p>
-            </div>
+            )}
             <Button onClick={start} disabled={busy} className="w-full">
               {busy ? t("trae.comp.oauth.startBusy", { variant: variantLabel }) : t("trae.comp.oauth.start", { variant: variantLabel })}
             </Button>
