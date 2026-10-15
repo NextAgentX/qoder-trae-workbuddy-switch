@@ -431,7 +431,10 @@ fn region_status(region: super::region::TraeRegion) -> Value {
 /// ⇒ 本函数是**单射**：六个 `(区域, 程序)` 组合 → 六个不同变体。
 ///
 /// 反向映射（`client_settings::program_of_variant`）与它互为逆，有单测钉住双向一致。
-fn variant_for_program(
+///
+/// `pub(crate)`：除本模块的状态聚合外，[`super::handlers::import_local_account_for_region`]
+/// 也要用它把「区域内的程序位表」摊平成变体序列（导入本机账号的读侧回退链）。
+pub(crate) fn variant_for_program(
     region: super::region::TraeRegion,
     program: super::region::TraeProgram,
 ) -> super::variant::TraeVariant {
@@ -541,6 +544,63 @@ fn secondary_drive_roots() -> Vec<PathBuf> {
         .map(|letter| PathBuf::from(format!("{}:\\Programs", letter as char)))
         .filter(|dir| dir.is_dir())
         .collect()
+}
+
+/// 注册表卸载项里登记的 Trae 安装目录（**兜底候选来源**，仅 Windows）。
+///
+/// ## 为什么现在加（[`detect_install`] 处旧注释的取舍已变化）
+///
+/// 旧设计刻意不查注册表，理由是「每次探测都付一个子进程，而常见位置已覆盖」。
+/// 现在的付费方式改成了**两级**：标准安装根（[`windows_install_roots`]）命中的
+/// 机器永远不会走到这里；只有标准根全部落空的机器（自定义安装目录，实测
+/// `C:\0000000\soft\Trae CN` —— 用户报障「导入本机账号 / 环境状态都说未检测到客户端」
+/// 的根因）才会在探测末尾付出一次 `reg query`。且结果做**进程级缓存**——
+/// 安装目录在进程生命周期内不会变，一个进程至多付一次。
+///
+/// Trae 的安装器（Inno Setup / NSIS 系）都会在
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<产品键>` 下登记
+/// `InstallLocation`；对整棵子树按值名过滤即可，不必逐键枚举解析。
+/// HKLM 两处（64 位 + WOW6432Node）一并查，覆盖「装给所有用户」的机器。
+///
+/// 过滤条件取「值里含 `trae`（大小写不敏感）」：卸载子树里还有别的软件，
+/// 不能整树收编；而 Trae 任何安装目录名都含产品名，误杀面为零。
+/// `is_dir()` 过滤掉已卸载但键残留的陈旧条目。
+#[cfg(windows)]
+fn registry_install_dirs() -> &'static Vec<PathBuf> {
+    static CACHE: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let roots = [
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ];
+        for root in roots {
+            let output = hidden_command("reg")
+                .args(["query", root, "/s", "/v", "InstallLocation"])
+                .output();
+            let Ok(output) = output else { continue };
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                // 行形如 `    InstallLocation    REG_SZ    C:\0000000\soft\Trae CN\`。
+                let Some((name, value)) = line.split_once("REG_SZ") else {
+                    continue;
+                };
+                if !name.trim().eq_ignore_ascii_case("InstallLocation") {
+                    continue;
+                }
+                let dir = value.trim();
+                if dir.is_empty() || !dir.to_ascii_lowercase().contains("trae") {
+                    continue;
+                }
+                let dir = PathBuf::from(dir);
+                if dir.is_dir() && !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+        dirs
+    })
 }
 
 /// 从「可执行文件所在目录」推导版本号。
@@ -780,19 +840,19 @@ pub fn detect_install(custom: &[String]) -> InstallProbe {
         }
     }
 
-    // 刻意**不查询注册表卸载项**：
+    // 注册表兜底**只付两级代价中的一级**（2026-10-15 更新，取代旧的「刻意不查」设计）：
     //
-    // 1. 参考实现用 `reg query /s /f TRAE` 兜底，代价是每次探测都起一个子进程
-    //    （Windows 上还会有控制台窗口闪烁），且在受限环境（沙箱、企业策略）里会被拦截；
-    // 2. [`candidate_exe_paths`] 已覆盖全部**常见**安装位置（`%LOCALAPPDATA%\Programs`、
+    // 1. 旧设计担心「每次探测都起一个子进程」。现在注册表候选由
+    //    [`candidate_paths_for`] 追加在标准根之后，且 [`registry_install_dirs`]
+    //    带**进程级缓存** —— 标准根命中的机器与「进程内非首次探测」都不付费，
+    //    一个进程至多付一次 `reg query`。
+    // 2. [`candidate_exe_paths`] 仍先覆盖全部**常见**安装位置（`%LOCALAPPDATA%\Programs`、
     //    `ProgramFiles` / `ProgramFiles(x86)` / `ProgramW6432`，以及非系统盘的
-    //    `<盘符>:\Programs`）；
-    // 3. 真正需要注册表兜底的场景只剩「装在任意自定义目录」（例如 `D:\Apps\Trae\`），
-    //    而该场景已有**更好的**手段：用户在设置里显式指定 `trae_path`
-    //    （见本函数开头的 `custom` 分支），且报错文案会主动提示这一点。
-    //
-    // 换句话说，注册表兜底换来的是「极少数用户少点一次设置」，代价是
-    // 「所有用户每次探测都付一次子进程」。这里选择不付。
+    //    `<盘符>:\Programs`）。
+    // 3. 注册表兜的是「装在任意自定义目录」（例如 `C:\0000000\soft\Trae CN\`）——
+    //    实测只装 Trae CN 且装在自定义目录的机器上，旧设计会让环境状态、
+    //    「从本机导入」入口全部误报「未检测到客户端」。设置里显式指定
+    //    `trae_path`（本函数开头的 `custom` 分支）仍是**优先级最高**的手段。
     InstallProbe {
         installed: false,
         exe: None,
@@ -843,6 +903,15 @@ fn candidate_paths_for(names: &[&'static str], exes: &[&'static str]) -> Vec<Pat
                 for &exe in exes {
                     out.push(root.join(name).join(exe));
                 }
+            }
+        }
+        // 兜底：注册表卸载项登记的**自定义安装目录**（`registry_install_dirs`）。
+        // 放在标准根之后 —— 标准根命中的机器在前面循环里就有真实存在的候选，
+        // 追加在这里不改变任何既有命中顺序；落空的机器才走到这里。
+        // 首次调用会付一次 `reg query` 子进程（有进程级缓存，至多一次）。
+        for dir in registry_install_dirs() {
+            for &exe in exes {
+                out.push(dir.join(exe));
             }
         }
     }

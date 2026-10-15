@@ -806,13 +806,14 @@ export default function TraeAccountsPage() {
     if (importing) return;
     setImporting(true);
     try {
-      // 把当前产品线传下去：Trae 多条产品线可同机并存，不传会让后端按「最近活跃」
-      // 全局挑一条 —— 用户在 Trae Work 分区导入却可能读到 Trae CN 的目录，
-      // 连报错文案都会说错产品线。
+      // `variant` 在本页即**区域**（见 `useTraeVariant`），折叠成区域作用域传下去；
+      // 区域内读哪条产品线的客户端由后端按程序位表逐个尝试决定 —— 账号库按区域
+      // 分家（写侧区域纯），本机哪条线带着登录态只有读侧探测才知道，硬编码到
+      // 区域主程序会让只装了 TraeCode CN 的机器误报「未检测到【TraeWork CN】」。
       //
       // 用已解析好的 `variant` 状态而不是 `env?.variant`：后者在 env 还没加载完时
-      // 是 `null`，会让「用户抢在加载完成前点导入」落到默认变体上；
-      // `variant` 初值就是默认变体、加载完成后被修正，语义更稳。
+      // 是 `null`，会让「用户抢在加载完成前点导入」落到默认区域上；
+      // `variant` 初值就是默认区域、加载完成后被修正，语义更稳。
       const result = await api.traeImportLocalAccount(variant);
       const who = result.name || result.userId;
       toast.success(t("trae.page.accounts.importLocalDone"), {

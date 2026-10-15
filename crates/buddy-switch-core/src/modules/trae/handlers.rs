@@ -286,6 +286,44 @@ pub fn import_local_account_for(variant: TraeVariant) -> Result<Value, String> {
     }))
 }
 
+/// 按**区域**从客户端登录态导入当前账号：在区域内的**全部程序位**里按序尝试，
+/// 第一个读到登录态的程序位胜出。
+///
+/// ## 为什么参数化命令用本函数而不是 [`import_local_account_for`]
+///
+/// 账号库自 2026-10 起按**区域**分家（同区域两条程序共用一本库，见
+/// `paths::scoped_file` 的模块文档），因此「导入本机账号」的写侧是区域纯的；
+/// 但**读侧**（读哪个客户端的 userData）是程序位敏感的。参数化命令
+/// `accounts_import_local` 只携带区域作用域（scope 模型 `wb-cn / wb-global /
+/// trae-cn / trae-global` 没有程序位维度），若折叠到区域主程序（CN 恒为
+/// `TraeWork`），只装了 TraeCode CN 的机器就会误报「未检测到【TraeWork CN】
+/// 客户端」——账号明明就在本机另一个客户端的登录态里。这里按程序位表顺序
+/// （`region::programs_of`）逐个尝试，等价于「读本机当前登录着的那条线」，
+/// 与按钮语义「把本机现在登录的账号同步进来」一致。
+///
+/// 优先级即程序位表顺序：同机多条线都登录时，先落**主程序**（TraeWork），
+/// 与「界面卡片的主程序优先」口径相同。合并版与遗留线共用 userData 目录名，
+/// 探测会先后命中同一目录，属预期（读到的是同一份登录态）。
+///
+/// 全部程序位都失败时，把各程序位的失败原因**逐条列出**而不是只报最后一个：
+/// 用户需要知道每条线各自差在哪（没装 / 装了没登录 / 从未启动）。
+pub fn import_local_account_for_region(
+    region: super::region::TraeRegion,
+) -> Result<Value, String> {
+    let mut failures: Vec<String> = Vec::new();
+    for spec in super::region::programs_of(region) {
+        let variant = super::platform::variant_for_program(region, spec.program);
+        match import_local_account_for(variant) {
+            Ok(value) => return Ok(value),
+            Err(error) => failures.push(format!("【{}】{}", spec.display_name, error)),
+        }
+    }
+    Err(format!(
+        "本机没有任何 Trae 客户端带着可导入的登录态：{}",
+        failures.join("；")
+    ))
+}
+
 /// 导出账号：按 userId 列表回传完整记录（含 JWT）。
 pub fn export_accounts(user_ids: &[String]) -> Result<Value, String> {
     export_accounts_for(TraeVariant::default(), user_ids)

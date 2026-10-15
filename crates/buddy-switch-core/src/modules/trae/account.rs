@@ -2732,9 +2732,15 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
             message.contains(TraeVariant::TraeWork.display_name()),
             "文案必须点明是哪条产品线: {message}"
         );
+        // ⚠️ 文案有**两个都正确**的分支，走哪个取决于 `detect_install_for` 对
+        // **真实磁盘**的探测（装了 →「从未启动…设备凭证」；没装 →「未检测到」）：
+        // 测试机与开发机的安装状态不同会让单分支断言时真时假（2026-10-15 在一台
+        // 只装了 TraeCode CN 的机器上实测到）。这里只锚**跨分支稳定**的不变量：
+        // 两个分支都点明产品线、都给了可执行的下一步；分支选择逻辑由
+        // `platform::data_dir_missing_reason` 的调用方语义保证。
         assert!(
-            message.contains("设备凭证"),
-            "文案必须把原因说到「设备凭证」上（否则用户会以为是网络/协议问题）: {message}"
+            message.contains("未检测到") || message.contains("设备凭证"),
+            "文案必须落在两个已知分支之一（都点明产品线并给出下一步）: {message}"
         );
         assert_eq!(credential_error.kind(), "dataDirMissing");
     }

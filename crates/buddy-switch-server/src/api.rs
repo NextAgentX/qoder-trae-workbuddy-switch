@@ -901,6 +901,10 @@ async fn api_accounts_import(Json(body): Json<Value>) -> Response {
 /// 与 `src-tauri/src/commands.rs::accounts_import_local` **一一对应**（刻意不去重）。旧路由
 /// `/api/import-local`（WB）与 `/api/trae/accounts/import-local`（Trae）保留为别名。形状按
 /// `scope.product()` 分叉：WB 返回 `{ok, account}`，Trae 返回 `{userId, name, accounts}`。
+///
+/// Trae 分支按**区域内全部程序位**逐个尝试（[`trae::handlers::import_local_account_for_region`]）
+/// —— scope 无程序位维度，而「本机哪条线登录着」只有读侧探测才知道；折叠到区域主程序
+/// 会让只装了另一条线的机器误报未检测到客户端。
 async fn api_accounts_import_local(Json(body): Json<Value>) -> Response {
     let scope = match resolve_scope_param(body.get("scope").and_then(Value::as_str)) {
         Ok(scope) => scope,
@@ -918,12 +922,16 @@ async fn api_accounts_import_local(Json(body): Json<Value>) -> Response {
             }
         }
         Product::Trae => {
-            let variant = match require_trae_region(scope) {
-                Ok(region) => trae_variant_of_region(region),
+            // 导入本机账号是「区域 + 读侧程序位回退」：账号库按区域分家（写侧区域纯），
+            // 但读哪个客户端的 userData 由「本机哪条线带着登录态」决定。scope 只携带
+            // 区域，这里交由 core 在区域内按程序位表逐个尝试，而不是折叠到区域主程序
+            // —— 后者会让只装了 TraeCode CN 的机器误报「未检测到【TraeWork CN】」。
+            let region = match require_trae_region(scope) {
+                Ok(region) => region,
                 Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
             };
             match tokio::task::spawn_blocking(move || {
-                trae::handlers::import_local_account_for(variant)
+                trae::handlers::import_local_account_for_region(region)
             })
             .await
             {
@@ -2900,11 +2908,20 @@ async fn api_trae_delete_account(Json(body): Json<Value>) -> Response {
 /// `Cloud-IDE-JWT`，已存在的账号**覆盖**（刷新 JWT，保留名字/分组），不存在则新建。
 ///
 /// body 可带可选 `variant`（`"trae_work"` / `"trae_cn"`，也接受 `TRAE SOLO CN`
-/// 之类的目录名），决定读哪条产品线的 userData；**缺失时回落默认变体**，
-/// 保证旧调用点行为不变。
+/// 之类的目录名），决定读哪条产品线的 userData；**缺失时在默认区域的全部程序位里
+/// 按序尝试**（[`trae::handlers::import_local_account_for_region`]）—— 与参数化命令
+/// `accounts_import_local` 的 Trae 分支同口径，避免「只装了 TraeCode CN 却报
+/// 未检测到 TraeWork CN」。无法识别的 `variant` 值同样走区域回退。
 async fn api_trae_import_local(Json(body): Json<Value>) -> Response {
-    let variant = parse_trae_variant(body.get("variant").and_then(Value::as_str));
-    match tokio::task::spawn_blocking(move || trae::handlers::import_local_account_for(variant)).await
+    let variant = body
+        .get("variant")
+        .and_then(Value::as_str)
+        .and_then(trae::variant::TraeVariant::parse);
+    match tokio::task::spawn_blocking(move || match variant {
+        Some(variant) => trae::handlers::import_local_account_for(variant),
+        None => trae::handlers::import_local_account_for_region(TraeRegion::default()),
+    })
+    .await
     {
         Ok(Ok(value)) => json_ok(value),
         Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),

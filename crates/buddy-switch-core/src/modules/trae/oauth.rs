@@ -2750,9 +2750,16 @@ mod tests {
             error.contains("TraeWork CN"),
             "错误文案必须点明是哪条产品线（否则用户不知道该启动哪个客户端）: {error}"
         );
+        // ⚠️ 文案有**两个都正确**的分支，走哪个取决于 `detect_install_for` 对
+        // **真实磁盘**的探测（`temp_env` 只重定向 APPDATA，重定向不了
+        // `%LOCALAPPDATA%\Programs` / `Program Files` 这些安装根）：
+        // 装了 →「从未启动…设备凭证」；没装 →「未检测到」。测试机与开发机的
+        // 安装状态不同会让单分支断言时真时假（2026-10-15 在一台只装了
+        // TraeCode CN 的机器上实测到）。这里只锚跨分支稳定的「点明产品线」，
+        // 并要求文案落在两个已知分支之一。
         assert!(
-            error.contains("设备凭证"),
-            "错误文案应指出缺的是设备凭证: {error}"
+            error.contains("未检测到") || error.contains("设备凭证"),
+            "错误文案必须落在两个已知分支之一: {error}"
         );
         // 端口必须已释放：失败路径不该白占 300 秒。
         assert!(
