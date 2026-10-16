@@ -1765,13 +1765,12 @@ function RegionPanel({ region }: { region: Region }) {
             usedText: t("wbAccounts.card.used", { n: formatCredits(resource.used) }),
             expiryText: resource.expired
               ? t("wbAccounts.card.expired")
-              : resource.expiringSoon
-                ? t("wbAccounts.card.expiresIn7")
-                : resource.expireAt
-                  ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(resource.expireAt, t) })
-                  : t("wbAccounts.card.forever"),
+              : resource.expireAt
+                ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(resource.expireAt, t) })
+                : t("wbAccounts.card.forever"),
             expired: resource.expired,
-            expiringSoon: resource.expiringSoon,
+            expiringSoon:
+              !resource.expired && resource.expireAt != null && resource.expireAt - Date.now() <= 7 * 86_400_000,
             ratio: resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0,
           }))
       : [];

@@ -213,7 +213,8 @@ export function formatCreditExpiry(ts: number | null, t: Translate): string {
   if (!ts) return t("wbAccounts.card.forever");
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return t("wbAccounts.card.forever");
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function accountIdentity(account: AccountMeta): string {
@@ -628,17 +629,28 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
    * 「N 积分 M 天后过期」——原型 `.acct-chips` 的第三条（`buddy-switch-prototype.html:2507`）：
    * `a.expiring ? <span class="badge warn">${fmt(a.expiring)} 积分 ${a.expireInDays} 天后过期</span> : ""`。
    *
-   * 取「**临期（7 天内）**剩余积分之和」+「最早到期时刻」——后端已算好这两个值
-   * （`CreditExpiry.expiringSoonRemaining` / `soonestExpireAt`）⇒ 天数**向上取整**。
+   * 取「**临期（3 天内）**剩余积分之和」+「最早到期时刻」，由 `resources[]` 就地汇总——
+   * 后端 `expiringSoonRemaining` 是 **7 天**口径（统计页 / 总览页还在用），卡片徽章刻意
+   * 用更紧的 3 天窗口 ⇒ 天数**向上取整**。
    * 没有临期积分、拿不到到期时刻、或那一刻已过 ⇒ **整条不渲染**
    * （绝不写一个「N 天」是猜出来的标签）。
    */
   const expiringChip = (() => {
     if (!credit?.ok) return null;
-    const amount = credit.expiringSoonRemaining ?? 0;
-    const earliest = credit.soonestExpireAt ?? null;
-    if (amount <= 0 || earliest === null || earliest <= Date.now()) return null;
-    const days = Math.ceil((earliest - Date.now()) / 86_400_000);
+    const now = Date.now();
+    const windowMs = 3 * 86_400_000;
+    const expiring = (credit.resources ?? []).filter(
+      (resource) =>
+        !resource.expired &&
+        resource.remaining > 0 &&
+        resource.expireAt != null &&
+        resource.expireAt > now &&
+        resource.expireAt - now <= windowMs,
+    );
+    const amount = expiring.reduce((sum, resource) => sum + resource.remaining, 0);
+    const earliest = expiring.length > 0 ? Math.min(...expiring.map((resource) => resource.expireAt as number)) : null;
+    if (amount <= 0 || earliest === null) return null;
+    const days = Math.ceil((earliest - now) / 86_400_000);
     return (
       <Badge variant="warning" className={chipClass}>
         {t("wbAccounts.card.expiringChip", { amount: formatCredits(amount), days })}

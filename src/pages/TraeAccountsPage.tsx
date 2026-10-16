@@ -1570,13 +1570,12 @@ export default function TraeAccountsPage() {
           usedText: t("trae.comp.card.package.used", { n: formatCredits(item.used) }),
           expiryText: item.expired
             ? t("trae.comp.card.package.expired")
-            : item.expiringSoon
-              ? t("trae.comp.card.package.expiringSoon")
-              : item.expireAt
-                ? t("trae.comp.card.expiry.short", { date: shortTime(item.expireAt) })
-                : t("trae.comp.card.expiry.permanent"),
+            : item.expireAt
+              ? t("trae.comp.card.expiry.short", { date: shortTime(item.expireAt) })
+              : t("trae.comp.card.expiry.permanent"),
           expired: item.expired,
-          expiringSoon: item.expiringSoon,
+          expiringSoon:
+            !item.expired && item.expireAt != null && item.expireAt > 0 && item.expireAt * 1000 - Date.now() <= 7 * 86_400_000,
           ratio: item.total > 0 ? Math.min(100, Math.max(0, (item.remaining / item.total) * 100)) : 0,
         }))
     : [];

@@ -137,7 +137,6 @@ export const zh = {
   // P4：抽屉 `DetailPack` 的「已用 / 到期」文本（与 WorkBuddy 抽屉同形，各平台自持文案）。
   "trae.comp.card.package.used": "已用 {n}",
   "trae.comp.card.package.expired": "已到期",
-  "trae.comp.card.package.expiringSoon": "7 天内到期",
 
   // ---- 操作说明（作为「更多」菜单项的 `title`）----
   // P4：卡片瘦身把页脚的「保存登录态 / 刷新 JWT」两枚按钮收回菜单（菜单本就有同名项），

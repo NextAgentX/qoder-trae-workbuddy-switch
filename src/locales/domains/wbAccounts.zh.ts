@@ -192,7 +192,6 @@ export const zh = {
   // 故 `creditPacks` / `expireSoon` / `nextExpiry` / `creditsForever` / `updated` /
   // `expiringSoonTitle` / `resourceTitle` / `creditsUnit` / `noCredits` 一并删除。
   "wbAccounts.card.expired": "已到期",
-  "wbAccounts.card.expiresIn7": "7 天内到期",
   "wbAccounts.card.expiresOn": "到期 {date}",
   "wbAccounts.card.used": "已用 {n}",
 

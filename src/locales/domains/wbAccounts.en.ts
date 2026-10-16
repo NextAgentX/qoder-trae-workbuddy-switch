@@ -158,7 +158,6 @@ export const en = {
   // 2026-10-12: the in-card "big number row + expiring soon" block was removed to match the
   // prototype card (top / chips / metrics / actions only).
   "wbAccounts.card.expired": "Expired",
-  "wbAccounts.card.expiresIn7": "Expires within 7 days",
   "wbAccounts.card.expiresOn": "Expires {date}",
   "wbAccounts.card.used": "Used {n}",
 

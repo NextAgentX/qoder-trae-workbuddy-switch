@@ -103,7 +103,6 @@ export const en = {
   // P4: "used / expiry" text for the drawer `DetailPack` (mirrors the WorkBuddy drawer).
   "trae.comp.card.package.used": "Used {n}",
   "trae.comp.card.package.expired": "Expired",
-  "trae.comp.card.package.expiringSoon": "Expires within 7 days",
 
   // ---- Action explanations (used as menu-item titles) ----
   // P4: the footer "Save login state" / "Refresh JWT" buttons moved back into the menu;
