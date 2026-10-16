@@ -74,6 +74,8 @@ import {
   type TraeLogsResponse,
   type TraeProfileInfo,
   type TraeProfilesOverview,
+  type TraeProgramStatus,
+  type TraeRegionId,
   type TraeSettings,
   type TraeVariantId,
   type TraeVariantStatus,
@@ -98,6 +100,42 @@ function CapabilityBadge({ labelKey, supported }: { labelKey: TranslationKey; su
       {supported ? "" : t("trae.page.settings.capabilityUnsupported")}
     </Badge>
   );
+}
+
+// 程序位选中态（设置页各程序级区块共用）
+//
+/**
+ * 本区域的**程序位**选中态：自动选中「写侧数据目录存在」的程序位（与后端快照
+ * 读写同一取值点），允许显式覆盖；区域切换后旧选择自动失效。状态复用
+ * `TRAE_VARIANTS_KEY` 缓存，不多发探测请求。
+ *
+ * 为什么需要它：设置页的快照/重置设备/运行日志都是**程序级**数据，此前把
+ * `useTraeVariant` 的区域值（`cn`/`global`）直接当变体传后端 —— 服务端把区域
+ * 折叠到主程序 TraeWork，只装 TraeCode CN 的机器上快照恒空、备份/重置打错客户端。
+ */
+function useTraeProgramVariant(region: TraeRegionId): {
+  programs: TraeProgramStatus[];
+  programVariant: TraeVariantId;
+  programLabel: string;
+  select: (variant: TraeVariantId) => void;
+} {
+  const { data: statuses } = useCachedResource<TraeVariantStatus[]>(
+    TRAE_VARIANTS_KEY,
+    loadTraeVariantStatuses,
+  );
+  const [override, setOverride] = useState<TraeVariantId | null>(null);
+  const programs = findRegionStatus(statuses ?? TRAE_VARIANT_FALLBACK, region)?.programs ?? [];
+  const auto = programs.find((program) => program.writeDataDirExists) ?? programs[0] ?? null;
+  const programVariant: TraeVariantId =
+    override !== null && programs.some((program) => program.variant === override)
+      ? override
+      : (auto?.variant ?? region);
+  return {
+    programs,
+    programVariant,
+    programLabel: programs.find((program) => program.variant === programVariant)?.label ?? "",
+    select: setOverride,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +168,11 @@ const KIND_LABEL: Record<TraeLogKind, TranslationKey> = {
  * 日志作为「排障用的设置类信息」下沉到设置页，能力本身完整保留
  * （类型/日期/关键字筛选、自动刷新、复制、导出 CSV）。
  */
-function RuntimeLogsSection() {
+function RuntimeLogsSection({ variant }: { variant: TraeVariantId }) {
   const t = useT();
   // 运行日志按产品线分家（`checkin` / `switch` 两条来源各读各的，`app` 刻意共用）。
-  // 变体取自侧栏分区，不由探测推导 —— 探测回答「本机哪条线最近活跃」，
-  // 不回答「用户此刻想管哪条线」。
-  const [variant] = useTraeVariant();
+  // 变体由页面传入（程序位值）——不能用 `useTraeVariant` 的区域值：后端会折叠到
+  // 主程序 TraeWork，只装 TraeCode CN 的机器永远读到空日志。
   const [kind, setKind] = useState<string>("all");
   const [date, setDate] = useState<string>("all");
   const [keywordDraft, setKeywordDraft] = useState("");
@@ -694,15 +731,21 @@ function ProfilesSection({
   data,
   loading,
   busy,
-  variant,
+  programVariant,
+  programs,
+  onProgramChange,
   onReload,
   onRun,
 }: {
   data: TraeProfilesOverview | null;
   loading: boolean;
   busy: string | null;
-  /** 当前产品线：快照按变体分家，备份/恢复/删除都必须带上它。 */
-  variant: TraeVariantId;
+  /** 生效的**程序位**变体：快照/备份/恢复/删除都打在这个客户端上（勿传区域值，后端会折叠到主程序 TraeWork）。 */
+  programVariant: TraeVariantId;
+  /** 本区域程序位清单（选择器数据源）。 */
+  programs: TraeProgramStatus[];
+  /** 用户切换程序位。 */
+  onProgramChange: (variant: TraeVariantId) => void;
   onReload: () => void | Promise<void>;
   onRun: (key: string, label: string, action: () => Promise<unknown>) => Promise<void>;
 }) {
@@ -755,15 +798,40 @@ function ProfilesSection({
             {t("trae.page.settings.snapshotCount", { count: profiles.length })}
           </span>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={reloadBusy || loading}
-          onClick={() => void runReload(() => onReload())}
-        >
-          {reloadBusy || loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-          {t("trae.page.settings.refresh")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <span className="text-[12.5px] text-muted-foreground">
+            {t("trae.page.settings.programLabel")}
+          </span>
+          {/* 程序位选择器：本区块的数据目录/快照列表/备份恢复删除全部跟着它走。 */}
+          <Select
+            value={programVariant}
+            onValueChange={(next) => onProgramChange(next as TraeVariantId)}
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-40"
+              aria-label={t("trae.page.settings.programLabel")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {programs.map((program) => (
+                <SelectItem key={program.variant} value={program.variant}>
+                  {program.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={reloadBusy || loading}
+            onClick={() => void runReload(() => onReload())}
+          >
+            {reloadBusy || loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("trae.page.settings.refresh")}
+          </Button>
+        </div>
       </SettingsRow>
 
       {data?.dataDir && (
@@ -793,7 +861,7 @@ function ProfilesSection({
               disabled={!backupSlot.trim() || busy === "backup"}
               onClick={() =>
                 void onRun("backup", t("trae.page.settings.backup"), () =>
-                  api.traeBackupProfile(backupSlot.trim(), variant),
+                  api.traeBackupProfile(backupSlot.trim(), programVariant),
                 ).then(() => setBackupSlot(""))
               }
             >
@@ -894,7 +962,7 @@ function ProfilesSection({
                 if (!target) return;
                 setPendingRestore(null);
                 void onRun(`restore-${target.slot}`, t("trae.page.settings.restore"), () =>
-                  api.traeRestoreProfile(target.slot, variant),
+                  api.traeRestoreProfile(target.slot, programVariant),
                 );
               }}
             >
@@ -928,7 +996,7 @@ function ProfilesSection({
                 if (!target) return;
                 setPendingDelete(null);
                 void onRun(`delete-${target.slot}`, t("trae.page.settings.delete"), () =>
-                  api.traeDeleteProfile(target.slot, variant),
+                  api.traeDeleteProfile(target.slot, programVariant),
                 );
               }}
             >
@@ -969,6 +1037,8 @@ export default function TraeSettingsPage() {
   const t = useT();
   // 快照按产品线分家（`paths::profiles_dir_for`），故这里也必须带上变体。
   const [variant] = useTraeVariant();
+  // ★ 程序位：快照/重置设备都是程序级操作，勿把区域值当变体传后端（会折叠到主程序 TraeWork）。
+  const program = useTraeProgramVariant(variant);
   const [saving, setSaving] = useState(false);
   /**
    * 排程（自动签到）的保存中标志，与上面的 `saving` **刻意分开**：
@@ -1011,10 +1081,10 @@ export default function TraeSettingsPage() {
     const [envData, capabilityData, profileData] = await Promise.all([
       api.getTraeEnv(),
       api.getTraeCapabilities(),
-      api.getTraeProfiles(variant),
+      api.getTraeProfiles(program.programVariant),
     ]);
     return { env: envData, capabilities: capabilityData, profiles: profileData };
-  }, [variant]);
+  }, [program.programVariant]);
 
   const {
     data: pageSnapshot,
@@ -1022,7 +1092,7 @@ export default function TraeSettingsPage() {
     pending,
     error,
     refresh: load,
-  } = useCachedResource<SettingsPageSnapshot>(`trae:settings-page:${variant}`, loadSnapshot);
+  } = useCachedResource<SettingsPageSnapshot>(`trae:settings-page:${program.programVariant}`, loadSnapshot);
 
   /** 设置项本身：与账号页共用 `trae:settings`，写入一律走 `patchSettings`（乐观更新）。 */
   const { data: settings, patch: patchSettings } = useCachedResource<TraeSettings>(
@@ -1117,7 +1187,7 @@ export default function TraeSettingsPage() {
   async function runResetDevice() {
     setResetBusy(true);
     try {
-      const report = await api.traeResetDevice(variant);
+      const report = await api.traeResetDevice(program.programVariant);
       setResetReport(report);
       toast.success(t("trae.page.settings.resetDone"), {
         description: t("trae.page.settings.resetLayers", {
@@ -1507,7 +1577,9 @@ export default function TraeSettingsPage() {
              刷新按钮点了不转、看起来像没反应（首屏骨架仍由 `loading` 负责）。 */
           loading={loading || pending}
           busy={busy}
-          variant={variant}
+          programVariant={program.programVariant}
+          programs={program.programs}
+          onProgramChange={program.select}
           onReload={() => load()}
           onRun={runProfileAction}
         />
@@ -1633,7 +1705,7 @@ export default function TraeSettingsPage() {
           </SettingsFieldRow>
           </CardContent>
         </SettingsGroup>
-        <RuntimeLogsSection />
+        <RuntimeLogsSection variant={program.programVariant} />
           </>
         )}
 
@@ -1685,6 +1757,10 @@ export default function TraeSettingsPage() {
           <DialogHeader>
             <DialogTitle>{t("trae.page.settings.resetLabel")}</DialogTitle>
             <DialogDescription>{t("trae.page.settings.resetDialogDesc")}</DialogDescription>
+            {/* 点明操作目标：重置是程序级操作，目标客户端随上面的程序位选择。 */}
+            <DialogDescription>
+              {t("trae.page.settings.programLabel")}: {program.programLabel || program.programVariant}
+            </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setResetOpen(false)}>

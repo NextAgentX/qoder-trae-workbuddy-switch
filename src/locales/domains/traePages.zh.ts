@@ -356,6 +356,7 @@ export const zh = {
   "trae.page.settings.profilesGroup": "登录态快照",
   "trae.page.settings.clientLabel": "客户端",
   "trae.page.settings.currentAccount": "当前账号",
+  "trae.page.settings.programLabel": "程序位",
   "trae.page.settings.snapshotCount": "快照 {count} 份",
   "trae.page.settings.dataDirLabel": "客户端数据目录：",
   "trae.page.settings.backupLabel": "备份当前登录态",

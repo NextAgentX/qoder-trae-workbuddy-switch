@@ -341,6 +341,7 @@ export const en = {
   "trae.page.settings.profilesGroup": "Sign-in snapshots",
   "trae.page.settings.clientLabel": "Client",
   "trae.page.settings.currentAccount": "Current account",
+  "trae.page.settings.programLabel": "Program",
   "trae.page.settings.snapshotCount": "{count} snapshots",
   "trae.page.settings.dataDirLabel": "Client data directory: ",
   "trae.page.settings.backupLabel": "Back up current sign-in state",
