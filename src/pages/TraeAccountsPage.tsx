@@ -2500,6 +2500,8 @@ export default function TraeAccountsPage() {
         onOpenChange={(open) => {
           if (!open) setDetailAccount(null);
         }}
+        // 页签记忆的身份键：`scope:userId`（国内版 / 国际版的同一个 userId 是两个账号）。
+        accountKey={detail ? `${scope}:${displayText(detail.userId) ?? ""}` : ""}
         name={detailName}
         subtitle={
           detail

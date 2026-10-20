@@ -2845,6 +2845,7 @@ const paletteLib = loadTs(path.join(ROOT, "src/lib/command-palette.ts"));
 const scopeShortcutsLib = loadTs(path.join(ROOT, "src/lib/scope-shortcuts.ts"));
 const paletteActionsLib = loadTs(path.join(ROOT, "src/lib/palette-actions.ts"));
 const shortcutPrefLib = loadTs(path.join(ROOT, "src/lib/shortcut-preference.ts"));
+const drawerTabLib = loadTs(path.join(ROOT, "src/lib/drawer-tab-preference.ts"));
 const firstRunLib = loadTs(path.join(ROOT, "src/lib/first-run.ts"));
 const accountSearchLib = loadTs(path.join(ROOT, "src/lib/account-search.ts"));
 
@@ -3717,6 +3718,69 @@ check("★ P6 快捷键偏好：默认开、写关读关、写开读开（storag
   if (shortcutPrefLib.readShortcutsEnabled(boom) !== true) throw new Error("存储抛异常应吞掉并默认开");
   shortcutPrefLib.writeShortcutsEnabled(boom, false); // 不应抛
   return "默认开 / 写关读关 / 写开读开 / 异常安全";
+});
+
+check("★ issue #49 抽屉页签记忆：每账号一键 · 记住的不可用则回落第一枚 · 回落不写盘", () => {
+  /* 需求 R1–R5（`src/lib/drawer-tab-preference.ts`）：关闭抽屉再打开同一账号要回到上次的页签。
+     可证伪点：
+     ① 键里**必须带作用域**（同一 uid 在国内版 / 国际版是两个账号）⇒ 两个账号各记各的；
+     ② 记住的页签当前不可用（如没有资源包）⇒ 回落**渲染顺序第一枚**；
+     ③ 回落**不改写**记忆（资源包回来后仍应回到「积分」）；
+     ④ 存储不可用 / 值非法 ⇒ 当没记住（不崩、不假装）。 */
+  const mem = memStorage();
+  if (drawerTabLib.readDrawerTab(mem, "wb-cn:1") !== null) {
+    throw new Error("没写过的账号应读到 null（不假装记住）");
+  }
+  drawerTabLib.writeDrawerTab(mem, "wb-cn:1", "credits");
+  drawerTabLib.writeDrawerTab(mem, "wb-cn:2", "checkin");
+  if (drawerTabLib.readDrawerTab(mem, "wb-cn:1") !== "credits") throw new Error("账号 1 应记住 credits");
+  if (drawerTabLib.readDrawerTab(mem, "wb-cn:2") !== "checkin") throw new Error("账号 2 应记住 checkin");
+  // 键形态：前缀 + `${scope}:${id}`（版本化前缀，语义若变可换键）
+  if (mem.getItem("buddy-switch:v1:drawer-tab:wb-cn:1") !== "credits") {
+    throw new Error("键必须是 `buddy-switch:v1:drawer-tab:<scope>:<id>`");
+  }
+  // 非法值 / 空账号键 ⇒ null
+  mem.setItem(drawerTabLib.drawerTabKey("wb-cn:9"), "bogus");
+  if (drawerTabLib.readDrawerTab(mem, "wb-cn:9") !== null) throw new Error("非法值应读到 null");
+  if (drawerTabLib.readDrawerTab(mem, "") !== null) throw new Error("空账号键应读到 null");
+  // R3：记住的可用 ⇒ 用它；不可用 ⇒ 第一枚可用
+  if (drawerTabLib.resolveDrawerTab("credits", ["overview", "credits"]) !== "credits") {
+    throw new Error("记住的页签可用时应原样使用");
+  }
+  if (drawerTabLib.resolveDrawerTab("credits", ["overview", "checkin"]) !== "overview") {
+    throw new Error("记住的页签不可用时应回落渲染顺序第一枚");
+  }
+  if (drawerTabLib.resolveDrawerTab(null, ["overview", "checkin"]) !== "overview") {
+    throw new Error("没有记忆时应落到第一枚可用页签");
+  }
+  if (drawerTabLib.resolveDrawerTab("snapshot", []) !== drawerTabLib.DEFAULT_DRAWER_TAB) {
+    throw new Error("没有可用页签时应落默认值");
+  }
+  // R4：回落**不擦除**记忆
+  const before = mem.getItem(drawerTabLib.drawerTabKey("wb-cn:1"));
+  drawerTabLib.resolveDrawerTab("credits", ["overview"]);
+  if (mem.getItem(drawerTabLib.drawerTabKey("wb-cn:1")) !== before) {
+    throw new Error("回落只决定「这次显示哪一枚」，不得改写记忆");
+  }
+  // 存储抛异常：读 ⇒ null，写 ⇒ 不抛
+  const boom = {
+    getItem: () => {
+      throw new Error("disabled");
+    },
+    setItem: () => {
+      throw new Error("disabled");
+    },
+  };
+  if (drawerTabLib.readDrawerTab(boom, "wb-cn:1") !== null) throw new Error("存储异常应读成 null");
+  drawerTabLib.writeDrawerTab(boom, "wb-cn:1", "credits");
+  // 三个调用点都必须传身份键（漏传在 tsc 阶段也会红 —— 属性是必填的）
+  for (const page of ["AccountsPage.tsx", "TraeAccountsPage.tsx", "QoderAccountsPage.tsx"]) {
+    const code = readCode(`src/pages/${page}`);
+    if (!/accountKey=\{detail \?/.test(code)) {
+      throw new Error(`${page} 没给抽屉传 \`accountKey\` —— 页签记忆会退化成「不记忆」`);
+    }
+  }
+  return "每账号一键 · 可用则用 / 不可用回落 · 回落不写盘 · 异常安全 · 三处调用点已传键";
 });
 
 check("★ P6 首次引导：默认显示、关闭后持久化不再显示", () => {

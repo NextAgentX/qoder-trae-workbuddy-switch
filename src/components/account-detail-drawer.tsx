@@ -12,6 +12,12 @@ import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTi
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { displayText } from "@/lib/display-text";
+import {
+  isDrawerTab,
+  resolveDrawerTab,
+  useDrawerTab,
+  type DrawerTab,
+} from "@/lib/drawer-tab-preference";
 import { useT } from "@/lib/i18n";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 import { cn } from "@/lib/utils";
@@ -188,6 +194,14 @@ export interface DetailCheckinHistoryRow {
 export interface AccountDetailDrawerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * ★ 账号的**稳定身份键**（`${scope}:${id}`，见 issue #49）。
+   *
+   * 只用来记住「这个账号上次停在哪个页签」：同一 `uid` 在国内版与国际版是**两个**账号，
+   * 所以键里必须带作用域。设为**必填**是有意的 —— 漏传会在 `tsc` 阶段报错，
+   * 而不是静默退化成「不记忆」。
+   */
+  accountKey: string;
   /** 头部展示名（已过 `displayText` 出口）。 */
   name: string;
   /** 头部副标题（身份 / uid，已归一）。 */
@@ -290,6 +304,7 @@ function programBadgeText(
 export function AccountDetailDrawer({
   open,
   onOpenChange,
+  accountKey,
   name,
   subtitle,
   avatarSeed,
@@ -423,6 +438,22 @@ export function AccountDetailDrawer({
     switchTargets.length === 0 &&
     (checkinHistory === null || checkinHistory.length === 0) &&
     !hasActions;
+
+  /**
+   * 本次**可用**的页签，按渲染顺序排列（issue #49）。
+   *
+   * 页签的「是否渲染」与「记住的值还可用吗」**共用这一份数组** —— 两处各写一遍条件
+   * 是这类缺陷的经典来源：条件漂移后会出现「记住了但触发器不存在」的空页签。
+   */
+  const availableTabs: DrawerTab[] = ["overview"];
+  if (packs.length > 0) availableTabs.push("credits");
+  if (checkin || (checkinHistory && checkinHistory.length > 0)) availableTabs.push("checkin");
+  if (hasActions) availableTabs.push("credential");
+  if (snapshots.length > 0) availableTabs.push("snapshot");
+
+  const [rememberedTab, rememberTab] = useDrawerTab(accountKey);
+  // 记住的页签当前不可用 ⇒ 回落第一枚可用页签，且**不改写**记忆（R3 / R4）。
+  const activeTab = resolveDrawerTab(rememberedTab, availableTabs);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -681,24 +712,23 @@ export function AccountDetailDrawer({
             /* 页签只切「看」的部分：概览（信息区块 + 程序位）/ 积分 / 签到 / 凭据。
                ⚠️ 备注、分组、程序位切换**留在页签之上** —— 它们是身份与操作，
                藏进页签会让「改个备注」变成「先猜在哪个页签里」。 */
-            <Tabs defaultValue="overview" className="min-h-0">
+            <Tabs
+              value={activeTab}
+              onValueChange={(value) => {
+                // 只记**用户主动点击**的结果；`resolveDrawerTab` 的回落不写盘（R4）。
+                if (isDrawerTab(value)) rememberTab(value);
+              }}
+              className="min-h-0"
+            >
               {/* 页签最多五个（含「快照」），抽屉又窄 ⇒ 必须**不换行**：
                   `inline-flex` 默认允许折行，五个页签会在 300px 里挤成两排（快照孤零零掉到第二行）。
                   改成 nowrap + 横向滚动：一行排开，实在放不下时能滑，而不是折行。 */}
               <TabsList className="max-w-full flex-nowrap overflow-x-auto">
-                <TabsTrigger value="overview">{t("shared.drawer.tab.overview")}</TabsTrigger>
-                {packs.length > 0 && (
-                  <TabsTrigger value="credits">{t("shared.drawer.tab.credits")}</TabsTrigger>
-                )}
-                {(checkin || (checkinHistory && checkinHistory.length > 0)) && (
-                  <TabsTrigger value="checkin">{t("shared.drawer.tab.checkin")}</TabsTrigger>
-                )}
-                {hasActions && (
-                  <TabsTrigger value="credential">{t("shared.drawer.tab.credential")}</TabsTrigger>
-                )}
-                {snapshots.length > 0 && (
-                  <TabsTrigger value="snapshot">{t("shared.drawer.tab.snapshot")}</TabsTrigger>
-                )}
+                {availableTabs.map((tab) => (
+                  <TabsTrigger key={tab} value={tab}>
+                    {t(`shared.drawer.tab.${tab}`)}
+                  </TabsTrigger>
+                ))}
               </TabsList>
 
               <TabsContent value="overview" className="space-y-4 pt-1">

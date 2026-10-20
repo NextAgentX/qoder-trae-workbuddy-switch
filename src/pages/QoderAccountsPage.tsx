@@ -1302,6 +1302,8 @@ export default function QoderAccountsPage() {
         onOpenChange={(open) => {
           if (!open) setDetail(null);
         }}
+        // 页签记忆的身份键：`scope:uid`（国内版 / 国际版的同一个 uid 是两个账号）。
+        accountKey={detail ? `${scope}:${displayText(detail.uid) ?? ""}` : ""}
         name={detail ? qoderAccountName(detail) : ""}
         subtitle={
           detail

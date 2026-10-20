@@ -2703,6 +2703,8 @@ function RegionPanel({ region }: { region: Region }) {
         onOpenChange={(open) => {
           if (!open) setDetailAccount(null);
         }}
+        // 页签记忆的身份键：`scope:id`（同一 id 在国内版 / 国际版是两个账号）。
+        accountKey={detail ? `${scope}:${detail.id}` : ""}
         name={detailName}
         subtitle={detail ? accountIdentity(detail) : ""}
         avatarSeed={detailName}
