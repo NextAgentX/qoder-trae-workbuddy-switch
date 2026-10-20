@@ -775,4 +775,23 @@ mod tests {
         assert_eq!(disabled["ok"], Value::Bool(false));
         assert_eq!(disabled["disabled"], Value::Bool(true));
     }
+    // ── 真机探针：**会真的领取**今日奖励（消耗当天额度），只在手动跑时执行 ──
+    //
+    //   cargo test -p buddy-switch-core --lib live_checkin_claim -- --ignored --nocapture
+    //
+    // 它走的是生产路径（`claim_for` → 活动平台 → 落盘），因此能一次性验证
+    // 「拉列表 / 领取 / 解析 / 盖章」整条链路。**不要在 CI 里跑**（CI 没有账号库）。
+    #[tokio::test]
+    #[ignore = "真机探针：会真的领取今日奖励（消耗当天额度）"]
+    async fn live_checkin_claim() {
+        let uid = std::env::var("QODER_LIVE_UID").expect("需 QODER_LIVE_UID（账号库里的 uid）");
+        let region = match std::env::var("QODER_LIVE_REGION").as_deref() {
+            Ok("global") => QoderRegion::Global,
+            _ => QoderRegion::Cn,
+        };
+        let result = claim_for(region, &uid).await.expect("签到调用本身失败");
+        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        assert_eq!(result["source"], "campaign", "应走活动平台");
+    }
+
 }

@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-core"
-version = "2026.10.191740"
+version = "2026.10.201130"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -490,7 +490,6 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.10.9",
- "tempfile",
  "tokio",
  "urlencoding",
  "uuid",
@@ -499,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-gateway"
-version = "2026.10.191740"
+version = "2026.10.201130"
 dependencies = [
  "anyhow",
  "axum",
@@ -518,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-rust"
-version = "2026.10.191740"
+version = "2026.10.201130"
 dependencies = [
  "buddy-switch-core",
  "buddy-switch-gateway",
@@ -540,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-server"
-version = "2026.10.191740"
+version = "2026.10.201130"
 dependencies = [
  "axum",
  "buddy-switch-core",
