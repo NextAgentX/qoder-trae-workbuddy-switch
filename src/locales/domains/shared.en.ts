@@ -619,6 +619,7 @@ export const en = {
   "shared.checkinResult.retryFailed": "Retry failed",
   "shared.checkinResult.summary4": "{ok} ok · {skip} unavailable · {fail} failed",
   "shared.checkinResult.skippedNames": "Check-in channel unavailable for: {names}",
+  "shared.checkinResult.earned": "+{n} Credits this run",
   "shared.checkinResult.dismiss": "Got it",
   "shared.list.groupCount": "{n}",
 

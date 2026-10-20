@@ -119,6 +119,8 @@ export interface AccountWorkbenchProps<T> {
     okCount: number;
     failedNames: string[];
     skippedNames?: string[];
+    /** 本次真领到的额度合计（活动通道专用；不传 = 不渲染那枚徽标）。 */
+    earnedCredits?: number;
     onRetry?: () => void;
   } | null;
   /** 结果条「知道了」的回执（只在有结果条时用得到；不传 = 不渲染结果条也就无所谓）。 */

@@ -107,6 +107,14 @@ export interface CheckinResultBarProps {
    *   故单独成档如实呈现。
    */
   skippedNames?: string[];
+  /**
+   * 本次**真领到**的额度合计（活动通道专用；其它平台不传）。
+   *
+   * ⚠️ 可选且**默认为 0/不传** ⇒ 不渲染这枚徽标，WB / Trae 的输出逐字不变。
+   * 为什么值得单独显示：历史报障正是「点了签到、界面说成功、额度纹丝不动」，
+   * 只说「成功 1 个」不足以证明真的到账。
+   */
+  earnedCredits?: number;
   /** 有失败项时的「只重试失败项」出口；无失败传 `undefined`（不渲染该按钮）。 */
   onRetry?: () => void | Promise<void>;
   /** 「知道了」：关闭结果条。 */
@@ -128,6 +136,7 @@ export function CheckinResultBar({
   okCount,
   failedNames,
   skippedNames,
+  earnedCredits = 0,
   onRetry,
   onDismiss,
 }: CheckinResultBarProps) {
@@ -165,6 +174,11 @@ export function CheckinResultBar({
             })
           : t("shared.checkinResult.summary", { ok: okCount, fail: failedNames.length })}
       </Badge>
+      {earnedCredits > 0 ? (
+        <Badge variant="success" className="shrink-0 tabular-nums border-transparent">
+          {t("shared.checkinResult.earned", { n: String(earnedCredits) })}
+        </Badge>
+      ) : null}
       <span className="min-w-0 flex-1 text-[11.5px] text-muted-foreground">
         {hasFail
           ? t("shared.checkinResult.failedNames", { names: failedNames.join(t("shared.punct.comma")) })

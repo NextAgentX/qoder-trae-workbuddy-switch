@@ -3137,9 +3137,28 @@ export interface QoderCheckinClaimResult {
   uid: string;
   already?: boolean;
   disabled?: boolean;
+  /** 本次**真领到**的额度（活动通道；旧通道可能没有该字段）。 */
   rewardCredits?: number;
   status?: string;
   rechecked?: boolean;
+  /* ── 活动通道明细（`source === "campaign"` 时才有；旧通道不带）── */
+  source?: "campaign" | "legacy";
+  /** 本次领取成功的活动条数。 */
+  claimedCount?: number;
+  /** 逐活动结果（`campaignId` / `title` / `amount` / `redemptionCode`）。 */
+  claimed?: { campaignId: string; title: string; amount: number; redemptionCode?: string }[];
+  /** 今日已领的活动。 */
+  alreadyItems?: { campaignId: string; title: string; benefitAmount: number }[];
+  /** 服务端按「人」去重被挡下的活动（同机其它账号本轮已领）。 */
+  blocked?: { campaignId: string; title: string; failureCode?: string }[];
+  /** 名额发完 / 需先完成任务。 */
+  pending?: unknown[];
+  locked?: unknown[];
+  /** 可读结论文案（活动通道）。 */
+  message?: string;
+  /** 下一次可领时刻（epoch 秒）与说明。 */
+  nextAvailableAt?: number;
+  nextAvailableNote?: string;
 }
 
 export function qoderCheckinClaim(scope: Scope, uid: string): Promise<QoderCheckinClaimResult> {

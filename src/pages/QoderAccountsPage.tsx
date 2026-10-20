@@ -178,6 +178,8 @@ export default function QoderAccountsPage() {
   /* 三档：成功数 / 通道未开放 / 失败（见 `runCheckin` 的口径说明）。 */
   const [checkinResult, setCheckinResult] = useState<{
     okCount: number;
+    /** 本次**真领到**的额度合计（活动通道；只作展示，不参与成败判定）。 */
+    earned: number;
     disabled: FailedItem[];
     failed: FailedItem[];
   } | null>(null);
@@ -626,25 +628,29 @@ export default function QoderAccountsPage() {
    *    「重试失败项」对它永远无效，混进失败只会教用户做没用的操作；
    * ③ 失败（真失败，可重试）。
    */
-  async function runCheckin(targets: QoderAccountView[], baseOk = 0) {
+  async function runCheckin(targets: QoderAccountView[], baseOk = 0, baseEarned = 0) {
     if (targets.length === 0 || busy) return;
     setBusy(true);
     const failed: FailedItem[] = [];
     const disabled: FailedItem[] = [];
     let ok = 0;
+    let earned = 0;
     for (const account of targets) {
       const item = { uid: account.uid, name: qoderAccountName(account) };
       try {
         const res = await api.qoderCheckinClaim(scope, account.uid);
-        if (res.ok) ok += 1;
-        else if (res.disabled) disabled.push(item);
+        if (res.ok) {
+          ok += 1;
+          // 活动通道会带「真领到多少」；旧通道没这个字段 ⇒ 记 0，不编数。
+          earned += res.rewardCredits ?? 0;
+        } else if (res.disabled) disabled.push(item);
         else failed.push(item);
       } catch {
         failed.push(item);
       }
     }
     setBusy(false);
-    setCheckinResult({ okCount: baseOk + ok, disabled, failed });
+    setCheckinResult({ okCount: baseOk + ok, earned: baseEarned + earned, disabled, failed });
     await loadEnrichment();
   }
 
@@ -1081,6 +1087,8 @@ export default function QoderAccountsPage() {
                 failedNames: checkinResult.failed.map((item) => item.name),
                 /* ⚠️ 「通道未开放」单独一档：不算成功、也不进重试桶。 */
                 skippedNames: checkinResult.disabled.map((item) => item.name),
+                /* 真领到的额度合计：只说「成功 1 个」不足以证明到账。 */
+                earnedCredits: checkinResult.earned,
                 /* 只重试失败项（原型 `checkin-bar` 的既有语义）。 */
                 onRetry:
                   checkinResult.failed.length > 0
@@ -1089,6 +1097,7 @@ export default function QoderAccountsPage() {
                         void runCheckin(
                           rows.filter((a) => failedUids.has(a.uid)),
                           checkinResult.okCount,
+                          checkinResult.earned,
                         );
                       }
                     : undefined,

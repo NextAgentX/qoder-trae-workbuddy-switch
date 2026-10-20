@@ -694,6 +694,9 @@ export const zh = {
   "shared.checkinResult.retryFailed": "重试失败项",
   "shared.checkinResult.summary4": "成功 {ok} · 未开放 {skip} · 失败 {fail}",
   "shared.checkinResult.skippedNames": "以下账号的签到通道未开放（桌面端网页活动页才可领）：{names}",
+  // 本次真领到的额度合计（活动通道）。**可选**：不传时结果条不显示这一枚徽标，
+  // WB / Trae 的渲染逐字不变（它们没有活动通道，也不该凭空多一行）。
+  "shared.checkinResult.earned": "本次共 +{n} Credits",
   "shared.checkinResult.dismiss": "知道了",
   // 分组标题右侧的数量（原型 `.tiny muted`，`buddy-switch-prototype.html:2471`）。
   "shared.list.groupCount": "{n} 个",
