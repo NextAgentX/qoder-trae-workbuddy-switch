@@ -108,6 +108,26 @@ fn parse_timestamp_ms(value: Option<&Value>) -> Option<i64> {
         .map(cn_wallclock_to_epoch_ms)
 }
 
+/// 到期时刻：取所有候选时间字段里**最早的非空值**。
+///
+/// 不能按字段优先级取「第一个存在的时间字段」（issue #51 的根因）：这些字段语义不同，
+///
+/// - `DeductionEndTime` 是**扣减窗口结束**，即包体层面的长期失效时刻
+///   （实测恒等于 `CreateTime` + 8 年 3 个月）；
+/// - `CycleEndTime` 才是**本周期额度的到期时刻**（额度每月重发，落在当月月底 23:59:59）；
+/// - `ExpiredTime` 是包体显式失效时间，空串表示未设。
+///
+/// 按优先级取值会把 `CodeBuddy个人体验版` 判成 2034/2035 年才过期，界面上显示成
+/// 「01-13 02:33」这种与当月月底无关的读数。裂变包 / 权益包两类恰好两个字段逐条相等，
+/// 所以缺陷只在个人体验版上暴露 —— 也因此「取最早」对那两类是零影响。
+///
+/// 取最早值的语义：剩余额度在**最早**那个时刻之后都不再可用，它就是真实到期点。
+fn earliest_timestamp_ms(raw: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .filter_map(|key| parse_timestamp_ms(raw.get(*key)))
+        .min()
+}
+
 fn value_at_path<'a>(mut current: &'a Value, path: &[&str]) -> Option<&'a Value> {
     for key in path {
         current = current.get(*key)?;
@@ -236,7 +256,7 @@ fn resource_summary(raw: &Value, now: i64) -> Value {
     let used = raw_used
         .unwrap_or_else(|| (total - remaining).max(0.0))
         .max(0.0);
-    let expire_at = parse_timestamp_ms(first_value(
+    let expire_at = earliest_timestamp_ms(
         raw,
         &[
             "DeductionEndTime",
@@ -246,7 +266,7 @@ fn resource_summary(raw: &Value, now: i64) -> Value {
             "CycleEndTime",
             "cycleEndTime",
         ],
-    ));
+    );
     let expired = expire_at.map(|value| value <= now).unwrap_or(false);
     let expiring_soon = expire_at
         .map(|value| value > now && value - now <= EXPIRING_SOON_DAYS * 24 * 3600 * 1000)
@@ -960,6 +980,58 @@ mod tests {
         assert_eq!(resource["used"], 25.25);
         assert_eq!(resource["expiringSoon"], true);
         assert_eq!(resource["expired"], false);
+    }
+
+    /// issue #51：`DeductionEndTime` 是包体生命周期（创建 + 8 年 3 个月），
+    /// `CycleEndTime` 才是本周期额度到期。按字段优先级取值会把「个人体验版」
+    /// 判成 2035 年才过期，界面显示 `01-13 02:33`。
+    #[test]
+    fn expiry_takes_the_earliest_candidate_not_the_first_present_one() {
+        // 2026-10-31 23:59:59 (+08:00)
+        const CYCLE_END: i64 = 1_793_462_399_000;
+        // 2035-01-13 02:33:49 (+08:00)：问题报告里被误取的扣减窗口结束时刻
+        const DEDUCTION_END: i64 = 2_052_239_629_000;
+
+        let resource = resource_summary(
+            &json!({
+                "PackageCode": "TCACA_code_008_cfWoLwvjU4",
+                "PackageName": "CodeBuddy个人体验版",
+                "CycleCapacitySizePrecise": "500",
+                "CycleCapacityRemainPrecise": "236.79",
+                "CycleCapacityUsedPrecise": "263.21",
+                "CycleStartTime": "2026-10-01 00:00:00",
+                "CycleEndTime": "2026-10-31 23:59:59",
+                "DeductionEndTime": DEDUCTION_END,
+                "ExpiredTime": "",
+            }),
+            CYCLE_END - 24 * 3600 * 1000,
+        );
+
+        assert_eq!(resource["expireAt"], CYCLE_END);
+        assert_eq!(resource["expired"], false);
+        // 还剩不到 2 天 ⇒ 落在「即将到期」窗口内（这也是用户真正想看到的提示）。
+        assert_eq!(resource["expiringSoon"], true);
+
+        // 反向：扣减窗口**早于**周期结束时，扣减窗口才是真实失效点。
+        let short = resource_summary(
+            &json!({
+                "CycleEndTime": "2026-10-31 23:59:59",
+                "DeductionEndTime": CYCLE_END - 10 * 24 * 3600 * 1000,
+            }),
+            CYCLE_END - 30 * 24 * 3600 * 1000,
+        );
+        assert_eq!(short["expireAt"], CYCLE_END - 10 * 24 * 3600 * 1000);
+
+        // 空串 / 缺失一律跳过，不得把包判成「没有到期时间」。
+        let only_cycle = resource_summary(
+            &json!({
+                "ExpiredTime": "",
+                "DeductionEndTime": "",
+                "CycleEndTime": "2026-10-31 23:59:59",
+            }),
+            CYCLE_END - 24 * 3600 * 1000,
+        );
+        assert_eq!(only_cycle["expireAt"], CYCLE_END);
     }
 
     #[test]
