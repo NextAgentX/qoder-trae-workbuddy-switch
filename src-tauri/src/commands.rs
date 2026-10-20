@@ -3987,16 +3987,18 @@ mod command_threading_tests {
         "get_trae_logs",          // 全量读日志文件
         "set_agent_hook_enabled", // 读写上游客户端 settings.json（P15 · hook 安装面）
         // ---- issue #48 第二批 ----
-        "get_agent_hook_status",     // 6 槽位读配置 + 逐个 tasklist（0.5–1.1 s）
-        "get_trae_gateway_models",   // 候选目录 + 开 SQLite + 解析 319 KB JSON
-        "get_trae_client_models",    // 同上，且与上一条被 Promise.all 同批打
+        // 注：本数组的尾部注释**不手工对齐** —— 新版 rustfmt 会按最长项重排，
+        // 手工对齐反而会让 `cargo fmt --check` 红（CI 用的是较新的 stable）。
+        "get_agent_hook_status", // 6 槽位读配置 + 逐个 tasklist（0.5–1.1 s）
+        "get_trae_gateway_models", // 候选目录 + 开 SQLite + 解析 319 KB JSON
+        "get_trae_client_models", // 同上，且与上一条被 Promise.all 同批打
         "get_trae_token_statistics", // 全量读 + 两遍解析网关日志（零缓存）
-        "get_trae_env",              // tasklist + 扫两遍安装候选 + 逐目录 stat
-        "open_data_dir",             // spawn explorer ≈160 ms
-        "open_accounts_dir",         // 建目录 + spawn explorer
-        "open_workbuddy_data_dir",   // 同上（WB 别名）
-        "open_trae_data_dir",        // 同上（Trae 别名）
-        "trae_launch_client",        // 起客户端进程
+        "get_trae_env",          // tasklist + 扫两遍安装候选 + 逐目录 stat
+        "open_data_dir",         // spawn explorer ≈160 ms
+        "open_accounts_dir",     // 建目录 + spawn explorer
+        "open_workbuddy_data_dir", // 同上（WB 别名）
+        "open_trae_data_dir",    // 同上（Trae 别名）
+        "trae_launch_client",    // 起客户端进程
     ];
 
     #[test]
