@@ -254,6 +254,15 @@ define_schedule_tasks! {
     // **凭据维护** —— 账号没到期时它什么也不做，到期了就必须有人换。合在一起会让
     // 「只想保活、不想签到」的用户被迫打开自动签到（那是本仓反复消灭的假控件形态）。
     TraeJwtRefresh => "trae_jwt_refresh", trae_jwt_refresh_enabled, trae_jwt_refresh_times, trae_jwt_refresh_hours, trae_jwt_refresh_jitter_minutes;
+    // Qoder 分区（第三条产品线）的自动签到。**与 `checkin` / `trae_checkin` 是三件事**：
+    // 各签各自平台的账号库，数据、端点、凭据全不相通。粒度同样刻意独立。
+    QoderCheckin => "qoder_checkin", qoder_checkin_enabled, qoder_checkin_times, qoder_checkin_hours, qoder_checkin_jitter_minutes;
+    // Qoder 账号的**令牌保活**（`drt-` / `jrt-` 到期前提前刷新）。
+    //
+    // 与 `qoder_checkin` 分开的理由与 Trae 侧**逐字相同**：签到是「每天签一次就够」的
+    // 动作，而保活是**凭据维护** —— 合在一起会让「只想保活、不想签到」的用户被迫打开
+    // 自动签到（本仓反复消灭的假控件形态）。
+    QoderKeepalive => "qoder_keepalive", qoder_keepalive_enabled, qoder_keepalive_times, qoder_keepalive_hours, qoder_keepalive_jitter_minutes;
 }
 
 /// 排程配置（`~/.buddy-switch/schedule_config.json`）。
@@ -269,6 +278,10 @@ pub struct ScheduleConfig {
     pub trae_checkin_times: Vec<TimeOfDay>,
     /// Trae 账号 JWT 自动续期的时点（第二条产品线，区域账号库）。
     pub trae_jwt_refresh_times: Vec<TimeOfDay>,
+    /// Qoder 自动签到的时点（第三条产品线，双区账号库）。
+    pub qoder_checkin_times: Vec<TimeOfDay>,
+    /// Qoder 令牌保活的时点（第三条产品线，双区账号库）。
+    pub qoder_keepalive_times: Vec<TimeOfDay>,
     /// 抖动幅度（分钟，`0` = 关闭）。见 [`next_fire_with_jitter`]：每次触发在时点前后
     /// 随机偏移至多这么多分钟，用来避免每天都精确落在同一分钟。
     pub checkin_jitter_minutes: u32,
@@ -279,6 +292,8 @@ pub struct ScheduleConfig {
     pub cat_jitter_minutes: u32,
     pub trae_checkin_jitter_minutes: u32,
     pub trae_jwt_refresh_jitter_minutes: u32,
+    pub qoder_checkin_jitter_minutes: u32,
+    pub qoder_keepalive_jitter_minutes: u32,
     pub checkin_enabled: bool,
     pub travel_enabled: bool,
     pub activity_enabled: bool,
@@ -289,6 +304,10 @@ pub struct ScheduleConfig {
     pub trae_checkin_enabled: bool,
     /// Trae JWT 自动续期开关。**默认开启**，见 [`default_schedule`] 的说明。
     pub trae_jwt_refresh_enabled: bool,
+    /// Qoder 自动签到开关。**默认关闭**（判据与 Trae 签到同源：替用户去领东西）。
+    pub qoder_checkin_enabled: bool,
+    /// Qoder 令牌保活开关。**默认开启**（判据与 Trae JWT 续期同源：维持用户已给出的登录态）。
+    pub qoder_keepalive_enabled: bool,
     pub activity_report_count: u32,
 }
 
@@ -333,6 +352,8 @@ pub fn default_schedule() -> ScheduleConfig {
         cat_times: vec![at(1)],
         trae_checkin_times: vec![at(9), at(21)],
         trae_jwt_refresh_times: vec![at(9), at(21)],
+        qoder_checkin_times: vec![at(9), at(21)],
+        qoder_keepalive_times: vec![at(22)],
         // 抖动**默认全关**：它改变「几点触发」这一既有行为，不能替老用户默认打开。
         checkin_jitter_minutes: 0,
         travel_jitter_minutes: 0,
@@ -342,6 +363,8 @@ pub fn default_schedule() -> ScheduleConfig {
         cat_jitter_minutes: 0,
         trae_checkin_jitter_minutes: 0,
         trae_jwt_refresh_jitter_minutes: 0,
+        qoder_checkin_jitter_minutes: 0,
+        qoder_keepalive_jitter_minutes: 0,
         checkin_enabled: true,
         travel_enabled: true,
         activity_enabled: true,
@@ -350,6 +373,11 @@ pub fn default_schedule() -> ScheduleConfig {
         cat_enabled: true,
         trae_checkin_enabled: false,
         trae_jwt_refresh_enabled: true,
+        // Qoder 两条与 Trae 两条**同判据**（见 [`default_schedule`] 文档）：
+        //   · `qoder_checkin` 默认**关**（替用户去领东西，他没要求过 ⇒ opt-in）；
+        //   · `qoder_keepalive` 默认**开**（维持用户导入/登录时自己交出来的 refresh_token）。
+        qoder_checkin_enabled: false,
+        qoder_keepalive_enabled: true,
         // 领猫前置需 5 次对话；5 连发把 chat_5 刷满。显式缺省 = 5，但 0/负数归一为 1（旧行为）。
         activity_report_count: 5,
     }
@@ -525,6 +553,8 @@ pub fn schedule_to_value(cfg: &ScheduleConfig) -> Value {
         "cat_times": cfg.cat_times,
         "trae_checkin_times": cfg.trae_checkin_times,
         "trae_jwt_refresh_times": cfg.trae_jwt_refresh_times,
+        "qoder_checkin_times": cfg.qoder_checkin_times,
+        "qoder_keepalive_times": cfg.qoder_keepalive_times,
         "checkin_jitter_minutes": cfg.checkin_jitter_minutes,
         "travel_jitter_minutes": cfg.travel_jitter_minutes,
         "activity_jitter_minutes": cfg.activity_jitter_minutes,
@@ -533,6 +563,8 @@ pub fn schedule_to_value(cfg: &ScheduleConfig) -> Value {
         "cat_jitter_minutes": cfg.cat_jitter_minutes,
         "trae_checkin_jitter_minutes": cfg.trae_checkin_jitter_minutes,
         "trae_jwt_refresh_jitter_minutes": cfg.trae_jwt_refresh_jitter_minutes,
+        "qoder_checkin_jitter_minutes": cfg.qoder_checkin_jitter_minutes,
+        "qoder_keepalive_jitter_minutes": cfg.qoder_keepalive_jitter_minutes,
         "checkin_enabled": cfg.checkin_enabled,
         "travel_enabled": cfg.travel_enabled,
         "activity_enabled": cfg.activity_enabled,
@@ -541,6 +573,8 @@ pub fn schedule_to_value(cfg: &ScheduleConfig) -> Value {
         "cat_enabled": cfg.cat_enabled,
         "trae_checkin_enabled": cfg.trae_checkin_enabled,
         "trae_jwt_refresh_enabled": cfg.trae_jwt_refresh_enabled,
+        "qoder_checkin_enabled": cfg.qoder_checkin_enabled,
+        "qoder_keepalive_enabled": cfg.qoder_keepalive_enabled,
         "activity_report_count": cfg.activity_report_count,
     })
 }
@@ -699,12 +733,17 @@ mod tests {
         assert_eq!(cfg.activity_report_count, 5);
         assert_eq!(cfg.trae_checkin_times, vec![t(9, 0), t(21, 0)]);
         assert_eq!(cfg.trae_jwt_refresh_times, vec![t(9, 0), t(21, 0)]);
+        assert_eq!(cfg.qoder_checkin_times, vec![t(9, 0), t(21, 0)]);
+        assert_eq!(cfg.qoder_keepalive_times, vec![t(22, 0)]);
         // WorkBuddy 的六类默认全启用（与参考实现逐字一致，改了会让老用户的功能静默消失）。
-        // Trae 两条**方向相反**，各有理由（见 `default_schedule` 的文档）：
-        //   · `trae_checkin` 默认**关**（替用户去领东西，他没要求过，故 opt-in）；
-        //   · `trae_jwt_refresh` 默认**开**（维持用户网页登录时自己交出来的 refresh_token）。
+        // Trae / Qoder 各两条**方向相反**，判据相同（见 `default_schedule` 的文档）：
+        //   · `*_checkin` 默认**关**（替用户去领东西，他没要求过，故 opt-in）；
+        //   · `*_keepalive` / `trae_jwt_refresh` 默认**开**（维持用户自己交出来的登录态）。
         for task in ScheduleTask::all() {
-            let expected = !matches!(task, ScheduleTask::TraeCheckin);
+            let expected = !matches!(
+                task,
+                ScheduleTask::TraeCheckin | ScheduleTask::QoderCheckin
+            );
             assert_eq!(
                 task.enabled(&cfg),
                 expected,
@@ -792,6 +831,8 @@ mod tests {
             "cat_enabled": false,
             "trae_checkin_enabled": false,
             "trae_jwt_refresh_enabled": false,
+            "qoder_checkin_enabled": false,
+            "qoder_keepalive_enabled": false,
         }))
         .unwrap();
         for task in ScheduleTask::all() {
@@ -815,6 +856,8 @@ mod tests {
             "cat_enabled": true,
             "trae_checkin_enabled": true,
             "trae_jwt_refresh_enabled": true,
+            "qoder_checkin_enabled": true,
+            "qoder_keepalive_enabled": true,
         }))
         .unwrap();
         for task in ScheduleTask::all() {
@@ -1037,18 +1080,11 @@ mod tests {
         let mut cfg = default_schedule();
         // 把签到挪到 09:37，其余任务全部关掉 ⇒ 下一次唤醒必须是 09:37。
         cfg.checkin_times = vec![t(9, 37)];
+        // 走 `set_enabled`（宏生成的按任务写开关）而不是手写 match：新增一类任务时
+        // 这里**不会再漏**——旧写法是全穷举 match，加第十类就编译失败（真实踩过）。
         for task in ScheduleTask::all() {
             if task != ScheduleTask::Checkin {
-                match task {
-                    ScheduleTask::Travel => cfg.travel_enabled = false,
-                    ScheduleTask::Activity => cfg.activity_enabled = false,
-                    ScheduleTask::Keepalive => cfg.keepalive_enabled = false,
-                    ScheduleTask::School => cfg.school_enabled = false,
-                    ScheduleTask::Cat => cfg.cat_enabled = false,
-                    ScheduleTask::TraeCheckin => cfg.trae_checkin_enabled = false,
-                    ScheduleTask::TraeJwtRefresh => cfg.trae_jwt_refresh_enabled = false,
-                    ScheduleTask::Checkin => {}
-                }
+                task.set_enabled(&mut cfg, false);
             }
         }
         let (at, kinds) = next_wake(&cfg, cst_ms(2026, 9, 16, 9, 0));
@@ -1090,6 +1126,10 @@ mod tests {
         cfg.school_enabled = false;
         cfg.cat_enabled = false;
         cfg.trae_jwt_refresh_enabled = false;
+        // Qoder 保活**默认开启**，这里必须显式关掉，否则「全关」根本不是全关
+        // （Qoder 签到默认已关，仍显式写一遍：以后默认值若改动，这条测试不该跟着红）。
+        cfg.qoder_checkin_enabled = false;
+        cfg.qoder_keepalive_enabled = false;
         let (at, kinds) = next_wake(&cfg, cst_ms(2026, 9, 16, 8, 0));
         assert_eq!(at, None);
         assert!(kinds.is_empty());
@@ -1157,7 +1197,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     #[test]
     fn schedule_task_mappings_are_pinned_per_variant() {
-        // 全关 + 八份互异的时点列表（当作「每类自己的那一列」的探针）。
+        // 全关 + 十份互异的时点列表（当作「每类自己的那一列」的探针）。
         let off = ScheduleConfig {
             checkin_times: vec![t(1, 0)],
             travel_times: vec![t(2, 0)],
@@ -1167,6 +1207,8 @@ mod tests {
             cat_times: vec![t(6, 0)],
             trae_checkin_times: vec![t(7, 0)],
             trae_jwt_refresh_times: vec![t(8, 0)],
+            qoder_checkin_times: vec![t(9, 0)],
+            qoder_keepalive_times: vec![t(10, 0)],
             // 抖动也取互异值：若某类任务读到了别人的抖动字段，下面的断言会立刻发现。
             checkin_jitter_minutes: 1,
             travel_jitter_minutes: 2,
@@ -1176,6 +1218,8 @@ mod tests {
             cat_jitter_minutes: 6,
             trae_checkin_jitter_minutes: 7,
             trae_jwt_refresh_jitter_minutes: 8,
+            qoder_checkin_jitter_minutes: 9,
+            qoder_keepalive_jitter_minutes: 10,
             checkin_enabled: false,
             travel_enabled: false,
             activity_enabled: false,
@@ -1184,6 +1228,8 @@ mod tests {
             cat_enabled: false,
             trae_checkin_enabled: false,
             trae_jwt_refresh_enabled: false,
+            qoder_checkin_enabled: false,
+            qoder_keepalive_enabled: false,
             activity_report_count: 5,
         };
 
@@ -1197,7 +1243,7 @@ mod tests {
             &str,
             u32,
             &str,
-        ); 8] = [
+        ); 10] = [
             (
                 ScheduleTask::Checkin,
                 "checkin",
@@ -1278,6 +1324,26 @@ mod tests {
                 8,
                 "trae_jwt_refresh_jitter_minutes",
             ),
+            (
+                ScheduleTask::QoderCheckin,
+                "qoder_checkin",
+                off.qoder_checkin_times.as_slice(),
+                "qoder_checkin_times",
+                "qoder_checkin_enabled",
+                "qoder_checkin_hours",
+                9,
+                "qoder_checkin_jitter_minutes",
+            ),
+            (
+                ScheduleTask::QoderKeepalive,
+                "qoder_keepalive",
+                off.qoder_keepalive_times.as_slice(),
+                "qoder_keepalive_times",
+                "qoder_keepalive_enabled",
+                "qoder_keepalive_hours",
+                10,
+                "qoder_keepalive_jitter_minutes",
+            ),
         ];
         // `times()` 仅在任务启用时才返回自己的列表，故 times 断言用「全启用」配置。
         let on = ScheduleConfig {
@@ -1289,6 +1355,8 @@ mod tests {
             cat_enabled: true,
             trae_checkin_enabled: true,
             trae_jwt_refresh_enabled: true,
+            qoder_checkin_enabled: true,
+            qoder_keepalive_enabled: true,
             ..off.clone()
         };
         for (
@@ -1340,9 +1408,9 @@ mod tests {
             );
         }
 
-        // (2) enabled：布尔仅两态，一份配置区分不了 8 个字段；遍历「只开一个开关」的八份配置，
+        // (2) enabled：布尔仅两态，一份配置区分不了 10 个字段；遍历「只开一个开关」的十份配置，
         //     断言「被启用的任务集合」恰为该开关的属主。
-        let only: [(&str, ScheduleConfig); 8] = [
+        let only: [(&str, ScheduleConfig); 10] = [
             (
                 "checkin",
                 ScheduleConfig {
@@ -1399,6 +1467,20 @@ mod tests {
                     ..off.clone()
                 },
             ),
+            (
+                "qoder_checkin",
+                ScheduleConfig {
+                    qoder_checkin_enabled: true,
+                    ..off.clone()
+                },
+            ),
+            (
+                "qoder_keepalive",
+                ScheduleConfig {
+                    qoder_keepalive_enabled: true,
+                    ..off.clone()
+                },
+            ),
         ];
         for (owner_label, cfg) in only {
             let enabled_labels: Vec<&str> = ScheduleTask::all()
@@ -1413,7 +1495,7 @@ mod tests {
             );
         }
 
-        // (3) 集合完整性：`all()` 恰好是这八类、不多不少（顺序 = 宏声明顺序）。
+        // (3) 集合完整性：`all()` 恰好是这十类、不多不少（顺序 = 宏声明顺序）。
         let labels: Vec<&str> = ScheduleTask::all()
             .into_iter()
             .map(|task| task.as_str())
@@ -1428,9 +1510,11 @@ mod tests {
                 "school",
                 "cat",
                 "trae_checkin",
-                "trae_jwt_refresh"
+                "trae_jwt_refresh",
+                "qoder_checkin",
+                "qoder_keepalive"
             ],
-            "all() 必须恰好包含全部八类且顺序稳定"
+            "all() 必须恰好包含全部十类且顺序稳定"
         );
     }
 

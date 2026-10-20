@@ -733,18 +733,17 @@ pub fn restore_for_region(region: TraeRegion, user_id: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 该区域的**两条程序位**（purge 时删除**全部**程序位的快照；穷举，无回落）。
-fn variants_of_region(region: TraeRegion) -> [TraeVariant; 2] {
-    match region {
-        TraeRegion::Cn => [TraeVariant::TraeWork, TraeVariant::Trae],
-        TraeRegion::Global => [TraeVariant::Global, TraeVariant::GlobalTraeCode],
-    }
-}
-
 /// 永久删除（**唯一不可逆步**）：从回收站真删 + 销毁关联登录态快照。
 ///
 /// 凭据（`jwt` / `refresh_token`）内嵌在记录里，随记录一并销毁；**快照是独立目录**，
 /// 必须显式删 —— 否则「删了账号，登录态快照还在」（安全：已删账号的登录态不应留存）。
+///
+/// ★ issue #28：删的是**该区域名下每一个快照池**（合并版池 + 历史池），走
+/// [`paths::profile_dirs_for_region`]。本函数原先遍历
+/// `variants_of_region(region) == [TraeWork, Trae] / [Global, GlobalTraeCode]`
+/// —— 那是 issue #28 收敛前的两条程序位，而它们的客户端已被官方合并卸载、
+/// 快照池也不再被写入 ⇒ **真正的合并版池一个都没删到**，症状是
+/// 「永久删除了账号，它的登录态快照还躺在磁盘上」。
 pub fn purge_for_region(region: TraeRegion, user_id: &str) -> Result<(), String> {
     let mut trash = load_trash_for_region(region);
     let Some(index) = trash
@@ -754,10 +753,8 @@ pub fn purge_for_region(region: TraeRegion, user_id: &str) -> Result<(), String>
         return Err("回收站中没有该账号".into());
     };
     trash.remove(index);
-    for variant in variants_of_region(region) {
-        if let Some(dir) = paths::profile_dir_for(variant, user_id) {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+    for dir in paths::profile_dirs_for_region(region, user_id) {
+        let _ = std::fs::remove_dir_all(dir);
     }
     store::write_json(&paths::accounts_trash_file_for_region(region), &trash)?;
     Ok(())
@@ -827,12 +824,15 @@ pub fn delete(user_id: &str, delete_profile: bool) -> Result<(), String> {
 /// `delete_profile = true` 时**额外**删除登录态快照目录。默认不删：
 /// 快照可能包含用户还未备份的登录态，误删成本高于磁盘占用。
 ///
-/// **删快照也必须限定变体**：两条产品线的快照根目录不同
-/// （见 [`paths::profiles_dir_for`]），否则会删到另一条产品线的快照。
+/// **删快照必须覆盖该区域名下每一个池**（issue #28）：issue #28 收敛后每个区域只剩
+/// **一条程序位**（合并版），但历史池目录仍在磁盘上（迁移是幂等的、尽力而为的）。
+/// 只删「当前变体那一个目录」会留下历史池里的同名快照 ⇒ 症状是「永久删除了账号，
+/// 它的登录态快照还躺在磁盘上」。因此走 [`paths::profile_dirs_for_region`]，
+/// 它按**区域**枚举全部池，不会删到另一区域的快照。
 pub fn delete_for(variant: TraeVariant, user_id: &str, delete_profile: bool) -> Result<(), String> {
     trash_for_region(variant.region(), user_id)?;
     if delete_profile {
-        if let Some(dir) = paths::profile_dir_for(variant, user_id) {
+        for dir in paths::profile_dirs_for_region(variant.region(), user_id) {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
@@ -1819,6 +1819,9 @@ pub fn checkin_url_for(variant: TraeVariant) -> String {
 #[cfg_attr(not(windows), allow(dead_code))]
 mod tests {
     use super::*;
+    // 只在测试里用（造「当前池 / 历史池」两份快照），放模块顶层会变成非测试构建的
+    // unused import —— 本仓要求零警告，故就近引入。
+    use crate::modules::trae::region::TraeProgram;
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -3620,9 +3623,13 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
         });
     }
 
-    /// ★【P5 §2.7】purge 是**唯一不可逆步**：删回收站条目 + 销毁该区域**两条程序位**的快照目录。
+    /// ★【P5 §2.7】purge 是**唯一不可逆步**：删回收站条目 + 销毁该区域**每一个**快照池的目录。
     ///
-    /// 可证伪性：若 purge 只删回收站条目、不删快照 ⇒ 快照断言红（「删了账号，登录态还在」）。
+    /// issue #28 之后每个区域只剩一条程序位（合并版池），但**历史池目录仍在磁盘上**
+    /// （迁移是幂等的、尽力而为的）。故这里造两份：合并版池 + CN 的历史池（`profiles`）。
+    ///
+    /// 可证伪性：若 purge 只删回收站条目、不删快照 ⇒ 快照断言红（「删了账号，登录态还在」）；
+    /// 若又退回「只删当前变体那一个目录」⇒ 历史池那条断言红。
     #[test]
     fn purge_removes_trash_entry_and_all_program_snapshots() {
         with_temp_home(|| {
@@ -3632,11 +3639,11 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
             save_accounts_for_region(region, &file).expect("造账号");
             trash_for_region(region, "u1").expect("软删除");
 
-            // 造两条程序位（TraeWork / TraeCode）的快照目录。
-            let work_snap = paths::profile_dir_for(TraeVariant::TraeWork, "u1").expect("槽位合法");
-            let code_snap = paths::profile_dir_for(TraeVariant::Trae, "u1").expect("槽位合法");
-            std::fs::create_dir_all(&work_snap).expect("造 TraeWork 快照");
-            std::fs::create_dir_all(&code_snap).expect("造 Trae 快照");
+            // 当前池（合并版）与历史池（CN 的 `profiles`，收敛前 TraeWork 的位置）。
+            let merged_snap = paths::profiles_dir_for_program(region, TraeProgram::Trae).join("u1");
+            let legacy_snap = paths::profiles_dir_for_program(region, TraeProgram::TraeWork).join("u1");
+            std::fs::create_dir_all(&merged_snap).expect("造合并版快照");
+            std::fs::create_dir_all(&legacy_snap).expect("造历史池快照");
 
             purge_for_region(region, "u1").expect("永久删除应成功");
 
@@ -3644,8 +3651,11 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
                 load_trash_for_region(region).is_empty(),
                 "回收站条目必须被销毁"
             );
-            assert!(!work_snap.exists(), "TraeWork 快照必须被销毁");
-            assert!(!code_snap.exists(), "Trae 快照必须被销毁");
+            assert!(!merged_snap.exists(), "合并版池的快照必须被销毁");
+            assert!(
+                !legacy_snap.exists(),
+                "历史池的快照也必须被销毁（issue #28：按区域枚举全部池）"
+            );
         });
     }
 

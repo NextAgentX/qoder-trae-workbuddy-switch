@@ -493,6 +493,36 @@ pub fn profile_dir_for(variant: TraeVariant, user_id: &str) -> Option<PathBuf> {
     Some(profiles_dir_for(variant).join(user_id))
 }
 
+/// 该区域**全部**快照池里某个账号的快照目录（合并版池 + 历史池）。
+///
+/// ## 为什么需要这个函数（issue #28）
+///
+/// 快照目录名是**按变体**派生的（`profiles_<as_str>`），而**账号是按区域**删除的
+/// （`purge_for_region(region, user_id)`）。issue #28 收敛前每个区域有两条程序位、
+/// 两个池；收敛后只剩合并版一个池，但**历史池目录仍在磁盘上**（迁移是幂等的、
+/// 且是尽力而为的）。于是「按区域删账号」必须遍历该区域名下**每一个**池 ——
+///
+/// - 只删合并版池 ⇒ 历史池里的快照残留，**已删账号的登录态仍留存**（安全缺陷）；
+/// - 只删历史池（issue #28 之前 [`super::account::purge_for_region`] 的写法，
+///   它遍历的是 `TraeWork` / `Trae` 这两条**退役**变体）⇒ 合并版池里的快照
+///   同样残留 —— 这正是收敛后「删账号不清快照」的成因。
+///
+/// 返回值**可能为空**（`user_id` 非法），也可能一个都不存在（从没存过快照）——
+/// 调用方按「不存在就跳过」处理，不要把它当错误。
+pub fn profile_dirs_for_region(region: TraeRegion, user_id: &str) -> Vec<PathBuf> {
+    if !safe_slot_name(user_id) {
+        return Vec::new();
+    }
+    let mut out = vec![profiles_dir_for_program(region, TraeProgram::Trae).join(user_id)];
+    for (pool, owner) in LEGACY_PROFILE_DIRS {
+        // 历史池按区域标注；只有本区域的才删 —— 删到别的区域等于毁掉另一套账号的登录态。
+        if *owner == region {
+            out.push(trae_dir().join(pool).join(user_id));
+        }
+    }
+    out
+}
+
 /// 校验快照槽位名（userId）是否可作为单个目录名使用。
 ///
 /// 拒绝：空、`.`、`..`、含 `/` 或 `\`、含 Windows 保留字符、含 NUL。

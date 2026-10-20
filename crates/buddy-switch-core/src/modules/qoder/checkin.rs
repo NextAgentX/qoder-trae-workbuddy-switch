@@ -26,6 +26,13 @@
 //! - 活动平台：**上游 `claimStatus` 为准**（任一积分类活动 `CLAIMED` ⇒ 今日已签）；
 //!   本地盖章（`account::last_checkin`）只作**展示提示**，不作判据。
 //! - 旧通道：上游 `lastClaimedAt`（该通道自带，无需本地状态）。
+//!
+//! ## 排程（`ScheduleTask::QoderCheckin`）
+//!
+//! [`run_cycle_for`] 逐账号**顺序**调用 [`claim_for`]（并发会踩风控）；
+//! 签到默认**关**（替用户去领东西，opt-in），保活默认**开**（维持用户交出来的
+//! `refresh_token`）。本地盖章只用于展示与去重提示，判据仍是上游 `claimStatus` ——
+//! 重复领取由上游幂等（`CLAIMED` ⇒ `already`）兜住，不依赖本地状态。
 
 use serde_json::{json, Value};
 
@@ -513,6 +520,47 @@ pub async fn status_map_for(region: QoderRegion, uids: Vec<String>) -> Value {
         }
     }
     Value::Object(map)
+}
+
+/// 批量签到：对区域内**全部**账号各跑一次（顺序，避免并发打上游触发风控）。
+///
+/// 供后台排程（`ScheduleTask::QoderCheckin`）与将来的「一键签到」入口使用；返回逐账号
+/// 结果 + 汇总（部分失败**如实报**，不把「一个账号成功」说成「整批成功」）。
+///
+/// ⚠️ 为什么顺序而不是并发：签到是**写操作**且直接对应上游风控计数；`status_map_for`
+/// 那种只读查询才适合并发。这里沿用官方客户端「逐个来」的节奏。
+pub async fn run_cycle_for(region: QoderRegion) -> Value {
+    let file = account::load_accounts_for(region);
+    let mut results = Vec::new();
+    let mut ok_count = 0usize;
+    let mut earned = 0i64;
+    for account in &file.accounts {
+        match claim_for(region, &account.uid).await {
+            Ok(value) => {
+                if value.get("ok") == Some(&Value::Bool(true)) {
+                    ok_count += 1;
+                }
+                earned += value.get("earned").and_then(Value::as_i64).unwrap_or(0);
+                results.push(json!({
+                    "uid": account.uid,
+                    "name": account::display_name(account),
+                    "result": value,
+                }));
+            }
+            Err(error) => results.push(json!({
+                "uid": account.uid,
+                "name": account::display_name(account),
+                "result": { "ok": false, "error": error },
+            })),
+        }
+    }
+    json!({
+        "region": region.as_str(),
+        "total": file.accounts.len(),
+        "okCount": ok_count,
+        "earned": earned,
+        "results": results,
+    })
 }
 
 #[cfg(test)]

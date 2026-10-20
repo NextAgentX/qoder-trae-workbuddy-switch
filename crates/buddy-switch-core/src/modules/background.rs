@@ -351,6 +351,20 @@ pub const TASKS: &[TaskSpec] = &[
         kind: TaskKind::Scheduled(ScheduleTask::TraeJwtRefresh),
         interval: Duration::ZERO,
     },
+    // Qoder（第三条产品线）两条：签到与令牌保活。与 Trae 两条**同判据**：
+    // 签到默认关（opt-in，它会替用户去领东西）、保活默认开（维持用户自己交出来的 refresh_token）。
+    // ⚠️ 不登记 = 两宿主都不会起这个排程循环 ⇒ 设置页的开关是**假控件**
+    //    （Trae JWT 续期就是这么被发现「界面标了、后台从没跑过」的）。
+    TaskSpec {
+        product: Product::Qoder,
+        kind: TaskKind::Scheduled(ScheduleTask::QoderCheckin),
+        interval: Duration::ZERO,
+    },
+    TaskSpec {
+        product: Product::Qoder,
+        kind: TaskKind::Scheduled(ScheduleTask::QoderKeepalive),
+        interval: Duration::ZERO,
+    },
 ];
 
 /// 是否存在「该产品线的该种类」任务。

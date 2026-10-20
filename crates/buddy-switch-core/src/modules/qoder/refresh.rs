@@ -113,6 +113,87 @@ pub async fn refresh_for(region: QoderRegion, uid: &str) -> Result<Value, String
     }))
 }
 
+// ---------------------------------------------------------------------------
+// 令牌保活（后台排程 `ScheduleTask::QoderKeepalive` 的唯一实现）
+// ---------------------------------------------------------------------------
+
+/// 「剩余寿命不足」阈值：进入该窗口的账号在巡检中被**提前**刷新（与参考实现同值 4 小时）。
+///
+/// 为什么是 4 小时而不是「等 401 再说」：`access token` 的有效期是**上游签发时决定**的
+/// （`dt-` 约 30 天 / `jt-` 24 小时），而网关转发是**长连接上的即时请求** ——
+/// 等 401 才刷，那一次调用已经失败了，用户看到的是「突然报错」。
+pub const KEEPALIVE_WINDOW_HOURS: i64 = 4;
+
+/// `expires_at` 归一成**毫秒**。
+///
+/// ⚠️ 两个来源单位不同：我们自己的刷新路径写的是**毫秒**（[`refresh_for`] 传
+/// `expires_at * 1000`），而**本机导入**路径把上游 `expiresAt` **原样**抄了下来
+/// （实测上游给的是**秒**）。判据用量级：小于 10^11 的一律当秒
+/// （10^11 秒 ≈ 公元 5138 年，10^11 毫秒 ≈ 1973 年 —— 两侧都不会误判）。
+fn expiry_ms(account: &RawAccount) -> Option<i64> {
+    account
+        .expires_at
+        .map(|value| if value < 100_000_000_000 { value * 1000 } else { value })
+}
+
+/// 这条账号是否需要保活刷新（**纯函数**，可测）。
+///
+/// - 没有可用 `access token` ⇒ `true`（必须换一个；PAT 会走兑换路由）；
+/// - 有过期信息且距今不足 [`KEEPALIVE_WINDOW_HOURS`] 小时 ⇒ `true`；
+/// - **没有过期信息 ⇒ `false`**：不猜、不为「不知道」去打上游（由手动刷新与
+///   上游 401 兜底）—— 无脑全量刷新会把「保活」变成每天白打 N 次上游。
+pub fn needs_keepalive(account: &RawAccount, now_ms: i64) -> bool {
+    let has_access = account
+        .access_token
+        .as_deref()
+        .map(|token| !token.is_empty())
+        .unwrap_or(false);
+    if !has_access {
+        return true;
+    }
+    match expiry_ms(account) {
+        Some(at) => at - now_ms <= KEEPALIVE_WINDOW_HOURS * 3_600_000,
+        None => false,
+    }
+}
+
+/// 区域令牌保活：逐账号刷新「即将到期 / 已无可用 access token」的那些。
+///
+/// 返回逐账号结果 + 汇总（**部分失败如实报**，不伪装成全量成功）。
+/// 顺序执行：并发刷新同一批账号只会更容易触发上游风控。
+pub async fn run_keepalive_cycle_for(region: QoderRegion) -> Value {
+    let file = account::load_accounts_for(region);
+    let now = chrono::Utc::now().timestamp_millis();
+    let mut refreshed: Vec<String> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    let mut skipped = 0usize;
+
+    for account in &file.accounts {
+        // 没有可用的刷新路由（既无刷新令牌也无 PAT）⇒ 跳过：刷也刷不动，
+        // 报了只是噪音（用户该做的是重新登录 / 重新导入）。
+        if plan_refresh(account).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if !needs_keepalive(account, now) {
+            skipped += 1;
+            continue;
+        }
+        match refresh_for(region, &account.uid).await {
+            Ok(_) => refreshed.push(account.uid.clone()),
+            Err(error) => failed.push(json!({ "uid": account.uid, "error": error })),
+        }
+    }
+
+    json!({
+        "region": region.as_str(),
+        "total": file.accounts.len(),
+        "refreshed": refreshed.len(),
+        "skipped": skipped,
+        "failed": failed,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +240,55 @@ mod tests {
         // 什么都没有 ⇒ 可读错误。
         let err = plan_refresh(&account_with(None, None)).unwrap_err();
         assert!(err.contains("重新登录"), "{err}");
+    }
+
+    /// ★ 保活判据：**没有 access token ⇒ 必刷**；**没有过期信息 ⇒ 不刷**（不猜）。
+    ///
+    /// 可证伪：把 `None => false` 改成 `None => true` ⇒ 第三条断言变红
+    /// （「保活」会退化成「每次巡检全量刷一遍」，每天白打 N 次上游）。
+    #[test]
+    fn keepalive_only_touches_expiring_or_credential_less_accounts() {
+        let now = 1_800_000_000_000i64; // 毫秒
+        // 无 access token ⇒ 必须刷。
+        let mut account = account_with(Some("drt-abc"), None);
+        account.access_token = None;
+        assert!(needs_keepalive(&account, now));
+        // 还有很久才过期 ⇒ 不刷。
+        let mut far = account_with(Some("drt-abc"), None);
+        far.expires_at = Some(now + 48 * 3_600_000);
+        assert!(!needs_keepalive(&far, now));
+        // 进入 4 小时窗口 ⇒ 刷。
+        let mut soon = account_with(Some("drt-abc"), None);
+        soon.expires_at = Some(now + 3 * 3_600_000);
+        assert!(needs_keepalive(&soon, now));
+        // 已过期 ⇒ 刷。
+        let mut expired = account_with(Some("drt-abc"), None);
+        expired.expires_at = Some(now - 1000);
+        assert!(needs_keepalive(&expired, now));
+        // ★ 没有过期信息 ⇒ **不刷**（不猜）。
+        let unknown = account_with(Some("drt-abc"), None);
+        assert_eq!(unknown.expires_at, None);
+        assert!(!needs_keepalive(&unknown, now));
+    }
+
+    /// ★ `expires_at` 的**两种单位**都要判对（导入路径抄的是秒，刷新路径写的是毫秒）。
+    ///
+    /// 可证伪：删掉 `expiry_ms` 的量级归一 ⇒ 秒形态（本机导入的账号）会被当成
+    /// 「1970 年就过期了」或「还有 50000 年」⇒ 要么全量乱刷、要么永不保活。
+    #[test]
+    fn expiry_units_are_normalized_by_magnitude() {
+        let now = 1_800_000_000_000i64;
+        // 毫秒形态：3 小时后过期 ⇒ 需刷。
+        let mut ms = account_with(Some("drt-abc"), None);
+        ms.expires_at = Some((now + 3 * 3_600_000) / 1000 * 1000);
+        assert!(needs_keepalive(&ms, now));
+        // 秒形态：同一天稍后过期（秒值 ≈ 1.8e9）⇒ 同样需刷（而不是被判成 1970 年）。
+        let mut seconds = account_with(Some("drt-abc"), None);
+        seconds.expires_at = Some((now + 3 * 3_600_000) / 1000);
+        assert!(needs_keepalive(&seconds, now));
+        // 秒形态且还很久 ⇒ 不刷。
+        let mut seconds_far = account_with(Some("drt-abc"), None);
+        seconds_far.expires_at = Some((now + 48 * 3_600_000) / 1000);
+        assert!(!needs_keepalive(&seconds_far, now));
     }
 }
