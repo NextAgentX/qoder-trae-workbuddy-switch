@@ -651,8 +651,17 @@ pub async fn checkin_status(scope: String, account_id: Option<String>) -> Result
 /// **不**用 `detected_variant` / `detect_data_dir` 猜测活跃客户端。
 ///
 /// 旧命令保留为别名（见 `src/lib/api.ts` 的 `ALIASES`）。
+///
+/// `async` + `spawn_blocking`：`spawn explorer` 实测 ≈160 ms/次，同步执行会在点击瞬间
+/// 卡住主线程（issue #48）。
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_data_dir(scope: String) -> Result<Value, String> {
+pub async fn open_data_dir(scope: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || build_open_data_dir(scope))
+        .await
+        .map_err(|error| format!("打开数据目录失败: {error}"))?
+}
+
+fn build_open_data_dir(scope: String) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     match scope.product() {
         Product::Workbuddy => capability::open_workbuddy_data_dir(require_wb_region(scope)?),
@@ -1163,7 +1172,13 @@ fn reveal_dir(dir: &std::path::Path) -> Result<(), String> {
 /// 账号库落在 `~/.buddy-switch/`（`accounts.json` / `accounts.global.json`），
 /// 因此这里统一打开账号文件所在目录；目录不存在时先创建，避免「打开失败」。
 #[tauri::command]
-pub fn open_accounts_dir(region: Option<String>) -> Result<Value, String> {
+pub async fn open_accounts_dir(region: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || build_open_accounts_dir(region))
+        .await
+        .map_err(|error| format!("打开账号库目录失败: {error}"))?
+}
+
+fn build_open_accounts_dir(region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
     let file = buddy_switch_core::modules::region::accounts_file_for(region);
     let dir = file
@@ -2381,8 +2396,12 @@ pub fn gateway_status(app: tauri::AppHandle) -> Value {
 /// 与 Trae 侧的 `open_trae_data_dir` 同形：形状（`{ok,path}` 或结构化 `Unsupported`）
 /// 由 `capability::open_workbuddy_data_dir` 唯一产出，前端用同一段分支渲染。
 #[tauri::command]
-pub fn open_workbuddy_data_dir(region: Option<String>) -> Result<Value, String> {
-    capability::open_workbuddy_data_dir(parse_region(region.as_deref()))
+pub async fn open_workbuddy_data_dir(region: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        capability::open_workbuddy_data_dir(parse_region(region.as_deref()))
+    })
+    .await
+    .map_err(|error| format!("打开数据目录失败: {error}"))?
 }
 
 /// GET /api/gateway/keys —— Key 列表（脱敏）。
@@ -2787,9 +2806,14 @@ pub async fn trae_merge_legacy_regions() -> Result<Value, String> {
 ///
 /// **单一视角**：返回自动探测挑中的那一条产品线（`variant` / `variantLabel`）。
 /// 界面要**并排**显示两条产品线时用 [`get_trae_variants`]。
+/// `async` + `spawn_blocking`：本命令要跑 `tasklist` 进程探测并扫两遍安装候选目录，
+/// 实测 0.1–0.25 s。同步执行会在账号页 / 设置页挂载时卡主线程（issue #48）。
 #[tauri::command]
-pub fn get_trae_env() -> Value {
-    trae::platform::env_status()
+pub async fn get_trae_env() -> Value {
+    match tauri::async_runtime::spawn_blocking(trae::platform::env_status).await {
+        Ok(value) => value,
+        Err(error) => json!({ "error": format!("读取 Trae 环境失败: {error}") }),
+    }
 }
 
 /// GET /api/trae/variants —— **全部** Trae 产品线的独立环境状态（数组）。
@@ -2888,13 +2912,23 @@ pub fn get_trae_credits(variant: Option<String>) -> Value {
 ///
 /// `days` 为统计窗口天数；`None` / `<= 0` 表示全部历史。
 /// `scope` 为**变体范围**筛选维度：`work` / `cn` / `unlabeled` / `all`（缺省 `all`）。
+///
+/// `async` + `spawn_blocking`：本命令**全量**读网关日志并解析两遍（零缓存），
+/// 被概览页 / Token 统计页 / 积分页三处重复调用。同步执行时切页会卡主线程（issue #48）。
 #[tauri::command]
-pub fn get_trae_token_statistics(days: Option<i64>, scope: Option<String>) -> Value {
-    let scope = scope
-        .as_deref()
-        .map(trae::token_stats::TraeTokenScope::parse)
-        .unwrap_or_default();
-    trae::handlers::token_statistics(days, scope)
+pub async fn get_trae_token_statistics(days: Option<i64>, scope: Option<String>) -> Value {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let scope = scope
+            .as_deref()
+            .map(trae::token_stats::TraeTokenScope::parse)
+            .unwrap_or_default();
+        trae::handlers::token_statistics(days, scope)
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => json!({ "error": format!("统计 Token 用量失败: {error}") }),
+    }
 }
 
 /// GET /api/trae/logs —— 运行日志（系统日志页的「运行日志」标签页）。
@@ -3316,8 +3350,19 @@ pub async fn trae_gateway_status(app: tauri::AppHandle, variant: Option<String>)
 ///
 /// `variant` 决定读哪条产品线；缺失 / 未知 → 默认变体（TraeWork）。
 /// 客户端清单读不到时**回落静态兜底清单**，保证「列模型」不会失败。
+///
+/// `async` + `spawn_blocking`：读客户端清单要探测候选目录并**逐个开 SQLite**
+/// （`busy_timeout` 1 s），与 [`get_trae_client_models`] 被 `Promise.all` 同批打，
+/// 2 区域 ⇒ 最多 4 次同步开库。同步执行会阻塞主线程（issue #48）。
 #[tauri::command]
-pub fn get_trae_gateway_models(variant: Option<String>) -> Value {
+pub async fn get_trae_gateway_models(variant: Option<String>) -> Value {
+    match tauri::async_runtime::spawn_blocking(move || build_trae_gateway_models(variant)).await {
+        Ok(value) => value,
+        Err(error) => json!({ "error": format!("读取模型清单失败: {error}") }),
+    }
+}
+
+fn build_trae_gateway_models(variant: Option<String>) -> Value {
     let variant = parse_trae_variant(variant.as_deref());
     // ★ 出口 ①（P11）：与 Trae 网关本体（`trae/routes.rs`）读**同一份** `disabled`，
     //   按 `region_of_variant` 键控 —— 否则「管理面看到的清单」与「网关实际暴露的清单」会不一致。
@@ -3351,8 +3396,20 @@ pub fn get_trae_gateway_models(variant: Option<String>) -> Value {
 /// `variant` 决定读哪条产品线的客户端；缺失 / 未知 → 默认变体（TraeWork）。
 /// 读不到（客户端没启动过 / 没登录 / 还没拉过清单）**不是错误**：返回
 /// `source = "missing"` 与可读的 `note`，由界面呈现空态。
+///
+/// `async` + `spawn_blocking`：同 [`get_trae_gateway_models`]（开 SQLite + 解析大 JSON）。
 #[tauri::command]
-pub fn get_trae_client_models(variant: Option<String>) -> Value {
+pub async fn get_trae_client_models(variant: Option<String>) -> Value {
+    match tauri::async_runtime::spawn_blocking(move || build_trae_client_models(variant)).await {
+        Ok(value) => value,
+        Err(error) => json!({
+            "source": "missing",
+            "note": format!("读取客户端模型清单失败: {error}"),
+        }),
+    }
+}
+
+fn build_trae_client_models(variant: Option<String>) -> Value {
     let variant = parse_trae_variant(variant.as_deref());
     match serde_json::to_value(trae::model_list::read_client_model_list(variant)) {
         Ok(value) => value,
@@ -3430,8 +3487,12 @@ pub fn delete_trae_api_key(id: String) -> Result<Value, String> {
 ///
 /// 形状（`{ok,path}` 或结构化 `Unsupported`）由 `handlers::open_data_dir` 唯一产出。
 #[tauri::command]
-pub fn open_trae_data_dir(variant: Option<String>) -> Result<Value, String> {
-    trae::handlers::open_data_dir(parse_trae_variant(variant.as_deref()))
+pub async fn open_trae_data_dir(variant: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        trae::handlers::open_data_dir(parse_trae_variant(variant.as_deref()))
+    })
+    .await
+    .map_err(|error| format!("打开数据目录失败: {error}"))?
 }
 
 /// POST /api/trae/launch-client —— 启动**该变体**的 Trae 客户端（OAuth 的前置动作）。
@@ -3440,8 +3501,12 @@ pub fn open_trae_data_dir(variant: Option<String>) -> Result<Value, String> {
 /// 必然以 `dataDirMissing` 失败。这个命令让用户**一键**跨过这道前置条件
 /// （动机与「启动成功 ≠ 凭证已就绪」的边界见 `handlers::launch_client_for`）。
 #[tauri::command]
-pub fn trae_launch_client(variant: Option<String>) -> Result<Value, String> {
-    trae::handlers::launch_client_for(parse_trae_variant(variant.as_deref()))
+pub async fn trae_launch_client(variant: Option<String>) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        trae::handlers::launch_client_for(parse_trae_variant(variant.as_deref()))
+    })
+    .await
+    .map_err(|error| format!("启动客户端失败: {error}"))?
 }
 
 /// GET /api/trae/gateway/logs —— 最近 N 条请求日志（元数据）。
@@ -3707,9 +3772,16 @@ fn apply_agent_hook_enabled(enabled: bool) -> Result<Value, String> {
 }
 
 /// GET /api/agent-hooks/status —— hook 安装状态（**只读**）。
+///
+/// `async` + `spawn_blocking`：本命令要逐槽位读客户端配置文件、并做**进程探测**
+/// （Windows 上起 `tasklist` 子进程，Trae 槽位还要逐变体探测），实测 0.5–1.1 s。
+/// 同步执行会把这段时长原样压在 Tauri 主线程上 ⇒ 设置页一打开窗口就发灰（issue #48）。
 #[tauri::command]
-pub fn get_agent_hook_status() -> Value {
-    agent_hook_status()
+pub async fn get_agent_hook_status() -> Value {
+    match tauri::async_runtime::spawn_blocking(agent_hook_status).await {
+        Ok(value) => value,
+        Err(error) => json!({ "error": format!("读取 hook 状态失败: {error}") }),
+    }
 }
 
 /// POST /api/agent-hooks/enabled —— 开启 / 关闭外部 Agent 会话监听。
@@ -3903,6 +3975,9 @@ mod command_threading_tests {
     ///
     /// 2026-09-28 之前它们全是同步的（审计 `docs/history/perf-audit-2026-09-24.md` 的 P1-3）。
     /// 把它们改回同步会让本用例变红。
+    ///
+    /// 2026-10-20 按 issue #48 补齐第二批（S 级清单）：都是「点一下就灰屏」的命令 ——
+    /// 起 `tasklist` 子进程、开 SQLite、全量读日志、`spawn explorer`。
     const MUST_BE_ASYNC: &[&str] = &[
         "import_local",           // 读客户端认证文件
         "check_auth_permission",  // 写 / 删探针文件
@@ -3911,6 +3986,17 @@ mod command_threading_tests {
         "get_trae_accounts",      // 读账号库 + 快照目录
         "get_trae_logs",          // 全量读日志文件
         "set_agent_hook_enabled", // 读写上游客户端 settings.json（P15 · hook 安装面）
+        // ---- issue #48 第二批 ----
+        "get_agent_hook_status",     // 6 槽位读配置 + 逐个 tasklist（0.5–1.1 s）
+        "get_trae_gateway_models",   // 候选目录 + 开 SQLite + 解析 319 KB JSON
+        "get_trae_client_models",    // 同上，且与上一条被 Promise.all 同批打
+        "get_trae_token_statistics", // 全量读 + 两遍解析网关日志（零缓存）
+        "get_trae_env",              // tasklist + 扫两遍安装候选 + 逐目录 stat
+        "open_data_dir",             // spawn explorer ≈160 ms
+        "open_accounts_dir",         // 建目录 + spawn explorer
+        "open_workbuddy_data_dir",   // 同上（WB 别名）
+        "open_trae_data_dir",        // 同上（Trae 别名）
+        "trae_launch_client",        // 起客户端进程
     ];
 
     #[test]
@@ -3942,7 +4028,7 @@ mod command_threading_tests {
 mod parameterized_scope_tests {
     use super::{
         accounts_export, accounts_export_to_path, accounts_import, accounts_import_local,
-        checkin_status, credits, open_data_dir,
+        build_open_data_dir, checkin_status, credits,
     };
 
     #[test]
@@ -3951,9 +4037,11 @@ mod parameterized_scope_tests {
         assert!(accounts_export("trae-glboal".to_string(), Vec::new()).is_err());
         assert!(accounts_export_to_path("nope".to_string(), Vec::new(), "x".to_string()).is_err());
         assert!(accounts_import(String::new(), String::new(), Vec::new()).is_err());
-        // `open_data_dir` 是**同步**参数化命令：未知 scope 必须在**定位目录 / 起子进程之前**失败。
-        assert!(open_data_dir("trae-glboal".to_string()).is_err());
-        assert!(open_data_dir(String::new()).is_err());
+        // `open_data_dir` 是**异步**参数化命令（慢 IO 不得跑在主线程，issue #48）：
+        // 未知 scope 必须在**定位目录 / 起子进程之前**失败 —— 断言打的是它的同步内核，
+        // 这样不必为「参数校验」引入一个 async 运行时。
+        assert!(build_open_data_dir("trae-glboal".to_string()).is_err());
+        assert!(build_open_data_dir(String::new()).is_err());
 
         // 错误文案必须列出合法取值，便于用户对照正确拼写。
         let error = accounts_export("trae-glboal".to_string(), Vec::new()).unwrap_err();

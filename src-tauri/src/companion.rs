@@ -25,6 +25,7 @@
 //! 不新增任何 Rust 周期循环 —— 于是**不触碰** `lib.rs` 的 `BackgroundTask` 注册表，
 //! 把「任务未登记 ⇒ 永不执行」这类风险归零。
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,23 @@ const POSITION_FILE: &str = "companion_window.json";
 
 /// 上次已落盘的位置，避免拖动过程中每一像素都写盘。
 static LAST_PERSISTED: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+/// 待落盘的位置（拖动中不断被覆盖，只有「停手后」才真正写盘一次）。
+static PENDING_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+
+/// 两次落盘之间的最小间隔（毫秒）。
+///
+/// 为什么要节流而不是「每次直接写」：`WindowEvent::Moved` 在拖动时**每移动一像素**
+/// 就触发一次，而「create_dir_all + 序列化 + 原子写」实测 2.47 ms/次 —— 按 60–120 Hz
+/// 的移动事件频率算，等于每秒 150–300 ms 的 IO，全压在 Tauri 主线程（窗口消息循环
+/// 所在线程）上，拖一次悬浮窗就把主线程占满，系统随即把窗口画成灰色「未响应」（issue #48）。
+///
+/// 取 120 ms：主线程 IO 占比降到 ~2%，而位置只是「下次启动时的记忆」，
+/// 中间丢掉的那几帧由关窗前的 [`flush_pending_position`] 补上。
+const POSITION_PERSIST_INTERVAL_MS: i64 = 120;
+
+/// 上次真正落盘的时刻（毫秒，`0` = 还没写过）。
+static LAST_PERSIST_MS: AtomicI64 = AtomicI64::new(0);
 
 /// 落盘的位置（物理坐标）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +158,17 @@ fn load_position() -> Option<(i32, i32)> {
 }
 
 /// 持久化窗口位置（物理坐标）；位置没变则跳过写盘。
+///
+/// **主线程上零 IO**（调用方是 `WindowEvent::Moved`，跑在 Tauri 主线程）：
+///
+/// 1. 内存去重（微秒级）—— 位置没变直接返回；
+/// 2. 按 [`POSITION_PERSIST_INTERVAL_MS`] **节流**：拖动时 `Moved` 每移动一像素就来一次，
+///    而「create_dir_all + 序列化 + 原子写」实测 2.47 ms/次，不节流就把消息循环占满
+///    ⇒ 系统把窗口画成灰色「未响应」（issue #48）；
+/// 3. 真正写盘交给 `spawn_blocking`（**一次性**任务，不是后台循环 —— P9 门禁只禁
+///    `spawn(` / `thread::spawn(`，见 `scripts/check-scope-registry.cjs`）。
+///
+/// 节流窗口里最后一次移动可能没写下去，由 [`flush_pending_position`] 在隐藏 / 销毁前补上。
 fn save_position(x: i32, y: i32) {
     {
         let mut last = LAST_PERSISTED
@@ -150,6 +179,43 @@ fn save_position(x: i32, y: i32) {
         }
         *last = Some((x, y));
     }
+    *PENDING_POSITION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((x, y));
+
+    let now = config::now_ms();
+    let last_write = LAST_PERSIST_MS.load(Ordering::Relaxed);
+    if last_write != 0 && now.saturating_sub(last_write) < POSITION_PERSIST_INTERVAL_MS {
+        return;
+    }
+    LAST_PERSIST_MS.store(now, Ordering::Relaxed);
+
+    let pending = PENDING_POSITION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some((x, y)) = pending {
+        // 一次性任务：主线程不等它，也不关心结果（位置只是下次启动的记忆）。
+        tauri::async_runtime::spawn_blocking(move || persist_position(x, y));
+    }
+}
+
+/// 立即落盘（隐藏 / 销毁前调用）：把还停在节流窗口里的位置写下去。
+///
+/// 不这样做的话，「拖完立刻关窗口」会丢掉最后一格位置 —— 节流省掉的是**中间**的写盘，
+/// 不该省掉最后一次。这里同步写一次（2.47 ms，只在关窗时发生一次）。
+fn flush_pending_position() {
+    let pending = PENDING_POSITION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some((x, y)) = pending {
+        persist_position(x, y);
+    }
+}
+
+/// 真正落盘（在后台线程上执行）。
+fn persist_position(x: i32, y: i32) {
     let _ = std::fs::create_dir_all(config::store_dir());
     let content = serde_json::to_string_pretty(&SavedPosition { x, y }).unwrap_or_default();
     let _ = config::atomic_write(&position_file(), &content);
@@ -282,9 +348,13 @@ pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
             // 关闭 = 隐藏（**不销毁**）：可从侧栏左下角 / 托盘再次打开。
             // 与主窗口 `tray.rs` 同一套「关闭 = 隐藏」纪律。
             api.prevent_close();
+            // 防抖窗口里可能还留着最后一格位置，先落盘再藏。
+            flush_pending_position();
             let _ = window.hide();
             let _ = window.app_handle().emit(VISIBILITY_EVENT, false);
         }
+        // 窗口被销毁（应用退出 / 重建）前把节流窗口里最后的位置补上。
+        WindowEvent::Destroyed => flush_pending_position(),
         _ => {}
     }
 }
