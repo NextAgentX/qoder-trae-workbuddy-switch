@@ -64,7 +64,9 @@ L5 门禁同步 + 全量验证   check-scope-registry.cjs / check-api-contract.c
 | `token.rs` | 令牌前缀语义 | `TokenKind::{DeviceAccess(dt-),JobAccess(jt-),Personal(pt-),DeviceRefresh(drt-),JobRefresh(jrt-)}`、`kind_of(token) -> Option<TokenKind>` |
 | `refresh.rs` | 按前缀路由的刷新 | `refresh_account_for(region, account)`、`ensure_fresh_for(region, uid)`、`run_keepalive_cycle_for(region)` |
 | `oauth.rs` | PKCE S256 设备流 | `login_start_for(region)`、`login_poll(login_id)`、`login_cancel`；两区 URL 参数差异在 `RealmSpec` |
-| `checkin.rs` | 每日签到（legacy 通道，上游已关停 · #58） | `claim_decision(&CheckinStatus)`、`claim_for(region, uid)`、`status_for(region)`、`status_map_for(region, uids)`；纯函数出口 `already_claim_response` / `disabled_claim_response` |
+| `campaign.rs` | 活动平台（**签到主通道**） | `fetch_campaigns(region, uid, access)`、`claim_campaign(...)`、`checkin_for(region, uid)`、`parse_campaigns(&Value)`、`classify(&CampaignItem)`、`checkin_ok(&errors, has_benefit)`、`desktop_headers(...)` |
+| `native.rs` | 原生风控身份桥（`runtime-info.exe`） | `cached_identity(region, uid, force)`、`runtime_info_exe(region)`、`parse_identity(&Value)`、`parse_state_ini(bytes)`；**best-effort**：取不到 ⇒ 一个 `cosy-machine*` 头都不发 |
+| `checkin.rs` | 签到编排（活动平台优先 / legacy 兜底） | `claim_for(region, uid)`、`status_for(region)`、`status_map_for(region, uids)`、`summarize_campaigns(&items)`；旧通道纯函数 `claim_decision` / `already_claim_response` / `disabled_claim_response` |
 | `credits.rs` | 额度 / 套餐 | `fetch_credits_for(region, uid)`、`fetch_plan_for(region, uid)` |
 | `profile.rs` | 本机导入（**两处**官方凭据存储） | `import_from_local_for(region)`、`import_from_pat_for(region, pat)` |
 | `platform.rs` | 客户端探测 / 能力诊断 | `detect_clients_for(region)`、`capabilities()` |

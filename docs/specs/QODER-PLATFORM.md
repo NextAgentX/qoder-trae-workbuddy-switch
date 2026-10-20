@@ -71,7 +71,7 @@
 
 | 能力 | 有 | 说明 |
 |:---|:---:|:---|
-| 每日签到领积分 | ⚠️ | **通道未开放**：本仓走的是 legacy `/sash/api/v1/me/daily-check-in/*`，上游已整体关停（claim 恒 409 且不携带幂等语义、status 恒 `DISABLED` + `totalClaimDays=0`）。界面如实报「未开放」并说明要开桌面端网页活动页；**工具内代领未实现**，见 issue #58 |
+| 每日签到领积分 | ✅ | 走**活动平台**：`GET /sash/api/v1/me/campaigns` → 筛 `CLAIM_BENEFIT` + `CLAIMABLE` → 逐个 `POST …/{id}/claim`，累加 Credits；已领 ⇒ 幂等「今日已领」。旧 `/sash/daily-check-in` 只在**整区没有活动平台**（404/405/410）时兜底。三档语义不变：**没有积分类活动 ⇒ 未开放（`ok:false` + `disabled`）**，不谎报成功。⚠️ 真机未复验（本仓无 Qoder 账号），当前只有协议级单测 + `#[ignore]` 探针（`live_campaigns_probe`） |
 | 积分 / 额度查询 | ✅ | quota/usage + 套餐快照 |
 | Pro 福利包 | ❌ | **未实现**：`PATH_PRO_CLAIM` 只有常量定义、零调用点（issue #58 第 1 阶段一并落地） |
 | OAuth 设备授权 | ✅ | **PKCE S256**；两区 URL 参数不同（国内带 `redirect_uri`，国际不带） |
