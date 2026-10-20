@@ -246,6 +246,21 @@ export const zh = {
   "qoder.page.settings.section.client": "客户端检测",
   "qoder.page.settings.client.description": "本机两处官方凭据存储的探测结果（只读，不落库）。",
   "qoder.page.settings.client.error": "探测失败：{error}",
+  // ★ 计划任务（Qoder 的两类排程；排程是全局单份 `schedule_config.json`）
+  "qoder.page.settings.schedule.checkinGroup": "自动签到",
+  "qoder.page.settings.schedule.checkinEnable": "按排程自动签到",
+  "qoder.page.settings.schedule.checkinDesc":
+    "到点自动领取活动平台的积分奖励（默认关闭 —— 替你去领东西，需要你明确打开）。",
+  "qoder.page.settings.schedule.checkinTimesLabel": "签到时点",
+  "qoder.page.settings.schedule.checkinTimesDesc":
+    "每天在这些时刻（本地时区）尝试一次；已有随机抖动，不会与官方风控撞在同一秒。",
+  "qoder.page.settings.schedule.keepaliveGroup": "令牌保活",
+  "qoder.page.settings.schedule.keepaliveEnable": "自动续期 refresh token",
+  "qoder.page.settings.schedule.keepaliveDesc":
+    "在令牌到期前 4 小时内续期（默认开启：refresh token 的唯一用途就是续期，它本来就是你在网页登录时交出来的）。",
+  "qoder.page.settings.schedule.keepaliveTimesLabel": "保活时点",
+  "qoder.page.settings.schedule.keepaliveTimesDesc": "每天在这些时刻检查一次是否临近到期。",
+  "qoder.page.settings.schedule.saveFailed": "保存计划任务失败",
   "qoder.page.settings.filtered":
-    "这里只列已有内容的分区；客户端路径 / 签到 / 网关 / 计划任务等设置项会随对应功能落地后出现（不预先摆空壳）。",
+    "这里只列已有内容的分区；签到 / 网关 / 权限诊断 / 日志等设置项会随对应功能落地后出现（不预先摆空壳）。",
 } as const;

@@ -241,6 +241,21 @@ export const en = {
   "qoder.page.settings.section.client": "Client detection",
   "qoder.page.settings.client.description": "Probe result for the two official credential stores (read-only).",
   "qoder.page.settings.client.error": "Probe failed: {error}",
+  // ★ Scheduled tasks (Qoder has two; the schedule config is a single global file)
+  "qoder.page.settings.schedule.checkinGroup": "Auto check-in",
+  "qoder.page.settings.schedule.checkinEnable": "Check in on schedule",
+  "qoder.page.settings.schedule.checkinDesc":
+    "Claims the campaign credit reward at the configured times (off by default — it acts on your behalf, so it must be opted in).",
+  "qoder.page.settings.schedule.checkinTimesLabel": "Check-in times",
+  "qoder.page.settings.schedule.checkinTimesDesc":
+    "One attempt at each time (local timezone); jitter is applied so it never lands on the same second as the official client.",
+  "qoder.page.settings.schedule.keepaliveGroup": "Token keep-alive",
+  "qoder.page.settings.schedule.keepaliveEnable": "Refresh the token automatically",
+  "qoder.page.settings.schedule.keepaliveDesc":
+    "Refreshes within 4 hours of expiry (on by default: a refresh token exists solely to be refreshed, and you handed it over at login).",
+  "qoder.page.settings.schedule.keepaliveTimesLabel": "Keep-alive times",
+  "qoder.page.settings.schedule.keepaliveTimesDesc": "Checks once at each of these times whether the token is close to expiry.",
+  "qoder.page.settings.schedule.saveFailed": "Failed to save scheduled tasks",
   "qoder.page.settings.filtered":
-    "Only sections with real content are listed; client path / check-in / gateway / scheduled-task settings will appear once those features land (no empty shells are shown up front).",
+    "Only sections with real content are listed; check-in / gateway / permissions / log settings will appear once those features land (no empty shells are shown up front).",
 } as const;
