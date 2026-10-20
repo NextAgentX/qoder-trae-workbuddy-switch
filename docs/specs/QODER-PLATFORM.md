@@ -77,7 +77,7 @@
 | OAuth 设备授权 | ✅ | **PKCE S256**；两区 URL 参数不同（国内带 `redirect_uri`，国际不带） |
 | PAT 导入 | ✅ | 前缀 `pt-`，导入后自动交换 jobToken |
 | API 网关 | ✅ | OpenAI 兼容（Chat Completions / Responses）+ **Anthropic 兼容**（`/v1/messages`） |
-| 定时调度 | ❌ | **无 Qoder 排程任务**：`ScheduleTask` 枚举里没有 Qoder 变体，`scheduler` 也无对应分支 ⇒ 签到与令牌保活**都不会自动执行**（issue #58 讨论是否补上） |
+| 定时调度 | ✅ | `ScheduleTask::{QoderCheckin, QoderKeepalive}`：逐账号**顺序**执行（并发会踩风控）。判据与 Trae 两条同源 —— 签到默认**关**（替用户去领东西，opt-in），保活默认**开**（维持用户交出来的 `refresh_token`）；入口在 Qoder 设置页「计划任务」 |
 | 会话复制 | ❌ | **不实现** —— 会话复制依赖客户端自身的会话存储与云端归属，当前只有 WorkBuddy 桌面具备 |
 | 自动旅行 | ❌ | WorkBuddy 独有 |
 
