@@ -3641,7 +3641,8 @@ hLkrYGiVNhsErnjKIgS7/EIHdsihRANCAARznG0WLhenNiMW5jA3SwFpTNyet2zw\n\
 
             // 当前池（合并版）与历史池（CN 的 `profiles`，收敛前 TraeWork 的位置）。
             let merged_snap = paths::profiles_dir_for_program(region, TraeProgram::Trae).join("u1");
-            let legacy_snap = paths::profiles_dir_for_program(region, TraeProgram::TraeWork).join("u1");
+            let legacy_snap =
+                paths::profiles_dir_for_program(region, TraeProgram::TraeWork).join("u1");
             std::fs::create_dir_all(&merged_snap).expect("造合并版快照");
             std::fs::create_dir_all(&legacy_snap).expect("造历史池快照");
 

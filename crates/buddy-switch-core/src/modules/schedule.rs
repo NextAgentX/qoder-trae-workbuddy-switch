@@ -740,10 +740,7 @@ mod tests {
         //   · `*_checkin` 默认**关**（替用户去领东西，他没要求过，故 opt-in）；
         //   · `*_keepalive` / `trae_jwt_refresh` 默认**开**（维持用户自己交出来的登录态）。
         for task in ScheduleTask::all() {
-            let expected = !matches!(
-                task,
-                ScheduleTask::TraeCheckin | ScheduleTask::QoderCheckin
-            );
+            let expected = !matches!(task, ScheduleTask::TraeCheckin | ScheduleTask::QoderCheckin);
             assert_eq!(
                 task.enabled(&cfg),
                 expected,

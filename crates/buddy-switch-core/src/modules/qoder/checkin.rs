@@ -838,8 +838,10 @@ mod tests {
             _ => QoderRegion::Cn,
         };
         let result = claim_for(region, &uid).await.expect("签到调用本身失败");
-        println!("{}", serde_json::to_string_pretty(&result).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).unwrap_or_default()
+        );
         assert_eq!(result["source"], "campaign", "应走活动平台");
     }
-
 }

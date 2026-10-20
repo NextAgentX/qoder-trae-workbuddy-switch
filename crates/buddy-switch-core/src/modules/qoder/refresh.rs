@@ -131,9 +131,13 @@ pub const KEEPALIVE_WINDOW_HOURS: i64 = 4;
 /// （实测上游给的是**秒**）。判据用量级：小于 10^11 的一律当秒
 /// （10^11 秒 ≈ 公元 5138 年，10^11 毫秒 ≈ 1973 年 —— 两侧都不会误判）。
 fn expiry_ms(account: &RawAccount) -> Option<i64> {
-    account
-        .expires_at
-        .map(|value| if value < 100_000_000_000 { value * 1000 } else { value })
+    account.expires_at.map(|value| {
+        if value < 100_000_000_000 {
+            value * 1000
+        } else {
+            value
+        }
+    })
 }
 
 /// 这条账号是否需要保活刷新（**纯函数**，可测）。
@@ -249,7 +253,7 @@ mod tests {
     #[test]
     fn keepalive_only_touches_expiring_or_credential_less_accounts() {
         let now = 1_800_000_000_000i64; // 毫秒
-        // 无 access token ⇒ 必须刷。
+                                        // 无 access token ⇒ 必须刷。
         let mut account = account_with(Some("drt-abc"), None);
         account.access_token = None;
         assert!(needs_keepalive(&account, now));
