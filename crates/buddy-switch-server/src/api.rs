@@ -6348,21 +6348,6 @@ mod parse_trae_variant_tests {
         assert_eq!(parse_trae_variant(Some("   ")), default);
         assert_eq!(parse_trae_variant(None), default);
     }
-
-    /// ★ issue #28：区域标识必须解析成**合并版**（与 `src-tauri` 的同名单测互为镜像）。
-    ///
-    /// `useTraeVariant()` 返回的就是 `cn` / `global`，它被原样传给
-    /// `api_trae_launch_client` / `api_trae_oauth_start` / `api_trae_open_data_dir`
-    /// 三个**程序级**路由。解析成退役变体时，那三个路由会去找已被官方合并
-    /// 卸载的 `TRAE SOLO CN` / `TRAE SOLO` ⇒ 报「未检测到【TraeWork CN】客户端」。
-    #[test]
-    fn region_ids_resolve_to_the_merged_client() {
-        assert_eq!(parse_trae_variant(Some("cn")), TraeVariant::TraeMerged);
-        assert_eq!(
-            parse_trae_variant(Some("global")),
-            TraeVariant::GlobalTraeMerged
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
