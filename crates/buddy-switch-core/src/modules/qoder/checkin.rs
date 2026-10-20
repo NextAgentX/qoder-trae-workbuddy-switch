@@ -1,24 +1,37 @@
-//! Qoder **签到**：状态查询与领取（`/sash` 通道）。
+//! Qoder **签到**：活动平台为主、旧 `/sash/daily-check-in` 通道兜底。
 //!
-//! ## 语义要点
+//! ## 通道选择（★ 改这里之前先读）
 //!
-//! - **国际版没有该接口**（404/405/410）⇒ 不是错误，是「本区域未开放」——
-//!   状态视图给 `unavailable` + 可读原因，领取**不发起**无意义的请求。
-//! - 领取是**状态驱动**的（与官方客户端同构）：先查状态 → 已签 ⇒ 幂等返回；
-//!   活动未开放（非 CLAIMABLE/CLAIMED）⇒ 成功跳过；否则 claim。
-//! - claim 返回 `success=false` 时**复查一次状态**（上游可能已记账）——
-//!   复查确认已签 ⇒ 如实报「今日已签到（复查确认）」，而不是把已签名额报成失败。
+//! | 通道 | 端点 | 现状 |
+//! |:--|:--|:--|
+//! | **活动平台**（主力） | `GET /sash/api/v1/me/campaigns` + `POST …/{id}/claim` | 官方现行机制，「每日领取 100 Credits」在这里 |
+//! | 旧签到通道（兜底） | `/sash/api/v1/me/daily-check-in/*` | 实测**国内版 `DISABLED`、国际版 404**，只在仍开放时可用 |
 //!
-//! ## 为什么没有本地「盖章」
+//! ⇒ 顺序固定：**先活动平台**；只有它**整区不可用**（404/405/410）时才回落旧通道。
+//! 旧通道返回 `DISABLED` 也**不**再回退（那是「活动关着」，不是「通道不存在」）。
 //!
-//! 官方客户端的参考实现会在本地记「今日已签」供其**调度器**去重；本仓暂无 Qoder
-//! 签到调度，签到与否以**上游 `lastClaimedAt` 为准**——不引入会与上游漂移的第二份状态。
+//! ## 三档语义（**不许回退**，issue #46-D / #58 §6）
+//!
+//! | 档 | 判据 | 出口 |
+//! |:--|:--|:--|
+//! | 成功 | 真领到了 / 今日已领（上游 `CLAIMED`） | `ok:true` |
+//! | **未开放** | 列表里**根本没有**积分类活动；或整区没有活动平台 | `ok:false` + `disabled:true` |
+//! | 失败 | 上游报错 / 网络失败 | `ok:false` |
+//!
+//! 「未开放」写成 `ok:true` 会让界面显示「N 个成功」而额度纹丝不动 —— 那正是
+//! `de932d7` 修掉的缺陷，也是 [`disabled_claim_response`] 存在的唯一理由。
+//!
+//! ## 「今日已签」怎么判
+//!
+//! - 活动平台：**上游 `claimStatus` 为准**（任一积分类活动 `CLAIMED` ⇒ 今日已签）；
+//!   本地盖章（`account::last_checkin`）只作**展示提示**，不作判据。
+//! - 旧通道：上游 `lastClaimedAt`（该通道自带，无需本地状态）。
 
 use serde_json::{json, Value};
 
 use super::account::{self, RawAccount};
-use super::api;
 use super::region::QoderRegion;
+use super::{api, campaign, store};
 
 /// 领取决策（纯函数，可测）：由状态推出下一步。
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +107,92 @@ fn access_token_of(account: &RawAccount) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
+// ---------------------------------------------------------------------------
+// 活动平台 → 签到状态（纯函数，可测）
+// ---------------------------------------------------------------------------
+
+/// 一次活动快照里与「签到」有关的聚合结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CampaignSummary {
+    /// 列表里**有没有**积分类活动 —— 这一条决定「未开放」这一档（issue #58 §6）。
+    pub has_benefit: bool,
+    /// 有活动已被领取（上游 `CLAIMED`）。
+    pub claimed: bool,
+    /// 有活动现在就能领。
+    pub claimable: bool,
+    /// 现在能领的金额合计（= 界面上的「今日可得」）。
+    pub claimable_amount: i64,
+    /// 已领金额合计（只有 `claimed` 时才有意义）。
+    pub claimed_amount: i64,
+}
+
+/// 把活动列表聚合成签到口径（**纯函数**）。
+///
+/// 只统计「积分类」活动（`CREDITS` / 空 kind，见 `CampaignItem::is_credit_kind`）——
+/// 兑换码 / 详情类活动不是签到，混进来会让「今日已签」变成假阳性。
+pub fn summarize_campaigns(items: &[campaign::CampaignItem]) -> CampaignSummary {
+    let mut summary = CampaignSummary::default();
+    for item in items.iter().filter(|item| item.is_credit_kind()) {
+        summary.has_benefit = true;
+        match campaign::classify(item) {
+            campaign::CampaignClass::Already => {
+                summary.claimed = true;
+                summary.claimed_amount += item.benefit_amount;
+            }
+            campaign::CampaignClass::Claimable => {
+                summary.claimable = true;
+                summary.claimable_amount += item.benefit_amount;
+            }
+            // 名额发完 / 被锁 / 详情类：都不是「今天领到了」，也不算「现在能领」。
+            campaign::CampaignClass::Pending
+            | campaign::CampaignClass::Locked
+            | campaign::CampaignClass::View => {}
+        }
+    }
+    summary
+}
+
+/// 把活动快照投影成 `CheckinStatusEntry`（**纯函数**；字段名与 WB 同构）。
+///
+/// - `todayCheckedIn` 只认上游 `claimStatus`（本地盖章只给 `stampedToday` 作提示）；
+/// - `dailyCredit` = 现在能领的合计，没有可领时退回已领合计（否则「已签」会显示成 0）；
+/// - `todayCredit` 只在**今天确实领到**时才有值（`0` 会被读成「签了但没给分」）。
+fn campaign_entry(snapshot: &campaign::CampaignsSnapshot, stamped_today: bool) -> Value {
+    let summary = summarize_campaigns(&snapshot.items);
+    let daily = if summary.claimable_amount > 0 {
+        summary.claimable_amount
+    } else {
+        summary.claimed_amount
+    };
+    let status = if summary.claimed {
+        "CLAIMED"
+    } else if summary.claimable {
+        "CLAIMABLE"
+    } else if summary.has_benefit {
+        "UNAVAILABLE"
+    } else {
+        "NONE"
+    };
+    json!({
+        "ok": true,
+        "todayCheckedIn": summary.claimed,
+        "dailyCredit": daily,
+        "todayCredit": if summary.claimed { json!(summary.claimed_amount) } else { Value::Null },
+        "totalCredits": summary.claimed_amount,
+        // 活动平台没有「连续天数」这个概念：给 null 而不是编一个 0。
+        "streakDays": Value::Null,
+        "status": status,
+        "active": summary.claimable || summary.claimed,
+        // 身份来源（`runtime-info` / `derived`）与机器头状态 —— 国际版拿不到活动时，
+        // 界面要能说清「是没装客户端」而不是「今天没有活动」。
+        "source": "campaign",
+        "identity": snapshot.identity,
+        "machineHeaders": snapshot.machine_headers,
+        "hint": snapshot.hint,
+        "stampedToday": stamped_today,
+    })
+}
+
 /// 区域签到状态视图：逐账号状态 + 汇总。`unavailable` 是**区域级**结论。
 pub async fn status_for(region: QoderRegion) -> Value {
     let file = account::load_accounts_for(region);
@@ -113,6 +212,30 @@ pub async fn status_for(region: QoderRegion) -> Value {
             }));
             continue;
         };
+        // ── 活动平台优先 ──
+        let stamped_today = account::checkin_stamp_day(account) == Some(store::today().as_str());
+        let snapshot = campaign::fetch_campaigns(region, &account.uid, access).await;
+        if snapshot.ok {
+            rows.push(campaign_entry(&snapshot, stamped_today));
+            continue;
+        }
+        if snapshot.available {
+            // 账号级失败（网络 / 鉴权 / 响应格式）：如实报错，**不**回落旧通道 ——
+            // 旧通道已关停，回落只会把一个真实错误变成一句「未开放」。
+            rows.push(json!({
+                "uid": account.uid,
+                "name": name,
+                "ok": false,
+                "error": snapshot.error,
+                "unavailable": false,
+                "source": "campaign",
+                "identity": snapshot.identity,
+                "machineHeaders": snapshot.machine_headers,
+                "hint": snapshot.hint,
+            }));
+            continue;
+        }
+        // ── 整区没有活动平台（404/405/410）⇒ 旧通道兜底 ──
         match api::checkin_status(region, &account.uid, access).await {
             Ok(status) => {
                 rows.push(json!({
@@ -172,8 +295,48 @@ pub async fn status_for(region: QoderRegion) -> Value {
     })
 }
 
-/// 单账号签到（状态驱动；见模块头的三步语义）。
+/// 单账号签到：**活动平台优先**；整区没有活动平台时回落旧通道。
+///
+/// 返回值同时带**旧契约**（`ok` / `already` / `rewardCredits` / `disabled`）与
+/// **活动明细**（`claimed` / `alreadyItems` / `blocked` / `pending` / `locked` / `earned` /
+/// `message` / `nextAvailableAt`），前端按需取用 —— 加字段是兼容的，改字段名不是。
 pub async fn claim_for(region: QoderRegion, uid: &str) -> Result<Value, String> {
+    let campaign_result = campaign::checkin_for(region, uid).await?;
+    // `available == false` 才是「整区没有活动平台」；账号级失败仍然是活动通道的结论。
+    if campaign_result.get("available").and_then(Value::as_bool) != Some(false) {
+        return Ok(normalize_campaign_claim(campaign_result));
+    }
+    legacy_claim_for(region, uid).await
+}
+
+/// 把活动通道的响应补成「旧契约 + 新明细」。
+///
+/// 只补**兼容键**，不改上游给的事实：
+/// - `already` = 有已领活动（布尔，与旧契约同名同义）；
+/// - `rewardCredits` = `earned`（本次真领到的额度）；
+/// - `claimedCount` = 本次领取条数。
+fn normalize_campaign_claim(mut value: Value) -> Value {
+    let already_count = value
+        .get("alreadyItems")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let claimed_count = value
+        .get("claimed")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let earned = value.get("earned").and_then(api::as_num).unwrap_or(0);
+    if let Some(map) = value.as_object_mut() {
+        map.insert("already".to_string(), json!(already_count > 0));
+        map.insert("rewardCredits".to_string(), json!(earned));
+        map.insert("claimedCount".to_string(), json!(claimed_count));
+    }
+    value
+}
+
+/// 旧 `/sash/daily-check-in` 通道的领取（**只在整区没有活动平台时**才走）。
+async fn legacy_claim_for(region: QoderRegion, uid: &str) -> Result<Value, String> {
     let account =
         account::find_account_for(region, uid).ok_or_else(|| format!("账号不存在: {uid}"))?;
     let access = access_token_of(&account)
@@ -302,6 +465,11 @@ pub async fn status_map_for(region: QoderRegion, uids: Vec<String>) -> Value {
             .get(uid.as_str())
             .and_then(|account| access_token_of(account))
             .map(str::to_string);
+        let today = store::today();
+        let stamped = by_uid
+            .get(uid.as_str())
+            .and_then(|account| account::checkin_stamp_day(account))
+            .is_some_and(|day| day == today);
         let permit = semaphore.clone();
         tasks.push(tokio::spawn(async move {
             let Ok(_permit) = permit.acquire_owned().await else {
@@ -313,6 +481,23 @@ pub async fn status_map_for(region: QoderRegion, uids: Vec<String>) -> Value {
                     failure_entry("没有可调用的 access token（PAT 不能用于签到端点）".to_string()),
                 );
             };
+            // 活动平台优先；整区没有活动平台（404/405/410）才回落旧通道。
+            // 判据与 `status_for` 完全同源 —— 两处各写一套会让「签到页」与
+            // 「卡片上的今日状态」给出不同答案。
+            let snapshot = campaign::fetch_campaigns(region, &uid, &access).await;
+            if snapshot.ok {
+                return (uid, campaign_entry(&snapshot, stamped));
+            }
+            if snapshot.available {
+                return (
+                    uid,
+                    failure_entry(
+                        snapshot
+                            .error
+                            .unwrap_or_else(|| "活动列表读取失败".to_string()),
+                    ),
+                );
+            }
             match api::checkin_status(region, &uid, &access).await {
                 Ok(status) => (uid, status_entry(&status)),
                 Err(error) => (uid, failure_entry(error)),
@@ -472,5 +657,122 @@ mod tests {
             claim_decision(&status("CLAIMED", false)),
             ClaimDecision::ClaimNow
         );
+    }
+    // ---- 活动平台通道（issue #58）----
+
+    fn campaign_item(status: &str, amount: i64, kind: &str) -> campaign::CampaignItem {
+        campaign::CampaignItem {
+            campaign_id: "c1".into(),
+            campaign_key: "daily".into(),
+            title: "每日领取 100 Credits".into(),
+            description: String::new(),
+            detail_url: String::new(),
+            button_text: String::new(),
+            action_type: "CLAIM_BENEFIT".into(),
+            claim_status: status.into(),
+            benefit_kind: kind.into(),
+            benefit_amount: amount,
+            required_achievement_key: String::new(),
+            achievement_completed: true,
+            unavailable_reason: String::new(),
+            start_at: 0,
+            end_at: 0,
+        }
+    }
+
+    fn snapshot(items: Vec<campaign::CampaignItem>) -> campaign::CampaignsSnapshot {
+        campaign::CampaignsSnapshot {
+            ok: true,
+            available: true,
+            show_campaign: true,
+            claimable: true,
+            campaign_url: String::new(),
+            items,
+            identity: "derived",
+            machine_headers: "omitted",
+            hint: String::new(),
+            error: None,
+        }
+    }
+
+    /// 聚合口径：只认积分类活动；已领 / 可领 / 都没有 三种形状。
+    #[test]
+    fn summarize_campaigns_splits_claimed_and_claimable() {
+        let claimable = summarize_campaigns(&[campaign_item("CLAIMABLE", 100, "CREDITS")]);
+        assert!(claimable.has_benefit && claimable.claimable && !claimable.claimed);
+        assert_eq!(claimable.claimable_amount, 100);
+
+        let claimed = summarize_campaigns(&[campaign_item("CLAIMED", 100, "CREDITS")]);
+        assert!(claimed.claimed && !claimed.claimable);
+        assert_eq!(claimed.claimed_amount, 100);
+
+        // 空列表 / 只有兑换码活动 ⇒ 都不是签到活动（`has_benefit` 必须是 false，
+        // 否则「未开放」会被当成「已签」）。
+        assert!(!summarize_campaigns(&[]).has_benefit);
+        assert!(
+            !summarize_campaigns(&[campaign_item("CLAIMABLE", 0, "REDEMPTION_CODE")]).has_benefit
+        );
+    }
+
+    /// 状态投影：`todayCheckedIn` 只认上游 `claimStatus`；没签时 `todayCredit` 是 null。
+    #[test]
+    fn campaign_entry_reports_checked_in_from_upstream_status_only() {
+        let claimed = campaign_entry(
+            &snapshot(vec![campaign_item("CLAIMED", 100, "CREDITS")]),
+            false,
+        );
+        assert_eq!(claimed["todayCheckedIn"], Value::Bool(true));
+        assert_eq!(claimed["todayCredit"], 100);
+        assert_eq!(claimed["dailyCredit"], 100, "已签时今日可得退回已领额度");
+        assert_eq!(claimed["status"], "CLAIMED");
+
+        let pending = campaign_entry(
+            &snapshot(vec![campaign_item("CLAIMABLE", 100, "CREDITS")]),
+            false,
+        );
+        assert_eq!(pending["todayCheckedIn"], Value::Bool(false));
+        assert_eq!(
+            pending["todayCredit"],
+            Value::Null,
+            "没签就不能有「今日已得」"
+        );
+        assert_eq!(pending["dailyCredit"], 100);
+        assert_eq!(pending["status"], "CLAIMABLE");
+        assert_eq!(pending["active"], Value::Bool(true));
+
+        // 本地盖章**不是**判据：盖章了但上游没 CLAIMED ⇒ 仍然算没签。
+        let stamped_only = campaign_entry(
+            &snapshot(vec![campaign_item("CLAIMABLE", 100, "CREDITS")]),
+            true,
+        );
+        assert_eq!(stamped_only["todayCheckedIn"], Value::Bool(false));
+        assert_eq!(stamped_only["stampedToday"], Value::Bool(true));
+    }
+
+    /// 旧契约兼容：`already` 必须是布尔、`rewardCredits` 取 `earned`。
+    #[test]
+    fn normalize_campaign_claim_keeps_legacy_contract() {
+        let claimed = normalize_campaign_claim(json!({
+            "ok": true, "earned": 100,
+            "claimed": [{"campaignId": "c1", "amount": 100}],
+            "alreadyItems": [],
+        }));
+        assert_eq!(claimed["ok"], Value::Bool(true));
+        assert_eq!(claimed["already"], Value::Bool(false));
+        assert_eq!(claimed["rewardCredits"], 100);
+        assert_eq!(claimed["claimedCount"], 1);
+
+        let already = normalize_campaign_claim(json!({
+            "ok": true, "earned": 0, "claimed": [], "alreadyItems": [{"campaignId": "c1"}],
+        }));
+        assert_eq!(already["already"], Value::Bool(true));
+        assert_eq!(already["rewardCredits"], 0);
+
+        // 未开放：`ok:false` 原样保留（这条是 de932d7 的核心修复，不许被 normalize 洗白）。
+        let disabled = normalize_campaign_claim(json!({
+            "ok": false, "disabled": true, "earned": 0, "claimed": [], "alreadyItems": [],
+        }));
+        assert_eq!(disabled["ok"], Value::Bool(false));
+        assert_eq!(disabled["disabled"], Value::Bool(true));
     }
 }

@@ -38,11 +38,13 @@
 
 pub mod account;
 pub mod api;
+pub mod campaign;
 pub mod checkin;
 pub mod cosy;
 pub mod credits;
 pub mod device;
 pub mod export_import;
+pub mod native;
 pub mod oauth;
 pub mod paths;
 pub mod profile;
@@ -75,13 +77,20 @@ pub const PATH_USER_PLAN: &str = "/api/v2/user/plan";
 /// 模型清单（动态源）。
 pub const PATH_MODEL_LIST: &str = "/algo/api/v2/model/list";
 /// 活动列表（签到 / 福利领取的入口）。
+///
+/// ★ 这是**当前**官方的签到机制：官方把「每日领取 100 Credits」等限时活动搬到了
+/// 活动平台，`/sash/api/v1/me/daily-check-in/*` 只在仍开放时作为兜底（见 [`campaign`]）。
 pub const PATH_CAMPAIGNS: &str = "/sash/api/v1/me/campaigns";
 /// 签到：状态查询（`/sash` 通道，与 `/api` 通道不同 —— 别拼错）。
 pub const PATH_CHECKIN_STATUS: &str = "/sash/api/v1/me/daily-check-in/status";
 /// 签到：领取。
 pub const PATH_CHECKIN_CLAIM: &str = "/sash/api/v1/me/daily-check-in/claim";
+/// Pro 升级奖励**资格查询**（`eligibility → claim` 两步走的第一步）。
+pub const PATH_PRO_ELIGIBILITY: &str = "/sash/api/v1/me/pro-upgrade/eligibility";
 /// Pro 升级奖励领取。
 pub const PATH_PRO_CLAIM: &str = "/sash/api/v1/me/pro-upgrade/claim";
+/// 单活动**奖励发放状态**查询（幂等、只读；`{id}` 位置替换 campaign id）。
+pub const PATH_CAMPAIGN_REWARD_TEMPLATE: &str = "/sash/api/v1/me/campaigns/{id}/reward";
 /// 单活动领取（`{id}` 位置替换 campaign id）。
 pub const PATH_CAMPAIGN_CLAIM_TEMPLATE: &str = "/sash/api/v1/me/campaigns/{id}/claim";
 /// 推理（SSE）：对话生成。

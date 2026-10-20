@@ -262,8 +262,7 @@ fn account_from_record(region: QoderRegion, raw: &Value, source: &str) -> Option
         source: Some(source.to_string()),
         remark: None,
         group: None,
-        added_at: None,
-        updated_at: None,
+        ..Default::default()
     })
 }
 
@@ -472,8 +471,7 @@ pub fn account_from_pat(
         source: Some(SOURCE_PAT.to_string()),
         remark: None,
         group: None,
-        added_at: None,
-        updated_at: None,
+        ..Default::default()
     })
 }
 

@@ -77,6 +77,29 @@ pub struct RawAccount {
     /// 那是我方凭空多出来的一步。自由文本也让「按分组分桶」这条视图能力零成本落地。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// **签到本地盖章**（`YYYY-MM-DD HH:MM:SS`，本地时区）。
+    ///
+    /// ## 为什么需要它（旧实现刻意没有）
+    ///
+    /// 旧 `/sash/daily-check-in` 通道的响应自带 `lastClaimedAt`，所以「今日是否已签」
+    /// 可以**只以上游为准**，不引入第二份状态（当时的模块头明确写了这条）。
+    /// **活动平台（campaigns）没有等价的字段** —— 它只给每个活动的 `claimStatus`，
+    /// 而「今天领没领」要跨活动聚合才知道。上游不给，就只能自己记。
+    ///
+    /// ⚠️ 它**只是展示与调度去重的提示**，不是判据：真正的判据永远是上游的
+    /// `claimStatus`（领取前先查状态，见 `campaign::checkin_for`）。上游与本地不一致时
+    /// 以上游为准，本地戳会被下一次成功签到覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checkin: Option<String>,
+    /// 活动平台已领取的**兑换码**（`campaignId -> code`）—— 落盘以免重启后丢失。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub campaign_codes: BTreeMap<String, String>,
+    /// 「同人已领」**冷却截止**（`campaignId -> epoch 秒`）。
+    ///
+    /// 服务端按「人」（机器指纹）去重：同机多号共享每轮一次的额度，后领的号会拿到
+    /// `SAME_PERSON_ALREADY_CLAIMED`。记冷却避免每轮都白打一次上游。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub campaign_blocked_until: BTreeMap<String, i64>,
     /// 加入时刻（ISO-8601）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_at: Option<String>,
@@ -299,6 +322,61 @@ pub fn set_group_for(
     account.updated_at = Some(store::now_iso());
     save_accounts_for(region, &file)?;
     Ok(true)
+}
+
+/// 记录一次签到结果：**本地盖章 + 兑换码 + 同人冷却**（三者一次写盘）。
+///
+/// ## 为什么是一个合并函数而不是三个 setter
+///
+/// 签到是「一次动作、三处状态」：分开写会让中间态落盘（写了戳还没写码），
+/// 而这三者本来就是同一次上游交互的产物。合并成一次原子写既省 I/O，
+/// 也让「一次签到 = 一次落盘」这条不变量可读。
+///
+/// 各参数语义：
+/// - `last_checkin`：非空才写（`None` = 不改动，不是清空）；
+/// - `codes`：`(campaignId, code)`，逐条插入 / 覆盖；
+/// - `blocked`：`(campaignId, 冷却截止 epoch 秒)`，逐条插入 / 覆盖。
+///
+/// 返回是否找到了该账号（`false` = 账号已不在库，调用方**不得**当成功报）。
+pub fn record_checkin_for(
+    region: QoderRegion,
+    uid: &str,
+    last_checkin: Option<&str>,
+    codes: &[(String, String)],
+    blocked: &[(String, i64)],
+) -> Result<bool, String> {
+    let mut file = load_accounts_checked_for(region)?;
+    let Some(account) = file.accounts.iter_mut().find(|a| a.uid == uid) else {
+        return Ok(false);
+    };
+    if let Some(stamp) = last_checkin.filter(|text| !text.trim().is_empty()) {
+        account.last_checkin = Some(stamp.to_string());
+    }
+    for (id, code) in codes {
+        if !id.trim().is_empty() && !code.trim().is_empty() {
+            account.campaign_codes.insert(id.clone(), code.clone());
+        }
+    }
+    for (id, until) in blocked {
+        if !id.trim().is_empty() {
+            account.campaign_blocked_until.insert(id.clone(), *until);
+        }
+    }
+    account.updated_at = Some(store::now_iso());
+    save_accounts_for(region, &file)?;
+    Ok(true)
+}
+
+/// 该账号本地盖章的日期（`YYYY-MM-DD`）；没有戳 ⇒ `None`。
+///
+/// 只截前 10 个字符 —— 戳的形态是 `YYYY-MM-DD HH:MM:SS`（见 [`record_checkin_for`]）。
+pub fn checkin_stamp_day(account: &RawAccount) -> Option<&str> {
+    account
+        .last_checkin
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| text.len() >= 10)
+        .map(|text| &text[..10])
 }
 
 /// 展示字段归一：**字符串或 `null`**，绝不把 `undefined` / 数字 / 对象交给前端。

@@ -398,8 +398,7 @@ pub async fn login_poll_for(region: QoderRegion, login_id: &str) -> Value {
         source: Some(SOURCE_OAUTH.to_string()),
         remark: None,
         group: None,
-        added_at: None,
-        updated_at: None,
+        ..Default::default()
     };
     let for_view = account.clone();
     if let Err(error) = account::upsert_account_for(region, account) {

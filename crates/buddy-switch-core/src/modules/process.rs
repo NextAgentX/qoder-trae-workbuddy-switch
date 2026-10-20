@@ -92,12 +92,49 @@ pub(crate) fn cmd_builder(program: impl AsRef<std::ffi::OsStr>) -> Command {
 /// 64KB 管道缓冲时死锁（`ps -axo` 全量输出在进程多的机器上很容易超过），
 /// 子进程写满阻塞永不退出，最终被超时 kill 并返回 None。
 pub(crate) fn run_cmd_timeout(program: &str, args: &[&str], timeout_secs: u64) -> Option<Output> {
-    let mut child = cmd_builder(program)
+    run_cmd_timeout_full(program, args, None, None, timeout_secs)
+}
+
+/// [`run_cmd_timeout`] 的**完整形态**：额外支持从 stdin 灌入固定字节、并指定工作目录。
+///
+/// ## 为什么需要它（而不是让调用方自己 `Command::new`）
+///
+/// 「超时 + 并发读取 stdout/stderr」这套编排在本仓只有这一份实现，而它踩过的坑
+/// （先 wait 后 read ⇒ 管道写满死锁）**每重写一遍都会再踩一次**。Qoder 的原生风控桥
+/// （`modules/qoder/native.rs`）需要 stdin（`{"account": …}`）与 cwd（组件按自身目录找
+/// 依赖），所以这里把两件事做成**参数**，而不是让调用方复制一份读线程编排。
+///
+/// `stdin_bytes = None` ⇒ 不给子进程 stdin（与 [`run_cmd_timeout`] 等价）。
+pub(crate) fn run_cmd_timeout_full(
+    program: impl AsRef<std::ffi::OsStr>,
+    args: &[&str],
+    stdin_bytes: Option<&[u8]>,
+    cwd: Option<&Path>,
+    timeout_secs: u64,
+) -> Option<Output> {
+    use std::io::Write;
+
+    let mut command = cmd_builder(program);
+    command
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::piped());
+    if stdin_bytes.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let mut child = command.spawn().ok()?;
+
+    // stdin 必须**立刻写完并关闭**：组件读到 EOF 才会开始干活，不关就会等到超时。
+    if let Some(bytes) = stdin_bytes {
+        if let Some(mut sink) = child.stdin.take() {
+            let _ = sink.write_all(bytes);
+            // sink 在此 drop ⇒ 关闭管道。
+        }
+    }
+
     let mut stdout = child.stdout.take()?;
     let mut stderr = child.stderr.take()?;
 
