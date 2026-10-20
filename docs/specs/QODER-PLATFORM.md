@@ -71,13 +71,13 @@
 
 | 能力 | 有 | 说明 |
 |:---|:---:|:---|
-| 每日签到领积分 | ✅ | 「每日领取 **100 Credits**」，由网关直接领取；活动幂等（已领返回 `replayed`） |
+| 每日签到领积分 | ⚠️ | **通道未开放**：本仓走的是 legacy `/sash/api/v1/me/daily-check-in/*`，上游已整体关停（claim 恒 409 且不携带幂等语义、status 恒 `DISABLED` + `totalClaimDays=0`）。界面如实报「未开放」并说明要开桌面端网页活动页；**工具内代领未实现**，见 issue #58 |
 | 积分 / 额度查询 | ✅ | quota/usage + 套餐快照 |
-| Pro 福利包 | ✅ | 资格检查 + 领取（独立于每日签到） |
+| Pro 福利包 | ❌ | **未实现**：`PATH_PRO_CLAIM` 只有常量定义、零调用点（issue #58 第 1 阶段一并落地） |
 | OAuth 设备授权 | ✅ | **PKCE S256**；两区 URL 参数不同（国内带 `redirect_uri`，国际不带） |
 | PAT 导入 | ✅ | 前缀 `pt-`，导入后自动交换 jobToken |
 | API 网关 | ✅ | OpenAI 兼容（Chat Completions / Responses）+ **Anthropic 兼容**（`/v1/messages`） |
-| 定时调度 | ✅ | 整点排程：签到 + 令牌保活 |
+| 定时调度 | ❌ | **无 Qoder 排程任务**：`ScheduleTask` 枚举里没有 Qoder 变体，`scheduler` 也无对应分支 ⇒ 签到与令牌保活**都不会自动执行**（issue #58 讨论是否补上） |
 | 会话复制 | ❌ | **不实现** —— 会话复制依赖客户端自身的会话存储与云端归属，当前只有 WorkBuddy 桌面具备 |
 | 自动旅行 | ❌ | WorkBuddy 独有 |
 
