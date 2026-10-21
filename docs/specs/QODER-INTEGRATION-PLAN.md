@@ -84,7 +84,7 @@ L5 门禁同步 + 全量验证   check-scope-registry.cjs / check-api-contract.c
 | 文件 | 改动 | 备注 |
 |:--|:--|:--|
 | `qoder/mod.rs`（新建） | `QoderGateway` + `impl GatewayProduct` + `OWNED_PATHS` + 进程内单例 | 照 `trae/mod.rs` |
-| `qoder/routes.rs`（新建） | `/health`（兼容 `/healthz`）`/status` `/v1/models` `/v1/chat/completions` `/v1/messages`；鉴权 `Authorization: Bearer` | ★ `/v1/responses` 明确 **501**（Qoder 无等价协议） |
+| `qoder/routes.rs`（新建） | `/health`（兼容 `/healthz`）`/status` `/v1/models` `/v1/chat/completions` `/v1/messages` `/v1/responses`；鉴权 `Authorization: Bearer` | `/v1/responses` 走 `protocol::responses` **协议翻译**（入站 Responses→chat、出站 SSE→Responses 事件流 / 非流式→Responses 对象），issue #64 |
 | `qoder/pool.rs`（新建） | `QoderPoolEntry` + `impl PoolEntryLike` + `qoder_pick_policy()` | 照 `trae/pool.rs` |
 | `qoder/apikey.rs`（新建） | 密钥库（`qd-` 前缀）+ 三态动作 | 照 `trae/apikey.rs` |
 | `qoder/payload.rs` / `qoder/sse.rs`（新建） | 请求体构造 / SSE 解析 | |
@@ -250,7 +250,7 @@ demo 拦截为预期）/ Esc 关抽屉 / **添加抽屉**（本机导入 + PAT�
 |:--|:--|:--|
 | **L0** | ✅ | 无改动 |
 | **L1** core | ✅ **补全** | `qoder/` 由 8 文件 → **14 文件**：新增 `cosy`（签名/编码：AES-128-CBC + RSA PKCS#1 v1.5 + 三段轮换 base64 + 5 行 md5 Bearer）、`api`（请求体构造 / 信封解包 / 清单 / openapi 通道：刷新·签到·额度·套餐）、`refresh`、`checkin`、`credits`；`device.rs` 的指纹算法按**官方向量**改成 MD5（原 SHA-256 与真机不符） |
-| **L2** gateway | ✅ **接入** | 新 `qoder/` 产品线（`mod/routes/sse/pool/apikey/payload` 6 文件）：**独立监听 7865**（与 WB 57891 / Trae 7864 / 统一 57892 错开，**绝不 merge router**）；`chat_for_region` 一份中继（认证之后与统一入口共用）；`/v1/messages` 走 `protocol::anthropic` 双向转换；`/v1/responses` **501 明确拒绝**；模型级 429 冷却（只冷该模型）；`disabled_models` 键从 `Region` 升级到 **`Scope`**（读时扇出迁移，Qoder 不继承 WB/Trae 的旧键） |
+| **L2** gateway | ✅ **接入** | 新 `qoder/` 产品线（`mod/routes/sse/pool/apikey/payload` 6 文件）：**独立监听 7865**（与 WB 57891 / Trae 7864 / 统一 57892 错开，**绝不 merge router**）；`chat_for_region` 一份中继（认证之后与统一入口共用）；`/v1/messages` 走 `protocol::anthropic` 双向转换；`/v1/responses` 由 `protocol::responses` 翻译支持（**原 501 已在 issue #64 去掉**）；模型级 429 冷却（只冷该模型）；`disabled_models` 键从 `Region` 升级到 **`Scope`**（读时扇出迁移，Qoder 不继承 WB/Trae 的旧键） |
 | **L3** 两宿主 | ✅ **网关接线完成** | `buddy-switch-server::qoder_gateway_host` + `src-tauri::qoder_gateway` 各持一个 `GatewayHost<QoderGateway>`；**11 条管理命令 × 四处同步**（config / status / models / keys list·create·revoke·restore·delete / logs / logs clear）；`SCOPE_PARAMETERIZED` 22 → **25**（status / models / create 三条按 `scope` 分家，其余跨区域） |
 | **L4** 前端 | ✅ **网关页落地** | `/s/qoder-{cn,global}/gateway` 由「尚未接入」空态换成**真实工作台**（与 WB / Trae **同构**：子导航去掉「请求代理」）：概览（开关 / 监听 / 端口 / Base URL / 概览两行 / 接入指引）×模型（上游实时清单 + 来源三级 + 禁用两出口）×密钥（多 Key + **归属区域** + 吊销/恢复/删除三态）×账号池（共用卡 + `QODER_POOL_TILES` = 可路由/冷却中/会话失效/**模型冷却**）×请求日志×统一入口；统一网关命名空间镜像表补 2 条（`qoder-cn` / `qoder-global`） |
 | **L5** 门禁 | ✅ | `check:api` 绿（routes 204 / call 194 / server 186 / invoke 212 / 参数化 **25**）；`check:scope` **295 passed / 0 failed**；`tsc` 0；新组件已登记进「空态 / 共享 `formatDate`」防回退名单 |

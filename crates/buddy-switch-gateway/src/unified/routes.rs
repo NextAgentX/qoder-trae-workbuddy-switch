@@ -130,7 +130,7 @@ enum LlmEndpoint {
 }
 
 impl LlmEndpoint {
-    /// 该端点在 Trae 分区是否可用。`/v1/responses` 只有 WorkBuddy 有。
+    /// 该端点在 Trae 分区是否可用。`/v1/responses` 只有 WorkBuddy 与 Qoder 有。
     fn supports_trae(self) -> bool {
         !matches!(self, LlmEndpoint::Responses)
     }
@@ -281,25 +281,32 @@ async fn relay_llm(
                     )
                     .await
                 }
-                // `/v1/responses` 对 Qoder 分区无意义（上游没有等价协议）——
-                // 明确 501，不许 404（那是「路径写错了」的语义）。
+                // `/v1/responses` 对 Qoder 分区同样成立（入站翻译成 chat、出站转 Responses
+                // 事件流/对象，见 `qoder::routes::Protocol::Responses`）。
                 LlmEndpoint::Responses => {
-                    endpoint_error(endpoint, endpoint_not_supported_for(spec.id))
+                    crate::qoder::routes::chat_for_region(
+                        qoder,
+                        region,
+                        rewritten,
+                        crate::qoder::routes::Protocol::Responses,
+                    )
+                    .await
                 }
             }
         }
     }
 }
 
-/// `/v1/responses` + Trae 命名空间的可诊断错误（**唯一构造点**，上面两处共用）。
+/// `/v1/responses` + **Trae** 命名空间的可诊断错误（`endpoint_not_supported_for_namespace`
+/// 的**唯一构造点**；Qoder 分区已支持该端点，不在这里）。
 fn endpoint_not_supported_for(namespace: &str) -> HttpError {
     HttpError {
         status: StatusCode::NOT_IMPLEMENTED,
         kind: "invalid_request_error",
         code: "endpoint_not_supported_for_namespace",
         message: format!(
-            "该分区没有 /v1/responses 端点（只有 WorkBuddy 有），而 `{namespace}` 不是 WorkBuddy 命名空间。\
-             请改用 /v1/chat/completions 或 /v1/messages，或把模型前缀换成 wb-cn: / wb-global:。"
+            "Trae 分区没有 /v1/responses 端点（WorkBuddy 与 Qoder 有），而 `{namespace}` 是 Trae 命名空间。\
+             请改用 /v1/chat/completions 或 /v1/messages，或把模型前缀换成 wb-cn: / wb-global: / qoder-cn: 等。"
         ),
     }
 }

@@ -1,4 +1,4 @@
-//! Qoder 网关路由：鉴权中间件 + 四类端点 + 共用中继。
+//! Qoder 网关路由：鉴权中间件 + 五类端点 + 共用中继。
 //!
 //! | 端点 | 说明 |
 //! |:--|:--|
@@ -7,9 +7,10 @@
 //! | `GET /v1/models` | 该 Key 归属区域的清单（**禁用过滤同源**） |
 //! | `POST /v1/chat/completions` | OpenAI 协议入口 |
 //! | `POST /v1/messages` | Anthropic 协议入口（协议层双向转换，中继**同一份**） |
-//! | `POST /v1/responses` | **501 明确拒绝**（Qoder 无等价协议） |
+//! | `POST /v1/responses` | OpenAI **Responses API**（入站翻译成 chat，出站转 Responses 事件流） |
 //!
-//! 中继 [`chat_for_region`] 与 WB/Trae 两侧同一纪律：**外层只有一份** ——
+//! 三个 LLM 端点的差别只在协议层（[`Protocol`]）：中继 [`chat_for_region`] 与
+//! WB/Trae 两侧同一纪律：**外层只有一份** ——
 //! 出站改写 / 停用判定 / 选号换号 / 冷却 / 粘性 / 日志不能有第二份，否则漂移点
 //! 恰恰是「换号 + 流内失败」这类最难复现的行为。
 
@@ -67,7 +68,8 @@ fn anthropic_error(status: StatusCode, kind: &str, message: &str) -> Response {
 
 fn protocol_error(protocol: Protocol, status: StatusCode, code: &str, message: &str) -> Response {
     match protocol {
-        Protocol::OpenAi => openai_error(status, code, message),
+        // Responses 客户端（Codex 等）解析的就是 OpenAI 错误体（`error.message`）。
+        Protocol::OpenAi | Protocol::Responses => openai_error(status, code, message),
         Protocol::Anthropic => anthropic_error(
             status,
             match code {
@@ -84,6 +86,8 @@ fn protocol_error(protocol: Protocol, status: StatusCode, code: &str, message: &
 pub enum Protocol {
     OpenAi,
     Anthropic,
+    /// OpenAI **Responses API**（`/v1/responses`）—— 上游仍是 chat，差别在协议层双向转换。
+    Responses,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,13 +224,17 @@ pub async fn messages(
     chat_for_region(state, key.0, body, Protocol::Anthropic).await
 }
 
-/// `POST /v1/responses` —— **明确 501**（Qoder 上游没有等价协议）。
-pub async fn responses() -> Response {
-    openai_error(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_supported",
-        "Qoder 上游没有 `/v1/responses` 等价协议：请改用 /v1/chat/completions 或 /v1/messages",
-    )
+/// `POST /v1/responses`（OpenAI Responses API）。
+///
+/// Codex CLI 的 `wire_api = "responses"` 打的就是这个路径 —— Qoder 上游只有
+/// chat SSE，故这里做**协议翻译**（入站 → chat，出站 → Responses 事件流 / 对象），
+/// 中继仍是 [`chat_for_region`]（选号 / 换号 / 冷却 / 记账一份）。
+pub async fn responses(
+    State(state): State<QoderGatewayState>,
+    Extension(key): Extension<QoderKeyRegion>,
+    body: Bytes,
+) -> Response {
+    chat_for_region(state, key.0, body, Protocol::Responses).await
 }
 
 /// 一趟 Qoder chat 中继（**认证之后的全部逻辑**）—— 产品线入口与统一网关**共用这一份**。
@@ -250,10 +258,11 @@ pub async fn chat_for_region(
     };
 
     let config = state.config_snapshot().await;
-    // Anthropic 入口先转成 OpenAI 形态（中继内部只认一份形态）。
+    // 非 OpenAI 入口先转成 OpenAI chat 形态（中继内部只认一份形态）。
     let openai_payload = match protocol {
         Protocol::OpenAi => parsed.clone(),
         Protocol::Anthropic => crate::protocol::anthropic::to_upstream_request(&parsed),
+        Protocol::Responses => payload::responses_to_chat(&parsed),
     };
     let wants_stream = payload::wants_stream(&parsed);
     let catalog = state.catalog_for(region).await;
@@ -597,11 +606,19 @@ async fn stream_relay(
         error_slot.clone(),
     );
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+    // ⚠️ 三个入口的协议转换都排在 `UsageTapStream` **之外** —— 转换后帧是 Anthropic 事件
+    //    / Responses 事件，取不到 OpenAI 的 `usage` 字段。
     let converter: std::pin::Pin<
         Box<dyn futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send>,
     > = match protocol {
         Protocol::OpenAi => Box::pin(tapped),
         Protocol::Anthropic => Box::pin(crate::protocol::anthropic::AnthropicSseStream::new(
+            tapped,
+            stream_model.clone(),
+        )),
+        // Responses 事件流：`response.created` … `response.completed`（**不补 `[DONE]`**，
+        // 上游那一条会被本层吞掉 —— 见 `protocol::responses::ResponsesSseStream`）。
+        Protocol::Responses => Box::pin(crate::protocol::responses::ResponsesSseStream::new(
             tapped,
             stream_model.clone(),
         )),
@@ -696,6 +713,38 @@ async fn aggregate_relay(
         return protocol_error(protocol, StatusCode::BAD_GATEWAY, "upstream_error", error);
     }
 
+    // 三个出口各一份形状；`chat.completion` 只在 OpenAi / Anthropic 分支构造（懒求值）。
+    let chat = || chat_completion_of(&aggregated, chat_id, model, usage.clone());
+    match protocol {
+        // 非流式 Responses 对象：形状由 `protocol::responses` 唯一构造（与 WB 那条线同源）。
+        Protocol::Responses => axum::Json(crate::protocol::responses::to_response_object_from(
+            &crate::protocol::responses::ResponsesParts {
+                content: &aggregated.content,
+                reasoning: &aggregated.reasoning,
+                tool_calls: &aggregated.tool_calls,
+                model: aggregated.model.as_deref(),
+                created_at: aggregated.created,
+                input_tokens: prompt_tokens,
+                output_tokens: completion_tokens,
+            },
+            model,
+        ))
+        .into_response(),
+        Protocol::OpenAi => axum::Json(chat()).into_response(),
+        Protocol::Anthropic => {
+            let message = crate::protocol::anthropic::message_from_response(&chat(), model);
+            axum::Json(message).into_response()
+        }
+    }
+}
+
+/// 聚合结果 → `chat.completion`（OpenAI / Anthropic 两个出口共用的一份形状）。
+fn chat_completion_of(
+    aggregated: &sse::AggregatedChat,
+    chat_id: &str,
+    model: &str,
+    usage: Option<Value>,
+) -> Value {
     let mut message = serde_json::Map::new();
     message.insert("role".into(), Value::String("assistant".into()));
     message.insert("content".into(), Value::String(aggregated.content.clone()));
@@ -711,8 +760,7 @@ async fn aggregate_relay(
             Value::Array(aggregated.tool_calls.clone()),
         );
     }
-
-    let completion = json!({
+    json!({
         "id": aggregated.id.clone().unwrap_or_else(|| chat_id.to_string()),
         "object": "chat.completion",
         "created": aggregated.created.unwrap_or_else(|| now_ms() / 1000),
@@ -727,13 +775,5 @@ async fn aggregate_relay(
             "completion_tokens": 0,
             "total_tokens": 0
         })),
-    });
-
-    match protocol {
-        Protocol::OpenAi => axum::Json(completion).into_response(),
-        Protocol::Anthropic => {
-            let message = crate::protocol::anthropic::message_from_response(&completion, model);
-            axum::Json(message).into_response()
-        }
-    }
+    })
 }

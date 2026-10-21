@@ -27,17 +27,42 @@ pub fn wants_stream(parsed: &Value) -> bool {
 }
 
 /// 会话粘性键（`metadata.conversation_id` 优先，回落 `metadata.session_id`；
+/// Responses 客户端（Codex 等）没有 `metadata`，用 `prompt_cache_key`
+/// —— 它本身就是「同一段会话复用同一前缀」的语义，与粘性同目的；
 /// 都没有 ⇒ `None`，调用方整段跳过粘性——绝不退化成轮级键）。
 pub fn sticky_key_of(parsed: &Value) -> Option<String> {
-    let metadata = parsed.get("metadata")?;
-    for key in ["conversation_id", "session_id"] {
-        if let Some(value) = metadata.get(key).and_then(Value::as_str) {
-            if !value.is_empty() {
-                return Some(value.to_string());
+    if let Some(metadata) = parsed.get("metadata") {
+        for key in ["conversation_id", "session_id"] {
+            if let Some(value) = metadata.get(key).and_then(Value::as_str) {
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
             }
         }
     }
-    None
+    parsed
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// Responses 请求（`POST /v1/responses`）→ 上游 chat 形态。
+///
+/// 与 WB 那条线**共用** [`crate::protocol::responses::to_upstream_request`]
+/// （`input` / `instructions` / `tools` / `tool_choice` / `max_output_tokens`
+/// 的翻译只有一份）；这里只补 Qoder 上游额外认的**思考档位**：
+/// Responses 把它放在 `reasoning.effort` 里，而 `build_chat_body` 读的是
+/// `payload.reasoning.effort` / `reasoning_effort` —— 不搬过来就等于用户设了
+/// `model_reasoning_effort = "high"` 却拿到默认档。
+pub fn responses_to_chat(parsed: &Value) -> Value {
+    let mut payload = crate::protocol::responses::to_upstream_request(parsed);
+    if let Some(reasoning) = parsed.get("reasoning") {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("reasoning".to_string(), reasoning.clone());
+        }
+    }
+    payload
 }
 
 /// 本次请求声明的工具名集合（供泄漏回声回读的守卫；无 tools ⇒ `None`）。
@@ -307,8 +332,56 @@ mod tests {
             sticky_key_of(&json!({"metadata": {"session_id": "s-1"}})),
             Some("s-1".into())
         );
+        // Responses 客户端（Codex）没有 `metadata`，靠 `prompt_cache_key` 粘同一段会话。
+        assert_eq!(
+            sticky_key_of(&json!({"prompt_cache_key": "p-1"})),
+            Some("p-1".into())
+        );
+        // `metadata` 优先（同一请求两处都给时以显式会话 id 为准）。
+        assert_eq!(
+            sticky_key_of(&json!({
+                "metadata": {"conversation_id": "c-1"},
+                "prompt_cache_key": "p-1",
+            })),
+            Some("c-1".into())
+        );
         assert_eq!(sticky_key_of(&json!({})), None);
         assert_eq!(sticky_key_of(&json!({"metadata": {}})), None);
+        assert_eq!(sticky_key_of(&json!({"prompt_cache_key": ""})), None);
+    }
+
+    /// Responses → chat：复用 `protocol::responses` 的那份翻译，并按 Qoder 上游
+    /// 的读法补上思考档位（`reasoning.effort`）。
+    #[test]
+    fn responses_to_chat_keeps_translation_and_reasoning_effort() {
+        let parsed = json!({
+            "model": "ultimate",
+            "instructions": "be terse",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            ],
+            "tools": [{"type": "function", "name": "pwsh", "description": "d"}],
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "max_output_tokens": 256,
+        });
+        let payload = responses_to_chat(&parsed);
+        assert_eq!(payload["model"], "ultimate");
+        assert_eq!(payload["messages"][0]["role"], "system");
+        assert_eq!(payload["messages"][0]["content"], "be terse");
+        assert_eq!(payload["messages"][1]["content"], "hi");
+        assert_eq!(payload["tools"][0]["function"]["name"], "pwsh");
+        assert_eq!(payload["max_tokens"], 256);
+        // Qoder 的 `build_chat_body` 读 `reasoning.effort` 定档位。
+        assert_eq!(payload["reasoning"]["effort"], "high");
+        // 翻译结果必须能过 `build_chat_body` 的思考档位解析。
+        assert_eq!(
+            buddy_switch_core::modules::qoder::api::extract_requested_effort(&payload),
+            Some("high".into())
+        );
+        // 无 `reasoning` 时不凭空插一个空对象。
+        assert!(responses_to_chat(&json!({"model": "m", "input": "hi"}))
+            .get("reasoning")
+            .is_none());
     }
 
     /// 禁用过滤走**唯一判断点**的 `is_disabled_in`（大小写不敏感）。

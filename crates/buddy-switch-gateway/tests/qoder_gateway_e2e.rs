@@ -554,9 +554,12 @@ async fn disabled_model_is_rejected() {
     assert!(text.contains("被禁用"), "{text}");
 }
 
-/// `/v1/responses`：明确 501（Qoder 无等价协议）。
+/// `/v1/responses` 非流式：入站 Responses → 上游 chat，出站聚合回 **Responses 对象**。
+///
+/// issue #64：Codex CLI（`wire_api = "responses"`）打的就是这个路径；旧实现直接 501
+/// ⇒ 客户端连不上。可证伪：把 `Protocol::Responses` 分支去掉 / 让响应回到 501 ⇒ 红。
 #[tokio::test]
-async fn responses_endpoint_is_explicit_501() {
+async fn responses_non_stream_returns_response_object() {
     let _guard = guard();
     let (state, key) = gateway_for("responses", &[("q1", "dt-1")], Behavior::Normal).await;
     let response = router(state)
@@ -566,12 +569,79 @@ async fn responses_endpoint_is_explicit_501() {
                 .uri("/v1/responses")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {key}"))
-                .body(Body::from(r#"{"model": "ultimate", "input": "hi"}"#))
+                .body(Body::from(
+                    r#"{"model": "ultimate", "instructions": "be terse", "input": "hi"}"#,
+                ))
                 .unwrap(),
         )
         .await
         .expect("请求");
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(response.status(), StatusCode::OK);
     let text = body_text(response).await;
-    assert!(text.contains("/v1/chat/completions"), "{text}");
+    let body: Value = serde_json::from_str(&text).expect("应为 JSON");
+    assert_eq!(body["object"], "response", "{text}");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["output"][0]["type"], "message");
+    assert_eq!(body["output"][0]["content"][0]["type"], "output_text");
+    assert_eq!(
+        body["output"][0]["content"][0]["text"], "来自 q1 的回答",
+        "上游正文必须被翻成 output_text：{text}"
+    );
+    assert_eq!(body["usage"]["input_tokens"], 7);
+    assert_eq!(body["usage"]["output_tokens"], 9);
+    assert!(
+        body["id"].as_str().unwrap_or_default().starts_with("resp_"),
+        "id 需带 resp_ 前缀：{text}"
+    );
+}
+
+/// `/v1/responses` 流式：转成 **Responses 事件流**（`response.created` … `response.completed`），
+/// 且**不补 `data: [DONE]`**（Responses 的流终止信号是 `response.completed`）。
+#[tokio::test]
+async fn responses_stream_emits_response_events() {
+    let _guard = guard();
+    let (state, key) = gateway_for("responsesstream", &[("q1", "dt-1")], Behavior::Normal).await;
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::from(
+                    r#"{"model": "ultimate", "input": "hi", "stream": true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("请求");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let text = body_text(response).await;
+    for expected in [
+        "response.created",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.completed",
+    ] {
+        assert!(text.contains(expected), "缺事件 `{expected}`：{text}");
+    }
+    assert!(
+        !text.contains("[DONE]"),
+        "Responses 流不得以 [DONE] 结尾：{text}"
+    );
+    assert!(text.contains("\"output_tokens\":9"), "末帧要带用量：{text}");
+    // 序号从 0 起严格递增（下游按它归并事件）。
+    let first = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find_map(|data| serde_json::from_str::<Value>(data).ok())
+        .expect("至少一个事件");
+    assert_eq!(first["sequence_number"], 0, "{text}");
 }

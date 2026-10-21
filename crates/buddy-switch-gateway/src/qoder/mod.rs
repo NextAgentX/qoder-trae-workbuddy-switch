@@ -8,7 +8,8 @@
 //!
 //! - 选号算法 [`crate::pool::pick_with_preference`]（条目实现 [`pool::QoderPoolEntry`]）；
 //! - 会话粘性 [`crate::StickyTable`]、请求日志 [`crate::logging::RequestLog`]；
-//! - 协议转换 [`crate::protocol::anthropic`]（Anthropic ↔ OpenAI 双向）；
+//! - 协议转换 [`crate::protocol::anthropic`]（Anthropic ↔ OpenAI 双向）、
+//!   [`crate::protocol::responses`]（Responses API ↔ OpenAI chat 双向）；
 //! - 禁用偏好 [`crate::disabled_models`]（键 = **作用域**：`qoder-cn` / `qoder-global`）。
 //!
 //! 协议实现（COSY 签名 / 请求体构造 / 信封解包）在

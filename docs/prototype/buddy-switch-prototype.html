@@ -4859,7 +4859,7 @@ function uniGuideCard() {
       <p class="tiny muted" style="margin:6px 2px 0">
         <b>模型名必须带命名空间前缀</b>（如 <span class="mono">${model}</span>）——
         从 <span class="mono">/v1/models</span> 自动发现拿到的就是这种形式。
-        <span class="mono">/v1/responses</span> 只有 WorkBuddy 命名空间有，Trae / Qoder 会返回 <span class="mono">501</span>。
+        <span class="mono">/v1/responses</span> 支持 WorkBuddy / Qoder 命名空间（Qoder 侧在网关内翻译成 chat），Trae 命名空间会返回 <span class="mono">501</span>。
       </p>
       <p class="tiny muted" style="margin:6px 2px 0">
         一把统一密钥可同时授权多个命名空间 —— 见「密钥」分区。

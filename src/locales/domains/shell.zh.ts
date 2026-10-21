@@ -231,7 +231,7 @@ export const zh = {
   "unifiedGateway.guideAnthropic": "Anthropic 兼容",
   "unifiedGateway.guideBase": "Base URL：OpenAI 系 {openai} · Anthropic 系 {anthropic}（不带 /v1，客户端会自己拼）。",
   "unifiedGateway.guideModels": "模型名必须带命名空间前缀（如 {sample}）—— 从 /v1/models 自动发现拿到的就是这种形式。",
-  "unifiedGateway.guideResponses": "/v1/responses 只有 WorkBuddy 命名空间有，Trae / Qoder 会返回 501。",
+  "unifiedGateway.guideResponses": "/v1/responses 支持 WorkBuddy / Qoder 命名空间（Qoder 侧由网关翻译成 chat），Trae 命名空间会返回 501。",
   "unifiedGateway.guideKey": "一把统一密钥可同时授权多个命名空间 —— 见「密钥」分区。",
   /* ── 裸模型名 + 错误响应样例（原型 UNI_ERRORS 的 5 条）──
      每一条都**带出路**：只说「不支持」会让人反复试错。 */

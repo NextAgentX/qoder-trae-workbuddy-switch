@@ -234,47 +234,101 @@ fn parts_to_content(content: Option<&Value>) -> Value {
     }
 }
 
+/// 非流式出口的**唯一**形状构造入参。
+///
+/// 两条上游的聚合产物形状不同（WB 的 [`CompletionAccumulator`]、Qoder 的
+/// `qoder::sse::AggregatedChat`），但 Responses 对象的形状**只能有一份** ——
+/// 各自拼一遍必然漂移（改一处另一处静默给旧形状）。
+#[derive(Debug, Clone, Copy)]
+pub struct ResponsesParts<'a> {
+    pub content: &'a str,
+    pub reasoning: &'a str,
+    /// chat 形态的工具调用：`{id, type, function:{name, arguments}}`。
+    pub tool_calls: &'a [Value],
+    pub model: Option<&'a str>,
+    pub created_at: Option<i64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
 /// 由聚合结果构造 Responses 对象（非流式出口）。
 pub fn to_response_object(accumulator: &CompletionAccumulator, fallback_model: &str) -> Value {
-    let model = accumulator
-        .model
-        .clone()
-        .unwrap_or_else(|| fallback_model.to_string());
-    let created_at = accumulator
-        .created
+    let tool_calls: Vec<Value> = accumulator
+        .tool_calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments},
+            })
+        })
+        .collect();
+    to_response_object_from(
+        &ResponsesParts {
+            content: &accumulator.content,
+            reasoning: &accumulator.reasoning,
+            tool_calls: &tool_calls,
+            model: accumulator.model.as_deref(),
+            created_at: accumulator.created,
+            input_tokens: accumulator.prompt_tokens.unwrap_or(0),
+            output_tokens: accumulator.completion_tokens.unwrap_or(0),
+        },
+        fallback_model,
+    )
+}
+
+/// 由**部件**构造 Responses 对象（非流式出口的唯一形状实现，两条上游共用）。
+pub fn to_response_object_from(parts: &ResponsesParts<'_>, fallback_model: &str) -> Value {
+    let model = parts.model.unwrap_or(fallback_model).to_string();
+    let created_at = parts
+        .created_at
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
     let mut output: Vec<Value> = Vec::new();
-    if !accumulator.reasoning.is_empty() {
+    if !parts.reasoning.is_empty() {
         output.push(json!({
             "id": new_id("rs"),
             "type": "reasoning",
-            "summary": [{"type": "summary_text", "text": accumulator.reasoning}],
+            "summary": [{"type": "summary_text", "text": parts.reasoning}],
         }));
     }
     // 无工具调用时恒输出 message（哪怕是空串），与官方「至少一个 message item」的形状一致。
-    if !accumulator.content.is_empty() || accumulator.tool_calls.is_empty() {
+    if !parts.content.is_empty() || parts.tool_calls.is_empty() {
         output.push(json!({
             "id": new_id("msg"),
             "type": "message",
             "status": "completed",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": accumulator.content, "annotations": []}],
+            "content": [{"type": "output_text", "text": parts.content, "annotations": []}],
         }));
     }
-    for tool_call in &accumulator.tool_calls {
+    for tool_call in parts.tool_calls {
+        let call_id = tool_call
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let function = tool_call.get("function");
+        let name = function
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let arguments = function
+            .and_then(|function| function.get("arguments"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         output.push(json!({
             "id": new_id("fc"),
             "type": "function_call",
             "status": "completed",
-            "call_id": tool_call.id,
-            "name": tool_call.name,
-            "arguments": tool_call.arguments,
+            "call_id": call_id,
+            "name": name,
+            "arguments": arguments,
         }));
     }
 
-    let input_tokens = accumulator.prompt_tokens.unwrap_or(0);
-    let output_tokens = accumulator.completion_tokens.unwrap_or(0);
+    let input_tokens = parts.input_tokens;
+    let output_tokens = parts.output_tokens;
     json!({
         "id": new_id("resp"),
         "object": "response",
@@ -282,7 +336,8 @@ pub fn to_response_object(accumulator: &CompletionAccumulator, fallback_model: &
         "status": "completed",
         "model": model,
         "output": output,
-        "output_text": accumulator.content,
+        // 官方非流式对象带 `output_text` 便捷字段；流式末帧没有它（见 `finish` 的注解）。
+        "output_text": parts.content,
         "parallel_tool_calls": true,
         "tools": [],
         "usage": {
@@ -503,6 +558,28 @@ impl<S> ResponsesSseStream<S> {
             if !usage.is_null() {
                 self.usage = Some(usage.clone());
             }
+        }
+        // 上游中途报错（Qoder 的 `event:error` 帧、WB 的 `{"error":{…}}` 分片）——
+        // **必须转成 Responses 的 `error` 事件**：否则本层只看到「没有 choices」，
+        // 静默走完 `response.completed` ⇒ 客户端拿到「200 + 空回答」，故障隐身。
+        if let Some(error) = chunk.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| error.to_string());
+            // OpenAI 的 `code` 是字符串；Qoder 给的是数字状态码 ⇒ 统一成字符串。
+            let code = match error.get("code") {
+                Some(Value::String(text)) => text.clone(),
+                Some(Value::Number(number)) => number.to_string(),
+                _ => "upstream_error".to_string(),
+            };
+            self.ensure_started();
+            self.push_event(
+                "error",
+                json!({"type": "error", "code": code, "message": message}),
+            );
+            return;
         }
         let Some(choice) = chunk
             .get("choices")
@@ -1100,6 +1177,29 @@ mod tests {
         let types = event_types(&events);
         assert_eq!(types.first().unwrap(), "response.created");
         assert_eq!(types.last().unwrap(), "response.completed");
+    }
+
+    /// 上游中途报错帧 ⇒ **`error` 事件**（不能静默成「200 + 空回答」，issue #64）。
+    ///
+    /// 可证伪：去掉 `handle_payload` 里那段 `chunk.get("error")` ⇒ 本用例一条断言都拿不到。
+    #[tokio::test]
+    async fn stream_surfaces_upstream_error_frame_as_error_event() {
+        let input = vec![
+            chunk("data: {\"error\":{\"message\":\"上游错误（HTTP 429）：rate limited\",\"type\":\"upstream_error\",\"code\":429}}\n\n"),
+            chunk("data: [DONE]\n\n"),
+        ];
+        let stream = ResponsesSseStream::new(futures_util::stream::iter(input), "m".to_string());
+        let events = collect_events(stream).await;
+        let error = events
+            .iter()
+            .find(|event| event["type"] == "error")
+            .expect("必须有 error 事件");
+        assert!(
+            error["message"].as_str().unwrap().contains("429"),
+            "{error}"
+        );
+        // `code` 必须是字符串（OpenAI schema；Qoder 给的是数字 429）。
+        assert_eq!(error["code"], "429");
     }
 
     #[tokio::test]

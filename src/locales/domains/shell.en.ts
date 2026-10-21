@@ -235,7 +235,7 @@ export const en = {
   "unifiedGateway.guideAnthropic": "Anthropic compatible",
   "unifiedGateway.guideBase": "Base URL: {openai} for OpenAI, {anthropic} for Anthropic (no /v1 — the client appends it).",
   "unifiedGateway.guideModels": "Model names must carry a namespace prefix (for example {sample}); that is exactly what /v1/models discovery returns.",
-  "unifiedGateway.guideResponses": "/v1/responses exists only for WorkBuddy namespaces; Trae and Qoder return 501.",
+  "unifiedGateway.guideResponses": "/v1/responses is available for WorkBuddy and Qoder namespaces (Qoder translates it to chat inside the gateway); Trae namespaces return 501.",
   "unifiedGateway.guideKey": "One unified key can authorise several namespaces — see the Keys section.",
   "unifiedGateway.bareModel": "Bare model name",
   "unifiedGateway.bareModelHint": "A model name without a prefix is rejected, with the list of usable prefixes",

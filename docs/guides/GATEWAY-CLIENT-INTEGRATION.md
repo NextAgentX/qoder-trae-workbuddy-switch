@@ -39,7 +39,7 @@
 | `GET /v1/models` | ✅ | ✅ | ✅（聚合四段命名空间，id 带前缀） |
 | `POST /v1/chat/completions` | ✅ | ✅ | ✅ |
 | `POST /v1/messages`（Anthropic） | ✅ | ✅ | ✅ |
-| `POST /v1/responses`（Responses API） | ✅ | ❌ **没有** | ⚠️ 取决于命名空间：`wb-*` 可用，`trae-*` 返回 **501** |
+| `POST /v1/responses`（Responses API） | ✅ | ❌ **没有** | ⚠️ 取决于命名空间：`wb-*` / `qoder-*` 可用，`trae-*` 返回 **501** |
 | 健康检查（免鉴权） | `GET /health`（兼容 `/healthz`） | `GET /health`（兼容 `/healthz`） | `GET /health`（兼容 `/healthz`） |
 | `GET /status`（需鉴权） | ✅ | ✅ | ✅ |
 | 业务转发 `POST /biz/*path` | ✅（WB 独有） | ❌ | ✅（命名空间来自 Key 的 `biz_namespace`） |
@@ -51,8 +51,9 @@
 
 ### 1.1 三条必须记住的硬事实
 
-1. **只有 WorkBuddy 侧有 `/v1/responses`。**
+1. **`/v1/responses` 只有 WorkBuddy 与 Qoder 两个分区有，Trae 没有。**
    Trae 侧没有 ⇒ **Codex 接 Trae 网关时必须 `wire_api = "chat"`**，否则 404。统一入口上 `trae-*` 命名空间的 `/v1/responses` 返回 **501**（明确说「不支持」，不静默降级到 chat）。
+   Qoder 侧（独立端口 `57895` 或统一入口 `qoder-*`）由网关**协议翻译**支持：入站 Responses 翻成 chat，出站把上游 chat SSE 转成 Responses 事件流（非流式转 Responses 对象）⇒ `wire_api = "responses"` 可用。
 2. **两边的认证头规则不一样。**
    WB 侧与统一入口 `x-api-key` 和 `Authorization: Bearer` 都收；Trae 侧**只收 `Authorization: Bearer`**（Qoder 侧同样只认 Bearer）。
    ⇒ Claude Code 接 Trae / Qoder 网关时**必须用 `ANTHROPIC_AUTH_TOKEN`**（走 Bearer）；用 `ANTHROPIC_API_KEY`（走 `x-api-key`）会拿到 401。
@@ -104,7 +105,10 @@
 | 认证头 | **只认 `Authorization: Bearer`**（同 Trae） |
 | 区域归属 | **由 Key 的归属区域决定**（`cn` / `global`），一个监听同时服务两区 |
 | Key / 配置落盘 | `~/.buddy-switch/qoder/gateway_keys.json` / `gateway_config.json` |
-| 协议 | OpenAI（`/v1/models`、`/v1/chat/completions`、`/v1/responses`）+ Anthropic（`/v1/messages`） |
+| 协议 | OpenAI（`/v1/models`、`/v1/chat/completions`、`/v1/responses`<sup>†</sup>）+ Anthropic（`/v1/messages`） |
+
+<sup>†</sup> Qoder 上游只有 chat SSE ⇒ `/v1/responses` 由网关做协议翻译（入站翻成 chat、出站转 Responses 事件流 / 对象），
+Codex 的 `wire_api = "responses"` 可直接用。翻译边界同 WB（见 §3.1「坑」）。
 
 ---
 
@@ -223,7 +227,7 @@ Trae 分区：把端口换成 `57894`，且**认证头统一用 `Authorization: 
 
 ### 3.1 Codex（OpenAI Codex CLI）
 
-**结论**：改 `~/.codex/config.toml`，加一个自定义 `model_provider`。WB 网关用 `wire_api = "responses"`；Trae 网关只能用 `wire_api = "chat"`。
+**结论**：改 `~/.codex/config.toml`，加一个自定义 `model_provider`。WB 与 Qoder 网关都能用 `wire_api = "responses"`；Trae 网关只能用 `wire_api = "chat"`。
 
 **WorkBuddy 网关（推荐 `responses`）**
 
@@ -235,6 +239,19 @@ model_provider = "buddy_switch"
 [model_providers.buddy_switch]
 name = "Buddy Switch"
 base_url = "http://127.0.0.1:57891/v1"
+env_key = "BUDDY_SWITCH_KEY"
+wire_api = "responses"
+```
+
+**Qoder 网关（`responses` 亦可；网关内翻译成 chat）**
+
+```toml
+model = "<从 http://127.0.0.1:57895/v1/models 复制的模型 id>"
+model_provider = "buddy_switch_qoder"
+
+[model_providers.buddy_switch_qoder]
+name = "Buddy Switch (Qoder)"
+base_url = "http://127.0.0.1:57895/v1"
 env_key = "BUDDY_SWITCH_KEY"
 wire_api = "responses"
 ```
@@ -273,7 +290,7 @@ setx BUDDY_SWITCH_KEY "sk-wb-..."
   - 支持：`input`（字符串 / items 数组）、`instructions`、扁平 `tools`、`tool_choice`、`temperature` / `top_p` / `max_output_tokens` / `parallel_tool_calls`。
   - **忽略而非报错**：`previous_response_id`、`store`、`include`、`background`、`stream_options`、文件 / 音频输入。
   - 其中 `previous_response_id` 要特别注意：本网关**无服务端会话状态**，依赖它做续写的调用会**静默丢上下文**。Codex 默认 `store: false`、每轮发全量历史，因此正常对话不受影响；但如果你在别处显式用了服务端会话续写，请改用 `wire_api = "chat"`。
-- `reasoning` 项会被丢弃（上游不接受）。
+- `reasoning` 项在 **WB 路径**会被丢弃（上游不接受）；**Qoder 路径**会翻成上游的思考档位 ⇒ `model_reasoning_effort` 生效。
 
 ### 3.2 Claude Code
 
