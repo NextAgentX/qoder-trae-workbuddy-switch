@@ -36,7 +36,7 @@ import { ChartFrame } from "@/components/usage/chart-frame";
 import { CreditBalanceArea } from "@/components/usage/credit-balance-area";
 import { CreditDivergingBar } from "@/components/usage/credit-diverging-bar";
 import { CreditExpiryBars } from "@/components/usage/credit-expiry-bars";
-import { formatCredits } from "@/components/usage/format";
+import { formatCredits, signedCredits } from "@/components/usage/format";
 import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
 import type { UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
@@ -161,7 +161,7 @@ export default function CreditStatsPage({ viewWindow, combineAll }: UsageViewPro
       value: "—",
       hint: t("wbStats.usage.caption.singleSide"),
     },
-    { icon: TrendingDown, label: t("wbStats.usage.credits.out"), value: `-${formatCredits(totalOut)}` },
+    { icon: TrendingDown, label: t("wbStats.usage.credits.out"), value: signedCredits(totalOut, "-") },
     {
       icon: CalendarDays,
       label: t("wbStats.usage.credits.expiring"),

@@ -51,7 +51,7 @@ import { ChartFrame } from "@/components/usage/chart-frame";
 import { CreditBalanceArea } from "@/components/usage/credit-balance-area";
 import { CreditDivergingBar } from "@/components/usage/credit-diverging-bar";
 import { CreditExpiryBars } from "@/components/usage/credit-expiry-bars";
-import { formatCredits } from "@/components/usage/format";
+import { formatCredits, signedCredits } from "@/components/usage/format";
 import { ModelDonut } from "@/components/usage/model-donut";
 import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
 import type { UsageViewProps } from "@/components/usage/view-param-bar";
@@ -187,13 +187,13 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
     {
       icon: TrendingUp,
       label: t("wbStats.usage.credits.in"),
-      value: `+${formatCredits(inAmount)}`,
+      value: signedCredits(inAmount, "+"),
       hint: t("trae.stats.credits.inHint"),
     },
     {
       icon: TrendingDown,
       label: t("wbStats.usage.credits.out"),
-      value: `-${formatCredits(outAmount)}`,
+      value: signedCredits(outAmount, "-"),
       hint: t("trae.stats.credits.netHint", { net: `${net >= 0 ? "+" : ""}${formatCredits(net)}` }),
     },
     {

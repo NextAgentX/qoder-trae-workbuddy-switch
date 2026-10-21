@@ -19,43 +19,60 @@ import { ChartContainer, ChartTooltip, type ChartConfig } from "@/components/ui/
 import { useT } from "@/lib/i18n";
 import type { CreditDailyBar } from "@/lib/usage-charts";
 
-import { formatCredits } from "./format";
+import { formatCredits, signedCredits } from "./format";
 
 const CONFIG = {
   up: { label: "in", color: "var(--data-series-emerald)" },
   down: { label: "out", color: "var(--data-series-amber)" },
 } satisfies ChartConfig;
 
-/** tooltip：双向时列出两侧，单向时只列消耗侧。 */
+/**
+ * 本图**喂给 recharts 的每一行**（`BarChart data` 的元素）。
+ *
+ * ★ 这是 tooltip 唯一能读到的对象：recharts 把 `payload[i].payload` 指向的正是
+ * **这一行数据**，不是适配层的 `CreditDailyBar`。旧实现把入参类型写成
+ * `Array<{ payload?: CreditDailyBar }>`（**谎报**）⇒ 编译期放行、运行时
+ * `bar.inAmt` / `bar.outAmt` 恒为 `undefined` ⇒ tooltip 永远显示「-—」（issue #70）。
+ * 因此行类型必须与 `data` 的产出**同一份定义**，让字段名漂移变成编译错误。
+ */
+interface DivergingRow {
+  label: string;
+  /** 柱高（正数），对应 `dataKey="up"`。 */
+  up: number;
+  /** 柱高（**负数**，由零线向下），对应 `dataKey="down"`。 */
+  down: number;
+}
+
+/** tooltip：双向时列出两侧，单向时只列消耗侧。数值一律**取自已绘制的行**。 */
 function DivergingTooltip({
   active,
   payload,
   showInflow,
 }: {
   active?: boolean;
-  payload?: Array<{ payload?: CreditDailyBar }>;
+  payload?: Array<{ payload?: DivergingRow }>;
   showInflow: boolean;
 }) {
   const t = useT();
   if (!active || !payload?.length) return null;
-  const bar = payload[0]?.payload;
-  if (!bar) return null;
+  const row = payload[0]?.payload;
+  if (!row) return null;
+  /* 消耗侧取绝对值：行里是负数（画在零线下方），展示口径是「消耗 N」而非「-N」。 */
+  const outAmt = Math.abs(Number(row.down));
   return (
     <div className="grid gap-1 rounded-lg border border-border/50 bg-background px-3 py-2 text-xs shadow-xl">
-      <div className="font-medium">{bar.label}</div>
+      <div className="font-medium">{row.label}</div>
       {showInflow ? (
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">{t("wbStats.usage.credits.in")}</span>
           <span className="font-mono tabular-nums text-success">
-            +{formatCredits(bar.inAmt)}
+            {signedCredits(Number(row.up), "+")}
           </span>
         </div>
       ) : null}
       <div className="flex items-center justify-between gap-4">
         <span className="text-muted-foreground">{t("wbStats.usage.credits.out")}</span>
-        <span className="font-mono tabular-nums text-warning">
-          -{formatCredits(bar.outAmt)}
-        </span>
+        <span className="font-mono tabular-nums text-warning">{signedCredits(outAmt, "-")}</span>
       </div>
     </div>
   );
@@ -65,7 +82,11 @@ export function CreditDivergingBar({ bars }: { bars: CreditDailyBar[] }) {
   if (bars.length === 0) return null;
 
   const showInflow = bars.some((bar) => bar.inAmt > 0);
-  const data = bars.map((bar) => ({ label: bar.label, up: bar.inAmt, down: -bar.outAmt }));
+  const data: DivergingRow[] = bars.map((bar) => ({
+    label: bar.label,
+    up: bar.inAmt,
+    down: -bar.outAmt,
+  }));
 
   return (
     <ChartContainer config={CONFIG} className="h-[180px] w-full">
