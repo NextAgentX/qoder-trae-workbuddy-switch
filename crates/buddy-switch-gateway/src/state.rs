@@ -272,19 +272,29 @@ impl GatewayStatusView {
     }
 }
 
-/// 用**账号库**对齐池（增量 upsert，不删条目、不动治理状态）。
+/// 用**账号库** + **排除表**对齐池（增量 upsert，不删条目、不动治理状态）。
 ///
 /// ★ 为什么管理面读状态前必须先对齐一次：池条目平时只在有请求经过
 /// （[`crate::routes::relay::relay`]）时才同步，于是「刚导入账号、还没发过请求」
 /// 时池是空的 —— 用户打开管理页会看到「账号池为空」，而账号管理页明明列着好几个号。
 ///
-/// 与请求路径同款（同一函数），因此不会引入第二套对齐语义。
+/// ★★ **排除表必须一起同步**（2026-10-22 修 bug）：池内的 `excluded` 快照原先只在
+/// ①真实 relay 请求（`routes/relay.rs`）②`pool_admin::set` 两处被填充。于是进程刚启动、
+/// 还没发生过任何网关请求时，管理面 `status_list` 的 `excluded` 恒为 `false`：
+/// 已经在排除表里的账号在 UI 上显示成「排除」按钮，用户点它只会**再排除一次**
+/// （`excluded=true` 幂等），永远走不到「取消排除」——症状就是「点了排除却取消不掉，
+/// 账号一直被排除在外」，刷新页面也不恢复（只有发过一次请求才会「突然正常」）。
+///
+/// 与请求路径同款（同一函数 + 同一 `scope_key`），因此不会引入第二套对齐语义。
 pub fn sync_pool_with_accounts(pool: &mut Pool) {
     for (region, realm) in [
         (Region::Cn, RealmTag::Cn),
         (Region::Global, RealmTag::Global),
     ] {
         pool.sync_accounts(&account::load_accounts_for(region), Some(realm));
+        // 按 scope 替换（`sync_exclusions` 只动该 scope 的条目），两个 region 各一次正好覆盖全池。
+        let scope = crate::routes::relay::scope_key(region);
+        pool.sync_exclusions(scope, &crate::pool::exclusions::load_for(scope));
     }
 }
 

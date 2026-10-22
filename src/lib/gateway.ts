@@ -165,6 +165,16 @@ export function normalizeGatewayPoolAccounts(raw: unknown): GatewayPoolAccount[]
         cooldownUntil: asNumber(record.cooldownUntil) ?? null,
         cooling: record.cooling === true,
         disabled: record.disabled === true,
+        // ★ 用户显式排除（互斥第六态）。**必须显式归一化**：本函数是白名单重建，
+        //   漏掉一个字段就等于前端永远看不到它 —— 而「排除 / 取消排除」按钮的文案与
+        //   提交值都依赖 `account.excluded`（`onExclude(uid, !account.excluded)`）。
+        //   漏了它的症状不是「不显示」，而是**按钮永远显示「排除」、点下去永远传 `true`**
+        //   ⇒ 已排除的账号再也取消不掉（2026-10-22 用户报障的根因）。
+        excluded: record.excluded === true,
+        excludedNote:
+          typeof record.excludedNote === "string" && record.excludedNote
+            ? record.excludedNote
+            : null,
         realm:
           record.realm === "cn" || record.realm === "global" ? record.realm : "unknown",
         creditsExpireAt: asNumber(record.creditsExpireAt) ?? null,
