@@ -134,6 +134,10 @@ function normalizePool(raw: unknown): TraeGatewayPoolSummary {
     expired: asNumber(record.expired) ?? 0,
     zeroCredits: asNumber(pick(record, "zeroCredits", "zero_credits")) ?? 0,
     totalCredits: asNumber(pick(record, "totalCredits", "total_credits")) ?? 0,
+    // 「用户显式排除」的账号数（互斥第六态）。
+    // 后端 `TraePool::summary` 已把它从 `available` 里扣掉 ⇒ 缺这一格就会出现
+    // 「3 可用」而实际只有 2 个能被选中（数字与事实不符）。
+    excluded: asNumber(record.excluded) ?? 0,
   };
 }
 
@@ -153,6 +157,16 @@ function normalizeAccount(raw: unknown): TraeGatewayAccountStatus | null {
     cooldownUntil: asNumber(pick(record, "cooldownUntil", "cooldown_until")) ?? null,
     cooldownReason: asString(pick(record, "cooldownReason", "cooldown_reason")) ?? null,
     disabled: asBoolean(record.disabled) ?? false,
+    // ★ 用户显式排除（互斥第六态）。**必须显式归一化**：本函数是白名单重建，
+    //   漏掉一个字段就等于前端永远看不到它 —— 而「排除 / 取消排除」按钮的文案与
+    //   提交值都依赖 `account.excluded`（`onExclude(uid, !account.excluded)`）。
+    //   漏了它的症状不是「不显示」，而是**按钮永远显示「排除」、点下去永远传 `true`**
+    //   ⇒ 已排除的账号再也取消不掉（2026-10-22 用户报障的根因，WorkBuddy 侧同源）。
+    excluded: record.excluded === true,
+    excludedNote:
+      typeof record.excludedNote === "string" && record.excludedNote
+        ? record.excludedNote
+        : null,
     deviceIdMasked: asString(pick(record, "deviceIdMasked", "device_id_masked")) ?? null,
   };
 }

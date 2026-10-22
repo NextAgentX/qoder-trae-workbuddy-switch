@@ -34,24 +34,30 @@ export type PoolTileKey =
   | "modelCooling"
   | "excluded";
 
-/** 默认五格（Trae 侧：积分过期有判据）。 */
+/**
+ * 默认六格（Trae 侧：积分过期有判据，另有「已排除」）。
+ *
+ * ★「已排除」是**互斥第六态**（被排除的号不能再算「可路由」）：后端已把它从
+ * `available` 里扣掉并单独计数 ⇒ 卡片必须给它一格，否则「可用 2」而实际有 3 个号、
+ * 少掉的那个去哪了无从得知（数字与事实不符）。
+ */
 export const DEFAULT_POOL_TILES: PoolTileKey[] = [
   "available",
   "cooling",
   "disabled",
   "expired",
   "zeroCredits",
+  "excluded",
 ];
 
 /**
- * WorkBuddy 侧的四格 —— **没有「积分过期」**。
+ * WorkBuddy 侧的五格 —— **没有「积分过期」**。
  *
  * 后端池条目只存「快过期的积分**数量**」，不存有效期，没有判据 ⇒ 该 state 恒为 0。
  * 与其摆一个永远为 0 的假格子，不如不给（诚实 > 看起来对齐）。
  *
- * ★ 新增「已排除」（2026-10-17）：它是**互斥第六态**（被排除的号不能再算「可路由」），
+ * ★「已排除」（2026-10-17）：它是**互斥第六态**（被排除的号不能再算「可路由」），
  * 因此必须有自己的一格 —— 否则「可路由 4」与实际可选中 3 个互相矛盾。
- * Trae / Qoder 侧暂不加：它们的排除端点还没接（摆一个恒 0 的格子就是假控件）。
  */
 export const WB_POOL_TILES: PoolTileKey[] = [
   "available",
@@ -62,13 +68,19 @@ export const WB_POOL_TILES: PoolTileKey[] = [
 ];
 
 /**
- * Qoder 侧的四格 —— **没有积分两格**（池不建模积分），多一格**模型冷却**。
+ * Qoder 侧的五格 —— **没有积分两格**（池不建模积分），多一格**模型冷却**。
  *
  * 上游 429 是**按模型**报的（「…switch to the other models」）⇒ 一个账号可能
  * 「对 A 模型冷却、对 B 模型仍可服务」。这一格与 `cooling`（账号级）**正交**，
  * 是真数据、不是把零值摆出来凑数（与 WB 去掉「积分过期」同一判据）。
  */
-export const QODER_POOL_TILES: PoolTileKey[] = ["available", "cooling", "disabled", "modelCooling"];
+export const QODER_POOL_TILES: PoolTileKey[] = [
+  "available",
+  "cooling",
+  "disabled",
+  "modelCooling",
+  "excluded",
+];
 
 const TILE_META: Record<PoolTileKey, { labelKey: TranslationKey; tone: "ok" | "warn" | "danger" | "muted" }> = {
   available: { labelKey: "shared.gateway.pool.tile.available", tone: "ok" },
@@ -249,10 +261,16 @@ export function AccountPoolCard({
         )}
       </div>
 
+      {/* 格数不同 ⇒ 断点不同：5 格一行铺满；6 格（Trae：多了「已排除」）在中等宽度下
+          先折成 3 列，避免每格被压到放不下「积分过期」四个字。 */}
       <div
         className={cn(
           "grid gap-0 border-b border-border/60",
-          tiles.length >= 5 ? "grid-cols-2 sm:grid-cols-5" : "grid-cols-2 sm:grid-cols-4",
+          tiles.length >= 6
+            ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-6"
+            : tiles.length >= 5
+              ? "grid-cols-2 sm:grid-cols-5"
+              : "grid-cols-2 sm:grid-cols-4",
         )}
       >
         {tiles.map((key, index) => {

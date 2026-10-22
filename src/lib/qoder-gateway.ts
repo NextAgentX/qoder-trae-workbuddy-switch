@@ -117,7 +117,13 @@ export interface QoderGatewayPoolSummary extends GatewayPoolSummary {
 export interface QoderGatewayPoolAccount {
   uid: string;
   name: string;
-  status: "available" | "cooling" | "disabled";
+  /**
+   * 池内状态。**`"excluded"` 是互斥第六态** —— 用户显式排除后该号不再参与选号。
+   *
+   * ⚠️ 不可省略：归一化时若把 `"excluded"` 落回 `"available"`，界面会显示
+   * 「可用」而实际选号永远不选它（数字与事实不符）。
+   */
+  status: "available" | "cooling" | "disabled" | "excluded";
   /** Qoder 池不建模积分 ⇒ 恒 `null`（卡片显示「—」）。 */
   credits: number | null;
   cooling: boolean;
@@ -125,6 +131,16 @@ export interface QoderGatewayPoolAccount {
   cooldownReason: string | null;
   /** `true` = **需人工干预**（无凭据 / 凭据失效），「恢复」出口据此渲染。 */
   disabled: boolean;
+  /**
+   * **用户显式排除**（硬约束：选号 / 兜底 / 偏好全跳过）。
+   *
+   * 「排除 / 取消排除」按钮的文案与提交值都依赖它
+   * （`onExclude(uid, !account.excluded)`）—— 缺了它，按钮永远显示「排除」、
+   * 点下去永远传 `true` ⇒ 排除后再也取消不掉（2026-10-22 用户报障）。
+   */
+  excluded: boolean;
+  /** 排除备注（为什么排除）。 */
+  excludedNote: string | null;
 }
 
 /** 状态视图。 */
@@ -352,7 +368,7 @@ export function normalizeQoderGatewayStatus(raw: unknown): QoderGatewayStatus | 
             uid,
             name: asString(entry.name) ?? uid,
             status:
-              status === "cooling" || status === "disabled"
+              status === "cooling" || status === "disabled" || status === "excluded"
                 ? (status as QoderGatewayPoolAccount["status"])
                 : "available",
             credits: asNumber(entry.credits) ?? null,
@@ -360,6 +376,14 @@ export function normalizeQoderGatewayStatus(raw: unknown): QoderGatewayStatus | 
             cooldownUntil: asNumber(pick(entry, "cooldownUntil", "cooldown_until")) ?? null,
             cooldownReason: asString(pick(entry, "cooldownReason", "cooldown_reason")) ?? null,
             disabled: asBoolean(entry.disabled) ?? false,
+            // ★ 用户显式排除（互斥第六态）。**必须显式归一化**：漏了它，
+            //   「排除 / 取消排除」按钮的文案恒为「排除」、提交值恒为 `true`
+            //   ⇒ 排除后再也取消不掉（与 WorkBuddy / Trae 同源，2026-10-22 用户报障）。
+            excluded: entry.excluded === true,
+            excludedNote:
+              typeof entry.excludedNote === "string" && entry.excludedNote
+                ? entry.excludedNote
+                : null,
           };
         })
         .filter((item): item is QoderGatewayPoolAccount => item !== null)
@@ -388,6 +412,9 @@ export function normalizeQoderGatewayStatus(raw: unknown): QoderGatewayStatus | 
       expired: asNumber(pool.expired) ?? 0,
       zeroCredits: asNumber(pick(pool, "zeroCredits", "zero_credits")) ?? 0,
       totalCredits: asNumber(pick(pool, "totalCredits", "total_credits")) ?? 0,
+      // 「用户显式排除」的账号数（互斥第六态）。后端 `QoderPool::summary` 已把它
+      // 从 `available` 里扣掉 ⇒ 缺这一格就会出现「3 可用」而实际只有 2 个能被选中。
+      excluded: asNumber(pool.excluded) ?? 0,
       modelCooling: asNumber(pick(pool, "modelCooling", "model_cooling")) ?? 0,
     },
     accounts,
