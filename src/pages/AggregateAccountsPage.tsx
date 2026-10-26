@@ -100,9 +100,10 @@ import {
 } from "@/lib/aggregate-detail";
 import { useT } from "@/lib/i18n";
 import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
-import type { AccountMeta, Region } from "@/lib/types";
+import type { AccountMeta, CheckinLog, CreditStatsEvent, Region } from "@/lib/types";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
 import { pickPriorityAccountId } from "@/lib/credit-priority";
+import { lastSevenDays, localDateKey } from "@/lib/checkin-history";
 import { useWbProgramStatuses, wbProgramAvailability } from "@/lib/wb-program-statuses";
 import {
   QODER_REFRESH_KINDS,
@@ -1460,6 +1461,111 @@ export default function AggregateAccountsPage() {
   }, [detailAccount, signalsByScope]);
 
   /**
+   * 抽屉「签到历史（近 7 天）」的两个数据源（issue #89 · 4.3 收尾）。
+   *
+   * ⚠️ 我前一轮说「它要 `getCheckinLog` **逐账号**取、与批量取数纪律冲突」—— **又说错了**：
+   * `getCheckinLogs()` 是**无参数的整本台账**（`get_checkin_logs` 一次给全部记录），
+   * 渠道页也是「打开抽屉时拉一次再客户端过滤」，没有逐账号命令。
+   *
+   * ⚠️ 但台账**只有 WorkBuddy 的签到流程会写**（`add_checkin_log` 全仓唯一调用点
+   * 在 `modules/checkin.rs`）⇒ 对 Trae / Qoder 传这份历史会渲染 7 行「未签到」**假数据**。
+   * 所以只对 `workbuddy` 账号取、只对 `workbuddy` 账号传。
+   */
+  const detailWbId =
+    detailAccount?.platform === "workbuddy" ? detailAccount.data.id : null;
+  const detailWbRegion =
+    detailAccount?.platform === "workbuddy"
+      ? scopeParts(detailAccount.scope).region
+      : null;
+  /* 早期台账条目没有 `accountId`，靠邮箱兜底匹配（与渠道页同口径）。 */
+  const detailWbEmail =
+    detailAccount?.platform === "workbuddy" ? detailAccount.data.email ?? null : null;
+  const [detailCheckinLogs, setDetailCheckinLogs] = useState<CheckinLog[] | null>(null);
+  const [detailCreditEvents, setDetailCreditEvents] = useState<CreditStatsEvent[] | null>(null);
+
+  useEffect(() => {
+    if (!detailWbId || !detailWbRegion) {
+      setDetailCheckinLogs(null);
+      setDetailCreditEvents(null);
+      return;
+    }
+    let cancelled = false;
+    /* 失败不阻断抽屉：该列回落「—」，绝不臆造固定奖励（与渠道页同口径）。 */
+    void api
+      .getCheckinLogs()
+      .then((res) => {
+        if (!cancelled) setDetailCheckinLogs(res.logs);
+      })
+      .catch(() => {
+        if (!cancelled) setDetailCheckinLogs(null);
+      });
+    void api
+      .getCreditStatistics(false, detailWbRegion)
+      .then((stats) => {
+        if (!cancelled) setDetailCreditEvents(stats.events);
+      })
+      .catch(() => {
+        if (!cancelled) setDetailCreditEvents(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailWbId, detailWbRegion]);
+
+  /**
+   * 「近 7 天」逐日结果 —— 与 `AccountsPage.detailCheckinHistory` **同一口径**：
+   * 同一天多条取最新一条；`accountId` 为空的旧记录用邮箱兜底匹配
+   * （早期台账没有 `accountId`）。
+   */
+  const detailCheckinHistory = useMemo(() => {
+    if (!detailWbId || !detailCheckinLogs) return null;
+    return lastSevenDays().map((day) => {
+      const log = detailCheckinLogs
+        .filter(
+          (entry) =>
+            localDateKey(entry.ts) === day &&
+            (entry.accountId === detailWbId ||
+              (entry.accountId == null && detailWbEmail != null && entry.email === detailWbEmail)),
+        )
+        .sort((left, right) => right.ts - left.ts)[0];
+      const event = (detailCreditEvents ?? []).find(
+        (item) => item.kind === "checkin" && item.date === day && item.accountId === detailWbId,
+      );
+      const amount = event && event.kind === "checkin" ? event.amount ?? null : null;
+      if (!log) {
+        return {
+          date: day,
+          resultLabel: t("shared.drawer.checkin.result.none"),
+          tone: "none" as const,
+          amount,
+        };
+      }
+      if (log.result === "success") {
+        return {
+          date: day,
+          resultLabel: t("shared.drawer.checkin.result.success"),
+          tone: "ok" as const,
+          amount,
+        };
+      }
+      if (log.result === "already") {
+        return {
+          date: day,
+          resultLabel: t("shared.drawer.checkin.result.already"),
+          tone: "warn" as const,
+          amount,
+        };
+      }
+      return {
+        date: day,
+        resultLabel: t("shared.drawer.checkin.result.fail"),
+        tone: "fail" as const,
+        amount,
+      };
+    });
+  }, [detailCheckinLogs, detailCreditEvents, detailWbEmail, detailWbId, t]);
+
+  /**
    * 抽屉「分组」下拉的候选（issue #89 · 4.3）。
    *
    * 只取**同一作用域**已有的分组名（跨作用域混在一起会把 WB 的分组名塞给 Qoder）。
@@ -1821,6 +1927,7 @@ export default function AggregateAccountsPage() {
         current={detailCurrent}
         actions={detailActions}
         checkin={detailCheckin}
+        checkinHistory={detailCheckinHistory}
         switchTargets={detailSwitchTargets}
         onWizardSwitch={
           detailAccount?.platform === "workbuddy"
