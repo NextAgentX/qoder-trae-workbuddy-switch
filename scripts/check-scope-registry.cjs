@@ -9159,12 +9159,20 @@ check("★★ 聚合页与渠道页必须传同一组卡片 props（少传只会
     );
   }
   /* 抽屉同理：`actions` 一个都不传时「操作」区整块消失（4.3 的原症状）。 */
-  for (const prop of ["actions", "groups", "loading", "current", "onRefreshPart"]) {
+  for (const prop of [
+    "actions",
+    "checkin",
+    "switchTargets",
+    "groups",
+    "loading",
+    "current",
+    "onRefreshPart",
+  ]) {
     if (!aggregate.includes(`${prop}=`)) {
       throw new Error(`聚合页的详情抽屉漏传 ${prop} —— 抽屉只能看不能操作`);
     }
   }
-  return `三张卡 ${Object.values(REQUIRED).flat().length} 项 + 抽屉 5 项均已接线`;
+  return `三张卡 ${Object.values(REQUIRED).flat().length} 项 + 抽屉 7 项均已接线`;
 });
 
 check("★ 新增账号提示：筛选生效期间新出现的账号**要能一键加入**", () => {

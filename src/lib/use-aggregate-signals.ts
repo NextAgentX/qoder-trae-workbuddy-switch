@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import * as api from "@/lib/api";
 import type { AccountTokenTodayEntry, Region, TravelStatus } from "@/lib/types";
+import type { CheckinStatusEntry } from "@/lib/api";
 import type { QoderProgramStatus, QoderCreditsRow } from "@/lib/api";
 import type {
   TraeAccount,
@@ -55,6 +56,18 @@ export interface ScopeSignals {
   todayTokensTruncated: boolean;
   /** 今日签到：`账号键 → 是否已签`（`null` = 未知 / 通道未开放）。 */
   checkin: Map<string, boolean | null>;
+  /**
+   * 签到状态的**完整条目**（`CheckinStatusEntry`），与 `checkin` 同源同一次请求。
+   *
+   * ★ 为什么要多存一份（issue #89 · 4.3 收尾）：三个平台的签到端点
+   * （`get_checkin_status_map` / `get_trae_checkin_status_map` / `qoder_checkin_status_map`）
+   * **返回的是同一个类型**，里面本来就有 `dailyCredit` / `todayCredit` /
+   * `totalCredits` / `streakDays` / `checkinDates` —— 而本层此前只留下 `todayCheckedIn`
+   * 一个布尔，把其余字段全丢了 ⇒ 抽屉的「签到」页签只能整块不渲染。
+   *
+   * 存整条而不是在页面侧再取一次：**同一份数据不该发两次请求**。
+   */
+  checkinDetail: Map<string, CheckinStatusEntry>;
   /**
    * Trae 程序位的**探测结果**（跨区域一次探测，逐区域过滤）。
    *
@@ -107,6 +120,7 @@ const EMPTY: ScopeSignals = {
   todayTokens: new Map(),
   todayTokensTruncated: false,
   checkin: new Map(),
+  checkinDetail: new Map(),
   traeStatuses: [],
   traeLogins: {},
   qoderPrograms: [],
@@ -114,6 +128,16 @@ const EMPTY: ScopeSignals = {
   traeCredits: new Map(),
   travel: new Map(),
 };
+
+/**
+ * 账号在信号层里的主键（各平台不同：WB `id` / Trae `userId` / Qoder `uid`）。
+ *
+ * 导出给页面用：抽屉要按同一个键去 `checkinDetail` 里取明细，
+ * 两边各写一份「WB 用 id、Trae 用 userId」迟早错一个（错了就是静默取不到）。
+ */
+export function signalKeyOf(account: AggregateAccount): string {
+  return primaryKey(account);
+}
 
 /** 账号在某个作用域里的主键（各平台不同：WB `id` / Trae `userId` / Qoder `uid`）。 */
 function primaryKey(account: AggregateAccount): string {
@@ -215,11 +239,23 @@ export function useAggregateSignals(accounts: readonly AggregateAccount[]): Aggr
             signals.checkin = new Map(
               items.map((item) => [primaryKey(item), map[primaryKey(item)]?.todayCheckedIn ?? null]),
             );
+            signals.checkinDetail = new Map(
+              items.flatMap((item) => {
+                const entry = map[primaryKey(item)];
+                return entry ? [[primaryKey(item), entry] as const] : [];
+              }),
+            );
           } else if (source.platform === "trae") {
             const ids = items.map((item) => primaryKey(item));
             const map = await api.getTraeCheckinStatusMap(source.variant, ids);
             signals.checkin = new Map(
               items.map((item) => [primaryKey(item), map[primaryKey(item)]?.todayCheckedIn ?? null]),
+            );
+            signals.checkinDetail = new Map(
+              items.flatMap((item) => {
+                const entry = map[primaryKey(item)];
+                return entry ? [[primaryKey(item), entry] as const] : [];
+              }),
             );
           } else {
             const ids = items.map((item) => primaryKey(item));
@@ -232,6 +268,15 @@ export function useAggregateSignals(accounts: readonly AggregateAccount[]): Aggr
                 if (!entry) return [primaryKey(item), null] as const;
                 if (entry.active === false) return [primaryKey(item), null] as const;
                 return [primaryKey(item), entry.todayCheckedIn] as const;
+              }),
+            );
+            /* `active === false`（该区域未开放活动）的条目**不存明细** ——
+               抽屉据此不渲染签到区，而不是渲染一片 0。 */
+            signals.checkinDetail = new Map(
+              items.flatMap((item) => {
+                const entry = map[primaryKey(item)];
+                if (!entry || entry.active === false) return [];
+                return [[primaryKey(item), entry] as const];
               }),
             );
           }

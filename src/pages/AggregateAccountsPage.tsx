@@ -48,7 +48,11 @@ import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
 import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import { OAuthLoginDialog } from "@/components/oauth-login-dialog";
 import { ScopeMark, scopeLabel } from "@/components/scope-chip";
-import { AccountDetailDrawer, type DetailActions } from "@/components/account-detail-drawer";
+import {
+  AccountDetailDrawer,
+  type DetailActions,
+  type DetailSwitchTarget,
+} from "@/components/account-detail-drawer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -62,6 +66,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import * as api from "@/lib/api";
+import { checkinCreditsOf } from "@/lib/api";
 import {
   AGGREGATE_SOURCES,
   aggregateAccountKey,
@@ -80,6 +85,7 @@ import {
 import { useAggregateAccounts } from "@/lib/use-aggregate-accounts";
 import {
   checkinTodayOf,
+  signalKeyOf,
   todayTokensOf,
   traeProgramsOf,
   useAggregateSignals,
@@ -1325,6 +1331,135 @@ export default function AggregateAccountsPage() {
   ]);
 
   /**
+   * 抽屉里**可点的**「切换到此账号」程序位（issue #89 · 4.3 收尾）。
+   *
+   * 之前不传 `switchTargets` 时抽屉退回**只读**徽标（4.4 已画出）：看得到「这个号
+   * 挂在哪条线上」，但**点不动** —— 要切换得先关掉抽屉、再去点卡片页脚那枚胶囊。
+   * 数据与回调全都已经在手边（`wbSwitch` / `traeSwitch` / `qoderSwitch` +
+   * 各自的 `programs`），所以这里只是装配，不发任何请求。
+   *
+   * `available` 的判据与卡片上那枚胶囊**同源**（`installed && hasDataDir` /
+   * `state === "ready" && !running`）—— 两处判据不同就会出现「卡片说能切、抽屉说不能」。
+   */
+  const detailSwitchTargets = useMemo<DetailSwitchTarget[]>(() => {
+    if (!detailAccount) return [];
+    if (detailAccount.platform === "workbuddy") {
+      const id = detailAccount.data.id;
+      const region = scopeParts(detailAccount.scope).region;
+      return [
+        {
+          key: "workbuddy",
+          label: t("product.workbuddy"),
+          current: isWorkbuddyCurrent(detailAccount.data, (region === "cn" ? wbCnStatus : wbGlobalStatus)?.current),
+          available: true,
+          onSwitch: () => setWbSwitchDialog({ account: detailAccount.data, region }),
+        },
+        {
+          key: "ide",
+          label: t("wbAccounts.program.codebuddyCnIde"),
+          current: id === wbPrograms.cnIde?.activeAccountId,
+          available: wbProgramAvail.cnIdeAvailable,
+          busy: wbSwitch.slotBusy("ide"),
+          loading: wbSwitch.slotLoading("ide", id),
+          onSwitch: wbProgramAvail.cnIdeAvailable ? () => wbSwitch.request("ide", detailAccount) : undefined,
+        },
+        {
+          key: "cli",
+          label: t("wbAccounts.program.codebuddyCli"),
+          current: id === wbPrograms.cli?.activeAccountId,
+          available: wbProgramAvail.cliConfigured,
+          busy: wbSwitch.slotBusy("cli"),
+          loading: wbSwitch.slotLoading("cli", id),
+          onSwitch: wbProgramAvail.cliConfigured ? () => wbSwitch.request("cli", detailAccount) : undefined,
+        },
+        {
+          key: "vscode",
+          label: t("wbAccounts.program.vscodeCodebuddyPlugin"),
+          current: id === wbPrograms.vscode?.activeAccountId,
+          available: wbProgramAvail.vscodeAvailable,
+          busy: wbSwitch.slotBusy("vscode"),
+          loading: wbSwitch.slotLoading("vscode", id),
+          onSwitch: wbProgramAvail.vscodeAvailable ? () => wbSwitch.request("vscode", detailAccount) : undefined,
+        },
+        {
+          key: "jetbrains",
+          label: t("wbAccounts.program.jetbrainsCodebuddyPlugin"),
+          current: id === wbPrograms.jetbrains?.activeAccountId,
+          available: wbProgramAvail.jetbrainsAvailable,
+          busy: wbSwitch.slotBusy("jetbrains"),
+          loading: wbSwitch.slotLoading("jetbrains", id),
+          onSwitch: wbProgramAvail.jetbrainsAvailable ? () => wbSwitch.request("jetbrains", detailAccount) : undefined,
+        },
+      ];
+    }
+    if (detailAccount.platform === "trae") {
+      const item = detailAccount;
+      return (signalsByScope.get(item.scope) ? traeProgramsOf(signalsByScope.get(item.scope), item) : []).map(
+        (program) => ({
+          key: `${program.region}:${program.program}`,
+          label: program.label,
+          current: program.current,
+          available: program.installed && program.hasDataDir,
+          busy: traeSwitch.switchBusy,
+          loading: traeSwitch.busy === `switch-${item.data.userId}@${program.variant}`,
+          onSwitch: () => traeSwitch.request(item, program.variant, program.label),
+        }),
+      );
+    }
+    const item = detailAccount;
+    const uid = item.data.uid;
+    return (signalsByScope.get(item.scope)?.qoderPrograms ?? []).map((program) => ({
+      key: program.id,
+      label: program.label,
+      current: program.currentUid === uid,
+      available: program.state === "ready" && !program.running,
+      busy: qoderSwitch.switchBusy,
+      onSwitch: () => qoderSwitch.request(item, program),
+    }));
+  }, [
+    detailAccount,
+    qoderSwitch,
+    signalsByScope,
+    t,
+    traeSwitch,
+    wbCnStatus,
+    wbGlobalStatus,
+    wbProgramAvail.cnIdeAvailable,
+    wbProgramAvail.cliConfigured,
+    wbProgramAvail.jetbrainsAvailable,
+    wbProgramAvail.vscodeAvailable,
+    wbPrograms.cli?.activeAccountId,
+    wbPrograms.cnIde?.activeAccountId,
+    wbPrograms.jetbrains?.activeAccountId,
+    wbPrograms.vscode?.activeAccountId,
+    wbSwitch,
+  ]);
+
+  /**
+   * 抽屉「签到」页签的数据（issue #89 · 4.3 收尾）。
+   *
+   * 三个平台的签到端点返回的是**同一个** `CheckinStatusEntry`，里面本来就有
+   * `dailyCredit` / `todayCredit` / `totalCredits` / `streakDays` / `checkinDates`。
+   * 之前我在 PR #95 里判断「聚合页只有布尔值 ⇒ 会画出 +0 假数据」，**那个判断是错的**：
+   * 数据一直都在，只是信号层把除 `todayCheckedIn` 之外的字段丢掉了。
+   * 现在信号层保留整条（`checkinDetail`），这里只做形状转换，**不发新请求**。
+   *
+   * ⚠️ 只在 `todayCheckedIn === true` 时传：抽屉的签到区块只在已签时渲染内容，
+   * 传 `false` 会得到一个**空页签**（比没有页签更糟）。「今天没签」的出口是
+   * 操作区的「签到」按钮（`showCheckin`），不是这里。
+   * ⚠️ `checkinHistory`（近 7 天）仍然不传：它要 `getCheckinLog` **逐账号**取，
+   * 与聚合页「按作用域批量取、绝不逐账号」的取数纪律冲突。
+   */
+  const detailCheckin = useMemo(() => {
+    if (!detailAccount) return null;
+    const entry = signalsByScope
+      .get(detailAccount.scope)
+      ?.checkinDetail.get(signalKeyOf(detailAccount));
+    if (!entry || !entry.ok || !entry.todayCheckedIn) return null;
+    return { todayCheckedIn: entry.todayCheckedIn, ...checkinCreditsOf(entry) };
+  }, [detailAccount, signalsByScope]);
+
+  /**
    * 抽屉「分组」下拉的候选（issue #89 · 4.3）。
    *
    * 只取**同一作用域**已有的分组名（跨作用域混在一起会把 WB 的分组名塞给 Qoder）。
@@ -1685,6 +1820,17 @@ export default function AggregateAccountsPage() {
            正在用的同一个函数），此前只是没传给抽屉 ⇒ 抽屉只能看不能刷。 */
         current={detailCurrent}
         actions={detailActions}
+        checkin={detailCheckin}
+        switchTargets={detailSwitchTargets}
+        onWizardSwitch={
+          detailAccount?.platform === "workbuddy"
+            ? () =>
+                setWbSwitchDialog({
+                  account: (detailAccount as { platform: "workbuddy"; data: AccountMeta }).data,
+                  region: scopeParts(detailAccount.scope).region,
+                })
+            : undefined
+        }
         groups={detailGroups}
         loading={loading}
         refreshingKinds={detailAccount ? refreshBusy.kindsOf(detailAccount.ref) : []}
