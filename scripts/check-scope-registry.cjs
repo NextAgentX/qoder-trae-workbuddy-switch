@@ -8995,13 +8995,31 @@ check("★ 聚合详情抽屉的装配按平台分开（一个字段套三处必
   }  /* 程序位徽标：只能给**能判的那一条**（WorkBuddy 主位），其余不许画「未绑定」的假徽标。 */
   const programs = detail.match(/export function aggregateDetailPrograms[\s\S]*?\n\}/);
   if (!programs) throw new Error("找不到 aggregateDetailPrograms");
-  if (!/account\.platform !== "workbuddy"\) return \[\];/.test(programs[0])) {
-    throw new Error("aggregateDetailPrograms 不是「只给 WorkBuddy」—— 其余平台的程序位状态另有来源");
+  /* ★ 2026-10-26（issue #89 · 4.4）：原先这里硬要求「只给 WorkBuddy」。
+     那条断言在当时是对的（聚合页确实没取 Trae / Qoder 的程序位），但信号层后来取了
+     ⇒ 断言把**过期的取舍**钉成了永久契约，代码于是永远画不出 Trae / Qoder 的徽标。
+     现在改为「必须按平台分派」：三个平台都要有自己的分支，不许一刀切 return []。 */
+  if (/account\.platform !== "workbuddy"\) return \[\];/.test(programs[0])) {
+    throw new Error(
+      "aggregateDetailPrograms 又退回「只给 WorkBuddy」—— 信号层已有 Trae / Qoder 的程序位",
+    );
+  }
+  for (const marker of ['account.platform === "trae"', 'account.platform === "qoder"']) {
+    if (!programs[0].includes(marker)) {
+      throw new Error(`aggregateDetailPrograms 缺平台分支：${marker}`);
+    }
   }
   if (!/current: Boolean\(ctx\.currentProgram\)/.test(programs[0])) {
-    throw new Error("aggregateDetailPrograms 没有用 currentProgram 判「当前登录」");
+    throw new Error("aggregateDetailPrograms 没有用 currentProgram 判 WorkBuddy 的「当前登录」");
   }
-  return "三平台分开 · 复用同一判定 · 程序位只给能判的那一条";
+  /* 页面必须真的把信号层的程序位传进去，否则函数改好了也画不出来（这正是 4.4 的成因）。 */
+  const page = readCode("src/pages/AggregateAccountsPage.tsx");
+  for (const field of ["traePrograms:", "qoderPrograms:"]) {
+    if (!page.includes(field)) {
+      throw new Error(`聚合页没有把 ${field} 传给详情上下文 —— 抽屉里那两个平台没有程序位徽标`);
+    }
+  }
+  return "三平台分开 · 复用同一判定 · 程序位按平台分派且页面已接线";
 });
 
 check("★★ 顶栏「聚合」入口的账号数与聚合页**同源**（两个数据源必然对不上）", () => {

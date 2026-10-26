@@ -430,6 +430,40 @@ export default function AggregateAccountsPage() {
   }, [accounts, reload, selected, t]);
 
   /**
+   * Trae 的非切换类动作（签到 / 保存登录态 / 刷新 JWT / 解冷却）的忙标记。
+   *
+   * ★ issue #89 · C6：卡片的 `busy` 是**一个字符串**，`checkingIn` / `saving` /
+   * `refreshingJwt` / `thawing` 都由 `busy === \`xxx-${uid}\`` 派生，而这些同时是
+   * `disabled` 的一部分 ⇒ 不传就等于「永远不显示执行中、可以重复点，
+   * 重复点会真的发第二次请求」。切换那条走 `traeSwitch.busy`（它自己管确认框），
+   * 这里管其余四个，两者互斥不会同时非空。
+   */
+  const [traeBusy, setTraeBusy] = useState<string | null>(null);
+
+  /**
+   * 跑一个 Trae 单账号动作：置忙 → 执行 → 重取账号与信号 → 失败报错 → 复位。
+   *
+   * 抽成函数而不是四个内联箭头：内联版本此前**既没有忙标记、也没有统一的失败文案**，
+   * 而「同一动作两处实现」正是本仓反复出现的分叉来源。
+   */
+  const runTraeAction = useCallback(
+    async (item: AggregateAccount, key: string, action: () => Promise<void>) => {
+      if (item.platform !== "trae") return;
+      setTraeBusy(key);
+      try {
+        await action();
+        await reload();
+        void reloadSignals();
+      } catch (error) {
+        toast.error(api.asError(error), { description: aggregateDisplayName(item) });
+      } finally {
+        setTraeBusy(null);
+      }
+    },
+    [reload, reloadSignals],
+  );
+
+  /**
    * 单账号刷 Trae 积分（issue #89 · C3）。
    *
    * 卡片「尚未查询到积分」那一行的就地刷新按钮走这里 —— 那一行恰恰是「没有积分」时
@@ -745,7 +779,7 @@ export default function AggregateAccountsPage() {
             /* ★ issue #89 · C4 / C6：不传 `busy` ⇒ 六个 `busy === \`xxx-${uid}\`` 恒 false
                ⇒ 菜单项永远不显示「执行中」、永远可重复点，而 `saving` / `thawing`
                同时是 `disabled` 的一部分 ⇒ 重复点会真的发第二次请求。 */
-            busy={traeSwitch.busy}
+            busy={traeSwitch.busy ?? traeBusy}
             switchBusy={traeSwitch.switchBusy}
             programs={programs.length ? programs : undefined}
             /* ★ issue #89 · 2.5：`current` 此前没传 ⇒ 卡片头部的「当前登录」徽章与
@@ -767,34 +801,67 @@ export default function AggregateAccountsPage() {
             doneKinds={refreshBusy.doneKindsOf(item.ref)}
             todayTokens={todayTokens}
             todayTokensTruncated={signals?.todayTokensTruncated}
-            onCheckin={(account) => {
-              void api
-                .traeCheckin({ scope: "selected", userIds: [account.userId], variant })
-                .then(() => {
-                  void reload();
-                  void reloadSignals();
-                })
-                .catch((error: unknown) => toast.error(api.asError(error)));
-            }}
+            /* ★ issue #89 · C5：签到必须**分四种情况说清**。此前只有一句
+               「成功 / 失败」，用户看不到「今天已经签过了」「冷却中」「凭据过期」
+               —— 而这三种恰恰是「点了没反应」的真实原因（后端在计划阶段就跳过了，
+               一条结果都不会返回）。反馈链与渠道页 `checkinOne` 逐条对齐。 */
+            onCheckin={(account) =>
+              void runTraeAction(item, `checkin-${account.userId}`, async () => {
+                const label = aggregateDisplayName(item);
+                const result = await api.traeCheckin({
+                  scope: "selected",
+                  userIds: [account.userId],
+                  variant,
+                });
+                const outcome = result.results[0];
+                if (!outcome) {
+                  /* 一条结果都没有 = 计划阶段就被跳过（今日已签 / 冷却中 / 凭据过期）。
+                     如实说「没有执行」，不为好看谎报成功。 */
+                  toast.info(t("trae.page.accounts.checkinNotRun"), {
+                    description:
+                      result.warnings[0] ??
+                      t("trae.page.accounts.checkinSkippedDesc", { name: label }),
+                  });
+                } else if (outcome.action === "skip_already") {
+                  toast.success(t("trae.page.accounts.alreadyCheckedToday"), { description: label });
+                } else if (!outcome.ok) {
+                  toast.error(t("trae.page.accounts.checkinFailed"), {
+                    description: t("trae.page.accounts.checkinFailedDesc", {
+                      name: label,
+                      reason: outcome.message || outcome.action,
+                    }),
+                  });
+                } else {
+                  toast.success(t("trae.page.accounts.checkinSuccess"), {
+                    description:
+                      outcome.delta > 0
+                        ? t("trae.page.accounts.checkinSuccessDesc", {
+                            name: label,
+                            delta: outcome.delta,
+                          })
+                        : label,
+                  });
+                }
+              })
+            }
             onEditRemark={() => openDetail(item.ref, "remark")}
-            onSaveLogin={(account) => {
-              void api
-                .traeSaveLogin(account.userId, variant)
-                .then(() => reload())
-                .catch((error: unknown) => toast.error(api.asError(error)));
-            }}
-            onRefreshJwt={(account) => {
-              void api
-                .traeRefreshJwt(account.userId, variant)
-                .then(() => reload())
-                .catch((error: unknown) => toast.error(api.asError(error)));
-            }}
-            onClearCooldown={(account) => {
-              void api
-                .traeClearCooldown(account.userId, variant)
-                .then(() => reload())
-                .catch((error: unknown) => toast.error(api.asError(error)));
-            }}
+            /* 三个动作走同一个执行器：键名与卡片派生的 `saving` / `refreshingJwt` /
+               `thawing` 一致，否则菜单项永远不显示「执行中」且可重复点（issue #89 · C6）。 */
+            onSaveLogin={(account) =>
+              void runTraeAction(item, `save-${account.userId}`, () =>
+                api.traeSaveLogin(account.userId, variant).then(() => undefined),
+              )
+            }
+            onRefreshJwt={(account) =>
+              void runTraeAction(item, `jwt-${account.userId}`, () =>
+                api.traeRefreshJwt(account.userId, variant).then(() => undefined),
+              )
+            }
+            onClearCooldown={(account) =>
+              void runTraeAction(item, `thaw-${account.userId}`, () =>
+                api.traeClearCooldown(account.userId, variant).then(() => undefined),
+              )
+            }
             {...common}
           />
         );
@@ -845,6 +912,8 @@ export default function AggregateAccountsPage() {
       refreshBusy,
       refreshPart,
       refreshTraeCredits,
+      runTraeAction,
+      traeBusy,
       reload,
       reloadSignals,
       saveGroup,
@@ -1099,6 +1168,12 @@ export default function AggregateAccountsPage() {
               (region === "cn" ? wbCnStatus : wbGlobalStatus)?.current,
             )
           : false,
+      /* ★ issue #89 · 4.4：程序位状态**早就在信号层里**，此前只是没传进来 ⇒
+         抽屉里 Trae / Qoder 永远没有程序位徽标，而注释还写着「页面按账号装配后传入」。
+         这里只做形状转换，**不发请求**。 */
+      traePrograms:
+        detailAccount.platform === "trae" ? traeProgramsOf(signals, detailAccount) : undefined,
+      qoderPrograms: detailAccount.platform === "qoder" ? signals?.qoderPrograms : undefined,
     };
   }, [creditOf, detailAccount, signalsByScope, t, wbCnStatus, wbGlobalStatus]);
 

@@ -17,17 +17,21 @@
  * ③ 分组是**自由文本**（WB / Qoder）还是 **groupId**（Trae）必须分开：Trae 侧
  *    页面**不注入** `onSaveGroup`，抽屉就不会渲染那一块。
  *
- * ## 程序位徽标为什么是空数组
+ * ## 程序位徽标（issue #89 · 4.4 已补齐 Trae / Qoder）
  *
  * 「当前登录」在三个平台上的数据源都不是账号对象本身：
  * WB 靠 `program_status`（页面用一组 props 传进卡片）、Trae 靠 `trae_program_status`、
- * Qoder 靠 `qoder_program_status` —— 都是**按区域**的独立命令。聚合页没有取它们
- * （6 个作用域 = 6 次额外请求，而 P1 的定位是只读总览）。
- * ⇒ 这里返回空数组，抽屉不渲染那一块，**不摆一排「未绑定」的假徽标**。
- * 补齐方式见 issue #50 的 P2。
+ * Qoder 靠 `qoder_program_status` —— 都是**按区域**的独立命令。
+ *
+ * ⚠️ 这里曾长期 `return []`（「聚合页没取，所以不给」），但**那句话早就过期了**：
+ * 信号层后来取了 Trae / Qoder 的程序位（`ScopeSignals.traeStatuses` / `qoderPrograms`），
+ * 只是页面没把它传进本函数。注释描述的是正确做法，代码没照做 —— 这类漂移最难自查，
+ * 因为读注释会以为已经处理了。现在按平台分派：**取了就必须画**。
  */
 
 import type { CreditExpiry } from "@/lib/types";
+import type { QoderProgramStatus } from "@/lib/api";
+import type { TraeProgram } from "@/components/trae-account-card";
 import type {
   DetailPack,
   DetailProgramBadge,
@@ -60,6 +64,14 @@ export interface AggregateDetailContext {
    * 而不是画一排「未绑定」。
    */
   currentProgram?: boolean;
+  /**
+   * Trae 的程序位（`traeProgramsOf(signals, item)` 的结果，**跨区域已消歧**）。
+   *
+   * 页面已经从信号层算好了 —— 这里只做形状转换，不再发请求。
+   */
+  traePrograms?: TraeProgram[];
+  /** Qoder 的程序位（信号层 `qoderPrograms`，按区域一份）。 */
+  qoderPrograms?: QoderProgramStatus[];
 }
 
 const dash = "—";
@@ -79,8 +91,36 @@ export function aggregateDetailPrograms(
   account: AggregateAccount,
   ctx: AggregateDetailContext,
 ): DetailProgramBadge[] {
-  if (account.platform !== "workbuddy") return [];
   const { t } = ctx;
+
+  /* Trae：`TraeProgram` 与 `DetailProgramBadge` 字段几乎一一对应
+     （`installed` / `hasDataDir` / `current` 都是后端给的事实）。
+     `key` 必须带区域 —— 两个区域可能各有一个同名程序位。 */
+  if (account.platform === "trae") {
+    return (ctx.traePrograms ?? []).map((program) => ({
+      key: `${program.region}:${program.program}`,
+      label: program.label,
+      current: program.current,
+      installed: program.installed,
+      hasDataDir: program.hasDataDir,
+    }));
+  }
+
+  /* Qoder：后端只给四态字符串 + `currentUid`，映射到徽标的两个布尔。
+     `ready` / `empty` 都说明**装了且目录在**（差别是登录态），`unreadable` 是目录在但读不了，
+     其余按未装处理 —— 与卡片上那枚胶囊的 `ready = state === "ready" && !running` 不冲突：
+     那是「此刻能不能切」，这里是「装了没有」。 */
+  if (account.platform === "qoder") {
+    const uid = displayText(account.data.uid) ?? "";
+    return (ctx.qoderPrograms ?? []).map((program) => ({
+      key: program.id,
+      label: program.label,
+      current: program.currentUid !== null && program.currentUid === uid,
+      installed: program.state !== "missing",
+      hasDataDir: program.state === "ready" || program.state === "empty",
+    }));
+  }
+
   /* ⚠️ 只给**主位**（WorkBuddy 客户端本身）：另外四个程序位（CLI / IDE / VS Code /
      JetBrains）的当前账号来自各自的 `*_status` 命令，聚合页没拉 ——
      画一排「未绑定」是撒谎（那是「没数据」伪装成「没装」）。
