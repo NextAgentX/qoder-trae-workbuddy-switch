@@ -345,6 +345,28 @@ pub enum UpstreamEvent {
     Server,
     /// 会话失效（12153）。
     SessionDead,
+    /// 上游 401 / 403（**无** `12153` 这类会话失效标记）：凭据被拒（issue #100）。
+    ///
+    /// ## 为什么不能归到 [`Self::Client`]
+    ///
+    /// 调用方自己的 Key 早就过了网关的鉴权，能走到上游说明「这一把 Key 是好的」——
+    /// 那么上游回 401/403 只可能是**该账号的凭据**（过期 / 被作废 / 签名不符）。
+    /// 旧实现把它当成「调用方错误」，后果是一整串：
+    ///
+    /// 1. `should_rotate` 返回 `false` ⇒ **一个请求都不换号**，池里明明有健康账号，
+    ///    客户端却直接吃到 401（用户原话：「之前旧的登录状态直接报 401」）；
+    /// 2. `apply_upstream_error` 不冷却、不计数 ⇒ 池卡继续把死号显示成「可路由」，
+    ///    下一次请求还会选中它；
+    /// 3. `probe_state_of` 落 `UpstreamError` ⇒ 探测结论也说不清是「凭据坏了」。
+    ///
+    /// ## 为什么**不**直接当 [`Self::SessionDead`]
+    ///
+    /// 那个分支是「三振**永久**禁用」（`disabled` 是终态，只有人工「恢复」能解），
+    /// 而 401/403 的绝大多数成因是**access token 过期**——保活刷新一轮就好。
+    /// 把可自愈的问题打成终态，用户看到的是「号没坏却再也用不了」。
+    /// ⇒ 本档只做**短冷却 + 换号**，让保活刷新后自然恢复；真正被作废的会话
+    /// 会带 `12153`，那条路仍然走三振禁用。
+    AuthRejected,
     /// 其它 4xx → 仅记错，不做治理动作。
     Client,
 }
@@ -426,6 +448,16 @@ pub const MIN_MODEL_COOLDOWN_MS: i64 = 60_000;
 /// 选 10 分钟的依据：lease 在「拿到响应头」时就释放（流式场景的既有偏差），
 /// 正常请求的占用量级是秒；10 分钟足够覆盖慢上游，又能让泄漏在十分钟内自愈。
 pub const IN_FLIGHT_LEASE_MS: i64 = 10 * 60 * 1000;
+
+/// 上游 401/403（凭据被拒）的冷却时长（毫秒，issue #100）。
+///
+/// 取 60 秒而不是「三振禁用」：401/403 的绝大多数成因是 **access token 过期**，
+/// 保活刷新一轮就好。把可自愈的问题打成终态（`disabled` 只能人工恢复）会让用户
+/// 看到「号没坏却再也用不了」。真正被作废的会话会带 `12153`，那条路仍然走三振禁用。
+///
+/// 也不能取 0：不冷却的话，本轮请求换号成功后，下一轮又会选中这个死号，
+/// 每次都要白吃一次 401。
+pub const AUTH_REJECT_COOLDOWN_MS: i64 = 60_000;
 
 /// 探测结果的**采纳**语义 —— [`Pool::adopt_probe_result`] 的输入。
 ///
@@ -640,6 +672,12 @@ pub fn classify_event(status: u16, body: &str) -> UpstreamEvent {
     }
     if status == 404 {
         return UpstreamEvent::NotFound;
+    }
+    // ★ issue #100：上游 401/403 = **凭据被拒**，不是「调用方错误」。
+    //   归到 `Client` 会导致「不换号 + 不冷却 + 池卡仍显示可路由」三连
+    //   （见 `UpstreamEvent::AuthRejected` 的文档）。
+    if status == 401 || status == 403 {
+        return UpstreamEvent::AuthRejected;
     }
     if status >= 500 {
         return UpstreamEvent::Server;
@@ -1337,6 +1375,17 @@ impl Pool {
             }
             UpstreamEvent::SessionDead => {
                 entry.note_session_dead(config.session_dead_threshold, "12153 session dead")
+            }
+            UpstreamEvent::AuthRejected => {
+                // 401/403：**短冷却 + 换号**，不计数、不禁用（见 `AuthRejected` 的文档）。
+                // 冷却时长与 404 同档：一分钟足够让本轮请求换到别的号，
+                // 又短到「保活刷新出新的 access token 后」不必人工干预就能自己恢复。
+                entry.cooldown_fixed(
+                    now_ms,
+                    AUTH_REJECT_COOLDOWN_MS,
+                    "upstream 401/403 (credential rejected)",
+                );
+                false
             }
             UpstreamEvent::Client => false,
         }
@@ -2061,6 +2110,26 @@ mod tests {
         assert_eq!(classify_event(404, "not found"), UpstreamEvent::NotFound);
         assert_eq!(classify_event(503, "boom"), UpstreamEvent::Server);
         assert_eq!(classify_event(400, "bad"), UpstreamEvent::Client);
+        // ★ issue #100：401/403 = **凭据被拒**，不是「调用方错误」。
+        //   变异：删掉 classify_event 里那条 401/403 分支 ⇒ 下面两条红，
+        //   且真实后果是「池里有健康号也不换、死号继续显示可路由」。
+        assert_eq!(
+            classify_event(401, r#"{"error":{"message":"invalid token"}}"#),
+            UpstreamEvent::AuthRejected
+        );
+        assert_eq!(
+            classify_event(403, "forbidden"),
+            UpstreamEvent::AuthRejected
+        );
+        // 带 12153 标记的 401 仍走**会话失效**（三振禁用）—— 标记优先于状态码，
+        // 因为「会话被作废」与「token 过期」的处置不同（前者刷新救不回来）。
+        assert_eq!(
+            classify_event(
+                401,
+                r#"{"code":12153,"msg":"Offline user session not found"}"#
+            ),
+            UpstreamEvent::SessionDead
+        );
 
         match classify_event(429, "rate limited") {
             UpstreamEvent::SoftRate {
@@ -2167,6 +2236,40 @@ mod tests {
         assert_eq!(
             parse_reset_at_ms(r#"{"msg":"reset at 2026-13-45 99:99:99 UTC+8"}"#),
             None
+        );
+    }
+
+    /// ★ issue #100：401/403 只做**浅冷却**，绝不三振禁用。
+    ///
+    /// 变异：把 `AuthRejected` 分支改成走 `note_session_dead` ⇒ 第二条断言红。
+    /// 真实后果是「一个只是 token 过期的号被永久禁用（`disabled` 只能人工恢复）」，
+    /// 而保活刷新明明能救它。
+    #[test]
+    fn auth_rejected_cools_briefly_and_never_disables() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "小明");
+
+        for _ in 0..5 {
+            let disabled = pool.apply_upstream_error("u1", "m", &UpstreamEvent::AuthRejected, NOW);
+            assert!(!disabled, "401/403 不得因累计次数而禁用账号");
+        }
+        let entry = pool.get("u1").expect("账号在池里");
+        assert!(!entry.disabled, "401/403 不得把账号打成终态");
+        assert_eq!(entry.session_dead_fails, 0, "401/403 不计会话失效次数");
+        assert!(
+            entry.cool_remaining_ms(NOW) > 0,
+            "必须浅冷却，否则下一轮又选中这个死号"
+        );
+        assert!(
+            entry.cool_remaining_ms(NOW) <= AUTH_REJECT_COOLDOWN_MS,
+            "冷却时长应恰为 AUTH_REJECT_COOLDOWN_MS，实际 {}",
+            entry.cool_remaining_ms(NOW)
+        );
+        // 冷却一过就能再被选中：这是「保活刷新后自愈」的前提。
+        assert_eq!(
+            entry.cool_remaining_ms(NOW + AUTH_REJECT_COOLDOWN_MS + 1),
+            0,
+            "冷却到期后必须恢复可用"
         );
     }
 

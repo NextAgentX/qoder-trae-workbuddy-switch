@@ -308,6 +308,8 @@ export const zh = {
   // 仅 WorkBuddy：三档策略里「非指定账号」的第二档（写回 `AccountStrategy::MaxCredits`）。
   "shared.gateway.pool.strategyMaxCredits": "按实时积分择优（每次请求查询）",
   "shared.gateway.pool.strategyRandom": "随机（在合格账号里均匀抽签）",
+  // issue #102：粘住当前账号、限流才换 —— 目的是复用上游前缀缓存，降低 token 消耗。
+  "shared.gateway.pool.strategySequential": "顺序（固定一个号，限流才换）",
   "shared.gateway.pool.preferredMissing": "已指定的账号（当前不在池中）",
   // 偏好语义：指定账号不可用时**回落**自动择优，而不是拒绝服务。
   "shared.gateway.pool.preferredHint": "偏好而非强制：指定账号冷却 / 失效 / 零积分时自动改用其他账号，不会拒绝服务。",

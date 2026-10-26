@@ -44,7 +44,7 @@
 | `rate_limited_account`（账号级限流） | `SoftRate{model_scoped:false}` | —（Qoder 无此细分，一律按模型） | —（同上，无法细分） |
 | `model_blocked`（模型封禁） | `ModelBlocked`（`11102`） | —（Qoder 无此码） | — |
 | `no_credits` | `HardCredit`（402 / 余额文案） | `Transient`？→ 需按 body 细分（未核实） | `PlanLimit`（`1005` / 含 `plan`） |
-| `auth_dead` | `SessionDead`（`12153`） | `AuthDead`（401/403） | `SessionDead`（401，永久禁用） |
+| `auth_dead` | `SessionDead`（`12153`）/**`AuthRejected`（401/403，issue #100）** | `AuthDead`（401/403） | `SessionDead`（401，永久禁用） |
 | `model_unavailable` | `NotFound`（404） | `ClientError` | `NotFound`（404） |
 | `upstream_error` | `Server` / `Client` | `Transient`（5xx） | `Server` / `Client`（5xx/4xx 区间） |
 | `upstream_queued`（**上游排队**，2026-10-22 新增） | —（WB 无此形态） | `QoderErrKind::Queued`（`10605` / `isQueued`，裹在 **403 信封**里） | —（Trae 侧并入 `rate_limited_model`） |

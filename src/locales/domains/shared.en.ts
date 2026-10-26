@@ -279,6 +279,9 @@ export const en = {
   // WorkBuddy only: the second non-account option (writes `AccountStrategy::MaxCredits`).
   "shared.gateway.pool.strategyMaxCredits": "Pick by live credits (queried per request)",
   "shared.gateway.pool.strategyRandom": "Random (uniform draw among eligible accounts)",
+  // issue #102: stick to one account, switch only when it is limited — reuses the
+  // upstream prefix cache, which is what keeps token usage down.
+  "shared.gateway.pool.strategySequential": "Sequential (stick to one account until limited)",
   "shared.gateway.pool.preferredMissing": "Preferred account (not in this pool)",
   // Preference, not a hard pin: falls back when the preferred account can't serve.
   "shared.gateway.pool.preferredHint": "A preference, not a hard pin: if it is cooling, dead, or out of credits, another account is used instead — requests are never rejected.",

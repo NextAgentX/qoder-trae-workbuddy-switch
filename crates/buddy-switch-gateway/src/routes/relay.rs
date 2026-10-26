@@ -683,6 +683,9 @@ fn should_rotate(event: &UpstreamEvent, attempt: usize) -> bool {
         | UpstreamEvent::ModelBlocked
         | UpstreamEvent::Server
         | UpstreamEvent::SessionDead => true,
+        // 401/403 换号能救：池里其它号的凭据可能好好的（issue #100）。
+        // 旧实现把它归到 `Client`（不换号）⇒ 池里明明有健康账号，客户端却直接吃到 401。
+        UpstreamEvent::AuthRejected => true,
         // 只换一次（`attempt == 0` 时还允许再试一个号）。
         UpstreamEvent::NotFound => attempt == 0,
         // 调用方自己的问题，换谁都一样。
@@ -765,6 +768,9 @@ pub fn upstream_kind_of(
         UpstreamEvent::HardCredit => UpstreamErrorKind::HardCredit,
         UpstreamEvent::SoftRate { .. } => UpstreamErrorKind::SoftRate,
         UpstreamEvent::SessionDead => UpstreamErrorKind::SessionDead,
+        // 401/403 对**客户端**的语义就是「这个账号的凭据不可用了」⇒ 对外仍是 401，
+        // 由文案把「换号后仍失败时该去重新登录」讲清楚。
+        UpstreamEvent::AuthRejected => UpstreamErrorKind::SessionDead,
         UpstreamEvent::NotFound => UpstreamErrorKind::NotFound,
         UpstreamEvent::Server => UpstreamErrorKind::Server,
         UpstreamEvent::ModelBlocked | UpstreamEvent::Client => UpstreamErrorKind::Client,
@@ -803,6 +809,10 @@ fn describe_event(event: &UpstreamEvent) -> String {
         UpstreamEvent::NotFound => "404 上游未找到 → 浅冷却 60s".to_string(),
         UpstreamEvent::Server => "5xx 上游异常 → 计入熔断".to_string(),
         UpstreamEvent::SessionDead => "12153 会话失效 → 三振禁用".to_string(),
+        // issue #100：401/403 不再归到「调用方错误」—— 那是**该账号的凭据**被拒。
+        UpstreamEvent::AuthRejected => {
+            "401/403 凭据被拒 → 浅冷却 60s 并换号（保活刷新后可自愈）".to_string()
+        }
         UpstreamEvent::Client => "4xx 调用方错误（不换号）".to_string(),
     }
 }
@@ -905,6 +915,8 @@ async fn select_account(
     // - `MaxCredits`⇒ 候选内按积分择优（**粘性不参与**：否则「按积分择优」会被粘性绑架成
     //                 「总落在同一个号上」，用户看到的又是假开关）；
     // - `Random`    ⇒ 候选内均匀抽签（同上，粘性不参与）；
+    // - `Sequential`⇒ 粘住当前号、不可用才换（**粘性天然重复，故不参与**：它自己就是
+    //                 「会话级粘性」的账号级版本，再叠一层只会让换号多绕一步）；
     // - `Current`   ⇒ 加权选号 + 粘性（粘性是自动择优的子优化）。
     let strategy = state.strategy_for(region).await;
     let (mode, preferred) = match &strategy {
@@ -913,6 +925,7 @@ async fn select_account(
         }
         AccountStrategy::MaxCredits => (PickMode::MaxCredits, None),
         AccountStrategy::Random => (PickMode::Random, None),
+        AccountStrategy::Sequential => (PickMode::Sequential, None),
         _ => (PickMode::Weighted, sticky_uid),
     };
 
@@ -1675,6 +1688,24 @@ mod tests {
     // （判据与自动选号同源，不再有第二套）。对应性质现在由 `pool/pick.rs` 的
     // `pick_with_preference` 系列用例与 `pool::tests::pick_account_honours_preferred_uid_and_falls_back`
     // 守住；Trae 侧另有 `trae::pool::preferred_uid_falls_back_when_unusable` 做行为级印证。
+
+    /// ★ issue #100：上游 401/403 必须**换号**。
+    ///
+    /// 旧实现把它归到 `UpstreamEvent::Client`（「调用方错误，不换号」）⇒ 池里明明有
+    /// 健康账号，客户端却直接吃到 401。用户原话：「之前旧的登录状态直接报 401」。
+    ///
+    /// 变异：把 `should_rotate` 里的 `AuthRejected` 挪回「不换号」⇒ 第一条断言红。
+    #[test]
+    fn auth_rejected_rotates_to_another_account() {
+        use crate::pool::UpstreamEvent;
+        assert!(should_rotate(&UpstreamEvent::AuthRejected, 0));
+        assert!(
+            should_rotate(&UpstreamEvent::AuthRejected, 5),
+            "401/403 不受 attempt 预算影响（它换号就能救）"
+        );
+        // 对照：参数错（400/422）仍然不换号 —— 换号只是把同一份坏参数喂给下一个号。
+        assert!(!should_rotate(&UpstreamEvent::Client, 0));
+    }
 }
 
 /// **首帧窥探**的集成测试：起一个只应答一次的**真 HTTP 服务**，让 `peek_first_frame`

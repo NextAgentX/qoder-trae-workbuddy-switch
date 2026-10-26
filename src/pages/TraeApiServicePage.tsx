@@ -10,6 +10,7 @@ import {
   AUTO_OPTION,
   MAX_CREDITS_OPTION,
   RANDOM_OPTION,
+  SEQUENTIAL_OPTION,
   AccountPoolCard,
 } from "@/components/gateway/account-pool-card";import { GatewayClientlessNotice } from "@/components/clientless-notice";
 import { GatewayShell } from "@/components/gateway/gateway-shell";
@@ -781,6 +782,10 @@ export default function TraeApiServicePage() {
                   label: t("shared.gateway.pool.strategyMaxCredits"),
                 },
                 { value: RANDOM_OPTION, label: t("shared.gateway.pool.strategyRandom") },
+                {
+                  value: SEQUENTIAL_OPTION,
+                  label: t("shared.gateway.pool.strategySequential"),
+                },
               ]}
             />
           )}

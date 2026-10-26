@@ -1994,7 +1994,15 @@ export type AccountStrategy =
    * 是共用枚举，前端少一个选项 = 该能力在这一平台静默消失（见
    * `check-scope-registry.cjs` 的「三平台策略选项一致」）。
    */
-  | { kind: "random" };
+  | { kind: "random" }
+  /**
+   * 顺序（issue #102）：**粘住当前账号**，只有它不可用时才换下一个。
+   *
+   * 与 `random` 的目的正好相反：随机把额度摊开，代价是同一段对话的上下文
+   * 反复落到不同账号上、上游前缀缓存全 miss（用户报「token 消耗过快」）。
+   * 排除 / 禁用 / 冷却 / 模型冷却 / 在途满**照样生效**。
+   */
+  | { kind: "sequential" };
 
 /** 某 region 的策略 + 当前选用账号（selected 与 AccountMeta 同构）。 */
 export interface AccountStrategyView {

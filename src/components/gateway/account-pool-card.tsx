@@ -23,6 +23,14 @@ export const AUTO_OPTION = "__auto__";
 export const MAX_CREDITS_OPTION = "__max_credits__";
 /** 「随机」哨兵 —— 与后端 `pool::PREFERRED_RANDOM` **逐字相同**。 */
 export const RANDOM_OPTION = "__random__";
+/**
+ * 「顺序」哨兵 —— 与后端 `pool::PREFERRED_SEQUENTIAL` **逐字相同**（issue #102）。
+ *
+ * 语义：**粘住当前账号**，只有它被限流 / 冷却 / 排除 / 占满在途时才换下一个。
+ * 与「随机」的目的正好相反 —— 随机把额度摊开，代价是同一段对话的上下文
+ * 反复落到不同账号上、上游前缀缓存全 miss（用户报「token 消耗过快」正是这个）。
+ */
+export const SEQUENTIAL_OPTION = "__sequential__";
 
 /** 五态计数格。 */
 export type PoolTileKey =
@@ -149,8 +157,9 @@ function formatCount(value: number | null | undefined): string {
  * 数据全部由调用方传入（状态来自各自的 `*_gateway_status`），卡片自身不发请求，
  * 因此两侧的差异只剩两处**数据驱动**的参数：
  * - [`tiles`]：计数格。Trae 五格，WorkBuddy 四格（无积分过期判据）。
- * - [`autoOptions`]：下拉里除账号之外的选项。Trae 只有「不指定」；WorkBuddy 另有
- *   「按实时积分择优」（那是它自己的策略能力，写回 `AccountStrategy`）。
+ * - [`autoOptions`]：下拉里除账号之外的选项。三个网关页现在**传同一组四档**
+ *   （不指定 / 按实时积分择优 / 随机 / **顺序**）—— 差异只在写回形态：
+ *   WorkBuddy 存 `AccountStrategy`，Trae / Qoder 存哨兵串 `preferredUid`。
  *
  * ## 指定账号的语义（务必与后端一致）
  *

@@ -76,7 +76,8 @@ const DRAW_SCALE: f64 = 1_000_000.0;
 /// 选号策略 —— **只影响「在合格候选里挑谁」**，不影响任何硬过滤。
 ///
 /// 与 `AccountStrategy` 一一对应（`Current` → [`Self::Weighted`]、`MaxCredits` →
-/// [`Self::MaxCredits`]、`Random` → [`Self::Random`]；`Pinned` 走「偏好」而不是这里）。
+/// [`Self::MaxCredits`]、`Random` → [`Self::Random`]、`Sequential` → [`Self::Sequential`]；
+/// `Pinned` 走「偏好」而不是这里）。
 ///
 /// ★ 为什么是一个枚举而不是若干 bool：这几种策略**互斥**。做成 bool 会出现
 /// 「既按积分择优又随机」这种语义上不可能成立的组合，而 UI 上很容易点出来。
@@ -92,6 +93,31 @@ pub enum PickMode {
     /// 与 `Weighted` 的区别是「有偏 / 无偏」：加权抽签仍然偏爱积分多、闲置久的号，
     /// 长期看会把某几个号抽干。用户明确要「平均分摊」时只有均匀抽签能满足。
     Random,
+    /// **顺序**（issue #102）：粘住当前账号，只有它不可用时才换「顺序上的下一个」。
+    ///
+    /// ## 为什么不是「轮流」（round-robin）
+    ///
+    /// 用户的诉求是**提高上游前缀缓存的命中率**：同一会话的上下文反复落在同一个账号上，
+    /// 上游侧才有可复用的 KV 前缀。轮流会在每轮请求上换号 —— 缓存命中率归零，
+    /// 与「随机」的后果完全一样，只是变得可预测。
+    ///
+    /// 因此本档的语义是「**粘住最近使用的那个号**」：只要它仍然健康、没被限流、
+    /// 没被排除、没占满在途，就一直用它；它一旦不可用，才换下一个。
+    ///
+    /// ## 「顺序」从哪来
+    ///
+    /// 候选按 `used_seq` **降序**取第一名（`used_seq` 是选号序号，单调递增、与系统时钟
+    /// 无关 ⇒ 不受时间回拨影响）；从未用过的号 `used_seq = 0`，并列时按 uid 升序。
+    /// 于是：冷启动取 uid 最小的那个并一直粘着它；它被限流/冷却后，落回「次近使用」的号，
+    /// 全都没用过时就是 uid 序的下一个。
+    ///
+    /// ★ 不依赖账号库的物理顺序：池是 `BTreeMap<uid, _>`，插入序根本不存在 ——
+    /// 「按列表顺序」只能是 uid 序，写清楚比含糊地叫「顺序」重要。
+    ///
+    /// ★ **不受 `min_pick_gap_ms`（防惊群）约束**：那条规则的作用是「别让同一个号被连续打死」，
+    /// 而本档的目的恰恰是「让它连续被用」。两者互斥，故本档在分层之后直接返回，
+    /// 不进入短名单与防惊群那一段。
+    Sequential,
 }
 
 /// 一次选号的**输入**（把 6 个同类型的参数收成一个结构体）。
@@ -260,12 +286,14 @@ fn idle_weight(last_used_ms: i64, now_ms: i64, policy: &PickPolicy) -> f64 {
 /// 这里只是把它变成**后端也认**的语义（否则用户选「按积分择优」在 Trae 侧会被当成一个
 /// 不存在的 uid，静默回落到加权 —— 又一个「假开关」）。
 ///
-/// 三个值与前端常量**逐字相同**，改任何一处都必须同步（`parse_preferred` 的用例钉住）。
+/// 四个值与前端常量**逐字相同**，改任何一处都必须同步（`parse_preferred` 的用例钉住）。
 pub const PREFERRED_AUTO: &str = "__auto__";
 /// 「按积分择优」（候选内积分最高者）。
 pub const PREFERRED_MAX_CREDITS: &str = "__max_credits__";
 /// 「随机」（候选内均匀抽签）。
 pub const PREFERRED_RANDOM: &str = "__random__";
+/// 「顺序」（粘住当前账号，不可用才换下一个；issue #102）。
+pub const PREFERRED_SEQUENTIAL: &str = "__sequential__";
 
 /// 把「偏好值」解析成 `(选号策略, 真正的偏好 uid)`。
 ///
@@ -276,6 +304,7 @@ pub fn parse_preferred(value: Option<&str>) -> (PickMode, Option<&str>) {
     match value.map(str::trim) {
         Some(PREFERRED_MAX_CREDITS) => (PickMode::MaxCredits, None),
         Some(PREFERRED_RANDOM) => (PickMode::Random, None),
+        Some(PREFERRED_SEQUENTIAL) => (PickMode::Sequential, None),
         Some(PREFERRED_AUTO) | None => (PickMode::Weighted, None),
         Some("") => (PickMode::Weighted, None),
         Some(uid) => (PickMode::Weighted, Some(uid)),
@@ -497,6 +526,22 @@ pub fn pick<E: PoolEntryLike>(
                             .partial_cmp(&left.weight)
                             .unwrap_or(std::cmp::Ordering::Equal),
                     )
+                    .then(left.uid.cmp(&right.uid))
+            });
+            let uid = candidates.first()?.uid.clone();
+            return Some(mark_selected(entries, uid, now_ms, pick_seq));
+        }
+        PickMode::Sequential => {
+            // 「顺序」= **粘住最近被选过的那个号**：`used_seq` 降序取第一，并列按 uid 升序。
+            //
+            // ★ 为什么用 `used_seq` 而不是 `last_used_ms`：后者是墙钟，系统时间回拨 /
+            //   跨时区同步会把它弄反；`used_seq` 是单调递增的选号序号，永远可靠。
+            // ★ 这里**不洗牌、不抽签、不看防惊群** —— 三者都会把「粘住」变成「轮流」，
+            //   而轮流对上游前缀缓存毫无帮助（见 `PickMode::Sequential` 的文档）。
+            candidates.sort_by(|left, right| {
+                right
+                    .used_seq
+                    .cmp(&left.used_seq)
                     .then(left.uid.cmp(&right.uid))
             });
             let uid = candidates.first()?.uid.clone();
@@ -825,9 +870,10 @@ mod tests {
 
     /// ★ 偏好值 → 策略的解析（Trae / Qoder 的策略下拉就靠它）。
     ///
-    /// 三个哨兵值必须与前端常量**逐字相同**（`AUTO_OPTION` / `MAX_CREDITS_OPTION`）——
-    /// 否则用户选了「按积分择优」，后端会把它当成一个不存在的 uid 静默回落加权，
-    /// 那就是**假开关**（本仓对这类缺陷零容忍）。
+    /// 四个哨兵值必须与前端常量**逐字相同**（`AUTO_OPTION` / `MAX_CREDITS_OPTION` /
+    /// `RANDOM_OPTION` / `SEQUENTIAL_OPTION`）—— 否则用户选了「按积分择优」，
+    /// 后端会把它当成一个不存在的 uid 静默回落加权，那就是**假开关**
+    /// （本仓对这类缺陷零容忍）。
     #[test]
     fn parse_preferred_maps_sentinels_to_modes() {
         assert_eq!(parse_preferred(None), (PickMode::Weighted, None));
@@ -845,6 +891,10 @@ mod tests {
             parse_preferred(Some(PREFERRED_RANDOM)),
             (PickMode::Random, None)
         );
+        assert_eq!(
+            parse_preferred(Some(PREFERRED_SEQUENTIAL)),
+            (PickMode::Sequential, None)
+        );
         // 普通 uid ⇒ 仍是「偏好」（不是策略）
         assert_eq!(
             parse_preferred(Some("uid-1")),
@@ -855,6 +905,160 @@ mod tests {
             parse_preferred(Some(" __random__ ")),
             (PickMode::Random, None)
         );
+    }
+
+    /// 带策略的选号（测试用；`PickInput::new` 恒为加权档）。
+    // 参数逐项对应一个约束维度（与上面的 `pick` 夹具同形），不为过 lint 而合并。
+    #[allow(clippy::too_many_arguments)]
+    fn pick_with_mode(
+        entries: &mut BTreeMap<String, PoolEntry>,
+        pick_seq: &mut u64,
+        policy: &PickPolicy,
+        now_ms: i64,
+        model: &str,
+        tried: &HashSet<String>,
+        mode: PickMode,
+        seed: u64,
+    ) -> Option<String> {
+        super::pick(
+            entries,
+            pick_seq,
+            policy,
+            now_ms,
+            &PickInput {
+                realm: None,
+                model,
+                tried,
+                excluded: no_exclusions(),
+                allowed: None,
+                mode,
+                seed,
+            },
+        )
+    }
+
+    /// ★ issue #102：顺序档必须**粘住同一个号**，而不是轮流。
+    ///
+    /// 变异：把 `Sequential` 分支改成「取 `used_seq` 最小者」⇒ 本用例立刻红
+    /// （那是轮流，上游前缀缓存命中率归零 —— 正是用户报的问题）。
+    ///
+    /// 同时钉住「不受防惊群约束」：`policy()` 的 `min_pick_gap_ms = 100`，
+    /// 而这里五次选号用**同一个 `now_ms`**。若顺序档走进短名单 + 防惊群那一段，
+    /// 第二跳就会被踢出去换号。
+    #[test]
+    fn sequential_sticks_to_the_same_account() {
+        let mut entries = pool_of(vec![base_entry("a"), base_entry("b"), base_entry("c")]);
+        let mut seq = 0u64;
+        let mut seen = Vec::new();
+        for round in 0..5u64 {
+            let uid = pick_with_mode(
+                &mut entries,
+                &mut seq,
+                &policy(),
+                NOW,
+                "m",
+                &HashSet::new(),
+                PickMode::Sequential,
+                round,
+            )
+            .expect("必须有候选");
+            seen.push(uid);
+        }
+        assert!(
+            seen.iter().all(|uid| uid == "a"),
+            "顺序档必须一直用同一个号（uid 序第一个）：{seen:?}"
+        );
+    }
+
+    /// ★ issue #102 的后半句：「账号限流后自动切换下一个」。
+    ///
+    /// 且**恢复后不抢回** —— 否则每 60 秒抖一次账号，缓存又被清空，等于没修。
+    #[test]
+    fn sequential_moves_to_next_only_when_current_is_unusable() {
+        let mut entries = pool_of(vec![base_entry("a"), base_entry("b")]);
+        let mut seq = 0u64;
+
+        let first = pick_with_mode(
+            &mut entries,
+            &mut seq,
+            &policy(),
+            NOW,
+            "m",
+            &HashSet::new(),
+            PickMode::Sequential,
+            1,
+        )
+        .expect("必须有候选");
+        assert_eq!(first, "a", "冷启动取 uid 序第一个");
+
+        // a 被账号级限流 ⇒ 不可用 ⇒ 换 b。
+        entries
+            .get_mut("a")
+            .expect("a 存在")
+            .cooldown_fixed(NOW, 60_000, "429 账号级限流");
+        let second = pick_with_mode(
+            &mut entries,
+            &mut seq,
+            &policy(),
+            NOW,
+            "m",
+            &HashSet::new(),
+            PickMode::Sequential,
+            2,
+        )
+        .expect("必须有候选");
+        assert_eq!(second, "b", "当前号被限流后必须换下一个");
+
+        // a 的冷却到期（60s 后）：**仍然留在 b** —— b 已是当前号。
+        let third = pick_with_mode(
+            &mut entries,
+            &mut seq,
+            &policy(),
+            NOW + 61_000,
+            "m",
+            &HashSet::new(),
+            PickMode::Sequential,
+            3,
+        )
+        .expect("必须有候选");
+        assert_eq!(
+            third, "b",
+            "冷却恢复后不得把请求从 b 抢回 a —— 那等于每 60 秒清一次缓存"
+        );
+    }
+
+    /// 顺序档照样吃硬约束：`tried`（本轮已试）与排除名单都不进候选。
+    #[test]
+    fn sequential_respects_tried_and_exclusions() {
+        let mut entries = pool_of(vec![base_entry("a"), base_entry("b"), base_entry("c")]);
+        let mut seq = 0u64;
+        let mut tried = HashSet::new();
+        tried.insert("a".to_string());
+        let uid = pick_with_mode(
+            &mut entries,
+            &mut seq,
+            &policy(),
+            NOW,
+            "m",
+            &tried,
+            PickMode::Sequential,
+            1,
+        )
+        .expect("必须有候选");
+        assert_eq!(uid, "b", "本轮已试过的号不得再被选中");
+
+        let excluded: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let input = PickInput {
+            realm: None,
+            model: "m",
+            tried: &HashSet::new(),
+            excluded: &excluded,
+            allowed: None,
+            mode: PickMode::Sequential,
+            seed: 2,
+        };
+        let uid = super::pick(&mut entries, &mut seq, &policy(), NOW, &input).expect("必须有候选");
+        assert_eq!(uid, "a", "排除是硬约束：被排除的号即使「最近用过」也不能选");
     }
 
     #[test]

@@ -174,6 +174,10 @@ pub fn probe_state_of(event: &UpstreamEvent) -> ProbeState {
         UpstreamEvent::ModelBlocked => ProbeState::ModelBlocked,
         UpstreamEvent::HardCredit => ProbeState::NoCredits,
         UpstreamEvent::SessionDead => ProbeState::AuthDead,
+        // issue #100：401/403 同样落 `auth_dead` —— 探测要能回答「这个号的凭据还能不能用」。
+        // 旧映射把它并进 `upstream_error`，于是一个「凭据过期」的号在探测结论里
+        // 与「上游抖动」同档，看的人没法判断该去重新登录还是等一等。
+        UpstreamEvent::AuthRejected => ProbeState::AuthDead,
         UpstreamEvent::NotFound => ProbeState::ModelUnavailable,
         UpstreamEvent::Server | UpstreamEvent::Client => ProbeState::UpstreamError,
     }
@@ -1692,6 +1696,12 @@ mod tests {
         );
         assert_eq!(
             probe_state_of(&UpstreamEvent::SessionDead),
+            ProbeState::AuthDead
+        );
+        // issue #100：401/403 也是「凭据不可用」，必须落 `auth_dead` 而不是
+        // 与「上游抖动」同档 —— 两者对用户的可行动指引完全不同。
+        assert_eq!(
+            probe_state_of(&UpstreamEvent::AuthRejected),
             ProbeState::AuthDead
         );
         assert_eq!(

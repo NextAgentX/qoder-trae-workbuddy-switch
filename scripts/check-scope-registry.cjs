@@ -7819,9 +7819,9 @@ check("★★ 三条产品线的账号池归一化都必须保留 `excluded`（�
 });
 
 check("★ 策略哨兵值前后端逐字一致（否则下拉是假开关）", () => {
-  /* 三个哨兵（`__auto__` / `__max_credits__` / `__random__`）在**前端常量**里定义一次、
-     在**后端 `PREFERRED_*`** 里再定义一次。任何一处漂移的后果都不是报错，而是
-     「用户选了『按积分择优』，后端把它当成一个不存在的 uid，静默回落加权」
+  /* 四个哨兵（`__auto__` / `__max_credits__` / `__random__` / `__sequential__`）在
+     **前端常量**里定义一次、在**后端 `PREFERRED_*`** 里再定义一次。任何一处漂移的后果
+     都不是报错，而是「用户选了『按积分择优』，后端把它当成一个不存在的 uid，静默回落加权」
      —— 假开关，且从界面上完全看不出来。故用契约检查把两份钉在一起。 */
   const card = stripComments(
     fs.readFileSync(path.join(ROOT, "src/components/gateway/account-pool-card.tsx"), "utf8"),
@@ -7836,6 +7836,7 @@ check("★ 策略哨兵值前后端逐字一致（否则下拉是假开关）", 
     ["AUTO_OPTION", "PREFERRED_AUTO"],
     ["MAX_CREDITS_OPTION", "PREFERRED_MAX_CREDITS"],
     ["RANDOM_OPTION", "PREFERRED_RANDOM"],
+    ["SEQUENTIAL_OPTION", "PREFERRED_SEQUENTIAL"],
   ];
   for (const [tsName, rsName] of pairs) {
     const ts = new RegExp(`export const ${tsName} = "([^"]+)"`).exec(card);
@@ -7848,12 +7849,13 @@ check("★ 策略哨兵值前后端逐字一致（否则下拉是假开关）", 
       );
     }
   }
-  return "3 个哨兵值前后端逐字一致";
+  return "4 个哨兵值前后端逐字一致";
 });
 
-check("★ 三个网关页的账号池策略档位必须一致（含「随机」）", () => {
+check("★ 三个网关页的账号池策略档位必须一致（含「随机」「顺序」）", () => {
   /* 后端 `account_strategy::AccountStrategy` 是**三平台共用**的枚举（Current / Pinned /
-     MaxCredits / Random），但「策略选项」是每页各自传给池卡的 `autoOptions`。任一页少给一档，
+     MaxCredits / Random / Sequential），但「策略选项」是每页各自传给池卡的 `autoOptions`。
+     任一页少给一档，
      症状是**该平台静默失去那个策略**：界面上没有这一项，用户根本无从知道后端支持它，
      而合并另一页时又会被当成「本来就没有」—— 排查成本极高（2026-10-17 用户报「随机模式没有了」，
      真因就是 WorkBuddy 页只传了两档）。
@@ -7866,7 +7868,12 @@ check("★ 三个网关页的账号池策略档位必须一致（含「随机」
   ];
   for (const [page, writeBack] of pages) {
     const source = stripComments(fs.readFileSync(path.join(ROOT, page), "utf8"));
-    for (const option of ["AUTO_OPTION", "MAX_CREDITS_OPTION", "RANDOM_OPTION"]) {
+    for (const option of [
+      "AUTO_OPTION",
+      "MAX_CREDITS_OPTION",
+      "RANDOM_OPTION",
+      "SEQUENTIAL_OPTION",
+    ]) {
       if (!source.includes(option)) {
         throw new Error(`${page} 的账号池 autoOptions 缺 ${option} —— 三平台策略档位必须一致`);
       }
@@ -7875,13 +7882,23 @@ check("★ 三个网关页的账号池策略档位必须一致（含「随机」
        选了会被当成一个不存在的 uid 静默回落自动择优。
        ⚠️ 两平台写回形态不同：Trae / Qoder 直接存哨兵串（`preferredUid`，由后端
        `pool::parse_preferred` 解释），WorkBuddy 存 `AccountStrategy`，故后者的
-       `random` 哨兵必须**显式**映射成 `persist({ kind: "random" })`。 */
+       `random` / `sequential` 哨兵必须**显式**映射成 `persist({ kind: … })`。 */
     if (writeBack === "strategy") {
       if (!/persist\(\{\s*kind:\s*"random"\s*\}\)/.test(source)) {
         throw new Error(`${page} 没有把 RANDOM_OPTION 映射到 persist({ kind: "random" })`);
       }
       if (!/strategy\.kind === "random"/.test(source)) {
         throw new Error(`${page} 没有把 kind: "random" 读回成下拉值（保存后选项会弹回「不指定」）`);
+      }
+      if (!/persist\(\{\s*kind:\s*"sequential"\s*\}\)/.test(source)) {
+        throw new Error(
+          `${page} 没有把 SEQUENTIAL_OPTION 映射到 persist({ kind: "sequential" })`,
+        );
+      }
+      if (!/strategy\.kind === "sequential"/.test(source)) {
+        throw new Error(
+          `${page} 没有把 kind: "sequential" 读回成下拉值（保存后选项会弹回「不指定」）`,
+        );
       }
     } else if (!/persist\(\{\s*preferredUid/.test(source)) {
       throw new Error(`${page} 没有把哨兵值写回 preferredUid`);
@@ -7895,7 +7912,12 @@ check("★ 三个网关页的账号池策略档位必须一致（含「随机」
   if (!/"random"/.test(union[1])) {
     throw new Error("AccountStrategy union 缺 `{ kind: \"random\" }` —— 后端枚举已有 Random");
   }
-  return "3 个网关页 × 3 档策略 + union 一致";
+  if (!/"sequential"/.test(union[1])) {
+    throw new Error(
+      "AccountStrategy union 缺 `{ kind: \"sequential\" }` —— 后端枚举已有 Sequential（issue #102）",
+    );
+  }
+  return "3 个网关页 × 4 档策略 + union 一致";
 });
 
 check("★ Q6「登录态快照」不得升为 Capability（D40）", () => {

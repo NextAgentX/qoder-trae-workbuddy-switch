@@ -10,6 +10,7 @@ import {
   AUTO_OPTION,
   MAX_CREDITS_OPTION,
   RANDOM_OPTION,
+  SEQUENTIAL_OPTION,
   AccountPoolCard,
   QODER_POOL_TILES,
 } from "@/components/gateway/account-pool-card";
@@ -707,6 +708,10 @@ export default function QoderApiServicePage() {
                   label: t("shared.gateway.pool.strategyMaxCredits"),
                 },
                 { value: RANDOM_OPTION, label: t("shared.gateway.pool.strategyRandom") },
+                {
+                  value: SEQUENTIAL_OPTION,
+                  label: t("shared.gateway.pool.strategySequential"),
+                },
               ]}
             />
             </>

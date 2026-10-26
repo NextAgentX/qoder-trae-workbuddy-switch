@@ -10,6 +10,7 @@ import {
   AUTO_OPTION,
   MAX_CREDITS_OPTION,
   RANDOM_OPTION,
+  SEQUENTIAL_OPTION,
   WB_POOL_TILES,
 } from "@/components/gateway/account-pool-card";
 import { IntegrationGuide } from "@/components/gateway/integration-guide";
@@ -612,7 +613,9 @@ function RegionPoolCard({ region }: { region: Region }) {
         ? MAX_CREDITS_OPTION
         : strategy.kind === "random"
           ? RANDOM_OPTION
-          : "";
+          : strategy.kind === "sequential"
+            ? SEQUENTIAL_OPTION
+            : "";
 
   async function persist(next: AccountStrategy) {
     setSaving(true);
@@ -635,6 +638,12 @@ function RegionPoolCard({ region }: { region: Region }) {
        后端 `AccountStrategy::Random` 是三平台共用枚举，这里少一档就是该平台静默失去它。 */
     if (next === RANDOM_OPTION) {
       void persist({ kind: "random" });
+      return;
+    }
+    /* 顺序（issue #102）：粘住当前账号，只有它不可用时才换下一个。
+       目的是**上游前缀缓存复用** —— 随机每轮换号会让同一段上下文反复按输入计价。 */
+    if (next === SEQUENTIAL_OPTION) {
+      void persist({ kind: "sequential" });
       return;
     }
     if (next === AUTO_OPTION || next === "") {
@@ -715,6 +724,7 @@ function RegionPoolCard({ region }: { region: Region }) {
         { value: AUTO_OPTION, label: t("shared.gateway.pool.preferredAuto") },
         { value: MAX_CREDITS_OPTION, label: t("shared.gateway.pool.strategyMaxCredits") },
         { value: RANDOM_OPTION, label: t("shared.gateway.pool.strategyRandom") },
+        { value: SEQUENTIAL_OPTION, label: t("shared.gateway.pool.strategySequential") },
       ]}
       // 不传 `title`：与 Trae 侧一致用默认的「账号池」——版本由**页头切换器**承担，
       // 卡内再挂一次版本后缀只是噪音（Trae 的池卡同样不标区域）。
