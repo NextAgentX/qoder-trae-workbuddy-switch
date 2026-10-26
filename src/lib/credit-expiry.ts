@@ -54,7 +54,10 @@ export interface ExpiringItem {
   expireAt: number | null;
   /** 后端标记：已到期。 */
   expired?: boolean;
-  /** 后端标记：临期（7 天窗口）。`undefined` 表示数据源没这个字段 ⇒ 视为未知、跳过。 */
+  /**
+   * 后端标记：临期（窗口见后端 `EXPIRING_SOON_SECS`，**14 天**）。
+   * `undefined` 表示数据源没这个字段 ⇒ 视为未知、跳过。
+   */
   expiringSoon?: boolean;
 }
 
@@ -105,17 +108,17 @@ export function summarizeExpiring(
  *
  * ## 为什么要有这一段（issue #69）
  *
- * `summarizeExpiring` 只看**后端 7 天临期窗口**内的批次 —— 那是对的，因为「7 天内过期」
+ * `summarizeExpiring` 只看**后端临期窗口**（14 天）内的批次 —— 那是对的，因为「N 天内过期」
  * 是一句**警告**（「再不用就浪费了」）。但用户真正要回答的是另一个问题：
  * **「我好几个账号，先用哪个？」** —— 这个问题需要「**每一笔未来到期**」的相对顺序，
  * 而不是「7 天内的那批」。
  *
- * 8 天后到期、30 天后到期的积分，在 `summarizeExpiring` 里**根本不可见**
+ * 15 天后到期、30 天后到期的积分，在 `summarizeExpiring` 里**根本不可见**
  * （`expiringSoon !== true` 直接被跳过）⇒ 用户说「两周内到期的看不到」就是这个。
  *
  * ## 三条与 `summarizeExpiring` **刻意不同**的地方
  *
- * ① **不读 `expiringSoon`**：那个布尔由后端的 7 天窗口决定，**不能**表达「14 天后」。
+ * ① **不读 `expiringSoon`**：那个布尔由后端的 14 天窗口决定，**不能**表达「30 天后」。
  * ② **不读 `credit.soonestExpireAt`**：它把**已过期**资源也算进最小值 ⇒ 拿它排序会
  *    把「已过期」排到最前（那是「已经浪费了」，不该抢占「先消耗」的位）。
  * ③ **不设天数上限**：「最近一批」是相对顺序，不是一个窗口。

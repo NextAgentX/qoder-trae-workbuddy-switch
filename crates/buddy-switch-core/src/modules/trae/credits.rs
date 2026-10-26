@@ -343,12 +343,24 @@ pub struct CreditPackage {
     pub expire_at: Option<i64>,
     /// 是否已过期（`expire_at` 存在且 `< now`）。
     pub expired: bool,
-    /// 是否 7 天内到期（未过期且 `expire_at - now <= 7 天`）。
+    /// 是否**临期**（未过期且 `expire_at - now <= ` [`EXPIRING_SOON_SECS`]）。
     pub expiring_soon: bool,
 }
 
-/// 「7 天内到期」的判定窗口（秒）。
-const EXPIRING_SOON_SECS: i64 = 7 * 24 * 3600;
+/// 「临期」的判定窗口（秒）—— **14 天**。
+///
+/// ## 为什么从 7 天放宽到 14 天（issue #83 · 3）
+///
+/// 7 天作为「再不用就浪费了」的告警太紧：多数人一周才打开一次这个工具，
+/// 7 天窗口常常在用户下一次打开之前就滑过去了 —— 徽标从来没亮过，积分就过期了。
+///
+/// 为什么不是 30 天：大部分积分包的有效期本身就在 30 天内，30 天窗口会让**几乎所有**
+/// 包都显示「临期」⇒ 这个信号失去区分度，用户会学会无视它。14 天是「两次使用间隔
+/// 的两倍左右」，既能在真正浪费前提醒，又不至于天天红。
+///
+/// ⚠️ 这是**产品口径**，不是技术常量：改它等于改文案的承诺
+/// （`trae.comp.card.chip.expiring` 写的是「N 天内过期」，由本窗口决定 N 的上界）。
+const EXPIRING_SOON_SECS: i64 = 14 * 24 * 3600;
 
 /// 由一组 `user_entitlement_pack_list` 元素解析逐包明细（纯函数，便于单测）。
 ///
@@ -1166,6 +1178,26 @@ mod tests {
         assert_eq!(packages[1].remaining, 0.0);
         assert!(packages[1].expired);
         assert!(!packages[1].expiring_soon);
+    }
+
+    /// ★ 临期窗口的**边界**（issue #83 · 3）：14 天以内算临期，超过不算。
+    ///
+    /// 这条用例的价值不在于「验证一个常量」，而在于把**产品口径**钉住：
+    /// 窗口从 7 天放宽到 14 天是刻意的（7 天常常在用户下次打开之前就滑过去了）。
+    /// 变异：把 `EXPIRING_SOON_SECS` 改回 7 天 ⇒ 13 天那条变红；改成 30 天 ⇒ 15 天那条变红。
+    #[test]
+    fn expiring_soon_window_is_fourteen_days() {
+        let now = 1_000_000_i64;
+        let pack = |days: i64| {
+            serde_json::json!({
+                "entitlement_base_info": { "quota": { "credits_limit": 10.0 } },
+                "expire_time": now + days * 24 * 3600,
+            })
+        };
+        let near = parse_credit_packages(&[pack(13)], now);
+        assert!(near[0].expiring_soon, "13 天后到期应算临期（窗口 14 天）");
+        let far = parse_credit_packages(&[pack(15)], now);
+        assert!(!far[0].expiring_soon, "15 天后到期不应算临期（窗口 14 天）");
     }
 
     /// ★★ 护栏（issue #7）：「最早到期」**不得**由已用完的包决定。
