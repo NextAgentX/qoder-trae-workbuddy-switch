@@ -96,6 +96,18 @@ pub struct PoolSummary {
     ///
     /// 不变量：`in_flight_full <= available`。
     pub in_flight_full: usize,
+    /// **状态可用、但有模型级冷却**的账号数（**正交计数，已计入** `available`，issue #88 新增）。
+    ///
+    /// 与 `in_flight_full` 同一档：账号本身没坏（凭据、余额、账号级冷却都没问题），
+    /// 只是「某个模型」被上游 429 罚了 —— 换个模型就能用。因此**不能**从 `available`
+    /// 里扣掉（扣掉会让人把「换个模型就好」误判成「这个号废了」，也与
+    /// [`PoolEntry::status_of`] 不读 `model_cooldowns` 的领域建模冲突）。
+    ///
+    /// 但缺了它，池摘要就**一个数字都不反映模型级冷却** —— 探测判出限流、池卡全绿，
+    /// 用户只能怀疑「探测没生效」（issue #88 的 2.6）。Qoder 侧早有这一格，属实现不对称。
+    ///
+    /// 不变量：`model_cooling <= available`。
+    pub model_cooling: usize,
     pub total_credits: f64,
 }
 
@@ -174,6 +186,13 @@ pub struct PoolConfig {
     /// 与模型级同一理由：配额窗口 ≠ 解锁时刻。给 2 小时会让一个十几分钟就恢复的号
     /// 长时间不可用（实测过）；给太短又会把真限流当没发生。
     pub rate_window_reset_max_ms: i64,
+    /// 探测回填的**兜底冷却时长**（毫秒，默认 10 分钟）—— issue #88。
+    ///
+    /// 上游没给任何可用墙钟时用它（见 [`PROBE_FALLBACK_COOLDOWN_MS`]）。
+    /// **刻意与 [`Self::min_model_cooldown_ms`]（真实流量）分开配置**：探测是用户
+    /// 主动发起的一次性动作，冷多久应当可以单独调，不能顺手改到真实流量那条链路。
+    /// `<= 0` 归一为 [`PROBE_FALLBACK_COOLDOWN_MS`]。
+    pub probe_fallback_ms: i64,
     /// 在途满时的**排队等待**上限（毫秒，默认 2000；`0` = 不排队、立刻换号）。
     ///
     /// 为什么要有它：`acquire` 失败就换号会把「此刻并发占满」误报成「这个号不可用」——
@@ -212,6 +231,7 @@ impl Default for PoolConfig {
             credits_refresh_interval_ms: 30 * 60 * 1000,
             min_model_cooldown_ms: MIN_MODEL_COOLDOWN_MS,
             rate_window_reset_max_ms: 15 * 60 * 1000,
+            probe_fallback_ms: PROBE_FALLBACK_COOLDOWN_MS,
             acquire_timeout_ms: 2000,
             gate_threshold: 2,
             gate_window_ms: 10 * 60 * 1000,
@@ -277,6 +297,10 @@ impl PoolConfig {
         if self.rate_window_reset_max_ms <= 0 {
             self.rate_window_reset_max_ms = 15 * 60 * 1000;
         }
+        // ★ 兜底时长同样不能配成 0：那会让探测回填退化成「冷 1ms = 没冷却」（issue #88）。
+        if self.probe_fallback_ms <= 0 {
+            self.probe_fallback_ms = PROBE_FALLBACK_COOLDOWN_MS;
+        }
         // `acquire_timeout_ms` 允许 0（= 不排队），负值归 0。
         if self.acquire_timeout_ms < 0 {
             self.acquire_timeout_ms = 0;
@@ -325,17 +349,60 @@ pub enum UpstreamEvent {
     Client,
 }
 
-/// 探测回填的**冷却下限**（毫秒）：上游没给墙钟、或给的墙钟已过期时用它。/// ## ★ 为什么必须有下限（2026-10-16 评审抓出的真缺陷）
+/// 探测回填的**冷却下限**（毫秒）：上游给的墙钟离现在太近（甚至已过期）时兜住它。
+///
+/// ## ★ 它不是「兜底时长」（issue #88）
+///
+/// 旧实现把「下限」当成了「兜底」—— `reset_at_ms` 为 `None` 时直接 `now + 60s`。
+/// 而 WB 的 `6004` 一个结构化数值键都不给 ⇒ 每条回填都恰好只冷 60 秒，用户根本来不及看见。
+/// 现在「不知道冷多久」走 [`PROBE_FALLBACK_COOLDOWN_MS`]（10 分钟，可配
+/// [`PoolConfig::probe_fallback_ms`]），本常量只负责「不能更短」。
+///
+/// ## ★ 为什么必须有下限（2026-10-16 评审抓出的真缺陷）
 ///
 /// `cooldown_model(.., reset_at_ms = 0, ..)` 会落到 `now + 1ms` —— 那等于**没有冷却**
-/// （下一毫秒就又去撞同一堵墙），而调用方却会以为「已置冷却」。方案 §4.5.2 要求
-/// 「无则 `now + 60s`」，本条把它落成常量。
+/// （下一毫秒就又去撞同一堵墙），而调用方却会以为「已置冷却」。
 ///
 /// ## 为什么下限放在**本模块**而不是调用方
 ///
 /// 放在调用方 ⇒ 换个调用方又漏。这里是回填的唯一入口，放这儿才有约束力。
-///
 pub const MIN_PROBE_COOLDOWN_MS: i64 = 60_000;
+
+/// 探测回填的**兜底冷却时长**（毫秒，默认 10 分钟）—— 上游完全没给墙钟时用它。
+///
+/// ## ★★ 为什么必须与 [`MIN_PROBE_COOLDOWN_MS`] 分开（issue #88）
+///
+/// 旧实现把两者合成一个 60 秒常量：`reset_at_ms` 为 `None` 时直接 `now + 60s`。
+/// 而 WB 的 `6004` 响应体**一个结构化数值键都没有**（`resetTime` / `resetAt` … 全缺），
+/// 于是**每一条**探测回填的冷却都恰好只有 60 秒。用户的操作节奏（跑完探测 → 切到
+/// 账号池分区 → 找到那个号）几乎必然超过它 ⇒ 结论在任何出口上都**不可观测**，
+/// 表现为「探测判出限流了，可账号池还是全绿」。
+///
+/// 60 秒作为「下限」是对的（防 `now + 1ms` 等于没冷却），但作为「兜底时长」太短。
+/// 两者是两条不同语义：下限约束「不能更短」，兜底决定「不知道时冷多久」。
+///
+/// 10 分钟的依据：探测是**用户主动发起**的一次性动作，冷却过长会误伤一个其实
+/// 已经恢复的模型；过短则用户来不及看见。10 分钟 ≈ 用户排查一轮的时间量级，
+/// 且首次成功请求会立刻清掉它（[`PoolEntry::note_success`] 的反证优先）。
+pub const PROBE_FALLBACK_COOLDOWN_MS: i64 = 10 * 60 * 1000;
+
+/// 探测回填的**目标冷却截止时刻**（唯一计算点）。
+///
+/// 三条规则，顺序不可换：
+/// 1. 上游给了**未来**墙钟 ⇒ 用它，但**不得短于** [`MIN_PROBE_COOLDOWN_MS`]
+///    （差 3 秒的墙钟等于没冷却，下一秒又去撞同一堵墙）；
+/// 2. 没给 / 已过期 ⇒ `now + config.probe_fallback_ms`（默认 10 分钟，**不是 60 秒**）；
+/// 3. 兜底值本身也被 [`MIN_PROBE_COOLDOWN_MS`] 兜住，防有人把它配成 0。
+///
+/// ★ 与真实流量那条链路的 [`MIN_MODEL_COOLDOWN_MS`] **无关**：两条语义独立，
+/// 共用一个会让「调探测」误伤真实流量（issue #88 的硬约束）。
+fn probe_cooldown_until(now_ms: i64, reset_at_ms: Option<i64>, config: &PoolConfig) -> i64 {
+    let floor = now_ms.saturating_add(MIN_PROBE_COOLDOWN_MS);
+    match reset_at_ms.filter(|value| *value > now_ms) {
+        Some(value) => value.max(floor),
+        None => now_ms.saturating_add(config.probe_fallback_ms.max(MIN_PROBE_COOLDOWN_MS)),
+    }
+}
 
 /// **真实流量**的模型级冷却下限（毫秒）。与 [`MIN_PROBE_COOLDOWN_MS`] 同值、**分常量**声明。
 ///
@@ -562,8 +629,11 @@ pub fn classify_event(status: u16, body: &str) -> UpstreamEvent {
             .any(|marker| body.contains(marker));
         return UpstreamEvent::SoftRate {
             // ★ 只信**结构化**墙钟。文案里的 `reset at` 是配额窗口（实测 6/6 判错），
-            //   拿它当冷却时长会把号冷掉几小时；冷却时长的兜底见
-            //   `PoolConfig::min_model_cooldown_ms` / `rate_window_reset_max_ms`。
+            //   拿它当冷却时长会把号冷掉几小时。
+            //   真实流量的兜底见 `PoolConfig::min_model_cooldown_ms`（下限）与
+            //   `PoolConfig::rate_window_reset_max_ms`（账号级上限）；
+            //   探测回填的兜底是另一条链，见 `probe_cooldown_until` /
+            //   `PoolConfig::probe_fallback_ms`。
             reset_at_ms: parse_reset_at_ms_from_json(body),
             model_scoped,
         };
@@ -1333,10 +1403,9 @@ impl Pool {
                         .get(model)
                         .map(|cool| cool.until_ms)
                         .unwrap_or(0);
-                    // ★ 下限：未知 / 已过期的墙钟一律补齐（否则只冷 1ms）。
-                    let reset_at = reset_at_ms
-                        .filter(|value| *value > now_ms)
-                        .unwrap_or(now_ms.saturating_add(MIN_PROBE_COOLDOWN_MS));
+                    // ★ 下限 + 兜底：未知 / 已过期的墙钟一律走 `probe_fallback_ms`
+                    //   （默认 10 分钟），不再是写死的 60 秒（issue #88）。
+                    let reset_at = probe_cooldown_until(now_ms, *reset_at_ms, &config);
                     entry.cooldown_model(
                         now_ms,
                         model,
@@ -1375,9 +1444,7 @@ impl Pool {
                 }
                 ProbeOutcome::AccountRateLimited { reset_at_ms } => {
                     let before = entry.until_ms;
-                    let reset_at = reset_at_ms
-                        .filter(|value| *value > now_ms)
-                        .unwrap_or(now_ms.saturating_add(MIN_PROBE_COOLDOWN_MS));
+                    let reset_at = probe_cooldown_until(now_ms, *reset_at_ms, &config);
                     entry.cooldown_soft_until(
                         now_ms,
                         reset_at,
@@ -1465,6 +1532,16 @@ impl Pool {
                         //   只在可用分支里数：禁用/冷却/零积分/被排除的号即便在途也不能选中。
                         if pick::in_flight_full(entry, &self.policy(), now_ms) {
                             summary.in_flight_full += 1;
+                        }
+                        // ★ 模型级冷却是**正交**信号（issue #88）：账号仍可用，只是某几个
+                        //   模型被罚。与 `in_flight_full` 同一档 —— 只数「状态可用」的号，
+                        //   否则会与 `cooling` / `disabled` 重复计数。
+                        if entry
+                            .model_cooldowns
+                            .values()
+                            .any(|cool| cool.until_ms > now_ms)
+                        {
+                            summary.model_cooling += 1;
                         }
                     }
                 }
@@ -3599,6 +3676,15 @@ mod tests {
             "没给墙钟必须补下限，不能只冷 1ms（实得 {}）",
             cooldown.until_ms - NOW
         );
+        // ★ issue #88：没墙钟时必须走**兜底时长**（10 分钟），不是 60 秒下限 ——
+        //   60 秒的冷却撑不到用户切到账号池分区，等于「回填了但看不见」。
+        //   变异：把 `probe_cooldown_until` 的 `None` 分支改回 `MIN_PROBE_COOLDOWN_MS` ⇒ 红。
+        assert_eq!(
+            cooldown.until_ms - NOW,
+            PROBE_FALLBACK_COOLDOWN_MS,
+            "无墙钟应取兜底时长（{PROBE_FALLBACK_COOLDOWN_MS}ms），实得 {}ms",
+            cooldown.until_ms - NOW
+        );
 
         // ② 墙钟已过期（上游说「昨天就重置了」，但我们刚吃了个 429）⇒ 同样补下限。
         assert!(pool.adopt_probe_result(
@@ -3630,6 +3716,59 @@ mod tests {
             pool.get("u1").unwrap().model_cooldowns["m3"].until_ms,
             NOW + 120_000,
             "未封顶的未来墙钟应原样采用"
+        );
+    }
+
+    /// ★ 兜底时长可配（issue #88 的「回填值不应是一个固定值」）。
+    ///
+    /// 变异：让 `adopt_probe_result` 忽略 `config.probe_fallback_ms`（直接吃常量）⇒ 红。
+    #[test]
+    fn adopt_probe_fallback_honours_config() {
+        let config = PoolConfig {
+            probe_fallback_ms: 20 * 60 * 1000,
+            ..PoolConfig::default()
+        };
+        let mut pool = Pool::new(config);
+        pool.upsert("u1", Some(RealmTag::Cn), "n1");
+        assert!(pool.adopt_probe_result(
+            "u1",
+            Some(RealmTag::Cn),
+            "m",
+            &ProbeOutcome::ModelRateLimited { reset_at_ms: None },
+            NOW,
+        ));
+        assert_eq!(
+            pool.get("u1").unwrap().model_cooldowns["m"].until_ms - NOW,
+            20 * 60 * 1000,
+            "兜底时长必须读配置，不能写死"
+        );
+    }
+
+    /// ★ `summary().model_cooling` 必须真的数出来（issue #88 · C）。
+    ///
+    /// 正交计数：账号状态仍是 `available`，只是有模型级冷却 —— 所以它**不能**
+    /// 从 `available` 里扣掉，但**必须**有一个非零数字反映它。
+    /// 变异：删掉 `summary_filtered` 里那段 `model_cooling` 累加 ⇒ 红。
+    #[test]
+    fn summary_counts_model_cooling_without_touching_available() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "n1");
+        pool.upsert("u2", Some(RealmTag::Cn), "n2");
+        assert!(pool.adopt_probe_result(
+            "u1",
+            Some(RealmTag::Cn),
+            "m",
+            &ProbeOutcome::ModelRateLimited { reset_at_ms: None },
+            NOW,
+        ));
+
+        let summary = pool.summary(NOW, Some(RealmTag::Cn));
+        assert_eq!(summary.model_cooling, 1, "有模型级冷却的号应被数到");
+        assert_eq!(summary.available, 2, "模型冷却不改账号级状态 ⇒ 可用数不变");
+        assert_eq!(summary.cooling, 0, "不得混进账号级冷却");
+        assert!(
+            summary.model_cooling <= summary.available,
+            "正交计数不得越过 available"
         );
     }
 

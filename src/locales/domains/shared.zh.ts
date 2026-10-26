@@ -188,6 +188,9 @@ export const zh = {
   "shared.gateway.probe.done": "已完成",
   "shared.gateway.probe.cancelled": "已取消剩余（下面是部分结果）",
   "shared.gateway.probe.adoptResult": "回填 置 {added} / 清 {cleared}",
+  // issue #88：探出限流却「回填 0 条」是最需要解释的组合，旧实现一个字都不渲染。
+  "shared.gateway.probe.adoptNone":
+    "本次判出 {n} 格限流，但没有写入任何冷却：这些账号可能已不在池中、已被禁用，或已有更晚的冷却（不会被缩短）。",
   // 回填明细（§5.3「回填反馈」完成条 → 可展开）；账号 / 模型 / 置或清 / 到什么时候。
   "shared.gateway.probe.adoptedDetail": "已回填 {n} 条冷却 · 看明细",
   "shared.gateway.probe.adoptedAdded": "置冷却",
@@ -292,6 +295,10 @@ export const zh = {
   "shared.gateway.pool.tile.excluded": "已排除",
   // Qoder 独有的一格：上游 429 按**模型**报 ⇒ 账号本身可用、但有模型级冷却。
   "shared.gateway.pool.tile.modelCooling": "模型冷却",
+  // 模型冷却徽标（issue #88）：**必须带解冻时刻**，否则「N 个模型限流」等于没说。
+  "shared.gateway.pool.modelCoolingBadge": "{count} 个模型限流 · {time} 解冻",
+  "shared.gateway.pool.modelCoolingHint":
+    "{models} 处于模型级冷却（只影响这些模型，其它模型仍可用），最早 {time} 解冻。",
   "shared.gateway.pool.empty": "账号池为空。请先在「账号管理」中添加账号。",
   "shared.gateway.pool.credits": "{credits} 积分",
   "shared.gateway.pool.diagnoseNote": "请求报「没有可用账号」时，按下面的原因逐条排查：",

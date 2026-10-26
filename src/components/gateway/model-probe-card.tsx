@@ -526,6 +526,7 @@ export function ModelProbeCard({
               added={adoptedAdded}
               cleared={adoptedCleared}
               adopted={probe.adopted}
+              adopt={adoptSupported && adopt}
               cancelled={probe.phase === "cancelled"}
               onExport={onExportCsv}
               onRetry={() => setSetupOverride(true)}
@@ -817,6 +818,8 @@ function DoneBody(props: {
   cleared: number;
   /** 回填**逐条明细**（后端唯一来源；§5.3「回填反馈」可展开看它）。 */
   adopted: ModelProbeAdoptRecord[];
+  /** 本次是否**开着回填**（关掉时不该解释「为什么没写入」，那是刻意的）。 */
+  adopt: boolean;
   cancelled: boolean;
   onExport: () => void;
   onRetry: () => void;
@@ -931,6 +934,21 @@ function DoneBody(props: {
       ) : (
         <div className="mb-2.5 flex items-center gap-2.5 text-[12.5px]">{doneBar}</div>
       )}
+
+      {/* ★ 回填 0 条时**必须解释**（issue #88 · E）。
+       *
+       * 「探出 3 格限流、回填 0 条」是最需要解释的组合，而旧实现此时**一个字都不渲染**
+       * （可展开明细只在 `adopted.length > 0` 时才有），用户只能认为回填坏了。
+       * 三种静默不计的原因见后端 `Pool::adopt_probe_result` 的三处 `return false`：
+       * 池里没这个 uid / 账号已禁用 / 已有更晚的冷却。 */}
+      {props.adopt && !hasAdopt && props.limitProbed.probed > 0 ? (
+        <p
+          className="mb-2.5 text-[11.5px] leading-relaxed text-muted-foreground"
+          data-act="gw-probe-adopt-none"
+        >
+          {t("shared.gateway.probe.adoptNone", { n: props.limitProbed.probed })}
+        </p>
+      ) : null}
 
       {/* 图例（两级被动词条区分来源） + 排序控件（§5.3；用 Radix Select，不用 details/summary）。 */}
       <div className="mb-2.5 flex flex-wrap items-center gap-x-3.5 gap-y-1.5 text-[11.5px] text-muted-foreground">

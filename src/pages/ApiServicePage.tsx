@@ -587,6 +587,22 @@ function RegionPoolCard({ region }: { region: Region }) {
   const [revivingUid, setRevivingUid] = useState<string | null>(null);
   const [excludingUid, setExcludingUid] = useState<string | null>(null);
 
+  /* ★ 探测收尾后主动刷一次池状态（issue #88）。
+   *
+   * 本卡只订阅 `status`，而 `refreshStatus()` 的调用点只有「进页面」与「排除/恢复」
+   * 两个动作回调 —— **没有任何定时刷新，也没有在探测收尾后刷新**。于是回填明明把
+   * 冷却写进了后端，池视图仍停在进页面那一刻的快照，用户看到「探测判出限流、
+   * 账号池却全绿」，只能怀疑探测没生效。
+   *
+   * 刻意**不做定时轮询**：那会平白增加 IPC，而探测收尾是唯一需要跟进的时刻。
+   * `finished_at_ms` 每轮都不同 ⇒ 连续两轮探测也能各刷一次（用 `phase` 判断会漏掉
+   * 「done → done」这种第二次收尾）。 */
+  const probeFinishedAt = useGatewayStore((s) => s.probe?.finished_at_ms ?? 0);
+  useEffect(() => {
+    if (!probeFinishedAt) return;
+    void refreshStatus();
+  }, [probeFinishedAt, refreshStatus]);
+
   const { pool, accounts, diagnose } = poolOf(status, region);
   const strategy = view.strategy;
   const preferredUid =

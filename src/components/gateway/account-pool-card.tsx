@@ -51,18 +51,23 @@ export const DEFAULT_POOL_TILES: PoolTileKey[] = [
 ];
 
 /**
- * WorkBuddy 侧的五格 —— **没有「积分过期」**。
+ * WorkBuddy 侧的六格 —— **没有「积分过期」**，但有「模型冷却」。
  *
  * 后端池条目只存「快过期的积分**数量**」，不存有效期，没有判据 ⇒ 该 state 恒为 0。
  * 与其摆一个永远为 0 的假格子，不如不给（诚实 > 看起来对齐）。
  *
  * ★「已排除」（2026-10-17）：它是**互斥第六态**（被排除的号不能再算「可路由」），
  * 因此必须有自己的一格 —— 否则「可路由 4」与实际可选中 3 个互相矛盾。
+ *
+ * ★「模型冷却」（issue #88，2026-10-26）：此前 WB 侧**一格都没有**反映模型级冷却，
+ * 于是「探测判出 429 → 池卡全绿」看起来像探测没生效。Qoder 侧早有这一格，
+ * 缺它是实现不对称，不是「WB 没有这一维」—— WB 的 6004 同样是按模型报的。
  */
 export const WB_POOL_TILES: PoolTileKey[] = [
   "available",
   "cooling",
   "disabled",
+  "modelCooling",
   "zeroCredits",
   "excluded",
 ];
@@ -98,18 +103,32 @@ const TILE_META: Record<PoolTileKey, { labelKey: TranslationKey; tone: "ok" | "w
  * 与账号级 `cooling` **分开显示**的依据：模型冷却时账号仍可用于**其它**模型，
  * 混进「冷却中」会让人把「换个模型就好」误判成「这个号废了」。
  * Trae 侧没有这一维 ⇒ 字段缺失时返回 `null`（不渲染假徽标）。
+ *
+ * ★ 必须带**解冻时刻**（issue #88 补充）：此前界面上只有「N 个模型限流」几个字，
+ * 时间只藏在 `title` 的模型名里 —— 用户无从判断「还要等多久」「是不是早就该好了」。
+ * 上游 429 的恢复信息本来就是按模型给的，不展示等于把它丢掉。
  */
-function modelCoolingBadge(account: GatewayPoolAccount): ReactNode {
+function modelCoolingBadge(account: GatewayPoolAccount, t: ReturnType<typeof useT>): ReactNode {
   const entries = Object.entries(account.modelCoolings ?? {});
   if (!entries.length) return null;
-  const models = entries.map(([model]) => model).join("、");
+  const now = Date.now();
+  // 只展示仍有效的（后端已过滤，这里再兜一次防时钟漂移导致的负数）。
+  const live = entries.filter(([, until]) => Number.isFinite(until) && until > now);
+  if (!live.length) return null;
+  const models = live.map(([model]) => model).join("、");
+  // 最早解冻的那个决定「什么时候能再用上其中一部分」。
+  const earliest = Math.min(...live.map(([, until]) => until));
+  const time = new Date(earliest).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
   return (
     <Badge
       variant="secondary"
       className="shrink-0 text-warning"
-      title={`${models} 处于模型级冷却（只影响这些模型，其它模型仍可用）`}
+      title={t("shared.gateway.pool.modelCoolingHint", { models, time })}
     >
-      {`${entries.length} 个模型限流`}
+      {t("shared.gateway.pool.modelCoolingBadge", { count: live.length, time })}
     </Badge>
   );
 }
@@ -380,7 +399,7 @@ export function AccountPoolCard({
                         {/* 模型级冷却：账号本身可用，只是**这个模型**在冷却。
                             必须与账号级 `cooling` 分开显示 —— 混在一起会让人把「换个模型就好」
                             误判成「这个号废了」。 */}
-                        {modelCoolingBadge(account)}
+                        {modelCoolingBadge(account, t)}
                         {(account.status === "cooling" || account.status === "disabled") &&
                           account.cooldownReason && (
                             <span className="truncate text-xs text-muted-foreground">
