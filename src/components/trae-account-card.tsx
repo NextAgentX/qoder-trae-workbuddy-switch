@@ -264,7 +264,22 @@ export function TraeAccountCard({
   onEditRemark,
 }: Props) {
   const t = useT();
+  /**
+   * ★ **备注优先作为主标题**（issue #83 · 1）。
+   *
+   * Trae 的 `name` 是客户端导入时兜底生成的机械名（`用户48465672787` / `账号839162`），
+   * 用户改备注的唯一目的就是「一眼认出这个号」。此前 `remark` **只在详情抽屉里可见**，
+   * 卡片主标题永远是机械名 ⇒ 改了等于没改，而界面上完全看不出「备注没生效」。
+   *
+   * 现在：有备注 ⇒ 主标题用备注、副标题变成「原名 · UID」；无备注 ⇒ 完全回到原行为
+   * （主标题原名、副标题 UID），不引入任何新状态。
+   *
+   * ⚠️ 头像首字仍取**账号名**而不是备注：备注是给用户认的，头像要跟「这个号是谁」绑定，
+   * 备注一改头像就变会让人以为换了账号。
+   */
+  const remark = displayText(account.remark)?.trim() ?? "";
   const name = displayText(account.name) || `UID · ${account.userId}`;
+  const title = remark || name;
   // 忙状态 key 带上变体（`switch-<uid>@<变体>`）：同一账号可能在切另一条线，
   // 只按 uid 判定会把「切 Trae CN 中」的转圈画到 Trae Work 的按钮上。
   const switchKeyPrefix = `switch-${account.userId}@`;
@@ -504,7 +519,8 @@ export function TraeAccountCard({
    * 结构与交互（整卡可点、当前登录两重信号、指标行、程序位页脚）必须逐项一致 ——
    * 这正是本次重构「用原型统一两个平台」的要求。
    */
-  const identity = `UID · ${account.userId}`;
+  // 有备注时副标题要带上原名（否则「这个号是谁」的信息被备注挤掉了）。
+  const identity = remark ? `${name} · UID · ${account.userId}` : `UID · ${account.userId}`;
 
   /* 「当前登录」徽章**单独拆出来**、与昵称同一行（原型 `:2502`）。
      ⚠️ 不能塞进下面的 `statusChips` 行：那会把头部撑成三行（WorkBuddy 侧已踩过）。 */
@@ -580,7 +596,7 @@ export function TraeAccountCard({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
-        <MenuHead>{displayText(account.name) || account.userId}</MenuHead>
+        <MenuHead>{title}</MenuHead>
         <DropdownMenuItem disabled={!onOpenDetail} onSelect={() => onOpenDetail?.(account)}>
           <Info />{t("trae.comp.card.detail.open")}
         </DropdownMenuItem>
@@ -714,7 +730,7 @@ export function TraeAccountCard({
               {accountInitials(name)}
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="truncate text-[13px] font-semibold" title={name}>{name}</h3>
+              <h3 className="truncate text-[13px] font-semibold" title={remark ? `${title}（${name}）` : title}>{title}</h3>
               <p className="truncate text-[11px] text-muted-foreground" title={identity}>{identity}</p>
             </div>
             {currentLoginBadge}
