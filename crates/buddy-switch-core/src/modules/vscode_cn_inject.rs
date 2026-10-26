@@ -356,12 +356,13 @@ fn encrypt_cbc_prefixed(
     Ok(result)
 }
 
-/// 运行命令并取 trim 后的 stdout；带超时兜底。
+/// 运行命令并取 trim 后的 stdout；带超时兜底。**只剩 Linux 的 `secret-tool` 在用**
+/// （macOS 那条已改用 [`run_security`]：它要拿到 stderr 才能分清「条目不存在」与
+/// 「授权被拒」，见 issue #94）。
 ///
-/// macOS 上 `security find-generic-password` 可能因 Keychain 授权弹窗而长时间
-/// 挂起（甚至无限期等待用户决定），因此不能使用无超时的阻塞式 `.output()`；
-/// 子进程输出也需并发读取（复用 process 模块实现），避免写满管道死锁。
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// 不能使用无超时的阻塞式 `.output()`；子进程输出也需并发读取
+/// （复用 process 模块实现），避免写满管道死锁。
+#[cfg(target_os = "linux")]
 fn run_command_get_trimmed(program: &str, args: &[&str], timeout_secs: u64) -> Option<String> {
     let output = crate::modules::process::run_cmd_timeout(program, args, timeout_secs)?;
     if !output.status.success() {
@@ -375,18 +376,159 @@ fn run_command_get_trimmed(program: &str, args: &[&str], timeout_secs: u64) -> O
     }
 }
 
+/// 从 `security dump-keychain` 的输出里抽出**服务名**（`svce` 属性）。
+///
+/// `dump-keychain` **只列元数据、不读密码** ⇒ 不会触发钥匙串授权弹窗，
+/// 因此可以安全地作为「查不到就枚举」的兜底手段。
+///
+/// 输出形态（macOS 15，`security dump-keychain`）：
+/// ```text
+/// keychain: "/Users/x/Library/Keychains/login.keychain-db"
+/// version: 512
+/// class: "genp"
+/// attributes:
+///     "acct"<blob>="Qoder Key"
+///     "svce"<blob>="Qoder Safe Storage"
+/// ```
+/// 只认以 `"svce"` 开头的行，取最后一个 `=` 之后的值并去引号；**去重 + 排序**，
+/// 让结果可复现（同一条目可能在多个 keychain 里出现）。
+pub fn parse_keychain_services(dump: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in dump.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("\"svce\"") {
+            continue;
+        }
+        let Some((_, value)) = trimmed.rsplit_once('=') else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"').trim();
+        if name.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|existing| existing == name) {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 在已发现的服务名里挑「可能是同一个应用」的候选。
+///
+/// ## 为什么需要它（issue #94）
+///
+/// 表里那三个服务名是**真机取证**得来的，但客户端一旦改名 / 换签名，
+/// 服务名就会变（`Qoder Safe Storage` → 别的名字），而硬编码必然 miss ——
+/// 与 issue #82 的 `.app` 包名同一类问题。**枚举 + 品牌词匹配**比继续猜名字可靠：
+/// 新名字只要还带品牌词与 `Safe Storage` 就能命中。
+///
+/// 品牌词取**主服务名的第一个词**（`Qoder Safe Storage` → `qoder`），
+/// 这样 `Qoder CN App Safe Storage` 与 `QoderWork Safe Storage` 都算同族，
+/// 而 `CodeBuddy CN Safe Storage` 不会被误选。
+///
+/// `limit` 限制尝试次数：每个**确实存在**的条目都可能触发一次钥匙串授权弹窗，
+/// 不能无上限地试。
+pub fn pick_safe_storage_candidates(
+    discovered: &[String],
+    primary: &str,
+    limit: usize,
+) -> Vec<String> {
+    let brand = primary
+        .split_whitespace()
+        .next()
+        .unwrap_or(primary)
+        .to_ascii_lowercase();
+    /* ★ 「国内版 / 国际版」是同一品牌下的两个**不同应用**，密钥不通用：
+    拿国内版的密码去解国际版的密文只会得到「解密失败」，比「读不到密码」更难查。
+    ⇒ 同品牌候选里，**区域标记与主名不一致的排到最后**（不排除 —— 客户端改名时
+    可能只剩它，那时宁可试一下也不要直接放弃）。 */
+    let primary_is_cn = primary.to_ascii_lowercase().contains(" cn ");
+    let mut same_region: Vec<String> = Vec::new();
+    let mut other_region: Vec<String> = Vec::new();
+    for name in discovered {
+        let lower = name.to_ascii_lowercase();
+        if !lower.contains("safe storage") || name.as_str() == primary {
+            continue;
+        }
+        if !brand.is_empty() && !lower.contains(&brand) {
+            continue;
+        }
+        if lower.contains(" cn ") == primary_is_cn {
+            same_region.push(name.clone());
+        } else {
+            other_region.push(name.clone());
+        }
+    }
+    same_region.extend(other_region);
+    same_region.truncate(limit);
+    same_region
+}
+
+/// 跑一次 `security`，成功返回 trim 后的 stdout，失败返回**可读原因**（stderr）。
+///
+/// 与 `run_command_get_trimmed` 的区别：那个把失败折成 `None`，于是调用方
+/// 只能报「读不到」，分不清「条目不存在」与「授权被拒」—— 这两种的下一步完全不同。
+#[cfg(target_os = "macos")]
+fn run_security(args: &[&str], timeout_secs: u64) -> Result<String, String> {
+    let output = crate::modules::process::run_cmd_timeout("security", args, timeout_secs)
+        .ok_or_else(|| "无法启动 security 命令（超时或被拦截）".to_string())?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("security 退出码 {}", output.status)
+        } else {
+            err
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// 本机钥匙串里所有 `*Safe Storage*` 条目（**只读元数据**，不弹授权框）。
+#[cfg(target_os = "macos")]
+fn macos_safe_storage_services() -> Vec<String> {
+    // 大钥匙串上 dump 可能较慢，给 15s；失败就是空列表（不影响主流程）。
+    let Ok(dump) = run_security(&["dump-keychain"], 15) else {
+        return Vec::new();
+    };
+    parse_keychain_services(&dump)
+        .into_iter()
+        .filter(|name| name.to_ascii_lowercase().contains("safe storage"))
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn get_macos_safe_storage_password(service: &str) -> Result<String, String> {
-    // 只查询一次：解密只依赖 password 本身、与 account 属性无关，
-    // 单次查询最多触发一次钥匙串授权弹窗（多候选循环会逐次弹窗）。
-    run_command_get_trimmed(
-        "security",
-        &["find-generic-password", "-w", "-s", service],
-        10,
-    )
-    .ok_or_else(|| {
-        format!("无法从 Keychain 读取「{service}」密码。请先手动打开对应应用并登录一次。")
-    })
+    // ① 先试表里的名字（真机取证值）。**只查一次** —— 每次查询都可能触发一次授权弹窗。
+    let primary_error = match run_security(&["find-generic-password", "-w", "-s", service], 10) {
+        Ok(value) if !value.is_empty() => return Ok(value),
+        Ok(_) => "返回空密码".to_string(),
+        Err(error) => error,
+    };
+
+    // ② 查不到就枚举兜底（issue #94）：客户端改名 / 换签名后服务名会变，
+    //    硬编码必然 miss。枚举只读元数据，不弹框。
+    let discovered = macos_safe_storage_services();
+    for candidate in pick_safe_storage_candidates(&discovered, service, 3) {
+        if let Ok(value) = run_security(&["find-generic-password", "-w", "-s", &candidate], 10) {
+            if !value.is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+
+    // ③ 仍失败：把「为什么」和「本机到底有哪些条目」一起交出去 ——
+    //    用户贴回这段就能一次定死是名字不对、授权被拒，还是客户端压根没登录过。
+    Err(format!(
+        "无法从 Keychain 读取「{service}」密码（{primary_error}）。\
+         本机钥匙串里的 *Safe Storage* 条目：{}。\
+         请先手动打开对应应用并登录一次；若客户端刚升级过，先在客户端里重新登录。",
+        if discovered.is_empty() {
+            "（未找到任何条目）".to_string()
+        } else {
+            discovered.join("、")
+        }
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1122,6 +1264,108 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// ★ 从 `security dump-keychain` 的**真实输出形态**里抽服务名（issue #94）。
+    ///
+    /// 可证伪：把解析改成「按 `=` 前后 split 取第一个」会在 `<blob>` 这种带尖括号的
+    /// 属性名上取错；改成不过滤 `svce` 会把 `acct` 也当成服务名。
+    #[test]
+    fn parse_keychain_services_extracts_only_svce() {
+        let dump = r#"
+keychain: "/Users/kana/Library/Keychains/login.keychain-db"
+version: 512
+class: "genp"
+attributes:
+    "acct"<blob>="Qoder Key"
+    "svce"<blob>="Qoder Safe Storage"
+keychain: "/Users/kana/Library/Keychains/login.keychain-db"
+class: "genp"
+attributes:
+    "acct"<blob>="Qoder CN App Key"
+    "svce"<blob>="Qoder CN App Safe Storage"
+    "svce"<blob>="Qoder Safe Storage"
+    "svce"<blob>="CodeBuddy CN Safe Storage"
+"#;
+        let services = parse_keychain_services(dump);
+        assert_eq!(
+            services,
+            vec![
+                "CodeBuddy CN Safe Storage".to_string(),
+                "Qoder CN App Safe Storage".to_string(),
+                "Qoder Safe Storage".to_string(),
+            ],
+            "只取 svce、去重、排序"
+        );
+        assert!(
+            !services.iter().any(|name| name.contains("Qoder Key")),
+            "acct 不能被当成服务名"
+        );
+    }
+
+    /// ★ 枚举兜底只挑**同品牌**的 `*Safe Storage*` 条目（issue #94）。
+    ///
+    /// 现实场景：客户端改名后服务名从 `Qoder Safe Storage` 变成
+    /// `QoderWork Safe Storage` —— 硬编码必然 miss，枚举 + 品牌词才能命中。
+    ///
+    /// 可证伪：去掉品牌词过滤 ⇒ `CodeBuddy CN Safe Storage` 会被选中，
+    /// 拿它的密码去解 Qoder 的密文只会得到「解密失败」。
+    #[test]
+    fn pick_safe_storage_candidates_matches_same_brand_only() {
+        let discovered = vec![
+            "CodeBuddy CN Safe Storage".to_string(),
+            "Qoder Safe Storage".to_string(),
+            "QoderWork Safe Storage".to_string(),
+            "Slack Safe Storage".to_string(),
+        ];
+        // 主名是国际版：排除它自己，剩下同品牌的两条里取第一条。
+        let picked = pick_safe_storage_candidates(&discovered, "Qoder Safe Storage", 3);
+        assert_eq!(picked, vec!["QoderWork Safe Storage".to_string()]);
+        assert!(
+            !picked
+                .iter()
+                .any(|name| name.contains("CodeBuddy") || name.contains("Slack")),
+            "跨品牌必须排除"
+        );
+
+        // 主名是国内版：品牌词同样是 `qoder`，两条同族都算候选（顺序跟随发现顺序）。
+        let picked_cn = pick_safe_storage_candidates(&discovered, "Qoder CN App Safe Storage", 3);
+        assert_eq!(
+            picked_cn,
+            vec![
+                "Qoder Safe Storage".to_string(),
+                "QoderWork Safe Storage".to_string(),
+            ]
+        );
+
+        // 上限生效：每个候选都可能弹一次授权框，不能无上限地试。
+        let many: Vec<String> = (0..5).map(|i| format!("Qoder{i} Safe Storage")).collect();
+        assert_eq!(
+            pick_safe_storage_candidates(&many, "Qoder Safe Storage", 3).len(),
+            3
+        );
+
+        /* ★ 区域标记不一致的排到最后：拿国内版的密码解国际版的密文只会「解密失败」，
+        比「读不到密码」更难查（两者都是同一品牌，光看名字分不出来）。 */
+        let mixed = vec![
+            "Qoder CN App Safe Storage".to_string(),
+            "QoderWork Safe Storage".to_string(),
+        ];
+        let global_first = pick_safe_storage_candidates(&mixed, "Qoder Safe Storage", 3);
+        assert_eq!(
+            global_first,
+            vec![
+                "QoderWork Safe Storage".to_string(),
+                "Qoder CN App Safe Storage".to_string(),
+            ],
+            "主名不带 CN ⇒ 带 CN 的候选排后面"
+        );
+        let cn_first = pick_safe_storage_candidates(&mixed, "Qoder CN App Safe Storage", 3);
+        assert_eq!(
+            cn_first,
+            vec!["QoderWork Safe Storage".to_string()],
+            "主名带 CN ⇒ 同区域的（Work 那条不带 CN）先试"
+        );
     }
 
     /// Linux 写入 → 读回必须还原原文：有密钥环走 v11、没有则退回 peanuts 的 v10，
