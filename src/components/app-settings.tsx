@@ -613,10 +613,21 @@ function ShortcutsCard({ variant }: { variant: AppSettingsVariant }) {
  * 作用域可见性是全局偏好，与语言 / 主题属于同一层级：它影响整个应用的导航入口，
  * 而不是某个产品线的局部行为。
  *
- * ## 约束规则
+ * ## 约束规则（★ 禁用判据必须**方向敏感**，issue #85）
  *
- * - 当前作用域**不可隐藏**（开关禁用）—— 它是顶栏选择器与全局键的锚点；
- * - 至少保留 1 个可见：勾到最后只剩 1 个时，其余开关自动禁用。
+ * - 至少保留 1 个可见：**只有「已可见且是最后一个可见项」**才禁用（关了就空了）；
+ * - 当前作用域可见时不可隐藏 —— 它是顶栏选择器与全局键的锚点。
+ *
+ * ## ★★ 为什么禁用判据不能与方向无关（issue #85 真因）
+ *
+ * 旧实现是 `scope === currentScope || visibleScopes.length === 1` ——
+ * 后者**与勾选状态无关**：一旦可见集合降到 1 个，**6 个开关全部 disabled**，
+ * 于是「关掉的作用域再也打不开」，而 `setVisibleScopes` 又拒绝写空集合 ⇒
+ * UI 层与 store 层互相锁死，只能清 localStorage 才能恢复。
+ *
+ * 同理 `scope === currentScope` 也不能无条件禁用：当前作用域被隐藏时（URL 直达、
+ * 或在另一产品的设置页里关掉了它），那一行就是 `disabled + off`，**永远点不回来**。
+ * 现在只在「当前作用域**已可见**」时禁用 —— 隐藏态下它必须能点回来。
  */
 function ScopeVisibilityCard() {
   const t = useT();
@@ -645,8 +656,12 @@ function ScopeVisibilityCard() {
         {SCOPES.map((scope) => {
           const { product: scopeProduct } = scopeParts(scope);
           const isVisible = visibleScopes.includes(scope);
-          // 禁用逻辑：当前作用域永远禁用；只剩 1 个可见时，其余全部禁用
-          const disabled = scope === currentScope || visibleScopes.length === 1;
+          // ★ 方向敏感（issue #85）：只在「关掉它会破坏约束」时禁用。
+          //   - 已可见且是最后一个可见项 ⇒ 不能再关（否则可见集合为空）；
+          //   - 当前作用域**已可见** ⇒ 不可隐藏（顶栏选择器 / 全局键的锚点）。
+          //   未勾选项**一律可点** —— 这正是旧实现缺的那一半，它让关到只剩 1 个之后
+          //   其余 5 个永远打不开。当前作用域若已被隐藏，也必须允许点回来。
+          const disabled = isVisible && (visibleScopes.length === 1 || scope === currentScope);
 
           return (
             <SettingsFieldRow
