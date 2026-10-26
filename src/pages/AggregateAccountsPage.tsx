@@ -1177,6 +1177,24 @@ export default function AggregateAccountsPage() {
     };
   }, [creditOf, detailAccount, signalsByScope, t, wbCnStatus, wbGlobalStatus]);
 
+  /**
+   * 抽屉头部的「当前登录」徽章（issue #89 · 4.3 的一部分）。
+   *
+   * 三个平台的判据不同，且都**已经在手边**（WB 走 `AppStatus.current`，
+   * Trae / Qoder 走程序位的 `current` / `currentUid`）——
+   * 此前聚合页的抽屉一律不显示，于是「这个号是不是正登着」只能退回卡片上看。
+   */
+  const detailCurrent = useMemo(() => {
+    if (!detailAccount) return false;
+    if (detailAccount.platform === "workbuddy") return Boolean(detailContext?.currentProgram);
+    if (detailAccount.platform === "trae") {
+      return (detailContext?.traePrograms ?? []).some((program) => program.current);
+    }
+    return (detailContext?.qoderPrograms ?? []).some(
+      (program) => program.currentUid === detailAccount.data.uid,
+    );
+  }, [detailAccount, detailContext]);
+
   return (
     <div className="mx-auto w-full max-w-[1560px] px-6 pb-16">
       {/* ══ 吸顶工具栏 ══ */}
@@ -1492,6 +1510,13 @@ export default function AggregateAccountsPage() {
         sections={detailAccount && detailContext ? aggregateDetailSections(detailAccount, detailContext) : []}
         packs={detailAccount && detailContext ? aggregateDetailPacks(detailAccount, detailContext) : []}
         programs={detailAccount && detailContext ? aggregateDetailPrograms(detailAccount, detailContext) : []}
+        /* ★ issue #89 · 4.3：这三项的数据与回调**都已经在页面里**（`refreshPart` 是卡片
+           正在用的同一个函数），此前只是没传给抽屉 ⇒ 抽屉只能看不能刷。 */
+        current={detailCurrent}
+        refreshingKinds={detailAccount ? refreshBusy.kindsOf(detailAccount.ref) : []}
+        onRefreshPart={
+          detailAccount ? (kind) => void refreshPart(detailAccount, kind) : undefined
+        }
         snapshots={[]}
         /* 与三个渠道页的抽屉一致：恒 `false`，写操作交给 `api.ts` 统一拦截并说明
            原因（issue #89 · 2.4）。渠道页注释已写明「备注是否可编辑不受演示模式影响」。 */
