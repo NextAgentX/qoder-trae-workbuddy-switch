@@ -207,7 +207,14 @@ pub fn detect_install_for(variant: super::variant::TraeVariant) -> InstallProbe 
     // `E0425 cannot find function windows_install_roots in this scope`
     // （CI 的 mac-arm64 / mac-x64 / linux-x64 三个 job 就是这样红的）。
     // 三平台共用一份装配逻辑后，这类「只在 Windows 定义」的缺口不可能再出现在此处。
-    for candidate in candidate_paths_for(data_dir_names_for(variant), exe_names_for(variant)) {
+    // ★ macOS：候选表只覆盖「包名 == 可执行体名」的已知名字，再补一层 bundle 扫描
+    //   （issue #82：macOS 上国内版 bundle 实测叫 `Trae Code.app`，候选表里没有它）。
+    //   `unused_mut` 只在非 macOS 出现，CI 的 `-D warnings` 会因此变红，故显式放行。
+    #[allow(unused_mut)]
+    let mut candidates = candidate_paths_for(data_dir_names_for(variant), exe_names_for(variant));
+    #[cfg(target_os = "macos")]
+    candidates.extend(macos_bundle_scan(Some(variant.region())));
+    for candidate in candidates {
         if candidate.is_file() {
             return InstallProbe {
                 installed: true,
@@ -286,9 +293,9 @@ pub fn is_running_for(variant: super::variant::TraeVariant) -> bool {
     }
     #[cfg(not(windows))]
     {
-        for name in exe_names_for(variant) {
+        for name in process_names_for(variant) {
             let ok = hidden_command("pgrep")
-                .args(["-x", name])
+                .args(["-x", name.as_str()])
                 .output()
                 .map(|output| output.status.success() && !output.stdout.is_empty())
                 .unwrap_or(false);
@@ -298,6 +305,35 @@ pub fn is_running_for(variant: super::variant::TraeVariant) -> bool {
         }
         false
     }
+}
+
+/// 该变体的**进程名候选**：写死的候选表 + **实际探测到的可执行体名**。
+///
+/// ## ★ 为什么必须补上后者（issue #82）
+///
+/// [`exe_names_for`] 是写死的候选表（国内 = `Trae CN`）。而 macOS 上国内版的可执行体
+/// 实测叫 `Trae Code`（bundle 名与可执行体名都与 Windows 不同）。只认 `Trae CN` 会让
+/// [`is_running_for`] **恒为 false**，于是切换流程跳过「先关闭客户端」这一步 ——
+/// 客户端退出时用内存态回写，把刚恢复的登录态覆盖掉，症状是「提示切换成功但账号没变」。
+///
+/// 探测到的名字排在**最前**（它是真机上真的存在的那个），候选表兜底。
+#[cfg(not(windows))]
+fn process_names_for(variant: super::variant::TraeVariant) -> Vec<String> {
+    let mut names: Vec<String> = exe_names_for(variant)
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let detected = detect_install_for(variant).exe.and_then(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    });
+    if let Some(detected) = detected {
+        if !names.iter().any(|existing| existing == &detected) {
+            names.insert(0, detected);
+        }
+    }
+    names
 }
 
 /// **全部变体**的环境状态（线上形态，数组）。
@@ -784,7 +820,12 @@ pub fn detect_install(custom: &[String]) -> InstallProbe {
         }
     }
 
-    for candidate in candidate_exe_paths() {
+    // ★ macOS bundle 扫描（issue #82）：跨变体场景不过滤区域，名字含 `trae` 即收。
+    #[allow(unused_mut)]
+    let mut candidates = candidate_exe_paths();
+    #[cfg(target_os = "macos")]
+    candidates.extend(macos_bundle_scan(None));
+    for candidate in candidates {
         if candidate.is_file() {
             return InstallProbe {
                 installed: true,
@@ -915,6 +956,78 @@ fn macos_bundle_exe(root: &Path, name: &str, exe: &str) -> PathBuf {
         .join("Contents")
         .join("MacOS")
         .join(exe)
+}
+
+/// macOS：**扫描 `.app` bundle 目录**，用 `Info.plist` 的 `CFBundleExecutable` 定位可执行体。
+///
+/// ## ★ 为什么必须有这一层（issue #82「trae 国内版切换账号未检测到」）
+///
+/// 上表的候选路径是 `<包名>.app/Contents/MacOS/<包名>` —— 它**假设包名 == 可执行体名**。
+/// 本仓在别处已经吃过这个假设的亏（[`crate::modules::identity::read_bundle_executable`]
+/// 的文档：两个 WorkBuddy bundle 的可执行体都是 `Electron`，按包名拼出来的路径不存在，
+/// 且该错误表现为「客户端未安装」而不是「启动失败」）。
+///
+/// macOS 上国内版 Trae 的 bundle 实测叫 **`Trae Code.app`**，而候选表里只有
+/// `Trae CN.app` / `Trae.app` ⇒ 探测恒为 `installed = false` ⇒ 账号卡切换胶囊、
+/// 空态卡、设置页「安装」行全部显示「未检测到」。这条一直是错的，只是 macOS 用户少。
+///
+/// 这一层**不认识任何具体名字**：枚举 `/Applications`、`/System/Applications`、
+/// `~/Applications` 下名字含 `trae` 的 `.app`，读 plist 拿真实可执行体名。
+/// 客户端下次改名/换 bundle 也不需要再改代码。
+///
+/// `region` 为 `Some` 时**按区域过滤**（跨区域必须拦住：`/Applications/Trae.app`
+/// 是国际版，不能因为「名字含 trae」就算国内版已安装 —— 同 [`detect_install_for`]
+/// 自定义路径分支的纪律）。
+#[cfg(target_os = "macos")]
+fn macos_bundle_scan(region: Option<super::region::TraeRegion>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Applications"));
+    }
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        // 目录不存在 / 无权限读 ⇒ 跳过这一层，不当作错误（探测必须永不 panic）。
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let bundle = entry.path();
+            if bundle.extension().and_then(|ext| ext.to_str()) != Some("app") {
+                continue;
+            }
+            let Some(name) = bundle.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if !name.to_ascii_lowercase().contains("trae") {
+                continue;
+            }
+            if let Some(wanted) = region {
+                let belongs = super::variant::variant_of_name(name)
+                    .map(|found| found.region() == wanted)
+                    // 反查不到（全新名字）：**放行** —— 名字含 `trae` 已经是强信号，
+                    // 拦掉会让「客户端改名」重新变回「未检测到」，正是本层要解决的问题。
+                    .unwrap_or(true);
+                if !belongs {
+                    continue;
+                }
+            }
+            let exe = crate::modules::identity::read_bundle_executable(
+                &bundle.join("Contents").join("Info.plist"),
+            )
+            .unwrap_or_else(|| name.to_string());
+            let candidate = bundle.join("Contents").join("MacOS").join(exe);
+            if candidate.is_file() {
+                out.push(candidate);
+            }
+        }
+    }
+    // 排序只为了让结果**确定**（多份并存时行为可复现，便于测试与排查）。
+    out.sort();
+    out
 }
 
 /// **全部变体**的可执行文件候选路径（跨平台）。
@@ -1219,9 +1332,21 @@ pub fn is_running() -> bool {
     #[cfg(not(windows))]
     {
         // 用可执行文件基名匹配，避免 pid 被别的进程复用；`-x` 要求精确进程名。
-        for name in exe_names() {
+        //
+        // ★ 除写死的候选名，还要算上 **macOS bundle 扫描到的真实可执行体名**
+        //   （issue #82）：国内版在 macOS 上是 `Trae Code`，只认 `Trae CN` 会把
+        //   「客户端正在跑」判成未运行。
+        #[allow(unused_mut)]
+        let mut names: Vec<String> = exe_names().iter().map(|name| (*name).to_string()).collect();
+        #[cfg(target_os = "macos")]
+        names.extend(macos_bundle_scan(None).iter().filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        }));
+        for name in names {
             let ok = hidden_command("pgrep")
-                .args(["-x", name])
+                .args(["-x", name.as_str()])
                 .output()
                 .map(|output| output.status.success() && !output.stdout.is_empty())
                 .unwrap_or(false);
@@ -1353,8 +1478,10 @@ pub fn kill_client_for(variant: super::variant::TraeVariant) -> Result<bool, Str
         // 三平台上都被用到，不必靠 `#[cfg]` 去门（漏门会让非 Windows 构建因
         // 「未使用的常量」直接失败，2026-09-29 CI 实测过）。
         // 一级：优雅关闭（`pkill` 不带信号 = SIGTERM）。
-        for name in exe_names_for(variant) {
-            let _ = hidden_command("pkill").args(["-x", name]).output();
+        // ★ 走 `process_names_for`（含**实际探测到的可执行体名**，issue #82）：
+        //   只认写死的 `Trae CN` 会让 macOS 上的 `Trae Code` 永远杀不掉。
+        for name in process_names_for(variant) {
+            let _ = hidden_command("pkill").args(["-x", name.as_str()]).output();
         }
         if wait_until_gone(variant, GRACEFUL_CLOSE_WAIT_SECS) {
             return Ok(true);
@@ -1362,9 +1489,9 @@ pub fn kill_client_for(variant: super::variant::TraeVariant) -> Result<bool, Str
 
         // 二级：强杀。
         let mut killed = false;
-        for name in exe_names_for(variant) {
+        for name in process_names_for(variant) {
             let output = hidden_command("pkill")
-                .args(["-KILL", "-x", name])
+                .args(["-KILL", "-x", name.as_str()])
                 .output()
                 .map_err(|e| format!("结束客户端进程失败: {e}"))?;
             if output.status.success() {
