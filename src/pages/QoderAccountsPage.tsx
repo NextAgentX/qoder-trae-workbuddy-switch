@@ -107,7 +107,12 @@ import {
 import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { displayText } from "@/lib/display-text";
 import { formatCredits } from "@/components/account-card";
-import { REFRESH_DONE_LABEL, useAccountRefreshBusy, type AccountRefreshKind } from "@/lib/account-refresh";
+import {
+  QODER_REFRESH_KINDS,
+  REFRESH_DONE_LABEL,
+  useAccountRefreshBusy,
+  type AccountRefreshKind,
+} from "@/lib/account-refresh";
 import { useT } from "@/lib/i18n";
 import { platformDescriptor, platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf, type Scope } from "@/lib/scope";
@@ -579,7 +584,6 @@ export default function QoderAccountsPage() {
    * credits、没有 token 概念（见 `qoder::usage` 模块头），摆一个点了只能重读缓存的
    * 菜单项比不摆更坏。
    */
-  const QODER_REFRESH_KINDS = ["credits", "checkin", "credential"] as const;
   const refreshPartBusy = useAccountRefreshBusy();
 
 

@@ -77,10 +77,10 @@ import {
 } from "@/lib/aggregate-detail";
 import { useT } from "@/lib/i18n";
 import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
-import { demoModeEnabled } from "@/lib/demo-mode";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
 import { useWbProgramStatuses, wbProgramAvailability } from "@/lib/wb-program-statuses";
 import {
+  QODER_REFRESH_KINDS,
   REFRESH_DONE_LABEL,
   useAccountRefreshBusy,
   type AccountRefreshKind,
@@ -357,6 +357,44 @@ export default function AggregateAccountsPage() {
   }, [accounts, reload, selected, t]);
 
   /**
+   * 单账号签到（WorkBuddy）。
+   *
+   * ★ issue #89 · 2.6：聚合页此前**没传** `onCheckin`，而 `AccountMoreMenu` 的分支是
+   * `disabled={featuresDisabled || !onCheckin}` ⇒「今天还没签」的 WB 账号在菜单里
+   * 看得见、点不动；而**同一页**的 Trae / Qoder 卡片都传了 `onCheckin`。
+   * 用户没有别的单账号签到路径（批量签要先把这一个勾上）。
+   *
+   * 反馈链照 `AccountsPage.onCheckin`：`already` 与 `error` 必须分开说 ——
+   * 把「今天已经签过了」报成「签到失败」是这个动作最常见的误报。
+   */
+  const checkinOne = useCallback(
+    async (item: AggregateAccount) => {
+      if (item.platform !== "workbuddy") return;
+      const region = scopeParts(item.scope).region;
+      const description = aggregateDisplayName(item);
+      try {
+        const res = await api.checkin(item.data.id, region);
+        const label =
+          res.result === "success"
+            ? t("wbAccounts.toast.checkinSuccess")
+            : res.result === "already"
+              ? t("wbAccounts.toast.checkedInToday")
+              : t("wbAccounts.toast.checkinFail");
+        if (res.result === "error") {
+          toast.error(label, { description: res.error ? `${description} · ${res.error}` : description });
+        } else {
+          toast.success(label, { description });
+        }
+        await reload();
+        void reloadSignals();
+      } catch (error) {
+        toast.error(t("wbAccounts.toast.checkinFail"), { description: api.asError(error) });
+      }
+    },
+    [reload, reloadSignals, t],
+  );
+
+  /**
    * 批量刷新（**当前可见的全部账号**，不是选中的那些）。
    *
    * ⚠️ 与批量签到/删除**刻意不同**：签到与删除是「作用于选中的」，而刷新是
@@ -488,7 +526,11 @@ export default function AggregateAccountsPage() {
             /* Qoder **没有 token 概念**（见 `qoder::usage` 模块头）⇒ 卡片的刷新项里
                本来就没有「今日 Token」，这里也不会收到。 */
             if (kind === "credits") {
-              await api.qoderCredits(account.scope);
+              /* ★ issue #89 · 2.7：这里原先是 `qoderCredits`（**只读**额度视图），
+                 而渠道页同一项调 `qoderRefreshAccount`（真的去上游换令牌）。两者菜单项同名、
+                 `kind` 同为 `"credits"`、完成 toast 也同一句 ⇒ 凭据已过期的账号在聚合页
+                 点「刷新积分」**必然还是那组旧数字**，却报「已刷新积分」。 */
+              await api.qoderRefreshAccount(account.scope, account.data.uid);
             } else if (kind === "checkin") {
               await api.qoderCheckinStatusMap(account.scope, [account.data.uid]);
             } else {
@@ -526,7 +568,11 @@ export default function AggregateAccountsPage() {
         selected: selected.has(item.ref),
         onToggleSelect: () => toggleSelect(item.ref),
         onOpenDetail: () => openDetail(item.ref),
-        featuresDisabled: demoModeEnabled,
+        /* ★ 与三个渠道页对齐（issue #89 · 2.4）：渠道页恒传 `false`，让 `api.ts` 统一
+           拦截写操作并给可读原因（`demoUnavailableMessage`）—— 比一枚「点不动又不说明」
+           的按钮好。聚合页此前传 `demoModeEnabled` ⇒ 演示站上聚合页卡片全退化成灰按钮，
+           切到任一渠道页同一批卡片又可点。 */
+        featuresDisabled: false,
       };
       if (item.platform === "workbuddy") {
         const region = scopeParts(item.scope).region;
@@ -555,6 +601,7 @@ export default function AggregateAccountsPage() {
             todayTokens={todayTokens}
             todayTokensTruncated={signals?.todayTokensTruncated}
             todayCheckedIn={checkinToday ?? undefined}
+            onCheckin={() => void checkinOne(item)}
             onRefreshPart={(_account, kind) => void refreshPart(item, kind)}
             refreshingKinds={refreshBusy.kindsOf(item.ref)}
             doneKinds={refreshBusy.doneKindsOf(item.ref)}
@@ -572,6 +619,10 @@ export default function AggregateAccountsPage() {
             onDelete={() => void handleDelete(item)}
             /* 程序位：**没取到就不传** ⇒ 卡片整行不渲染（不是画一排「未检测到」的灰胶囊）。 */
             programs={programs.length ? programs : undefined}
+            /* ★ issue #89 · 2.5：`current` 此前没传 ⇒ 卡片头部的「当前登录」徽章与
+               左侧主色竖条永不出现，而页脚的程序位胶囊按 `program.current` 自己判、照常亮
+               ⇒ 同一张卡上两个信号互相矛盾。判据与渠道页 `isCurrentAccount` 同式。 */
+            current={programs.some((program) => program.current)}
             onSwitchTo={(account, target) => {
               void api
                 .traeSwitchAccount({ userId: account.userId, variant: target })
@@ -633,6 +684,9 @@ export default function AggregateAccountsPage() {
           }
           checkinToday={checkinToday}
           programs={qoderPrograms.length ? qoderPrograms : null}
+          /* ★ issue #89 · D1：不传就回落四项 ⇒ 菜单里多出「刷新今日 Token」，
+             Qoder 没有 token 概念，点了什么也不发生。 */
+          refreshKinds={QODER_REFRESH_KINDS}
           onSwitch={(program) => {
             void api
               .qoderSwitchAccount(item.scope, program.id, item.data.uid)
@@ -1137,7 +1191,9 @@ export default function AggregateAccountsPage() {
         packs={detailAccount && detailContext ? aggregateDetailPacks(detailAccount, detailContext) : []}
         programs={detailAccount && detailContext ? aggregateDetailPrograms(detailAccount, detailContext) : []}
         snapshots={[]}
-        featuresDisabled={demoModeEnabled}
+        /* 与三个渠道页的抽屉一致：恒 `false`，写操作交给 `api.ts` 统一拦截并说明
+           原因（issue #89 · 2.4）。渠道页注释已写明「备注是否可编辑不受演示模式影响」。 */
+        featuresDisabled={false}
       />
     </div>
   );

@@ -36,6 +36,24 @@ export const ACCOUNT_REFRESH_KINDS: readonly AccountRefreshKind[] = [
   "credential",
 ] as const;
 
+/**
+ * Qoder 的可用刷新项：**没有 `tokens`**。
+ *
+ * Qoder 没有 token 概念（见 `qoder::usage` 模块头），摆一个「刷新今日 Token」
+ * 在它上面点了只能重读缓存 —— 比不摆更坏。
+ *
+ * ## ★ 为什么放在这里而不是页面内（issue #89 · D1）
+ *
+ * 渠道页与聚合页**两处都要传**，各写一份必然漂移：聚合页漏传 ⇒ 回落到
+ * [`ACCOUNT_REFRESH_KINDS`] 的四项 ⇒ 菜单里多出一项「刷新今日 Token」，
+ * 点了什么也不发生。常量只有一个来源，漏传才会被 `tsc`/review 抓住。
+ */
+export const QODER_REFRESH_KINDS: readonly AccountRefreshKind[] = [
+  "credits",
+  "checkin",
+  "credential",
+];
+
 const keyOf = (accountId: string, kind: AccountRefreshKind) => `${accountId}:${kind}`;
 
 /**
