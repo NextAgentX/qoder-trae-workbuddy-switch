@@ -99,8 +99,12 @@ export const zh = {
   // 「{amount} 积分 {days} 天内过期」——issue #44：金额是窗口内**全部**临期之和，
   // 天数取其中最晚那一刻，故只能写「天内」（写「天后」会把不同批次混成一句话，是假话）。
   "trae.comp.card.chip.expiring": "{amount} 积分 {days} 天内过期",
-  "trae.comp.card.chip.expiringTipTitle": "按到期时间分批（共 {n} 批）",
-  "trae.comp.card.chip.expiringTipLine": "{time} · {amount} 积分",
+  // issue #83 · 3 后半：卡片上要能看到**逐包**的名称 / 剩余 / 到期，而不是只有汇总。
+  // 落点是浮层（卡片是 4 块 / 243px 的固定版式，塞第五块会挤掉「当前登录」徽章）。
+  "trae.comp.card.packs.title": "积分包明细（{n}）",
+  "trae.comp.card.packs.line": "{name} · 剩 {remaining}/{total} · {expire} 到期",
+  "trae.comp.card.packs.lineExpired": "{name} · 剩 {remaining}/{total} · {expire} 已过期",
+  "trae.comp.card.packs.unnamed": "未命名包",
   "trae.comp.card.chip.unchecked": "今日未签到",
   "trae.comp.card.chip.cooling": "冷却中",
   "trae.comp.card.chip.jwtAuto": "自动刷新 JWT",

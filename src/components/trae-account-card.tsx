@@ -14,10 +14,17 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { AVATAR_TEXT_CLASS, accountInitials, avatarTone } from "@/components/account-card";
 import { displayText } from "@/lib/display-text";
 import { EXPIRY_TIP_MAX_HEIGHT, summarizeExpiring } from "@/lib/credit-expiry";
-import { formatAbsoluteTime, formatRelativeTime } from "@/lib/catalog-source";
+import { formatRelativeTime } from "@/lib/catalog-source";
 import { useT, type Translate } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-import type { TraeAccount, TraeJwtStatus, TraeProgramId, TraeRegionId, TraeVariantId } from "@/lib/trae-types";
+import type {
+  TraeAccount,
+  TraeCreditPackage,
+  TraeJwtStatus,
+  TraeProgramId,
+  TraeRegionId,
+  TraeVariantId,
+} from "@/lib/trae-types";
 
 /* 与 WB 卡片同一处理：几何交给 `Badge` 基础样式（已逐值对齐原型 `.badge`），
    这里只抵消它的 1px 透明边框（原型 `.badge` 没有边框）。 */
@@ -352,6 +359,40 @@ export function TraeAccountCard({
    * ⚠️ Trae 的 `expireAt` 是**秒**（后端直接透传上游 `expire_time`），WorkBuddy 是毫秒 ——
    * 单位必须显式传给汇总函数，此前这里靠 `> 1e12` 猜单位，猜错一次就会整条徽章消失。
    */
+  /**
+   * 逐包明细（issue #83 · 3 后半）。
+   *
+   * 排序：**未过期**按到期时刻升序（`null` 视为永久 ⇒ 排最后），**已过期**整体排到末尾
+   * —— 用户看这一列是为了决定「先用哪个」，把已浪费的排在前面会抢走注意力
+   * （与 `credit-priority` 的分档同一条道理）。
+   */
+  const packsSorted = [...(account.creditPackages ?? [])].sort((left, right) => {
+    if (left.expired !== right.expired) return left.expired ? 1 : -1;
+    const leftExpiry = left.expireAt ?? Number.POSITIVE_INFINITY;
+    const rightExpiry = right.expireAt ?? Number.POSITIVE_INFINITY;
+    return leftExpiry - rightExpiry;
+  });
+
+  /** 逐包浮层内容：名称 · 剩余/总额 · 到期。标题钉在浮层顶部，列表限高可滚。 */
+  const packsTipBody = (rows: readonly TraeCreditPackage[], title: string) => (
+    <>
+      <div className="sticky -top-2 -mx-3 -mt-2 bg-popover px-3 pb-1 pt-2 font-medium">{title}</div>
+      {rows.map((pkg, index) => (
+        <div
+          key={`${pkg.packageCode ?? pkg.packageName ?? "pack"}-${index}`}
+          className="whitespace-nowrap tabular-nums"
+        >
+          {t(pkg.expired ? "trae.comp.card.packs.lineExpired" : "trae.comp.card.packs.line", {
+            name: pkg.packageName ?? pkg.packageCode ?? t("trae.comp.card.packs.unnamed"),
+            remaining: formatCredits(pkg.remaining),
+            total: formatCredits(pkg.total),
+            expire: formatExpiryDate(pkg.expireAt) ?? t("trae.comp.card.expiry.permanent"),
+          })}
+        </div>
+      ))}
+    </>
+  );
+
   const expiring = summarizeExpiring(account.creditPackages, { unit: "s" });
   const expiringChip = expiring ? (
     <Tooltip>
@@ -370,17 +411,16 @@ export function TraeAccountCard({
       {/* issue #79：逐批明细可能有几十行 ⇒ 限高可滚，标题钉在浮层顶部。
           与 WB 卡片同一处理（`EXPIRY_TIP_MAX_HEIGHT`），见 `account-card.tsx::expiryTipBody`。 */}
       <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
-        <div className="sticky -top-2 -mx-3 -mt-2 bg-popover px-3 pb-1 pt-2 font-medium">
-          {t("trae.comp.card.chip.expiringTipTitle", { n: expiring.batches.length })}
-        </div>
-        {expiring.batches.map((batch) => (
-          <div key={batch.expireAt} className="whitespace-nowrap tabular-nums">
-            {t("trae.comp.card.chip.expiringTipLine", {
-              time: formatAbsoluteTime(batch.expireAt),
-              amount: formatCredits(batch.amount),
-            })}
-          </div>
-        ))}
+        {(() => {
+          /* ★ 逐包列出（带**名称**与剩余量），而不是只按到期时刻分批：
+             分批会把同一天到期的多个包合成一行、名称全部丢失，而用户要判断
+             「先用哪个」恰恰需要名称（「月卡」和「活动赠送」不是一回事）。 */
+          const soon = packsSorted.filter((pkg) => pkg.expiringSoon && !pkg.expired);
+          return packsTipBody(
+            soon,
+            t("trae.comp.card.packs.title", { n: soon.length }),
+          );
+        })()}
       </TooltipContent>
     </Tooltip>
   ) : null;
@@ -553,11 +593,33 @@ export function TraeAccountCard({
   const lastUpdatedRelative = formatRelativeTime(updatedSeconds === null ? null : updatedSeconds * 1000, t);
   const metricsRow = (
     <div className="flex min-w-0 gap-[14px] text-[11.5px] text-muted-foreground">
-      <span>
-        {t("trae.comp.card.metric.credits")}{" "}
-        <b className="font-semibold tabular-nums text-foreground">{formatCredits(account.remainingCredits)}</b>
-{creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
-      </span>
+      {packsSorted.length > 0 ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="cursor-default">
+              {t("trae.comp.card.metric.credits")}{" "}
+              <b className="font-semibold tabular-nums text-foreground">
+                {formatCredits(account.remainingCredits)}
+              </b>
+              {creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
+            {packsTipBody(
+              packsSorted,
+              t("trae.comp.card.packs.title", { n: packsSorted.length }),
+            )}
+          </TooltipContent>
+        </Tooltip>
+      ) : (
+        <span>
+          {t("trae.comp.card.metric.credits")}{" "}
+          <b className="font-semibold tabular-nums text-foreground">
+            {formatCredits(account.remainingCredits)}
+          </b>
+          {creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
+        </span>
+      )}
       <span>
         {t("trae.comp.card.metric.expiry")}{" "}
         <b className="font-semibold tabular-nums text-foreground">

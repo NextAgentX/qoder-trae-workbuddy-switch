@@ -412,7 +412,7 @@ export interface TraeCreditPackage {
   used: number;
   expireAt: number | null;
   expired: boolean;
-  /** 是否 7 天内到期。 */
+  /** 是否临期（窗口由后端 `EXPIRING_SOON_SECS` 决定，现为 **14 天**）。 */
   expiringSoon: boolean;
 }
 
