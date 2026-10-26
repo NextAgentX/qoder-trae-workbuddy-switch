@@ -314,7 +314,10 @@ fn apply_linux_render_workarounds() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
         return;
     }
-    if std::env::var("BUDDY_SWITCH_KEEP_DMABUF").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("BUDDY_SWITCH_KEEP_DMABUF")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         return;
     }
     let wayland = std::env::var("XDG_SESSION_TYPE")
@@ -358,8 +361,10 @@ pub fn run() {
             //   用户贴出来的日志总是「很干净」，排查只能靠猜。
             #[cfg(target_os = "linux")]
             {
-                let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
-                let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "-".into());
+                let session =
+                    std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
+                let wayland_display =
+                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "-".into());
                 let dmabuf = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER")
                     .unwrap_or_else(|_| "unset".into());
                 runtime_log::info(
