@@ -9046,11 +9046,33 @@ check("★★ 聚合页的写动作必须落到**真实命令**（不许摆假�
   /* 批量删除必须带撤销（后端有 `account_restore` ⇒ 不给撤销就是「假承诺」）。 */
   if (!/showUndoToast\(/.test(page)) throw new Error("批量删除没有撤销 —— 后端支持恢复却不给撤销");
   if (!/accountRestore\(/.test(page)) throw new Error("批量删除的撤销没有调用 account_restore");
-  /* 切换：三个平台各一条。 */
+  /* 切换：三个平台各一条。
+     ★ 命令可能落在**共享层**（`components/aggregate/aggregate-*-switcher.tsx`）——
+     「确认框 + busy + 成功/失败反馈」必须收在一处，否则就是 issue #89 第五节
+     指出的成因 2（内联箭头 ⇒ 每个调用点各写一遍）。因此把页面与两个切换器
+     合并成一份源码再查：命令不许凭空消失，但也不强求写在页面里。 */
+  const writePath = [
+    page,
+    readCode("src/components/aggregate/aggregate-trae-switcher.tsx"),
+    readCode("src/components/aggregate/aggregate-qoder-switcher.tsx"),
+  ].join("\n");
   for (const cmd of ["traeSwitchAccount", "qoderSwitchAccount"]) {
-    if (!page.includes(cmd)) throw new Error(`聚合页没有接 ${cmd}`);
+    if (!writePath.includes(cmd)) throw new Error(`聚合页（含共享切换器）没有接 ${cmd}`);
   }
-  return "四项刷新 · 批量签到/删除（带撤销）· 三平台切换";
+  /* ★ 收进共享层的代价是「确认框可能被顺手删掉而没人发现」⇒ 这里钉住它：
+     Trae 必须走 `RestartConfirmDialog`（要关客户端），Qoder 必须是确认 Dialog。
+     两者都必须由切换器的 `confirmProps` 驱动，否则就是「有框但不生效」。 */
+  if (!/RestartConfirmDialog \{\.\.\.traeSwitch\.confirmProps\}/.test(page)) {
+    throw new Error("聚合页的 Trae 切换没有渲染重启确认框 —— 点一下就会静默重启客户端");
+  }
+  if (!/open=\{qoderSwitch\.confirmProps\.open\}/.test(page)) {
+    throw new Error("聚合页的 Qoder 切换没有渲染确认框 —— 点一下就直接改写客户端登录态");
+  }
+  /* 删除必须先确认（单个与批量共用同一个框）。 */
+  if (!/open=\{confirmDelete !== null\}/.test(page)) {
+    throw new Error("聚合页的删除没有确认框 —— 与三个渠道页的交互契约相反");
+  }
+  return "四项刷新 · 批量签到/删除（带撤销）· 三平台切换（确认框已钉住）";
 });
 
 check("★ 新增账号提示：筛选生效期间新出现的账号**要能一键加入**", () => {

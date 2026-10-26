@@ -28,21 +28,33 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { AlertTriangle, ListTree, RotateCw, SearchX, UserPlus } from "lucide-react";
 import { toast } from "sonner";
 
-import { AccountCard } from "@/components/account-card";
+import { AccountCard, type GuideTarget } from "@/components/account-card";
 import { TraeAccountCard } from "@/components/trae-account-card";
 import { QoderAccountCard } from "@/components/qoder/qoder-account-card";
 import { AggregateFilterPanel } from "@/components/aggregate/aggregate-filter-panel";
 import { AggregateExportButton, groupExportTargets } from "@/components/aggregate/aggregate-export-button";
 import { useAggregateWbSwitcher } from "@/components/aggregate/aggregate-wb-switcher";
+import { useAggregateTraeSwitcher } from "@/components/aggregate/aggregate-trae-switcher";
+import { useAggregateQoderSwitcher } from "@/components/aggregate/aggregate-qoder-switcher";
 import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
+import { SwitchAccountDialog } from "@/components/switch-account-dialog";
 import { ScopeMark, scopeLabel } from "@/components/scope-chip";
 import { AccountDetailDrawer } from "@/components/account-detail-drawer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import * as api from "@/lib/api";
 import {
@@ -77,6 +89,7 @@ import {
 } from "@/lib/aggregate-detail";
 import { useT } from "@/lib/i18n";
 import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
+import type { AccountMeta, Region } from "@/lib/types";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
 import { useWbProgramStatuses, wbProgramAvailability } from "@/lib/wb-program-statuses";
 import {
@@ -127,6 +140,59 @@ export default function AggregateAccountsPage() {
   const wbSwitch = useAggregateWbSwitcher(() => {
     void reload();
   });
+  /**
+   * Trae / Qoder 的程序位切换（issue #89 · 2.1 / 2.2）。
+   *
+   * 与 `wbSwitch` **同构**：确认框 + busy + 成功/失败反馈都收在 hook 里，页面只调 `request`。
+   * 此前这两条线是 `renderCard` 里的内联箭头 ⇒ 点一下就直接改客户端登录态（Trae 还会
+   * 静默重启客户端），而渠道页是**先确认再执行**。
+   */
+  const traeSwitch = useAggregateTraeSwitcher(() => {
+    void reload();
+    void reloadSignals();
+  });
+  const qoderSwitch = useAggregateQoderSwitcher(() => {
+    void reload();
+    void reloadSignals();
+  });
+  /** WorkBuddy 主程序位（「WB」那枚）的切换：与账号页同一个向导（含会话迁移）。 */
+  const [wbSwitchDialog, setWbSwitchDialog] = useState<{
+    account: AccountMeta;
+    region: Region;
+  } | null>(null);
+
+  const navigate = useNavigate();
+  /**
+   * 「未检测到程序位」的引导（issue #89 · B2）：与账号页**同一条路径** ——
+   * 一句针对性 toast + 跳到**该作用域**设置页的「权限与诊断」子项锚点。
+   *
+   * ⚠️ 必须带 `?section=diagnostics`：跳到设置页首页的话用户还得自己找子项。
+   * 这里比账号页多一步「取该账号自己的 scope」—— 聚合页一屏里有 6 个作用域，
+   * 用当前页面的作用域会把人带到另一条产品线的设置页。
+   */
+  const onGuideToSetting = useCallback(
+    (item: AggregateAccount, target: GuideTarget) => {
+      toast.info(
+        target === "ide"
+          ? t("wbAccounts.toast.guideIdeSetting")
+          : t("wbAccounts.toast.guideCliSetting"),
+      );
+      navigate(`/s/${item.scope}/settings?section=diagnostics`);
+    },
+    [navigate, t],
+  );
+
+  /** 「插件未安装」的引导（issue #89 · B3）：与账号页同一句 toast。 */
+  const onGuidePlugin = useCallback(
+    (programId: string) => {
+      const client =
+        programId === "vscode_codebuddy_plugin"
+          ? t("wbAccounts.program.vscodeCodebuddyPlugin")
+          : t("wbAccounts.program.jetbrainsCodebuddyPlugin");
+      toast.info(t("wbAccounts.card.guidePlugin", { client }));
+    },
+    [t],
+  );
   const wbProgramAvail = wbProgramAvailability(wbPrograms);
   const wbCnStatus = useAccountsStore((s) => s.status);
   const wbGlobalStatus = useAccountsStore((s) => s.global.status);
@@ -233,7 +299,14 @@ export default function AggregateAccountsPage() {
   /* ── 删除（真删 + 撤销）────────────────────────────────────────
      撤销走 `offerUndo`，它的 `undo` 是**必填**参数 —— 后端没有恢复命令时
      这段代码根本写不出来（`undo-toast.ts` 文件头那条红线的落地方式）。 */
-  const handleDelete = useCallback(
+  /* ★ issue #89 · 2.3：删除**必须先确认**。三个渠道页都是 `setDeleteTarget(a)`
+     → Dialog 确认；聚合页此前点菜单项即刻删除。撤销 toast 只是**事后**补救，
+     与渠道页养成的「删账号会先问一句」的预期相反。 */
+  const [confirmDelete, setConfirmDelete] = useState<
+    { kind: "one"; account: AggregateAccount } | { kind: "batch"; count: number } | null
+  >(null);
+
+  const performDelete = useCallback(
     async (account: AggregateAccount) => {
       const scope = account.scope;
       const key = aggregateAccountKey(account);
@@ -355,6 +428,31 @@ export default function AggregateAccountsPage() {
     else toast.success(t("aggregate.toast.checkinDone", { n: ok }));
     setSelected(new Set());
   }, [accounts, reload, selected, t]);
+
+  /**
+   * 单账号刷 Trae 积分（issue #89 · C3）。
+   *
+   * 卡片「尚未查询到积分」那一行的就地刷新按钮走这里 —— 那一行恰恰是「没有积分」时
+   * 唯一的出口，按钮若是死的（`disabled={... || !onRefreshCredits}`），用户就只能去
+   * 全选 → 批量刷新 → 取消全选。
+   *
+   * 成功后必须 `reloadSignals()`：逐包明细来自信号层的 `get_trae_credits`，
+   * 只 `reload()`（账号列表）刷不出包粒度数据。
+   */
+  const refreshTraeCredits = useCallback(
+    async (item: AggregateAccount) => {
+      if (item.platform !== "trae") return;
+      const description = aggregateDisplayName(item);
+      try {
+        await api.traeRefreshCredits(item.data.userId, traeVariantOf(item.scope));
+        await reloadSignals();
+        toast.success(t(REFRESH_DONE_LABEL.credits), { description });
+      } catch (error) {
+        toast.error(api.asError(error), { description });
+      }
+    },
+    [reloadSignals, t],
+  );
 
   /**
    * 单账号签到（WorkBuddy）。
@@ -580,23 +678,42 @@ export default function AggregateAccountsPage() {
           <AccountCard
             key={item.ref}
             account={item.data}
-            onDelete={() => void handleDelete(item)}
+            onDelete={() => setConfirmDelete({ kind: "one", account: item })}
             credit={creditOf(item.scope, item.data.id)}
             creditLoading={region === "cn" ? wbCnCreditLoading[item.data.id] : wbGlobalCreditLoading[item.data.id]}
             /* 「当前登录」判定与账号页**共用** `isWorkbuddyCurrent`（见 `lib/account-current.ts`）。 */
             workbuddyActive={isWorkbuddyCurrent(item.data, (region === "cn" ? wbCnStatus : wbGlobalStatus)?.current)}
             codebuddyCliConfigured={wbProgramAvail.cliConfigured}
+            /* ★ issue #89 · B1：主程序位「WB」的切换。不传 ⇒ `disabled={... || !onSwitch}`
+               命中，所有非当前账号的「WB」按钮点不动。走与账号页同一个向导（含会话迁移）。 */
+            onSwitch={() => setWbSwitchDialog({ account: item.data, region })}
+            /* ★ issue #89 · B2 / B3：不传这两个 ⇒ IDE / CLI 的「未检测到」与
+               VS Code / JetBrains 的「未装」都变成**点不动的灰按钮**，
+               而卡片注释原本写着「不摆一枚点不动的灰按钮」。 */
+            onGuideToSetting={(target) => onGuideToSetting(item, target)}
+            onGuidePlugin={onGuidePlugin}
             onSwitchCodebuddyCli={() => wbSwitch.request("cli", item)}
             onSwitchCodebuddyCnIde={() => wbSwitch.request("ide", item)}
             onSwitchVscodePlugin={() => wbSwitch.request("vscode", item)}
             onSwitchJetbrainsPlugin={() => wbSwitch.request("jetbrains", item)}
-            codebuddyCliBusy={wbSwitch.busyAccountId === item.data.id}
+            /* ★ issue #89 · B4：四个程序位各自的 `Busy`（锁该位全部按钮）与 `Loading`
+               （给正在切的那张卡转圈）。此前只传了 `codebuddyCliBusy`，且用的是
+               **逐账号**语义 ⇒ ① 另外三个位不锁、切换中可无限重复点；
+               ② 六个 `*Loading` 全缺 ⇒ 正在切的卡不转圈、不写「切换中」、`aria-busy` 为假。 */
+            codebuddyCliBusy={wbSwitch.slotBusy("cli")}
+            codebuddyCliLoading={wbSwitch.slotLoading("cli", item.data.id)}
             codebuddyCliActive={item.data.id === wbPrograms.cli?.activeAccountId}
             codebuddyCnIdeAvailable={wbProgramAvail.cnIdeAvailable}
+            codebuddyCnIdeBusy={wbSwitch.slotBusy("ide")}
+            codebuddyCnIdeLoading={wbSwitch.slotLoading("ide", item.data.id)}
             codebuddyCnIdeActive={item.data.id === wbPrograms.cnIde?.activeAccountId}
             vscodePluginAvailable={wbProgramAvail.vscodeAvailable}
+            vscodePluginBusy={wbSwitch.slotBusy("vscode")}
+            vscodePluginLoading={wbSwitch.slotLoading("vscode", item.data.id)}
             vscodePluginActive={item.data.id === wbPrograms.vscode?.activeAccountId}
             jetbrainsPluginAvailable={wbProgramAvail.jetbrainsAvailable}
+            jetbrainsPluginBusy={wbSwitch.slotBusy("jetbrains")}
+            jetbrainsPluginLoading={wbSwitch.slotLoading("jetbrains", item.data.id)}
             jetbrainsPluginActive={item.data.id === wbPrograms.jetbrains?.activeAccountId}
             todayTokens={todayTokens}
             todayTokensTruncated={signals?.todayTokensTruncated}
@@ -615,23 +732,35 @@ export default function AggregateAccountsPage() {
         return (
           <TraeAccountCard
             key={item.ref}
-            account={item.data}
-            onDelete={() => void handleDelete(item)}
             /* 程序位：**没取到就不传** ⇒ 卡片整行不渲染（不是画一排「未检测到」的灰胶囊）。 */
+            /* ★ issue #89 · C2：逐包明细来自 `get_trae_credits` 的 `packages[uid]`，
+               账号视图只带聚合积分。与渠道页同样**合并进 account 对象**再交给卡片，
+               否则指标行的 `/Y` 与「N 积分 M 天内过期」chip 在这里常缺。 */
+            account={{
+              ...item.data,
+              creditPackages:
+                signals?.traeCredits.get(item.data.userId) ?? item.data.creditPackages ?? null,
+            }}
+            onDelete={() => setConfirmDelete({ kind: "one", account: item })}
+            /* ★ issue #89 · C4 / C6：不传 `busy` ⇒ 六个 `busy === \`xxx-${uid}\`` 恒 false
+               ⇒ 菜单项永远不显示「执行中」、永远可重复点，而 `saving` / `thawing`
+               同时是 `disabled` 的一部分 ⇒ 重复点会真的发第二次请求。 */
+            busy={traeSwitch.busy}
+            switchBusy={traeSwitch.switchBusy}
             programs={programs.length ? programs : undefined}
             /* ★ issue #89 · 2.5：`current` 此前没传 ⇒ 卡片头部的「当前登录」徽章与
                左侧主色竖条永不出现，而页脚的程序位胶囊按 `program.current` 自己判、照常亮
                ⇒ 同一张卡上两个信号互相矛盾。判据与渠道页 `isCurrentAccount` 同式。 */
             current={programs.some((program) => program.current)}
-            onSwitchTo={(account, target) => {
-              void api
-                .traeSwitchAccount({ userId: account.userId, variant: target })
-                .then(() => {
-                  void reload();
-                  void reloadSignals();
-                })
-                .catch((error: unknown) => toast.error(api.asError(error)));
-            }}
+            /* ★ issue #89 · 2.1：切走共享层 —— 先弹重启确认再执行。
+               此前直接调 `api.traeSwitchAccount`，而它的 `launch` 默认 `true`
+               ⇒ 点一下页脚胶囊客户端就被静默重启，全程没有一句确认。
+               `label` 由卡片原样上传（后端 `program.label`），不由变体反推（issue #20）。 */
+            onSwitchTo={(_account, target, label) => traeSwitch.request(item, target, label)}
+            /* ★ issue #89 · C3：「尚未查询到积分」那一行的就地刷新按钮，
+               不传 ⇒ `disabled={... || !onRefreshCredits}` 命中，而这一行恰恰是
+               「没有积分」时唯一的出口。 */
+            onRefreshCredits={() => void refreshTraeCredits(item)}
             checkedTodayOverride={checkinToday ?? undefined}
             onRefreshPart={(_account, kind) => void refreshPart(item, kind)}
             refreshingKinds={refreshBusy.kindsOf(item.ref)}
@@ -676,7 +805,7 @@ export default function AggregateAccountsPage() {
         <QoderAccountCard
           key={item.ref}
           account={item.data}
-          onDelete={() => void handleDelete(item)}
+          onDelete={() => setConfirmDelete({ kind: "one", account: item })}
           credits={
             creditsRow && creditsRow.ok
               ? { remaining: creditsRow.remaining ?? 0, total: creditsRow.total ?? 0, plan: creditsRow.plan ?? null }
@@ -687,15 +816,9 @@ export default function AggregateAccountsPage() {
           /* ★ issue #89 · D1：不传就回落四项 ⇒ 菜单里多出「刷新今日 Token」，
              Qoder 没有 token 概念，点了什么也不发生。 */
           refreshKinds={QODER_REFRESH_KINDS}
-          onSwitch={(program) => {
-            void api
-              .qoderSwitchAccount(item.scope, program.id, item.data.uid)
-              .then(() => {
-                void reload();
-                void reloadSignals();
-              })
-              .catch((error: unknown) => toast.error(api.asError(error)));
-          }}
+          /* ★ issue #89 · 2.2：写客户端登录态 ⇒ 必须先确认（渠道页同纪律）。 */
+          onSwitch={(program) => qoderSwitch.request(item, program)}
+          switchBusy={qoderSwitch.switchBusy}
           onCheckin={(account) => {
             void api
               .qoderCheckinClaim(item.scope, account.uid)
@@ -713,10 +836,15 @@ export default function AggregateAccountsPage() {
     },
     [
       creditOf,
-      handleDelete,
+      performDelete,
+      onGuidePlugin,
+      onGuideToSetting,
       openDetail,
+      qoderSwitch.request,
+      qoderSwitch.switchBusy,
       refreshBusy,
       refreshPart,
+      refreshTraeCredits,
       reload,
       reloadSignals,
       saveGroup,
@@ -724,6 +852,9 @@ export default function AggregateAccountsPage() {
       signalsByScope,
       t,
       toggleSelect,
+      traeSwitch.busy,
+      traeSwitch.request,
+      traeSwitch.switchBusy,
       wbCnCreditLoading,
       wbCnStatus,
       wbGlobalCreditLoading,
@@ -1134,7 +1265,13 @@ export default function AggregateAccountsPage() {
           <Button size="sm" variant="outline" onClick={() => void batchCheckin()}>
             {t("shared.batch.checkin")}
           </Button>
-          <Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => void batchDelete()}>
+          {/* ★ issue #89 · 2.3：批量删除同样先确认（此前点一下就删）。 */}
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-destructive hover:text-destructive"
+            onClick={() => setConfirmDelete({ kind: "batch", count: selected.size })}
+          >
             {t("shared.batch.delete")}
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
@@ -1147,6 +1284,96 @@ export default function AggregateAccountsPage() {
 
       {/* ══ WB 程序位切换的统一重启确认框（与账号页同一个组件）══ */}
       <RestartConfirmDialog {...wbSwitch.confirmProps} />
+
+      {/* ══ Trae 程序位切换的重启确认（issue #89 · 2.1）══
+          与 WB 用同一个组件：Trae 的切换同样是「先关客户端、写登录态、再重开」，
+          确认框里的「自动重开」勾选映射到 `api.traeSwitchAccount` 的 `launch`。 */}
+      <RestartConfirmDialog {...traeSwitch.confirmProps} />
+
+      {/* ══ Qoder 程序位切换确认（issue #89 · 2.2）══
+          Qoder 没有「重启客户端」这一档 ⇒ 普通确认框，不摆无效的「自动重开」勾选。 */}
+      <Dialog
+        open={qoderSwitch.confirmProps.open}
+        onOpenChange={qoderSwitch.confirmProps.onOpenChange}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("qoder.page.accounts.switch.title")}</DialogTitle>
+            <DialogDescription>
+              {t("qoder.page.accounts.switch.desc", {
+                name: qoderSwitch.confirmProps.name,
+                program: qoderSwitch.confirmProps.programLabel,
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => qoderSwitch.confirmProps.onOpenChange(false)}
+              disabled={qoderSwitch.switchBusy}
+            >
+              {t("qoder.page.accounts.switch.cancel")}
+            </Button>
+            <Button onClick={qoderSwitch.confirmProps.onConfirm} disabled={qoderSwitch.switchBusy}>
+              {t("qoder.page.accounts.switch.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ══ 删除确认（issue #89 · 2.3，单个与批量共用）══
+          撤销 toast 是**事后**补救，不能替代「删之前问一句」——三个渠道页都是先确认。 */}
+      <Dialog
+        open={confirmDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDelete(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("aggregate.delete.title")}</DialogTitle>
+            <DialogDescription>
+              {confirmDelete?.kind === "batch"
+                ? t("aggregate.delete.batchBody", { n: confirmDelete.count })
+                : t("aggregate.delete.body", {
+                    name: confirmDelete ? aggregateDisplayName(confirmDelete.account) : "",
+                  })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDelete(null)}>
+              {t("aggregate.delete.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                const target = confirmDelete;
+                setConfirmDelete(null);
+                if (!target) return;
+                if (target.kind === "batch") void batchDelete();
+                else void performDelete(target.account);
+              }}
+            >
+              {t("aggregate.delete.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ══ WorkBuddy 主程序位切换向导（issue #89 · B1）══
+          与账号页**同一个组件**：它带会话迁移三步（目标与来源 → 迁移内容 → 确认），
+          在聚合页重写一遍既不可能也不该。 */}
+      <SwitchAccountDialog
+        open={wbSwitchDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setWbSwitchDialog(null);
+        }}
+        account={wbSwitchDialog?.account ?? null}
+        region={wbSwitchDialog?.region}
+        onDone={() => {
+          void reload();
+        }}
+      />
 
       {/* ══ 详情抽屉（`accountKey` 恰好就是 `${scope}:${key}`，与 ref 同源）══ */}
       <AccountDetailDrawer

@@ -141,6 +141,13 @@ export const en = {
   "aggregate.export.platform.qoder": "Qoder",
   "aggregate.export.done": "Exported {n} accounts",
   "aggregate.toast.switching": "Switching…",
+  // Delete confirmation (issue #89 · 2.3): the undo toast is a remedy, not a substitute
+  // for asking first.
+  "aggregate.delete.title": "Delete account",
+  "aggregate.delete.body": "Delete “{name}”? You can restore it right away with the “Undo” action in the toast.",
+  "aggregate.delete.batchBody": "Delete the {n} selected accounts? You can restore them right away with the “Undo” action in the toast.",
+  "aggregate.delete.cancel": "Cancel",
+  "aggregate.delete.confirm": "Delete",
 
   // ---- Batch action results ----
   "aggregate.toast.checkinDone": "Checked in {n} accounts",

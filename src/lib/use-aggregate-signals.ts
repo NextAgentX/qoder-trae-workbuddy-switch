@@ -31,7 +31,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
 import type { AccountTokenTodayEntry, Region } from "@/lib/types";
 import type { QoderProgramStatus, QoderCreditsRow } from "@/lib/api";
-import type { TraeAccount, TraeRegionId, TraeVariantStatus } from "@/lib/trae-types";
+import type {
+  TraeAccount,
+  TraeCreditPackage,
+  TraeRegionId,
+  TraeVariantStatus,
+} from "@/lib/trae-types";
 import {
   loadTraeVariantLogins,
   loadTraeVariantStatuses,
@@ -64,6 +69,17 @@ export interface ScopeSignals {
   qoderPrograms: QoderProgramStatus[];
   /** Qoder 积分（`uid → 行`）。 */
   qoderCredits: Map<string, QoderCreditsRow>;
+  /**
+   * Trae 的**逐包积分**（`userId → 包数组`）。
+   *
+   * ★ issue #89 · C2：账号视图（`list_account_views_for`）只带聚合积分，包粒度明细在
+   * `get_trae_credits` 的 `packages[uid]` 里。渠道页把它**合并进 account 对象**再交给卡片；
+   * 聚合页此前直接用账号对象自带的 `creditPackages`（未刷新过积分时为 `null`）
+   * ⇒ 指标行的 `/Y` 与「N 积分 M 天内过期」chip 在聚合页常缺。
+   *
+   * 每个作用域**一次**调用（不是逐账号），符合本层的取数纪律 ①。
+   */
+  traeCredits: Map<string, TraeCreditPackage[]>;
 }
 
 const EMPTY: ScopeSignals = {
@@ -74,6 +90,7 @@ const EMPTY: ScopeSignals = {
   traeLogins: {},
   qoderPrograms: [],
   qoderCredits: new Map(),
+  traeCredits: new Map(),
 };
 
 /** 账号在某个作用域里的主键（各平台不同：WB `id` / Trae `userId` / Qoder `uid`）。 */
@@ -216,6 +233,16 @@ export function useAggregateSignals(accounts: readonly AggregateAccount[]): Aggr
             signals.qoderPrograms = view.programs;
           } catch {
             /* 同上 */
+          }
+        }
+
+        /* ── Trae 逐包积分（issue #89 · C2）── */
+        if (source.platform === "trae") {
+          try {
+            const overview = await api.getTraeCredits(source.variant);
+            signals.traeCredits = new Map(Object.entries(overview.packages ?? {}));
+          } catch {
+            /* 取不到 ⇒ 卡片不渲染逐包明细（不是画一条 0） */
           }
         }
 

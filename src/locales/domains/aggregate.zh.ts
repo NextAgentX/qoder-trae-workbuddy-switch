@@ -155,6 +155,12 @@ export const zh = {
   "aggregate.export.platform.qoder": "Qoder",
   "aggregate.export.done": "已导出 {n} 个账号",
   "aggregate.toast.switching": "正在切换…",
+  // 删除确认（issue #89 · 2.3）：撤销 toast 只是事后补救，不能替代「删之前问一句」。
+  "aggregate.delete.title": "删除账号",
+  "aggregate.delete.body": "确定删除「{name}」？删除后可立即用弹出的「撤销」恢复。",
+  "aggregate.delete.batchBody": "确定删除选中的 {n} 个账号？删除后可立即用弹出的「撤销」恢复。",
+  "aggregate.delete.cancel": "取消",
+  "aggregate.delete.confirm": "删除",
 
   // ---- 批量动作结果 ----
   "aggregate.toast.checkinDone": "已为 {n} 个账号签到",

@@ -36,6 +36,17 @@ export interface AggregateWbSwitcher {
   request: (slot: WbProgramSlot, account: AggregateAccount) => void;
   /** 正在切换中的账号 id（用于把胶囊标成「切换中」）。 */
   busyAccountId: string | null;
+  /**
+   * 某个程序位**是否有账号正在切换**（锁住该位的所有按钮）。
+   *
+   * ★ issue #89 · B4：渠道页四个 `*Busy` 都是「该程序位任一账号切换中就锁全部」
+   * （`codebuddyCliSwitchingId !== null`），不是逐账号 —— 因为切换是「关客户端 + 写登录态」，
+   * 并发点第二个会在前一个还没落盘时覆盖它。聚合页此前只传了 `codebuddyCliBusy`
+   * 且用的是**逐账号**语义 ⇒ 既不锁其它卡，也没锁另外三个程序位。
+   */
+  slotBusy: (slot: WbProgramSlot) => boolean;
+  /** 某账号在某个程序位上正在切换（转圈 + `aria-busy`）。 */
+  slotLoading: (slot: WbProgramSlot, accountId: string) => boolean;
   /** 确认框的 props（页面渲染 `RestartConfirmDialog`）。 */
   confirmProps: {
     open: boolean;
@@ -54,7 +65,8 @@ export interface AggregateWbSwitcher {
 export function useAggregateWbSwitcher(onSwitched?: () => void): AggregateWbSwitcher {
   const t = useT();
   const [pending, setPending] = useState<{ slot: WbProgramSlot; account: AggregateAccount } | null>(null);
-  const [busyAccountId, setBusyAccountId] = useState<string | null>(null);
+  /* 记**槽位 + 账号**：只有槽位才能回答「锁哪一位」，只有账号才能回答「给谁转圈」。 */
+  const [busy, setBusy] = useState<{ slot: WbProgramSlot; accountId: string } | null>(null);
 
   const request = useCallback((slot: WbProgramSlot, account: AggregateAccount) => {
     setPending({ slot, account });
@@ -78,7 +90,7 @@ export function useAggregateWbSwitcher(onSwitched?: () => void): AggregateWbSwit
       setPending(null);
       if (!target || target.account.platform !== "workbuddy") return;
       const id = target.account.data.id;
-      setBusyAccountId(id);
+      setBusy({ slot: target.slot, accountId: id });
       const label = aggregateDisplayName(target.account);
       const toastId = toast.loading(
         target.slot === "cli"
@@ -104,16 +116,25 @@ export function useAggregateWbSwitcher(onSwitched?: () => void): AggregateWbSwit
         } catch (error) {
           toast.error(api.asError(error), { id: toastId });
         } finally {
-          setBusyAccountId(null);
+          setBusy(null);
         }
       })();
     },
     [onSwitched, pending, t],
   );
 
+  const slotBusy = useCallback((slot: WbProgramSlot) => busy?.slot === slot, [busy]);
+  const slotLoading = useCallback(
+    (slot: WbProgramSlot, accountId: string) =>
+      busy?.slot === slot && busy.accountId === accountId,
+    [busy],
+  );
+
   return {
     request,
-    busyAccountId,
+    busyAccountId: busy?.accountId ?? null,
+    slotBusy,
+    slotLoading,
     confirmProps: {
       open: pending !== null,
       clientLabel: clientLabel(pending?.slot ?? "ide"),
