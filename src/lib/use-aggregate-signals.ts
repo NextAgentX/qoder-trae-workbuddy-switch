@@ -29,7 +29,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import * as api from "@/lib/api";
-import type { AccountTokenTodayEntry, Region } from "@/lib/types";
+import type { AccountTokenTodayEntry, Region, TravelStatus } from "@/lib/types";
 import type { QoderProgramStatus, QoderCreditsRow } from "@/lib/api";
 import type {
   TraeAccount,
@@ -70,6 +70,16 @@ export interface ScopeSignals {
   /** Qoder 积分（`uid → 行`）。 */
   qoderCredits: Map<string, QoderCreditsRow>;
   /**
+   * WorkBuddy 的**今日旅行状态**（`账号 id → 状态`）。
+   *
+   * ★ issue #89 · B5：卡片上的「旅行中 / 刚结束」chip 由它决定。渠道页是页面级
+   * `travelMap`，聚合页此前没取 ⇒ 那一枚 chip 在聚合页永不出现。
+   * 放在信号层而不是页面 effect 里：`reloadSignals()` 会顺带刷新它，
+   * 不必再为「什么时候重取」单独设计一个触发条件。
+   *
+   * ⚠️ 只有 WorkBuddy 有这个概念（`get_travel_status_map` 是 WB 专属命令）。
+   */
+  /**
    * Trae 的**逐包积分**（`userId → 包数组`）。
    *
    * ★ issue #89 · C2：账号视图（`list_account_views_for`）只带聚合积分，包粒度明细在
@@ -80,6 +90,17 @@ export interface ScopeSignals {
    * 每个作用域**一次**调用（不是逐账号），符合本层的取数纪律 ①。
    */
   traeCredits: Map<string, TraeCreditPackage[]>;
+  /**
+   * WorkBuddy 的**今日旅行状态**（`账号 id → 状态`）。
+   *
+   * ★ issue #89 · B5：卡片上的「旅行中 / 刚结束」chip 由它决定。渠道页是页面级
+   * `travelMap`，聚合页此前没取 ⇒ 那一枚 chip 在聚合页永不出现。
+   * 放在信号层而不是页面 effect 里：`reloadSignals()` 会顺带刷新它，
+   * 不必再为「什么时候重取」单独设计一个触发条件。
+   *
+   * ⚠️ 只有 WorkBuddy 有这个概念（`get_travel_status_map` 是 WB 专属命令）。
+   */
+  travel: Map<string, TravelStatus>;
 }
 
 const EMPTY: ScopeSignals = {
@@ -91,6 +112,7 @@ const EMPTY: ScopeSignals = {
   qoderPrograms: [],
   qoderCredits: new Map(),
   traeCredits: new Map(),
+  travel: new Map(),
 };
 
 /** 账号在某个作用域里的主键（各平台不同：WB `id` / Trae `userId` / Qoder `uid`）。 */
@@ -215,6 +237,21 @@ export function useAggregateSignals(accounts: readonly AggregateAccount[]): Aggr
           }
         } catch {
           /* 签到状态读不到 ⇒ 全部未知（`null`） */
+        }
+
+        /* ── WorkBuddy 今日旅行（issue #89 · B5）── */
+        if (source.platform === "workbuddy") {
+          try {
+            const ids = items
+              .filter((item) => item.platform === "workbuddy")
+              .map((item) => item.data.id);
+            if (ids.length > 0) {
+              const map = await api.getTravelStatusMap(ids, scopeParts(source.scope).region);
+              signals.travel = new Map(Object.entries(map));
+            }
+          } catch {
+            /* 取不到 ⇒ 不渲染那一枚 chip（不是画一个「未旅行」） */
+          }
         }
 
         /* ── 程序位 ── */

@@ -9093,6 +9093,80 @@ check("★★ 聚合页的写动作必须落到**真实命令**（不许摆假�
   return "四项刷新 · 批量签到/删除（带撤销）· 三平台切换（确认框已钉住）";
 });
 
+check("★★ 聚合页与渠道页必须传同一组卡片 props（少传只会静默降级）", () => {
+  /* issue #89 的成因 1：「复用组件」被当成了「行为一致」的证明。
+     三张卡都是「缺回调 ⇒ 控件禁用或整块消失」的设计 ⇒ **每一个 prop 都是一处
+     独立的一致性风险**，而此前没有任何断言覆盖「调用点传齐了没有」。
+
+     这份清单只收**两侧都必须有**的项（渠道页有、聚合页漏过，且漏了会静默降级）。
+     「可选但降级」的项（如 `onExtSessions`）刻意不收 —— 把它们钉死会让合理的
+     取舍无法表达。
+
+     ⚠️ 检查方式是「文件里出现了 `prop=` 这个 JSX 属性」：够用且稳定。
+     抽屉 `actions={{ onDelete: … }}` 用的是冒号，不会误判成卡片属性。 */
+  const aggregate = readCode("src/pages/AggregateAccountsPage.tsx");
+  const REQUIRED = {
+    AccountCard: [
+      "onDelete",
+      "onSwitch",
+      "onCheckin",
+      "onExport",
+      "onGuideToSetting",
+      "onGuidePlugin",
+      "onAddPlaintextAccount",
+      "onRefreshPart",
+      "refreshingKinds",
+      "travelStatus",
+      "creditPriority",
+      "workbuddyActive",
+      "todayCheckedIn",
+    ],
+    TraeAccountCard: [
+      "onDelete",
+      "programs",
+      "current",
+      "busy",
+      "switchBusy",
+      "onSwitchTo",
+      "onCheckin",
+      "onRefreshCredits",
+      "onRefreshPart",
+      "refreshingKinds",
+      "checkedTodayOverride",
+    ],
+    QoderAccountCard: [
+      "onDelete",
+      "programs",
+      "onSwitch",
+      "switchBusy",
+      "onCheckin",
+      "onExport",
+      "onRefreshPart",
+      "refreshingKinds",
+      "refreshKinds",
+    ],
+  };
+  const missing = [];
+  for (const [card, props] of Object.entries(REQUIRED)) {
+    for (const prop of props) {
+      /* `prop={` 或 `prop="` 都算传了；`prop={` 覆盖绝大多数（回调 / 布尔表达式）。 */
+      if (!aggregate.includes(`${prop}=`)) missing.push(`${card}.${prop}`);
+    }
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `聚合页漏传这些卡片 props（会静默降级成灰按钮 / 整块消失）：${missing.join(" · ")}`,
+    );
+  }
+  /* 抽屉同理：`actions` 一个都不传时「操作」区整块消失（4.3 的原症状）。 */
+  for (const prop of ["actions", "groups", "loading", "current", "onRefreshPart"]) {
+    if (!aggregate.includes(`${prop}=`)) {
+      throw new Error(`聚合页的详情抽屉漏传 ${prop} —— 抽屉只能看不能操作`);
+    }
+  }
+  return `三张卡 ${Object.values(REQUIRED).flat().length} 项 + 抽屉 5 项均已接线`;
+});
+
 check("★ 新增账号提示：筛选生效期间新出现的账号**要能一键加入**", () => {
   const lib = readCode("src/lib/aggregate-accounts.ts");
   if (!/export function newcomerAccounts/.test(lib)) throw new Error("缺少 newcomerAccounts");
