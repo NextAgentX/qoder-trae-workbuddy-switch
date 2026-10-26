@@ -80,7 +80,6 @@ import type {
   CheckinLog,
   CodeBuddyCliStatus,
   CodeBuddyCnIdeStatus,
-  CreditExpiry,
   CreditStatsEvent,
   JetbrainsCodebuddyPluginStatus,
   ExtClientId,
@@ -98,19 +97,20 @@ import { useAccountsStore } from "@/stores/accounts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n";
 import { daysUntil, nearestExpiringBatch } from "@/lib/credit-expiry";
+import {
+  compareCreditPriority,
+  nearestCreditExpiry,
+  pickPriorityAccountId,
+} from "@/lib/credit-priority";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { showUndoToast } from "@/lib/undo-toast";
 
-function expiringSoonAmount(credit?: CreditExpiry): number {
-  return credit?.ok ? credit.expiringSoonRemaining ?? 0 : 0;
-}
+
 
 /* 日期口径（`localDateKey` / `lastSevenDays`）已上提到 `@/lib/checkin-history` ——
    Trae 侧也要装配「近 7 天」抽屉区块，两处必须同口径（差一天就会把「昨天签的」显示成「未签到」）。 */
 
-function hasExpiringSoonCredits(credit?: CreditExpiry): boolean {
-  return credit?.ok === true && expiringSoonAmount(credit) > 0;
-}
+
 
 /**
  * 需要走「统一重启确认」的客户端（PLAN §3.15.3）。
@@ -121,37 +121,8 @@ function hasExpiringSoonCredits(credit?: CreditExpiry): boolean {
  */
 type SwitchClient = "cli" | "ide" | "vscode" | "jetbrains";
 
-/**
- * 「最近一批未来到期」的到期时刻（issue #69）。
- *
- * ⚠️ **不看 `expiringSoon`**（那是 7 天警告窗口），**不看 `credit.soonestExpireAt`**
- * （它把已过期资源也算进最小值 ⇒ 「已经浪费的」会抢占「先消耗」的位）。
- * 统一走 `nearestExpiringBatch` —— 它只认「未来 + 剩余 > 0 + 有到期时刻」。
- */
-function nearestCreditExpiry(credit?: CreditExpiry): number {
-  const batch = credit?.ok ? nearestExpiringBatch(credit.resources) : null;
-  return batch ? batch.expireAt : Number.POSITIVE_INFINITY;
-}
-
-/**
- * 「建议优先」的分档（issue #69）。
- *
- * | rank | 条件 | 含义 |
- * |:--|:--|:--|
- * | 0 | 7 天内有临期 | **再不用就浪费**（警告强度最高） |
- * | 1 | 正常（有未来到期 / 无到期） | **先消耗快到期的**（用户真正要的顺序） |
- * | 2 | 有**已过期**积分 | 已经浪费了 ⇒ 排到正常之后，别抢「先消耗」的位 |
- * | 3 | 积分查询失败 | 未知排最后 |
- *
- * ⚠️ 2026-10-21 前 rank 1 = 已过期、rank 2 = 正常 ⇒ 「有过期积分」的账号排在
- * 「14 天后到期」的账号**前面** —— 那正好把用户要的相对顺序倒过来了。
- */
-function creditPriorityRank(credit?: CreditExpiry): number {
-  if (!credit?.ok) return 3;
-  if (hasExpiringSoonCredits(credit)) return 0;
-  if (credit.expired) return 2;
-  return 1;
-}
+/* 「最近到期」与「建议优先」的四条判据已上提到 `@/lib/credit-priority` ——
+   聚合页也要显示同一个 ⭐ 徽章，两处各算一次必然分叉（issue #89 · B6）。 */
 
 /**
  * 「这个账号是不是客户端当前登录的那个」—— 判定已抽到 `lib/account-current.ts`，
@@ -1503,19 +1474,10 @@ function RegionPanel({ region }: { region: Region }) {
    *   假选项（决策 #3 的原判据「无字段」已不成立 —— 见 `check-scope-registry.cjs` 对应断言）。
    */
   const listConfig = useMemo<AccountListConfig<AccountMeta>>(() => {
-    const priorityComparator: AccountComparator<AccountMeta> = (left, right) => {
-      const leftCredit = creditMap[left.id];
-      const rightCredit = creditMap[right.id];
-      const rankDifference = creditPriorityRank(leftCredit) - creditPriorityRank(rightCredit);
-      if (rankDifference !== 0) return rankDifference;
-      /* 组内：**最近到期升序** → 临期金额降序（issue #69）。
-         「最近到期」用 `nearestCreditExpiry`（只认未来批次），不再用
-         `soonestRelevantExpiry`（它只看 7 天窗口内的批次）。 */
-      const leftExpiry = nearestCreditExpiry(leftCredit);
-      const rightExpiry = nearestCreditExpiry(rightCredit);
-      if (leftExpiry !== rightExpiry) return leftExpiry - rightExpiry;
-      return expiringSoonAmount(rightCredit) - expiringSoonAmount(leftCredit);
-    };
+    /* 三级键（分档 → 最近到期升序 → 临期金额降序）在 `credit-priority.ts` 里，
+       与聚合页的 ⭐ 徽章**共用同一份**（issue #89 · B6）。 */
+    const priorityComparator: AccountComparator<AccountMeta> = (left, right) =>
+      compareCreditPriority(creditMap[left.id], creditMap[right.id]);
     const nameComparator: AccountComparator<AccountMeta> = (left, right) =>
       wbAccountName(left).localeCompare(wbAccountName(right), undefined, { numeric: true, sensitivity: "base" });
     /**
@@ -1603,7 +1565,7 @@ function RegionPanel({ region }: { region: Region }) {
   /** 只服务「建议优先」徽章：按积分优先级排一遍（与当前 `sort` 无关）。 */
   const priorityOrdered = sortAccounts(accounts, "priority", listConfig);
   const priorityAccountId = creditOrderingReady
-    ? priorityOrdered.find((account) => hasExpiringSoonCredits(creditMap[account.id]))?.id
+    ? pickPriorityAccountId(priorityOrdered, (account) => creditMap[account.id])
     : undefined;
 
   /** 排序 / 分组下拉选项 —— 由 `availableSorts` / `availableGroups`（数据）驱动，无假选项。 */
