@@ -161,23 +161,53 @@ impl UnifiedGatewayConfig {
     /// 中途保存过一次空配置就自锁了。UI 已经禁止取消最后一条，这里对**手改配置文件**
     /// 也做同样的兜底，并打一行说明（不静默）。
     pub fn enabled_namespaces(&self) -> Vec<&'static NamespaceSpec> {
+        let enabled = self.effective_namespaces();
+        // 只有「配置里确实一条都没落上」时才提示（否则每次 `/v1/models` 都会刷一行）。
+        if enabled.len() != self.namespaces.len() || enabled.is_empty() {
+            if self
+                .namespaces
+                .iter()
+                .all(|id| !enabled.iter().any(|spec| spec.id == id))
+            {
+                eprintln!(
+                    "[unified-gateway] namespaces 里没有任何在册项 ⇒ 回落默认集（{}），否则统一入口会变成「怎么调都 400」的死入口",
+                    enabled.iter().map(|spec| spec.id).collect::<Vec<_>>().join(" / ")
+                );
+            }
+        }
+        enabled
+    }
+
+    /// **实际生效**的命名空间集合（唯一判据，**不打日志**）。
+    ///
+    /// ## 为什么必须与 `is_enabled` 同源（安全审计 P1-4）
+    ///
+    /// 改造前 `enabled_namespaces()` 对空列表回落到默认集，而 `is_enabled()` **只看原始
+    /// 数组**，两个把关点（`unified/routes.rs` 的两处）用的都是后者。于是当
+    /// `gateway_unified.json` 里 `namespaces` 是 `[]`（手改过、或写了个拼错的 id）：
+    ///
+    /// - `GET /v1/models` 与 `/unified/config` 列出**全部 6 条**（说明「可用」）；
+    /// - 而任何请求都被 400 `namespace_not_enabled`，文案还指着那个说「含它」的设置页。
+    ///
+    /// ⇒ 一个**无法自我诊断**的死入口。这里把它收敛成一份：凡是问「启没启用」的地方
+    /// 都读 [`Self::effective_namespaces`]。
+    fn effective_namespaces(&self) -> Vec<&'static NamespaceSpec> {
         let enabled: Vec<&'static NamespaceSpec> = gateway_namespace::all_specs()
             .iter()
             .filter(|spec| self.namespaces.iter().any(|id| id == spec.id))
             .collect();
         if enabled.is_empty() {
-            eprintln!(
-                "[unified-gateway] namespaces 为空 ⇒ 回落默认集（{}），否则统一入口会变成「怎么调都 400」的死入口",
-                known_ids().join(" / ")
-            );
             return gateway_namespace::default_specs().collect();
         }
         enabled
     }
 
-    /// 是否启用了某个命名空间（不做「空列表回落」——调用方应先经 [`Self::enabled_namespaces`]）。
+    /// 是否启用了某个命名空间。
+    ///
+    /// ★ 与 [`Self::enabled_namespaces`] **同一判据**（含空列表回落）：两者若分家，
+    /// 就会出现「清单说可用、每个请求都 400」的死入口。
     pub fn is_enabled(&self, id: &str) -> bool {
-        self.namespaces.iter().any(|item| item == id)
+        self.effective_namespaces().iter().any(|spec| spec.id == id)
     }
 }
 
@@ -342,15 +372,52 @@ mod tests {
         );
     }
 
-    /// `is_enabled` 只看配置本身（不做空列表回落 —— 那由 `enabled_namespaces` 负责）。
+    /// ★★ 安全审计 P1-4：`is_enabled` 必须与 `enabled_namespaces` **同一判据**。
+    ///
+    /// 改造前这条用例断言的是 `assert!(!config.is_enabled("wb-cn"))`（清空后为 false），
+    /// 而配套的 `empty_namespaces_fall_back_to_defaults` 断言「空表回落 6 条」——
+    /// **两条测试各钉一半，正好把这个矛盾永久固化**：清单列 6 个可用、每个请求 400。
+    ///
+    /// 这与 #108 修复时发现的三条「用例存在、断言精确、方向反了」完全同型。
+    ///
+    /// 变异验证：把 `is_enabled` 改回 `self.namespaces.iter().any(...)` ⇒ 第一条断言红。
     #[test]
-    fn is_enabled_reads_the_raw_list() {
+    fn is_enabled_agrees_with_enabled_namespaces_after_empty_fallback() {
         let mut config = UnifiedGatewayConfig::default();
         config.namespaces.clear();
+        assert!(
+            config.is_enabled("wb-cn"),
+            "空列表会回落默认集 ⇒ 请求必须被放行（否则清单说可用、请求全 400）"
+        );
+        // 逐条对齐：`is_enabled` 与 `enabled_namespaces()` 对每个在册 id 的结论必须一致。
+        let enabled: Vec<&str> = config.enabled_namespaces().iter().map(|s| s.id).collect();
+        for id in known_ids() {
+            assert_eq!(
+                config.is_enabled(id),
+                enabled.contains(&id),
+                "`{id}` 在两个入口上的结论必须一致"
+            );
+        }
+
+        // 只勾一个：此时**只有它**是启用的（不再回落）。
+        config.namespaces = vec!["trae-global".into()];
+        assert!(config.is_enabled("trae-global"));
         assert!(!config.is_enabled("wb-cn"));
-        config.namespaces = vec!["traework-cn".into()];
-        assert!(config.is_enabled("traework-cn"));
-        assert!(!config.is_enabled("traework-global"));
+    }
+
+    /// 全部是**未在册**的 id（手写错）⇒ 同样回落默认集，而不是变成死入口。
+    #[test]
+    fn namespaces_with_only_unknown_ids_fall_back_to_defaults() {
+        let config = UnifiedGatewayConfig {
+            namespaces: vec!["wb-cnx".into(), "typo".into()],
+            ..Default::default()
+        };
+        let ids: Vec<&str> = config.enabled_namespaces().iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), 6, "全是未知 id 等价于空列表");
+        assert!(
+            config.is_enabled("wb-cn"),
+            "与 `enabled_namespaces` 同源 ⇒ 也必须是启用的"
+        );
     }
 
     /// 落盘文件名是**对外事实**（文档与用户手改文件都用它）⇒ 钉住文件名，不是断言

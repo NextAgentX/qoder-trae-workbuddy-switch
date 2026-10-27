@@ -362,24 +362,44 @@ fn guard_namespace<'a>(
     requested: &'a str,
 ) -> Result<(&'static NamespaceSpec, &'a str), HttpError> {
     let split = gateway_namespace::split(requested);
-    let Some(spec) = split.spec else {
-        return Err(HttpError {
-            status: StatusCode::BAD_REQUEST,
-            kind: "invalid_request_error",
-            code: "namespace_prefix_required",
-            message: format!(
-                "统一网关要求模型名带命名空间前缀。本入口启用的命名空间：{}。\
-                 你填的是 `{requested}`，请改成 `{}:…` 这类形式（用不了的命名空间会被明确拒绝，不会静默改路由）。",
-                enabled_prefixes(config),
-                config
-                    .enabled_namespaces()
-                    .first()
-                    .map(|spec| spec.id)
-                    .unwrap_or("wb-cn")
-            ),
-        });
+    // ★★ 安全审计 P2-9：`default_namespace` 此前是**死开关** —— 持久化、`validate()`
+    // 校验、`/unified/config` 回显都做了，**唯独请求路径从不读它** ⇒ 设成 `"wb-cn"`
+    // 之后发裸模型名仍然是 400 `namespace_prefix_required`。
+    //
+    // 现在：配置了默认命名空间（且在册）⇒ 裸模型名落到它；没配置 ⇒ 维持原来的
+    // 明确拒绝（`None` = 不猜，这是模块头写死的安全默认）。
+    let (spec, bare) = match split.spec {
+        Some(spec) => (spec, split.bare),
+        None => {
+            let default_id = config
+                .default_namespace
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty());
+            match default_id.and_then(gateway_namespace::parse) {
+                Some(spec) => (spec, split.bare),
+                None => {
+                    return Err(HttpError {
+                        status: StatusCode::BAD_REQUEST,
+                        kind: "invalid_request_error",
+                        code: "namespace_prefix_required",
+                        message: format!(
+                            "统一网关要求模型名带命名空间前缀。本入口启用的命名空间：{}。\
+                             你填的是 `{requested}`，请改成 `{}:…` 这类形式（用不了的命名空间会被明确拒绝，不会静默改路由）。\
+                             若希望裸模型名可用，请在统一网关设置里指定「默认命名空间」。",
+                            enabled_prefixes(config),
+                            config
+                                .enabled_namespaces()
+                                .first()
+                                .map(|spec| spec.id)
+                                .unwrap_or("wb-cn")
+                        ),
+                    });
+                }
+            }
+        }
     };
-    if split.bare.trim().is_empty() {
+    if bare.trim().is_empty() {
         return Err(HttpError {
             status: StatusCode::BAD_REQUEST,
             kind: "invalid_request_error",
@@ -414,7 +434,7 @@ fn guard_namespace<'a>(
             ),
         });
     }
-    Ok((spec, split.bare))
+    Ok((spec, bare))
 }
 
 /// `POST /biz/*path`：**业务转发**（客户端把 base URL 指向本机时，本该发给上游的业务请求）。
@@ -880,6 +900,102 @@ fn error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn record_authorized(namespaces: &[&str]) -> crate::unified::apikey::UnifiedApiKeyRecord {
+        crate::unified::apikey::UnifiedApiKeyRecord {
+            id: "k1".into(),
+            name: "test".into(),
+            prefix: "sk-uni-test".into(),
+            suffix: "0000".into(),
+            hash: "0".repeat(64),
+            namespaces: namespaces.iter().map(|v| v.to_string()).collect(),
+            biz_namespace: None,
+            created_at: 0,
+            revoked_at: None,
+            last_used_at: None,
+            quota_mode: crate::apikey::QuotaMode::Unlimited,
+            quota_limit: 0,
+            quota_unit: crate::apikey::QuotaUnit::Request,
+            quota_period: crate::apikey::QuotaPeriod::None,
+            scope_mode: crate::apikey::ScopeMode::All,
+            scope_accounts: Vec::new(),
+            scope_groups: Vec::new(),
+        }
+    }
+
+    /// `guard_namespace` 的错误没有 `Debug`（它是 HTTP 错误体）⇒ 断言用这个取出来。
+    fn expect_guard<'a>(
+        config: &UnifiedGatewayConfig,
+        record: &crate::unified::apikey::UnifiedApiKeyRecord,
+        requested: &'a str,
+    ) -> Result<(&'static gateway_namespace::NamespaceSpec, &'a str), HttpError> {
+        guard_namespace(config, record, requested)
+    }
+
+    /// ★★ 安全审计 P2-9：`default_namespace` 必须是**能生效**的开关。
+    ///
+    /// 改造前它只被持久化、被 `validate()` 校验、被 `/unified/config` 回显，
+    /// **请求路径从不读它** —— 设了之后裸模型名仍然是 400 `namespace_prefix_required`。
+    #[test]
+    fn default_namespace_lets_a_bare_model_name_through() {
+        let record = record_authorized(&["wb-cn"]);
+        let config = UnifiedGatewayConfig {
+            namespaces: vec!["wb-cn".into()],
+            default_namespace: Some("wb-cn".into()),
+            ..Default::default()
+        };
+        let (spec, bare) = expect_guard(&config, &record, "glm-5.3")
+            .unwrap_or_else(|error| panic!("裸名应当被接受：{}", error.message));
+        assert_eq!(spec.id, "wb-cn");
+        assert_eq!(bare, "glm-5.3", "裸名要原样作为模型名往下传");
+
+        // 带前缀时前缀优先，默认值不参与。
+        let (spec, bare) = expect_guard(&config, &record, "wb-cn:glm-5.3")
+            .unwrap_or_else(|error| panic!("带前缀也通：{}", error.message));
+        assert_eq!(spec.id, "wb-cn");
+        assert_eq!(bare, "glm-5.3");
+    }
+
+    /// 没配默认命名空间 ⇒ 维持原来的**明确拒绝**（`None` = 不猜）。
+    #[test]
+    fn bare_model_name_is_still_rejected_without_a_default_namespace() {
+        let record = record_authorized(&["wb-cn"]);
+        let config = UnifiedGatewayConfig {
+            namespaces: vec!["wb-cn".into()],
+            default_namespace: None,
+            ..Default::default()
+        };
+        let error = expect_guard(&config, &record, "glm-5.3").expect_err("必须拒绝");
+        assert_eq!(error.code, "namespace_prefix_required");
+        assert!(
+            error.message.contains("默认命名空间"),
+            "文案要告诉用户「怎么才能让裸名可用」: {}",
+            error.message
+        );
+    }
+
+    /// 默认命名空间指向一个**未启用**的命名空间 ⇒ 仍按「未启用」拒绝，不静默改路由。
+    #[test]
+    fn default_namespace_must_also_be_enabled() {
+        let record = record_authorized(&["wb-cn", "trae-global"]);
+        let config = UnifiedGatewayConfig {
+            namespaces: vec!["wb-cn".into()],
+            default_namespace: Some("trae-global".into()),
+            ..Default::default()
+        };
+        let error = expect_guard(&config, &record, "glm-5.3").expect_err("必须拒绝");
+        assert_eq!(error.code, "namespace_not_enabled");
+
+        // 该 Key 没被授权同一命名空间时同样是 403（授权判定不能被默认值绕过）。
+        let narrow = record_authorized(&["wb-cn"]);
+        let config = UnifiedGatewayConfig {
+            namespaces: vec!["wb-cn".into()],
+            default_namespace: Some("trae-global".into()),
+            ..Default::default()
+        };
+        let error = expect_guard(&config, &narrow, "glm-5.3").expect_err("必须拒绝");
+        assert_eq!(error.code, "namespace_not_enabled", "先判启用，再判授权");
+    }
     use crate::unified::UnifiedApiKeyStore;
 
     fn entry(namespace: &'static str, source: &'static str, models: &[&str]) -> NamespaceModels {
