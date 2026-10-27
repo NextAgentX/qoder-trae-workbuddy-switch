@@ -711,6 +711,16 @@ fn draw_weighted<'a>(items: &[&'a Candidate], rng: &mut Pcg32) -> Option<&'a Can
 /// 约束：非 `tried`、realm 匹配、非禁用、**未被排除**、**排除仍在有效硬冷却中的账号**
 /// （硬冷却意味着余额不足，强试必然再失败且浪费一次上游调用）。
 /// 不推进 `used_seq`（它只是「试一下」，不应影响 LRU 语义）。
+///
+/// 「解冻时刻」取**账号级与模型级的较大者**（[`effective_cool_expiry_ms`]）：
+/// 只被模型级冷落的账号同样值得一次半开试探，否则「只有这个模型被限流」会让
+/// 整个池直接放弃（issue #106 §2.3）。
+fn effective_cool_expiry_ms<E: PoolEntryLike>(entry: &E, model: &str) -> i64 {
+    entry
+        .cool_expiry_ms()
+        .max(entry.model_cool_expiry_ms(model))
+}
+
 fn pick_earliest_expiry<E: PoolEntryLike>(
     entries: &mut BTreeMap<String, E>,
     policy: &PickPolicy,
@@ -739,9 +749,20 @@ fn pick_earliest_expiry<E: PoolEntryLike>(
             if entry.is_hard_cooled(now_ms) {
                 return false;
             }
-            entry.cool_expiry_ms() > 0
+            // ★ issue #106 §2.3：判据必须包含**该模型**的冷却。
+            //
+            // 改造前只看 `cool_expiry_ms()`（账号级冷却 + 熔断），完全不含
+            // `model_cooldowns` ⇒ 「池里唯一的问题就是这个模型被限流」时兜底一个号
+            // 都给不出来，调用方落到 `last == None` ⇒ 对外 401「凭据无效」。
+            // 这是与闸门短路并列的第二条 19ms 空账号 401 路径。
+            effective_cool_expiry_ms(*entry, input.model) > 0
         })
-        .min_by_key(|entry| (entry.cool_expiry_ms(), entry.uid().to_string()))
+        .min_by_key(|entry| {
+            (
+                effective_cool_expiry_ms(*entry, input.model),
+                entry.uid().to_string(),
+            )
+        })
         .map(|entry| entry.uid().to_string())?;
 
     if let Some(entry) = entries.get_mut(&candidate) {
@@ -1519,8 +1540,18 @@ mod tests {
         );
     }
 
+    /// ★ issue #106 §2.3：模型级冷却必须让账号**不可路由**，但**不得**让整个池
+    /// 直接放弃 —— 兜底要能对它做一次半开试探。
+    ///
+    /// 改造前 `pick_earliest_expiry` 的判据是 `cool_expiry_ms() > 0`，只看账号级冷却，
+    /// 于是「池里唯一的问题就是这个模型被限流」时一个号都给不出来 ⇒ 调用方落到
+    /// `last == None` ⇒ 对外 **401 `no_credential`**（19ms、无上游往返、账号列为空）。
+    /// 这正是报障里「9 个号、五项计数全 0，却说 0 个可用」的来源。
+    ///
+    /// 反向对照（同批钉住）：硬冷却（余额不足）**仍然**不得被兜底强试 ——
+    /// 见 `hard_cooled_accounts_are_excluded_from_expiry_fallback`。
     #[test]
-    fn model_cooldown_excludes_only_that_model() {
+    fn model_cooldown_falls_back_to_a_probe_instead_of_giving_up() {
         let mut entry = base_entry("a");
         entry.cooldown_model(NOW, "glm-5.2", 0, 60_000, "6004");
         let mut pool = pool_of(vec![entry]);
@@ -1536,9 +1567,12 @@ mod tests {
                 &HashSet::new(),
                 1
             ),
-            None,
-            "触发限流的模型应被跳过"
+            Some("a".to_string()),
+            "只剩模型级冷却时必须给出一个半开试探号，而不是整池放弃（那会变成 401）"
         );
+        // 但它在**择优**阶段仍被视为不可用：冷却未到期时不会因为「健康」被选中。
+        // （上面那次是兜底 `pick_earliest_expiry`，走的是 `mark_probed`，不推进 `used_seq`。）
+        assert_eq!(pool["a"].used_seq, 0, "兜底强试不得推进 LRU 序号");
         assert_eq!(
             pick(
                 &mut pool,

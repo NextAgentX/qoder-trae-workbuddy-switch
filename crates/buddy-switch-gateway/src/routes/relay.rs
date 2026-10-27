@@ -327,21 +327,45 @@ pub async fn relay(
         // 与下面的「本轮第 2 个账号失败即停」是两个层次：那条只能挽回**当前**这一轮，
         // 这条让**后续请求**也直接快速失败 —— 否则每个新请求都要重新撞一遍同样的墙。
         if let Some(block) = state.pool.write().await.admit_model(&request.model, now_ms) {
+            // ★★ issue #106：闸门短路必须**自带错误**，不能落到下面 `last == None` 的兜底。
+            //
+            // 改造前这里只 push 一条 attempt 就 `break`，于是 `last` 仍是 `None` ⇒ 走
+            // `pool_unavailable_error`，而 `PoolBusy` 的判据（可用号全在途满）在这种场景
+            // 不成立 ⇒ 一律 **401 `no_credential`**。客户端把 401 归为 `AUTH`、不可重试、
+            // 渲染成「API 密钥无效」⇒ 整轮会话终止。实测证据：那次耗时 19ms、账号列为空。
+            //
+            // 语义上这是「上游此刻对该模型整体限流」= 可重试的临时不可用 ⇒ 503 + Retry-After。
+            let remain_secs = (block.remain_ms.max(0) as u64).div_ceil(1000);
+            let reason = if block.remain_ms > 0 {
+                format!(
+                    "{} 整体暂停（窗口内已失败 {} 次，剩 {}s）",
+                    block.model, block.failures, remain_secs
+                )
+            } else {
+                format!("{} 半开试探名额已被其它请求占用", block.model)
+            };
             attempts.push(UpstreamAttempt {
                 account: String::new(),
                 uid: String::new(),
                 status: 0,
-                reason: if block.remain_ms > 0 {
-                    format!(
-                        "{} 整体暂停（剩 {}s，已在 {} 个账号上被限流）",
-                        block.model,
-                        block.remain_ms / 1000,
-                        block.accounts
-                    )
-                } else {
-                    format!("{} 半开试探名额已被其它请求占用", block.model)
-                },
+                reason,
             });
+            // 本轮**一次都没打到上游**时才用它：否则用户更需要看的是「第 1 轮为什么失败」
+            // （那条错误自身已经带着完整的 `attempts`）。
+            if last.is_none() {
+                last = Some(RelayFailure {
+                    error: GatewayError::ModelGatePaused {
+                        model: block.model,
+                        remain_secs,
+                        failures: block.failures,
+                        attempts: attempts.clone(),
+                    },
+                    account: String::new(),
+                    uid: String::new(),
+                    upstream_message: String::new(),
+                    sanitized: request.sanitized,
+                });
+            }
             break;
         }
         // 粘性只是**偏好**：查不到就按原逻辑选号（读锁，不占选号要用的写锁）。
@@ -1018,6 +1042,7 @@ fn no_credential_cause_of(summary: &PoolSummary) -> NoCredentialCause {
             zero_credits: summary.zero_credits,
             excluded: summary.excluded,
             in_flight_full: summary.in_flight_full,
+            model_cooling: summary.model_cooling,
         }
     }
 }
@@ -1077,6 +1102,7 @@ fn scope_empty_cause(pool_total: usize, scoped: &PoolSummary) -> NoCredentialCau
         zero_credits: scoped.zero_credits,
         excluded: scoped.excluded,
         in_flight_full: scoped.in_flight_full,
+        model_cooling: scoped.model_cooling,
     }
 }
 
@@ -1398,6 +1424,7 @@ mod tests {
                 excluded: 0,
                 zero_credits: 0,
                 in_flight_full: 0,
+                model_cooling: 0,
             },
             "有号但全不可用 ⇒ 必须带上分类计数，不能退化成「未登录」"
         );
@@ -1501,6 +1528,7 @@ mod tests {
                     zero_credits: 0,
                     excluded: 0,
                     in_flight_full: 0,
+                    model_cooling: 0,
                 },
                 "白名单生效时必须报名单口径，不能把全池 12 个号摆给用户"
             ),

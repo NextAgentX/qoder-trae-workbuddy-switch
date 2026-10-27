@@ -21,6 +21,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+// ★ issue #108 §P0-B：会话失效标记**从 core 复用，不在这里另写一份** ——
+// Trae 侧此前各自没有这份表，于是「真正的会话作废」与「access token 过期」
+// 只能共用同一个判据（裸 401）。两侧同源是「改一处、两边生效」的前提。
+use buddy_switch_core::modules::upstream::SESSION_DEAD_MARKERS;
 use chrono::{NaiveDate, TimeZone};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -527,9 +531,6 @@ const MODEL_RATE_MARKERS: &[&str] = &["IsModelRateLimit", "6004"];
 
 /// 模型封禁标记（`11102`）。
 const MODEL_BLOCK_MARKER: &str = "11102";
-
-/// 会话失效标记。
-const SESSION_DEAD_MARKERS: &[&str] = &["Offline user session not found", "12153"];
 
 /// 从响应体里尝试解析上游声明的重置时刻。
 ///
@@ -1041,7 +1042,7 @@ impl Pool {
             Some(GateBlock {
                 model: model.to_string(),
                 remain_ms: 0,
-                accounts: 0,
+                failures: 0,
             })
         }
     }
@@ -2515,7 +2516,7 @@ mod tests {
 
         let block = pool.admit_model("m", NOW).expect("暂停中必须被拒");
         assert!(block.remain_ms > 0, "拒绝信息必须带剩余时长");
-        assert_eq!(block.accounts, 2);
+        assert_eq!(block.failures, 2);
 
         // 另一个模型不受影响（闸门按模型分家）
         assert!(pool.admit_model("other", NOW).is_none());

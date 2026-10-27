@@ -888,6 +888,17 @@ impl crate::pool::entry_like::PoolEntryLike for PoolEntry {
         self.cool_kind == Some(CoolKind::Hard) && now_ms < self.until_ms
     }
 
+    /// 该模型维度的冷却解冻时刻（issue #106 §2.3）。
+    ///
+    /// `model_cooldowns` 的键是模型名、值是 `ModelCooldown`（含 `until_ms`）；
+    /// 不存在该模型 ⇒ `0`（「没有冷却」，与「冷却到 0」同义）。
+    fn model_cool_expiry_ms(&self, model: &str) -> i64 {
+        self.model_cooldowns
+            .get(model)
+            .map(|cooldown| cooldown.until_ms)
+            .unwrap_or(0)
+    }
+
     fn healthy_for_request(&self, now_ms: i64, model: &str) -> bool {
         PoolEntry::healthy_for_request(self, now_ms, model)
     }

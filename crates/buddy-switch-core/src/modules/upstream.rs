@@ -81,7 +81,15 @@ const HARD_CREDIT_MARKERS: &[&str] = &[
 ];
 
 /// 会话失效标记。
-const SESSION_DEAD_MARKERS: &[&str] = &["Offline user session not found", "12153"];
+/// 会话被上游**作废**的标记（出现在响应体里）。
+///
+/// ★ 跨产品线**唯一来源**：WorkBuddy（`gateway::pool::classify_event`）与 Trae
+/// （`gateway::trae::pool::classify_http_with_body` / `classify_solo`）都必须读这一份。
+///
+/// issue #108 的教训：Trae 侧此前**完全不识别** `12153`，于是「真正的会话作废」
+/// 与「access token 过期」共用同一个判据（裸 401）⇒ 只能二选一，怎么选都错。
+/// 必须先能识别作废，才有资格把裸 401 降级为可自愈的浅冷却。
+pub const SESSION_DEAD_MARKERS: &[&str] = &["Offline user session not found", "12153"];
 
 /// 上游失败分类（严格按参考实现的判定顺序）。
 pub fn classify_upstream_error(status: u16, body: &str) -> UpstreamErrorKind {

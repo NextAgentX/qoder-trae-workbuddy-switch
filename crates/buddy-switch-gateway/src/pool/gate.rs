@@ -56,8 +56,13 @@ pub enum GatePhase {
 pub struct ModelGate {
     /// 模型名。
     pub model: String,
-    /// 触发时涉及多少个账号（诊断用）。
-    pub accounts: usize,
+    /// **窗口内累计失败次数**（诊断用）。
+    ///
+    /// ★ 这不是账号数（issue #106 §2.2）。原字段名叫 `accounts`，而 `record_failure`
+    /// 每被调用一次就 push 一个时间戳 —— 同一个账号在同一模型上连撞两次 6004 也会
+    /// 得到 `2`。于是文案渲染成「已在 2 个账号上被限流」，单号池时是假话，
+    /// 用户数了数自己的号，对不上这句话。
+    pub failures: usize,
     /// 暂停截止时刻（毫秒）。
     pub until_ms: i64,
     /// 阶段。
@@ -78,8 +83,8 @@ pub struct GateBlock {
     pub model: String,
     /// 剩余毫秒（`0` = 已到期但探针名额已被别的请求占掉）。
     pub remain_ms: i64,
-    /// 触发时涉及的账号数。
-    pub accounts: usize,
+    /// 触发时**窗口内的失败次数**（不是账号数，见 [`ModelGate::failures`]）。
+    pub failures: usize,
 }
 
 /// 全部模型的闸门（进程内，不落盘）。
@@ -113,12 +118,12 @@ impl ModelGates {
                 // 半开试探失败 ⇒ 重新暂停且退避翻倍（这正是半开要判的东西）。
                 let trips = gate.trips.saturating_add(1);
                 let until = now_ms.saturating_add(backoff_ms(config, trips));
-                let accounts = gate.accounts.max(entry.len());
+                let failures = gate.failures.max(entry.len());
                 self.gates.insert(
                     model.to_string(),
                     ModelGate {
                         model: model.to_string(),
-                        accounts,
+                        failures,
                         until_ms: until,
                         phase: GatePhase::Paused,
                         trips,
@@ -139,7 +144,7 @@ impl ModelGates {
             model.to_string(),
             ModelGate {
                 model: model.to_string(),
-                accounts: entry.len(),
+                failures: entry.len(),
                 until_ms: until,
                 phase: GatePhase::Paused,
                 trips,
@@ -164,7 +169,7 @@ impl ModelGates {
             GatePhase::Paused => Some(GateBlock {
                 model: gate.model.clone(),
                 remain_ms: gate.until_ms.saturating_sub(now_ms),
-                accounts: gate.accounts,
+                failures: gate.failures,
             }),
             GatePhase::HalfOpen => {
                 // ★★ 探针**租约到期**仍未回填结果 ⇒ 按失败处理，重新暂停并退避翻倍。
@@ -177,13 +182,13 @@ impl ModelGates {
                 if gate.probed && gate.probe_until_ms > 0 && now_ms >= gate.probe_until_ms {
                     let trips = gate.trips.saturating_add(1);
                     let until = now_ms.saturating_add(backoff_ms(config, trips));
-                    let accounts = gate.accounts;
+                    let failures = gate.failures;
                     let model = gate.model.clone();
                     self.gates.insert(
                         model.clone(),
                         ModelGate {
                             model: model.clone(),
-                            accounts,
+                            failures,
                             until_ms: until,
                             phase: GatePhase::Paused,
                             trips,
@@ -194,7 +199,7 @@ impl ModelGates {
                     return Some(GateBlock {
                         model,
                         remain_ms: until.saturating_sub(now_ms),
-                        accounts,
+                        failures,
                     });
                 }
                 None
@@ -303,7 +308,7 @@ mod tests {
             "第 2 个账号失败必须开闸"
         );
         let blocked = gates.blocked("m", NOW, &cfg).expect("必须被挡住");
-        assert_eq!(blocked.accounts, 2);
+        assert_eq!(blocked.failures, 2);
         assert!(blocked.remain_ms > 0);
     }
 
