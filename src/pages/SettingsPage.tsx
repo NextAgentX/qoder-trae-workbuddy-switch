@@ -29,6 +29,7 @@ import { SettingsFieldRow, SettingsGroup, SettingsRow } from "@/components/setti
 // P7 T03：设置页子导航（9 项）+「备份与恢复」分区 + 通用设置分组（与侧栏弹层共用）。
 import { parseSettingsSubnav, SettingsSubnav, type SettingsSubnavId } from "@/components/settings/settings-subnav";
 import { BackupSection } from "@/components/settings/backup-section";
+import { CodebuddyCliCard } from "@/components/settings/codebuddy-cli-card";
 import { CacheSection } from "@/components/settings/cache-section";
 import { RuntimeLogCard } from "@/components/settings/runtime-log-card";
 import { AppSettingsGroups } from "@/components/app-settings";
@@ -1712,6 +1713,10 @@ export default function SettingsPage() {
           )}
 
           {section === "gateway" && <GatewaySettingsCard />}
+
+          {/* CodeBuddy CLI 的**接入方式**（issue #109）：状态条 + 两张模式卡 + 切换向导。
+              它是全局一次性配置（CLI 的凭据只有一份），与账号卡上的「切到 CLI」是两个层次。 */}
+          {section === "cli" && <CodebuddyCliCard />}
 
           {section === "schedule" && <ScheduleCard />}
 

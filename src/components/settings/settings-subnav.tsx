@@ -1,16 +1,18 @@
 /**
- * 设置页 **9 项子导航**（P7 §3.9）—— 数据驱动。
+ * 设置页 **10 项子导航**（P7 §3.9 + issue #109）—— 数据驱动。
  *
  * ## 为什么数据驱动
  *
- * 9 项的名字 / 图标 / 顺序只在这里声明一次，页面按 `active` 渲染对应分区。
+ * 各项的名字 / 图标 / 顺序只在这里声明一次，页面按 `active` 渲染对应分区。
  * 加一项 = 加一行（§4.2 同一思路），不需要在页面里再写一遍 `if`。
  *
  * ## 9 项从哪来（§3.9）
  *
- * 设置的真实内容是 **WB 7 组 + Trae 10 组**，6 项装不下，逐项核对后收敛为 9 项：
- * `通用 / 账号与登录 / 签到与积分 / 网关 / 计划任务 / 客户端 / 权限与诊断 / 日志 / 备份与恢复`。
- * 其中「备份与恢复」（第 9 项）是 P7 新增。
+ * 设置的真实内容是 **WB 7 组 + Trae 10 组**，6 项装不下，逐项核对后收敛为 9 项；
+ * issue #109 又加了第 10 项「CodeBuddy CLI」：
+ * `通用 / 账号与登录 / 签到与积分 / 网关 / 计划任务 / 客户端 / CodeBuddy CLI /
+ *  权限与诊断 / 日志 / 备份与恢复`。
+ * 其中「备份与恢复」是 P7 新增（**必须保持最后一项**），「CodeBuddy CLI」是 WorkBuddy 侧独有。
  *
  * ## 为什么不做成「可折叠 + 记住位置」
  *
@@ -39,6 +41,7 @@ export type SettingsSubnavId =
   | "gateway"
   | "schedule"
   | "client"
+  | "cli"
   | "diagnostics"
   | "logs"
   | "backup";
@@ -53,6 +56,11 @@ export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
   { id: "gateway", labelKey: "settings.subnav.gateway" },
   { id: "schedule", labelKey: "settings.subnav.schedule" },
   { id: "client", labelKey: "settings.subnav.client" },
+  /* issue #109：CodeBuddy CLI 的**接入方式**（二选一）。放这里而不是账号卡：
+     它是全局一次性配置（CLI 的凭据只有一份 `~/.codebuddy/settings.json`），
+     而账号卡上的 `cliControl` 是「按账号切默认账号」，另一层次。
+     ⚠️ 只有 WorkBuddy 侧有这一项 —— Trae / Qoder 设置页用 `items` 收窄排除它。 */
+  { id: "cli", labelKey: "settings.subnav.cli" },
   { id: "diagnostics", labelKey: "settings.subnav.diagnostics" },
   { id: "logs", labelKey: "settings.subnav.logs" },
   { id: "backup", labelKey: "settings.subnav.backup" },

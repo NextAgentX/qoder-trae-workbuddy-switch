@@ -4661,14 +4661,19 @@ const APP_SETTINGS_SNAPSHOT = "src/lib/app-settings-snapshot.ts";
 const BACKUP_LOCALE_ZH = "src/locales/domains/backup.zh.ts";
 const BACKUP_LOCALE_EN = "src/locales/domains/backup.en.ts";
 
-check("★ P7 设置 9 项子导航：9 项齐备，第 9 项是「备份与恢复」", () => {
+check("★ P7 设置 10 项子导航：10 项齐备，最后一项是「备份与恢复」，且含 CodeBuddy CLI", () => {
   const code = readCode(BACKUP_SUBNAV);
   const m = code.match(/SETTINGS_SUBNAV[\s\S]*?=\s*\[([\s\S]*?)\];/);
   if (!m) throw new Error("找不到 `SETTINGS_SUBNAV` 表");
   const ids = [...m[1].matchAll(/id:\s*"([a-z]+)"/g)].map((x) => x[1]);
-  if (ids.length !== 9) throw new Error(`子导航应 9 项，实际 ${ids.length}：${ids.join(",")}`);
+  /* ★ 项数**故意写死**：子导航是设置页唯一导航，多一项少一项都要有意识。
+     issue #109 加「CodeBuddy CLI」（`cli`）时就是靠这条提醒改这里的。
+     ⚠️ `cli` 是 WorkBuddy 侧独有 —— Trae / Qoder 设置页用 `items` 收窄排除它，
+     所以「表里有 10 项」不等于「每个平台都显示 10 项」。 */
+  if (ids.length !== 10) throw new Error(`子导航应 10 项，实际 ${ids.length}：${ids.join(",")}`);
+  if (!ids.includes("cli")) throw new Error("缺 cli（CodeBuddy CLI 接入方式，issue #109）");
   if (ids[ids.length - 1] !== "backup") {
-    throw new Error(`第 9 项应为 backup（备份与恢复），实际 ${ids[ids.length - 1]}`);
+    throw new Error(`最后一项应为 backup（备份与恢复），实际 ${ids[ids.length - 1]}`);
   }
   if (!/settings\.subnav\.backup/.test(code)) throw new Error("缺「备份与恢复」标签键");
   return ids.join(" / ");

@@ -1363,6 +1363,13 @@ export interface CodeBuddyCliStatus {
   activeAccountName: string | null;
   accountCount: number;
   statePath: string;
+  /**
+   * CLI 是否已被指向**本机网关**（issue #109）。
+   *
+   * 非 `null` = 已走网关（值就是命中的 URL）⇒「接入 CLI / 切号」会被后端拒绝、
+   * 自动轮换会跳过。界面据此把控件置灰并说明原因，而不是让用户点了才看到报错。
+   */
+  gatewayMode?: string | null;
 }
 
 export interface CodeBuddyCliSwitchResult {

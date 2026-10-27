@@ -27,7 +27,12 @@ import { AppSettingsGroups } from "@/components/app-settings";
 import { BackupSection } from "@/components/settings/backup-section";
 import { RuntimeLogCard } from "@/components/settings/runtime-log-card";
 // 设置子导航**与 WorkBuddy 设置页共用同一张表 / 同一个解析函数**（PLAN §3.9、D12）。
-import { parseSettingsSubnav, SettingsSubnav, type SettingsSubnavId } from "@/components/settings/settings-subnav";
+import {
+  parseSettingsSubnav,
+  SETTINGS_SUBNAV,
+  SettingsSubnav,
+  type SettingsSubnavId,
+} from "@/components/settings/settings-subnav";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1280,7 +1285,14 @@ export default function TraeSettingsPage() {
           `[data-split-layout]`（含 900px 转纵向），故这里不再写 `flex-col` / `lg:flex-row`。
           此前这里是**一屏长滚动**（`space-y-12`、无子导航），与 WorkBuddy 设置页结构不同。 */}
       <div data-split-layout className="min-w-0">
-        <SettingsSubnav active={section} onSelect={goSection} />
+        {/* ★ 收窄：`cli`（CodeBuddy CLI 接入方式）是 WorkBuddy 侧独有的配置，
+            Trae 侧没有 CodeBuddy CLI ⇒ 不显示那一项。与 Qoder 页同一做法（白名单收窄，
+            不复制表 —— 复制即漂移的种子）。 */}
+        <SettingsSubnav
+          items={SETTINGS_SUBNAV.filter((item) => item.id !== "cli")}
+          active={section}
+          onSelect={goSection}
+        />
 
         {/* 主区 `.split-main`：分区之间 16px（原型 `:378`）。 */}
         <div className="min-w-0 flex-1 space-y-4">
