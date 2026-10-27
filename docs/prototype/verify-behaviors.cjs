@@ -27,6 +27,14 @@ const results = [];
 /* ─────────── 变异注入 ─────────── */
 const MUT = (process.argv.find((a) => a.startsWith("--mutate")) || "").replace("--mutate", "").replace(/^=/, "");
 const MUTATIONS = {
+  /* issue #109：切到网关时**跳过确认**、直接改状态 —— 确认框成了装饰。
+     期望「切到网关**先弹确认**」那条红（它同时断言「确认前状态不能变」）。 */
+  cliConfirm: {
+    desc: "切到网关不弹确认，直接改状态",
+    file: "demo-app.js",
+    from: 'if (a1 === "gateway") { drawerCliConfirm("gateway"); break; }',
+    to: 'if (a1 === "gateway") { state.cli.mode = "gateway"; renderContent(); break; } /* MUTATED: 跳过确认 */',
+  },
   merge: {
     desc: "把 merge 退回假开关（只改标签、不换数据源）",
     file: "demo-app.js",
@@ -1098,10 +1106,15 @@ async function boot(query) {
   const bByAct = (act) => [...dB.querySelectorAll("[data-act]")].find((el) => el.dataset.act === act);
   const flat = (s) => String(s || "").replace(/\s+/g, " ").trim();
 
-  check("备份页：设置子导航含「备份与恢复」，共 9 项", () => {
+  check("备份页：设置子导航含「备份与恢复」，共 10 项", () => {
+    /* 10 = 通用 / 账号与登录 / 签到与积分 / 网关 / 计划任务 / 客户端 / CodeBuddy CLI /
+       权限与诊断 / 日志 / 备份与恢复。
+       ★ 这一条**故意写死数字**：子导航是设置页的唯一导航，多一项少一项都要有意识
+         （issue #109 加「CodeBuddy CLI」时就是靠它提醒改这一行的）。 */
     const items = [...dB.querySelectorAll(".subnav button")].map((b) => b.textContent.trim());
-    if (items.length !== 9) throw new Error(`子导航 ${items.length} 项，期望 9 项`);
+    if (items.length !== 10) throw new Error(`子导航 ${items.length} 项，期望 10 项`);
     if (!items.includes("备份与恢复")) throw new Error("没有「备份与恢复」：" + items.join("/"));
+    if (!items.includes("CodeBuddy CLI")) throw new Error("没有「CodeBuddy CLI」：" + items.join("/"));
     return items.join(" / ");
   });
 
@@ -2350,6 +2363,84 @@ async function boot(query) {
     dsAcct.querySelector('[data-act="drawer-tab|a1|credits"]').click();
     if (!dsAcct.querySelector(".pk")) throw new Error("单文件原型的积分页没有资源包明细（两份漂移了）");
     return "指标 / Tab / 积分明细 / 分组 都在";
+  });
+
+  /* ══════════════════════ CodeBuddy CLI 接入方式（issue #109）══════════════════════
+   *
+   * 这块 UI 的本质是**一个二选一开关**（两条路都写同一份 settings.json），
+   * 所以断言集中在三件事上，而不是「长得对不对」：
+   *   ① 同一时刻只有一档选中；
+   *   ② 切换**先确认**，且确认框把「会清掉上游 token / 关掉轮换」说清；
+   *   ③ 冲突态把「直连上游」**真的禁用**（属性，不是样式）。
+   */
+  const domCli = await boot("dest=settings&set=cli&hint=0");
+  const dc = domCli.window.document;
+  const cByAct = (act) => [...dc.querySelectorAll("[data-act]")].find((el) => el.dataset.act === act);
+  const cClick = (el) => el.dispatchEvent(new domCli.window.MouseEvent("click", { bubbles: true }));
+
+  check("CodeBuddy CLI 子页：默认「直连上游」，且自动轮换为开启", () => {
+    const badge = [...dc.querySelectorAll(".card-head .badge")].map((b) => b.textContent.trim());
+    if (!badge.includes("直连上游")) throw new Error("卡片头没有「直连上游」徽章：" + badge.join("/"));
+    const text = dc.querySelector(".split-main").textContent;
+    if (!text.includes("自动轮换")) throw new Error("缺「自动轮换」行");
+    if (!text.includes("开启")) throw new Error("直连模式下轮换应显示「开启」");
+    if (text.includes("http://127.0.0.1:57891")) throw new Error("直连模式下不该显示网关地址");
+    return badge.join("/");
+  });
+
+  check("CodeBuddy CLI 子页：切到网关**先弹确认**，且逐条列出代价", () => {
+    cClick(cByAct("cli-mode|gateway"));
+    const drawer = dc.querySelector("#drawer-body");
+    if (!drawer || !drawer.textContent.trim()) throw new Error("没有弹出确认抽屉");
+    const text = drawer.textContent;
+    for (const must of ["清掉", "关闭自动轮换", "重启终端"]) {
+      if (!text.includes(must)) throw new Error(`确认框缺「${must}」：${text.slice(0, 120)}`);
+    }
+    /* 关键：没点确认之前**状态不能变**（否则确认就是装饰）。 */
+    const badge = [...dc.querySelectorAll(".card-head .badge")].map((b) => b.textContent.trim());
+    if (!badge.includes("直连上游")) throw new Error("确认前状态就变了 —— 确认框成了装饰");
+    return "确认前状态不变 · 三项代价齐";
+  });
+
+  check("CodeBuddy CLI 子页：确认后切到网关，展示地址/Key/轮换已关闭", () => {
+    cClick(cByAct("cli-confirm|gateway"));
+    const main = dc.querySelector(".split-main").textContent;
+    for (const must of ["http://127.0.0.1:57891", "sk-wb-", "已关闭", "需要重启终端"]) {
+      if (!main.includes(must)) throw new Error(`网关态缺「${must}」`);
+    }
+    const badge = [...dc.querySelectorAll(".card-head .badge")].map((b) => b.textContent.trim());
+    if (!badge.includes("走本机网关")) throw new Error("徽章没切到「走本机网关」：" + badge.join("/"));
+    return "地址 / Key 掩码 / 轮换已关闭 / 重启提示";
+  });
+
+  check("CodeBuddy CLI 子页：Key 只出现掩码，不出现完整 Key", () => {
+    const main = dc.querySelector(".split-main").textContent;
+    if (!main.includes("••••")) throw new Error("Key 必须是掩码形态");
+    if (/sk-wb-[a-z0-9]{20,}/i.test(main)) throw new Error("出现了疑似完整 Key");
+    return "掩码 · 无完整 Key";
+  });
+
+  check("CodeBuddy CLI 子页：冲突态把「直连上游」**真的禁用**（属性不是样式）", () => {
+    /* 先切回直连，再打开演示开关（模拟 settings 已被外部改成网关地址）。 */
+    cClick(cByAct("cli-mode|direct"));
+    cClick(cByAct("cli-confirm|direct"));
+    cClick(cByAct("cli-demo-foreign"));
+    const direct = cByAct("cli-mode|direct");
+    if (!direct) throw new Error("找不到「直连上游」按钮");
+    if (!direct.disabled) throw new Error("冲突态下「直连上游」必须是 disabled 属性（只改样式等于没禁）");
+    const text = dc.querySelector(".split-main").textContent;
+    if (!text.includes("这不是错误，是护栏")) throw new Error("冲突提示缺「这不是错误，是护栏」");
+    if (!text.includes("时好时坏")) throw new Error("冲突提示缺「时好时坏」——那是这个故障最难查的地方");
+    return "disabled 属性 · 护栏文案";
+  });
+
+  check("CodeBuddy CLI 子页：模型下拉可改，且含「留空」选项", () => {
+    const select = dc.querySelector('select[data-act="cli-model"]');
+    if (!select) throw new Error("没有模型下拉");
+    const options = [...select.options].map((o) => o.textContent);
+    if (!options.some((o) => o.includes("留空"))) throw new Error("缺「留空」选项：" + options.join("/"));
+    if (select.options.length < 2) throw new Error("模型下拉至少要有留空 + 一个具体模型");
+    return options.join(" / ");
   });
 
   const pass = results.filter((r) => r.ok).length;

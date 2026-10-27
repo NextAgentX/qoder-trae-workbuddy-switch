@@ -63,6 +63,11 @@ const state = {
   maxContext: true,
   gwTool: "codex",      // 接入说明里选中的客户端（§3.18.3）
   setSub: "general",
+  /* ★ CodeBuddy CLI 的**接入方式**（issue #109）—— 全局一次性配置，与「按账号切 CLI 默认账号」
+     是两个层次。两条路互斥（都写 `~/.codebuddy/settings.json`），所以用单一 mode 表达。
+       `foreignGateway` 是**仅原型**的演示开关：模拟「settings 已被外部改成网关地址」，
+       用来看冲突态（护栏把「直连上游」按钮禁掉）长什么样。 */
+  cli: { mode: "direct", model: "", rotate: true, foreignGateway: false },
   /* 会话工作台（v2.3）：客户端 Tab + 状态筛选 + 排序 */
   sessionClient: "workbuddy",
   sessionFilter: "all",
@@ -3900,7 +3905,9 @@ function viewSettings() {
     <div class="split">
       <nav class="subnav">${SETTINGS.map((s) => `<button class="${state.setSub === s.id ? "on" : ""}" data-act="set-sub|${s.id}">${s.label}</button>`).join("")}</nav>
       <div class="split-main">
-        ${group.kind === "backup" ? viewBackup() : group.groups.map((g) => {
+        ${group.kind === "backup" ? viewBackup()
+          : group.kind === "cli" ? viewCliIntegration()
+          : group.groups.map((g) => {
           const rows = g.rows.filter((r) => !r.cap || p.capabilities.includes(r.cap));
           if (!rows.length) return "";
           return `<section class="card">
@@ -3912,6 +3919,160 @@ function viewSettings() {
       </div>
     </div>
   </div>`;
+}
+
+/* ══════════════════════ CodeBuddy CLI 接入方式（issue #109）══════════════════════
+ *
+ * ## 为什么它是「二选一」，而不是再加一个功能开关
+ *
+ * CLI 的凭据只有**一份**（`~/.codebuddy/settings.json`），两条路都要写它：
+ *   · 直连上游：本工具写**上游 token**（`CODEBUDDY_AUTH_TOKEN` / `apiKeyHelper`），
+ *     选号由本工具的自动轮换决定；
+ *   · 走本机网关：本工具写**网关 Key**（`CODEBUDDY_BASE_URL` / `CODEBUDDY_API_KEY`），
+ *     选号由网关**按模型**决定（某个模型限流时自动换号）。
+ *
+ * 混用 ⇒ CLI 把**上游 token** 发到本机网关 ⇒ 401；而轮换每轮又重写一次 settings
+ * ⇒ 表现为**时好时坏**，症状正像「API 密钥无效」（issue #106 那类观感）。
+ *
+ * 所以这块 UI 必须满足三条：① 同一时刻只选一个；② 切换要显式告知代价；③ 当前状态一眼可见。
+ *
+ * ## 与账号卡 `cliControl` 的分工（容易混）
+ *
+ * 账号卡那个是「**按账号**切 CLI 的默认账号」（逐账号动作，需要客户端在运行）；
+ * 这里是「**凭据从哪来**」（全局一次性）。网关模式下前者失效 —— 选号已经不归本工具了。
+ *
+ * ## 冲突态不是错误
+ *
+ * 当 settings 里已有网关地址、用户还想点「直连上游」时，**禁用而不是报错**：
+ * 后端会拒绝（PR #114 的护栏），但让用户点了才看到报错是下策。文案刻意写
+ * 「这不是错误，是护栏」+「混用会时好时坏」—— 后半句是关键，那是它最难查的地方。
+ */
+
+/** 模型下拉的候选。真实实现读网关 `/v1/models`（当前启用的命名空间），原型写死三个。 */
+const CLI_MODELS = ["", "glm-5.3", "deepseek-v4-flash", "claude-sonnet-4.5"];
+
+function viewCliIntegration() {
+  const c = state.cli;
+  const gateway = c.mode === "gateway";
+  /* 冲突 = settings 里已有网关地址（外部改的），而当前 mode 还是直连。 */
+  const blocked = c.foreignGateway && !gateway;
+
+  const modeRow = `<div class="srow">
+    <div class="lab"><b>凭据来源</b><span>CLI 的凭据只有一份（<code>~/.codebuddy/settings.json</code>），两条路都写它，所以互斥</span></div>
+    <div class="seg wide" role="group" aria-label="接入方式">
+      <button class="${gateway ? "" : "on"}" data-act="cli-mode|direct"${blocked ? " disabled" : ""}>直连上游</button>
+      <button class="${gateway ? "on" : ""}" data-act="cli-mode|gateway"${blocked ? " disabled" : ""}>走本机网关</button>
+    </div>
+  </div>`;
+
+  const conflictNote = blocked ? `<div class="note-warn" style="margin:0 16px 14px">
+      <b>检测到 settings 已指向本机网关（<span class="mono">127.0.0.1:57891</span>）</b>，所以「直连上游」暂时不可选。
+      再写上游 token 会让 CLI 把上游 token 发到网关 ⇒ 401，而且轮换每轮重写一次 ⇒ <b>时好时坏</b>。
+      <br>要回直连，先把 settings 里的网关地址删掉（或在这里选「走本机网关」接管它）。
+      <span class="muted">这不是错误，是护栏。</span>
+    </div>` : "";
+
+  const gatewayRows = gateway ? `
+    <div class="srow">
+      <div class="lab"><b>网关地址</b><span>CLI 的请求会打到本机网关，由它按模型选号</span></div>
+      <span class="mono">http://127.0.0.1:57891</span>
+    </div>
+    <div class="srow">
+      <div class="lab"><b>CLI 专用 Key</b><span>切换时自动创建；列表里显示为 <span class="mono">CodeBuddy CLI（网关）</span></span></div>
+      <span class="mono">sk-wb-a1b2••••••••9f3c</span>
+    </div>
+    <div class="srow">
+      <div class="lab"><b>自动轮换</b><span>选号已交给网关，轮换每轮都会把网关 Key 覆盖回去，故已关闭</span></div>
+      <span class="badge warn">已关闭</span>
+    </div>` : `
+    <div class="srow">
+      <div class="lab"><b>自动轮换</b><span>按积分到期择优换号（直连上游时由本工具负责选号）</span></div>
+      <span class="badge ok">开启</span>
+    </div>`;
+
+  const modelRow = `<div class="srow">
+    <div class="lab"><b>默认模型</b><span>留空 = 由 CLI 自己决定；固定模型会让「网关按模型选号」失去一半意义</span></div>
+    <select class="inp" data-act="cli-model">
+      ${CLI_MODELS.map((m) => `<option value="${esc(m)}"${c.model === m ? " selected" : ""}>${m === "" ? "留空 · 由 CLI 自己决定" : esc(m)}</option>`).join("")}
+    </select>
+  </div>`;
+
+  const tail = gateway
+    ? `<div class="note-warn">
+        改了 <code>settings.json</code> 的 <code>env</code>，<b>需要重启终端与 CodeBuddy CLI</b> 才生效
+        （环境变量不热重载）。当前运行中的会话仍走旧配置。
+        <br>想回到本工具选号：点「直连上游」—— 会清掉网关配置并恢复上游 token。
+      </div>`
+    : `<div class="note-ok">
+        直连上游：本工具把上游 token 写进 <code>settings.json</code>，并按积分到期自动换号。
+        切到「走本机网关」会<b>清掉上游 token 与 <code>apiKeyHelper</code></b>、<b>关闭自动轮换</b>，
+        并创建一把 CLI 专用网关 Key。
+      </div>`;
+
+  /* 演示开关（**仅原型**）：真实实现里这个状态由后端 `status().gatewayMode` 给出。 */
+  const demoRow = `<div class="srow">
+    <div class="lab"><b>演示：模拟「settings 已被外部改成网关地址」</b><span>仅原型可见 —— 用来看冲突态（护栏把「直连上游」禁用）长什么样</span></div>
+    <button class="switch${c.foreignGateway ? " on" : ""}" data-act="cli-demo-foreign" aria-label="演示开关"></button>
+  </div>`;
+
+  return `<section class="card">
+    <div class="card-head">
+      <h3>接入方式</h3>
+      <span class="grow"></span>
+      <span class="badge ${gateway ? "info" : "ok"}">${gateway ? "走本机网关" : "直连上游"}</span>
+    </div>
+    ${conflictNote}
+    ${modeRow}
+    ${gatewayRows}
+    ${modelRow}
+    <div style="padding:0 16px 16px">${tail}${demoRow}</div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h3>为什么只能二选一</h3></div>
+    <div style="padding:0 16px 16px">
+      <ul class="notes">
+        <li>两条路都往同一份 <code>settings.json</code> 写凭据，<b>同一时刻只有一个生效</b>。</li>
+        <li>混用的症状是<b>时好时坏</b>的 401：CLI 把上游 token 发到本机网关，而轮换每轮又把网关 Key 覆盖回去。</li>
+        <li>「走本机网关」之后，账号卡上的「切到 CLI」会失效 —— 选号由网关按模型决定，不归本工具了。</li>
+      </ul>
+    </div>
+  </section>`;
+}
+
+/**
+ * 切换确认抽屉：把「会清掉什么」逐条说清。
+ *
+ * 为什么必须确认：「清掉上游 token」是**不可见的破坏性操作** —— 用户的 token 是导入来的，
+ * 被清掉后界面上看不出任何变化，直到 CLI 报错。说清「账号库里仍有、切回来不需要重新登录」
+ * 能省掉一次「我的号怎么没了」的报障。
+ */
+function drawerCliConfirm(target) {
+  const toGateway = target === "gateway";
+  const body = toGateway
+    ? `<p class="tiny muted" style="margin:0 0 8px">会改写 <code>~/.codebuddy/settings.json</code>：</p>
+       <ul class="notes">
+         <li>写入网关地址 <span class="mono">http://127.0.0.1:57891</span> 与一把新 Key（列表里叫「CodeBuddy CLI（网关）」）</li>
+         <li><b>清掉</b>现有的上游 token 与 <code>apiKeyHelper</code></li>
+         <li><b>关闭自动轮换</b>（选号改由网关负责）</li>
+       </ul>
+       <div class="note-warn">改完需要<b>重启终端与 CodeBuddy CLI</b> 才生效（环境变量不热重载）。<br>
+         上游 token 只是不再写进 settings，<b>账号库里仍有</b> —— 想切回来点「直连上游」即可，不需要重新登录。</div>`
+    : `<p class="tiny muted" style="margin:0 0 8px">会改写 <code>~/.codebuddy/settings.json</code>：</p>
+       <ul class="notes">
+         <li><b>删掉</b>网关地址、CLI 专用 Key 与 <code>CODEBUDDY_MODEL</code></li>
+         <li>重新写入当前账号的上游 token（或恢复 <code>apiKeyHelper</code>）</li>
+         <li><b>重新开启自动轮换</b>（选号回到本工具）</li>
+       </ul>
+       <div class="note-ok">切回后由本工具按积分到期择优换号；网关里那把「CodeBuddy CLI（网关）」Key 会保留，
+         你可以在网关页自行吊销。</div>`;
+
+  openDrawer(
+    body,
+    toGateway ? "切到「走本机网关」？" : "切回「直连上游」？",
+    `<div class="tiny muted" style="flex:1;min-width:0">动的是用户级配置文件，确认后立即写入</div>
+     <button class="btn ghost grow0" data-act="drawer-cancel">取消</button>
+     <button class="btn primary grow0" data-act="cli-confirm|${target}">确认切换</button>`,
+  );
 }
 
 function settingsRow(r) {
@@ -6329,6 +6490,43 @@ document.addEventListener("click", (e) => {
       break;
     }
     case "set-sub": stop(); state.setSub = a1; renderContent(); break;
+    /* ── CodeBuddy CLI 接入方式（issue #109） ── */
+    case "cli-mode": {
+      stop();
+      /* 已经是当前档 ⇒ 不重复确认（避免「点了取消但状态没变」的困惑）。 */
+      if (state.cli.mode === a1) break;
+      if (a1 === "gateway") { drawerCliConfirm("gateway"); break; }
+      drawerCliConfirm("direct");
+      break;
+    }
+    case "cli-confirm": {
+      stop();
+      const target = a1;
+      closeDrawer();
+      state.cli.mode = target;
+      /* 切到网关后，settings 里的网关地址就是**我们自己**写的 ⇒ 冲突态解除。 */
+      if (target === "gateway") state.cli.foreignGateway = false;
+      state.cli.rotate = target === "direct";
+      renderContent();
+      toast("ok",
+        target === "gateway" ? "已切到本机网关" : "已切回直连上游",
+        target === "gateway"
+          ? "已创建 CLI 专用 Key 并关闭自动轮换；重启终端与 CLI 后生效"
+          : "已清掉网关配置并恢复上游 token；自动轮换已重新开启");
+      break;
+    }
+    case "cli-model": {
+      /* select 的 value 是空串时 `a1` 会是 `""`，`split("|")` 拿不到它 ⇒ 从事件目标取。 */
+      state.cli.model = e.target.value || "";
+      break;
+    }
+    case "drawer-cancel": stop(); closeDrawer(); break;
+    case "cli-demo-foreign": {
+      stop();
+      state.cli.foreignGateway = !state.cli.foreignGateway;
+      renderContent();
+      break;
+    }
     /* ── 会话工作台（§3.15） ── */
     case "sess-client": stop(); state.sessionClient = a1; state.sessionFilter = "all"; renderContent(); break;
     case "sess-filter": stop(); state.sessionFilter = a1; renderContent(); break;

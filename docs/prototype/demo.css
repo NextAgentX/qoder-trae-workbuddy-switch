@@ -1723,3 +1723,11 @@ tr.krow-detail-row > td { padding: 0 !important; border-top: 0 !important; }
 }
 /* 表格里的「在途」：达到上限时用红字（它是**临时**不可选，不是账号坏了） */
 td.num.full { color: var(--destructive); font-weight: 600; }
+
+/* ─────────── 设置页「二选一」分段器（issue #109） ───────────
+   设置页里这两个标签比常规 `.seg` 长（「直连上游」/「走本机网关」），
+   常规内边距会挤成两行；同时补上 disabled 态 —— 冲突时「直连上游」被护栏禁掉，
+   而 `.seg` 原本没有 disabled 样式，禁用与可点会长得一样（那等于没禁）。 */
+.seg.wide button { padding: 5px 12px; white-space: nowrap; }
+.seg button:disabled { cursor: not-allowed; opacity: .45; }
+.seg button:disabled:hover { color: var(--muted-fg); }

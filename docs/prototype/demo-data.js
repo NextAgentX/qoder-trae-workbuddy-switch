@@ -1185,6 +1185,14 @@ const SETTINGS = [
     ],
   },
   {
+    /* ★ issue #109：CodeBuddy CLI 的**接入方式**（二选一）。
+       放设置页而不是账号卡：CLI 的凭据只有一份（`~/.codebuddy/settings.json`），
+       这是**全局一次性配置**；账号卡上的 `cliControl` 是「按账号切默认账号」，另一层次。
+       渲染走 `viewCliIntegration()`（`kind: "cli"`），因为它是分段器 + 条件行，
+       不是 `rows` 能表达的静态行。 */
+    id: "cli", label: "CodeBuddy CLI", kind: "cli",
+  },
+  {
     id: "diagnostics", label: "权限与诊断",
     groups: [
       { title: "环境自检", rows: [
