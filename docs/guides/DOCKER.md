@@ -126,6 +126,7 @@ runner，再由 merge job 拼 manifest）。手动触发该工作流只产出 `e
 | `BUDDY_SWITCH_HOME` | `/data`（镜像内置） | **数据根目录**。账号库、网关 Key、签到/积分记录、备份都在它下面。 |
 | `BUDDY_SWITCH_HOST` | `0.0.0.0`（镜像内置） | 监听地址。CLI 原生默认是 `127.0.0.1`，容器里必须改成 `0.0.0.0` 才能从宿主访问。 |
 | `BUDDY_SWITCH_PORT` | `57890` | 监听端口。 |
+| `BUDDY_SWITCH_ALLOWED_HOSTS` | 空（只接受回环） | **额外**允许的 `Host`，逗号分隔、可带端口。**只有「跨机直连」才需要** —— 见下面「安全」段。填 `*` 无效（会被忽略）。 |
 
 优先级：**命令行参数 > 环境变量 > 内置默认值**。即 `docker run … buddy-switch serve --port 8080`
 会覆盖 `BUDDY_SWITCH_PORT`。
@@ -187,14 +188,52 @@ docker run --rm -v buddy-switch-data:/data -v "$PWD:/backup" alpine \
 
 - 默认只发布到宿主机回环 `127.0.0.1:57890`（`docker-compose.yml` 里写死的）。
 - 服务端在监听**非回环**地址时会打印一条显式警告。
-- 要跨机访问，二选一：
+- **管理面有来源校验**：只接受 `Host` 为 `127.0.0.1` / `localhost` / `::1` 的请求，
+  其余一律 `403`。这不是可选项 —— 它是 DNS rebinding 的**唯一**防线（见下面的说明）。
+- 要跨机访问，三选一：
+
   1. **SSH 隧道**（推荐）：`ssh -L 57890:127.0.0.1:57890 <host>`，然后本地开
-     `http://127.0.0.1:57890`。**不要**改 compose 的端口映射。
-  2. **反代加鉴权**：Nginx / Caddy + Basic Auth 或 mTLS，再把映射改成 `"57890:57890"`。
+     `http://127.0.0.1:57890`。**不要**改 compose 的端口映射，也**不需要**任何额外变量
+     —— 浏览器访问的是 localhost，`Host` 是回环，天然放行。
+  2. **反代加鉴权**：Nginx / Caddy + Basic Auth 或 mTLS，映射改成 `"57890:57890"`，
+     并让反代把 `Host` 改写成回环（推荐：这样什么都不用放宽）：
+
+     ```nginx
+     location / {
+       proxy_pass http://127.0.0.1:57890;
+       proxy_set_header Host 127.0.0.1:57890;   # ← 关键：改写 Host，管理面才会放行
+       auth_basic "buddy-switch";
+       auth_basic_user_file /etc/nginx/.htpasswd;
+     }
+     ```
+
+     若反代依赖原始 `Host` 做路由、不能改写，那就必须把它列进白名单：
+
+     ```yaml
+     environment:
+       BUDDY_SWITCH_ALLOWED_HOSTS: "bs.example.com:57890"
+     ```
+  3. **直连**（不推荐）：`"57890:57890"` + 从别的机器访问 `http://<ip>:57890`。
+     **必须**设 `BUDDY_SWITCH_ALLOWED_HOSTS=<ip 或域名>:57890`，否则一律 403。
 - **不要**在无鉴权的情况下把 `57890` 直接暴露到公网或不可信局域网。
 
+### 为什么要有 Host 校验（升级后看到 403 就是它）
+
+管理面的请求里带着全部明文凭据（`POST /api/accounts/export` 直接返回
+`access_token` / `refresh_token`）。默认只绑回环时，「外部网页读不到本机端口」是
+唯一屏障 —— 而 **DNS rebinding 正好绕过它**：恶意页面把 `attacker.com` 解析到
+`127.0.0.1`，浏览器就认为 `http://attacker.com:57890` 是同源，能读回响应。
+
+`Origin` 与 `Host` **同源**也挡不住（两者都是攻击者域名），所以判据只能落在
+`Host` 本身可信。
+
+**升级提示**：如果你之前是「映射 `"57890:57890"` + 从别的机器用 IP / 域名访问」，
+升级后会看到 `403`（错误体里 `reason` 是 `host_not_allowed`）。按上面第 2 或第 3 种
+方式补 `BUDDY_SWITCH_ALLOWED_HOSTS` 即可；**SSH 隧道与回环访问不受影响**。
+
 容器内的加固已经做了：非 root 用户（uid `10001`）运行、只装 `ca-certificates` 与 `curl`、
-`/data` 由 `buddy` 持有。
+`/data` 由 `buddy` 持有。健康检查打的是 `http://127.0.0.1:57890/api/status`（`Host` 是回环），
+不受上面这条校验影响。
 
 ---
 

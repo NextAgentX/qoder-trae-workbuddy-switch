@@ -57,6 +57,13 @@ services:
       # 数据根目录。**必须是已存在的绝对目录**，否则 CLI 拒绝启动
       # （entrypoint 会 mkdir，但 bind mount 的属主不对时仍会失败 —— 那是故意的）。
       BUDDY_SWITCH_HOME: "/data"
+      # 管理面的 Host 白名单（2026-10 起有来源校验）。**默认不用设**：
+      # 本文件把端口发布到宿主回环（127.0.0.1:57890），浏览器用 localhost 访问时
+      # Host 是回环，天然放行；SSH 隧道同理。
+      # 只有「映射成 "57890:57890" 且从别的机器用 IP/域名直连」才需要，例如：
+      #   BUDDY_SWITCH_ALLOWED_HOSTS: "192.168.1.5:57890"
+      # 详见 docs/guides/DOCKER.md 的「安全」段。
+      # BUDDY_SWITCH_ALLOWED_HOSTS: ""
     healthcheck:
       # 用服务端自己的 API 路由做探活：SPA 兜底会让「任何路径都返回 200」，
       # 因此不能拿 `/` 判断存活 —— 必须打一个真实的 API 路由。

@@ -142,6 +142,29 @@ if (mainRs) {
 }
 
 // ---------------------------------------------------------------------------
+// ⑦ 管理面 Host 白名单：部署文档必须与代码**同名**
+// ---------------------------------------------------------------------------
+// 2026-10 起管理面只接受回环 Host（`api_guard.rs`）。这是**唯一**会改变用户部署
+// 方式的行为变更：跨机直连必须配白名单。文档把变量名写错的后果是「用户照着文档
+// 配了、仍然 403」—— 比不写更糟，所以名字必须从源码里取、不在这边再抄一遍。
+const GUARD_RS = path.join(ROOT, "crates", "buddy-switch-server", "src", "api_guard.rs");
+const DOCKER_MD = path.join(ROOT, "docs", "guides", "DOCKER.md");
+const guardRs = read(GUARD_RS);
+const dockerDoc = read(DOCKER_MD);
+if (guardRs && dockerDoc) {
+  const allowedHostsEnv = rustConstValue(guardRs, "ALLOWED_HOSTS_ENV");
+  if (!allowedHostsEnv) {
+    fail("api_guard.rs 里找不到 ALLOWED_HOSTS_ENV 常量（管理面的 Host 白名单）");
+  } else if (!dockerDoc.includes(allowedHostsEnv)) {
+    fail(
+      `docs/guides/DOCKER.md 没有提到 ${allowedHostsEnv} —— 跨机直连的用户会照着文档配错、仍然 403`,
+    );
+  } else {
+    notes.push(`管理面 Host 白名单：${allowedHostsEnv}（部署文档已覆盖）`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ④ .dockerignore 必须排除 dist/（防「编进旧前端」）
 // ---------------------------------------------------------------------------
 if (dockerignore) {
