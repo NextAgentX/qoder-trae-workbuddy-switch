@@ -173,6 +173,9 @@ export const zh = {
   "wbAccounts.card.ideNotDetected": "未检测到 CodeBuddy IDE",
   "wbAccounts.card.switchingIde": "正在切换 CodeBuddy IDE",
   "wbAccounts.card.setCurrentCli": "设为 CodeBuddy CLI 当前账号",
+  // issue #109：CLI 走本机网关时，切号语义上已不存在（选号由网关按模型决定）。
+  "wbAccounts.card.cliGatewayMode":
+    "CLI 已走本机网关，选号由网关按模型决定。要按账号切换，请先在「设置 → CodeBuddy CLI」切回直连上游。",
   "wbAccounts.card.switchingCli": "正在切换 CodeBuddy CLI 当前账号",
   "wbAccounts.card.connectCliFirst": "请先接入 CodeBuddy CLI",
   // P4：备注编辑器与「查看详情」入口。

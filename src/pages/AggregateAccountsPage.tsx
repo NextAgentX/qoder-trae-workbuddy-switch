@@ -853,6 +853,9 @@ export default function AggregateAccountsPage() {
             /* 「当前登录」判定与账号页**共用** `isWorkbuddyCurrent`（见 `lib/account-current.ts`）。 */
             workbuddyActive={isWorkbuddyCurrent(item.data, (region === "cn" ? wbCnStatus : wbGlobalStatus)?.current)}
             codebuddyCliConfigured={wbProgramAvail.cliConfigured}
+            /* ★ issue #109：与账号页**同一来源**（`wbProgramAvailability`）——
+               少传这个 prop 不会报错，只会静默降级成「可点」（issue #89 那类问题）。 */
+            codebuddyCliGatewayMode={wbProgramAvail.cliGatewayMode}
             /* ★ issue #89 · B1：主程序位「WB」的切换。不传 ⇒ `disabled={... || !onSwitch}`
                命中，所有非当前账号的「WB」按钮点不动。走与账号页同一个向导（含会话迁移）。 */
             onSwitch={() => setWbSwitchDialog({ account: item.data, region })}

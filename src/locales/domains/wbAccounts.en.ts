@@ -143,6 +143,9 @@ export const en = {
   "wbAccounts.card.ideNotDetected": "CodeBuddy IDE not detected",
   "wbAccounts.card.switchingIde": "Switching CodeBuddy IDE",
   "wbAccounts.card.setCurrentCli": "Set as CodeBuddy CLI current account",
+  // issue #109: with the CLI on the local gateway, switching accounts no longer applies.
+  "wbAccounts.card.cliGatewayMode":
+    "The CLI now goes through the local gateway, which picks accounts by model. To switch per account, switch back to direct upstream in Settings → CodeBuddy CLI.",
   "wbAccounts.card.switchingCli": "Switching CodeBuddy CLI current account",
   "wbAccounts.card.connectCliFirst": "Connect CodeBuddy CLI first",
   // P4: remark editor moved to the shared drawer; only the card entry point stays.

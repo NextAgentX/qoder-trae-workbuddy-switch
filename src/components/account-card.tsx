@@ -405,6 +405,13 @@ interface Props {
   creditPriority?: boolean;
   workbuddyActive?: boolean;
   codebuddyCliConfigured?: boolean;
+  /**
+   * CLI 已被指向本机网关（issue #109）⇒「切到 CLI」置灰。
+   *
+   * 不传 = 非网关模式（默认可用）—— 与其它 `codebuddyCli*` props 同一约定：
+   * 缺省是「没这个限制」，而不是「禁用」。聚合页与账号页**都必须传**。
+   */
+  codebuddyCliGatewayMode?: boolean;
   codebuddyCliActive?: boolean;
   /** 任一 CodeBuddy CLI 账号切换正在进行，用于阻止并发切换。 */
   codebuddyCliBusy?: boolean;
@@ -508,7 +515,7 @@ function ProductCurrentState({
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onRefreshPart, refreshingKinds, doneKinds, refreshKinds, onExport, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, todayTokens, todayTokensTruncated = false, featuresDisabled = true }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onRefreshPart, refreshingKinds, doneKinds, refreshKinds, onExport, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliGatewayMode, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, todayTokens, todayTokensTruncated = false, featuresDisabled = true }: Props) {
   const t = useT();
   /**
    * 兜底归一（第三道闸）。
@@ -894,7 +901,28 @@ const workbuddyControl = workbuddyActive ? (
   );
 
   // CodeBuddy CLI：未接入 → **引导设置**（同上）。
-  const cliControl = codebuddyCliActive ? (
+  /* ★ issue #109：CLI 已走本机网关 ⇒ 选号由网关按模型决定，**切号无效**。
+     后端会拒绝（`ensure_not_gateway_mode`），但让用户点了才看到报错是下策 —— 界面先说清。
+     ⚠️ 用 `<span>` 包住 disabled 按钮：`disabled` 元素不派发 pointer 事件，
+     Radix Tooltip 收不到 hover，提示就永远弹不出来（那等于「灰按钮 + 无解释」）。 */
+  const cliControl = codebuddyCliGatewayMode ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={cn("inline-flex", btnClass)}>
+          <Button
+            variant="outline"
+            size={btnSize}
+            className="opacity-50"
+            disabled
+            aria-label={t("wbAccounts.card.cliGatewayMode")}
+          >
+            {progLabel("CLI")}
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{t("wbAccounts.card.cliGatewayMode")}</TooltipContent>
+    </Tooltip>
+  ) : codebuddyCliActive ? (
     <ProductCurrentState product="codebuddy" short="CLI" />
   ) : codebuddyCliConfigured ? (
     <Tooltip>

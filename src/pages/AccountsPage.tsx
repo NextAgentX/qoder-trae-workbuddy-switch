@@ -2422,6 +2422,8 @@ function RegionPanel({ region }: { region: Region }) {
                               creditPriority={a.id === priorityAccountId}
                               workbuddyActive={isWorkbuddyCurrent(a, current)}
                               codebuddyCliConfigured={codebuddyCli?.configured && !codebuddyCli.migrationRequired && !codebuddyCli.syncPending}
+                              /* ★ issue #109：网关模式下「切到 CLI」置灰（选号不归本工具了）。 */
+                              codebuddyCliGatewayMode={Boolean(codebuddyCli?.gatewayMode)}
                               codebuddyCliActive={a.id === cliCurrentAccountId}
                               codebuddyCliBusy={codebuddyCliSwitchingId !== null}
                               onSwitchCodebuddyCli={onSwitchCodebuddyCli}

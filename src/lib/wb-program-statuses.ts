@@ -77,6 +77,13 @@ export function useWbProgramStatuses(): WbProgramStatuses {
  */
 export function wbProgramAvailability(statuses: WbProgramStatuses): {
   cliConfigured: boolean;
+  /**
+   * CLI 是否已被指向**本机网关**（issue #109）。
+   *
+   * `true` ⇒ 选号由网关按模型决定，「切到 CLI」这个动作**语义上已不存在**：
+   * 后端会拒绝（`ensure_not_gateway_mode`），卡片应置灰并说明，而不是让人点了才看到报错。
+   */
+  cliGatewayMode: boolean;
   cnIdeAvailable: boolean;
   vscodeAvailable: boolean;
   jetbrainsAvailable: boolean;
@@ -85,6 +92,7 @@ export function wbProgramAvailability(statuses: WbProgramStatuses): {
     cliConfigured: Boolean(
       statuses.cli?.configured && !statuses.cli.migrationRequired && !statuses.cli.syncPending,
     ),
+    cliGatewayMode: Boolean(statuses.cli?.gatewayMode),
     cnIdeAvailable: Boolean(statuses.cnIde?.installed),
     vscodeAvailable: Boolean(statuses.vscode?.extensionInstalled),
     jetbrainsAvailable: Boolean(statuses.jetbrains?.pluginInstalled),
