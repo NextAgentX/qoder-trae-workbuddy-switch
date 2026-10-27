@@ -317,6 +317,10 @@ export const zh = {
   "shared.gateway.pool.modelCoolingBadge": "{count} 个模型限流 · {time} 解冻",
   "shared.gateway.pool.modelCoolingHint":
     "{models} 处于模型级冷却（只影响这些模型，其它模型仍可用），最早 {time} 解冻。",
+  // 徽标 tooltip 的逐模型行（issue #88 缺口 4.2）：名称 · 剩余 · 是否兜底。
+  "shared.gateway.pool.modelCoolingRow": "{model} · 剩 {remaining}{fallback}",
+  // 「兜底」= 上游没给墙钟，本仓按 probe_fallback_ms 猜的（默认 10 分钟）。
+  "shared.gateway.pool.modelCoolingFallback": "（兜底）",
   "shared.gateway.pool.empty": "账号池为空。请先在「账号管理」中添加账号。",
   "shared.gateway.pool.credits": "{credits} 积分",
   "shared.gateway.pool.diagnoseNote": "请求报「没有可用账号」时，按下面的原因逐条排查：",

@@ -1725,6 +1725,29 @@ export interface GatewayPoolAccount {
    * Trae / Qoder 侧暂无该字段 ⇒ 归一化缺省 `{}`（老后端 / 演示站不炸）。
    */
   modelCoolings?: Record<string, number>;
+  /**
+   * 同一份冷却数据的**带来源**版本（issue #88 缺口 4.1）。
+   *
+   * `modelCoolings` 只给解冻时刻，用户分不清那是**上游声明的**还是**本仓兜底猜的**
+   * （拿不到上游墙钟时冷 `probe_fallback_ms`，默认 10 分钟）—— 两者对排查的含义相反：
+   * 前者该等，后者该怀疑是不是配大了。
+   *
+   * Trae / Qoder 侧暂无该字段 ⇒ 缺省 `{}`，徽标回落 `modelCoolings`。
+   */
+  modelCooldownDetails?: Record<
+    string,
+    {
+      /** 解冻时刻（ms）。 */
+      untilMs: number;
+      /** 上游声明的重置时刻（ms）；`0` = 上游没给。 */
+      resetAtMs: number;
+      /** 由 `resetAtMs === 0` 推出：`true` = 本仓兜底时长，不是上游说的。 */
+      fallback: boolean;
+      reason: string;
+      /** `11102` 封禁的累计次数（退避指数）；`6004` 限流恒 0。 */
+      hits: number;
+    }
+  >;
 }
 
 /** API Key 记录（列表脱敏返回，绝不含明文）。字段名与后端 masked() 输出一致。 */

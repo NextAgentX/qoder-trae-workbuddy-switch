@@ -116,27 +116,70 @@ const TILE_META: Record<PoolTileKey, { labelKey: TranslationKey; tone: "ok" | "w
  * 时间只藏在 `title` 的模型名里 —— 用户无从判断「还要等多久」「是不是早就该好了」。
  * 上游 429 的恢复信息本来就是按模型给的，不展示等于把它丢掉。
  */
+/**
+ * 解冻时刻的可读形式：**今天只给时分，跨天补上「月/日」**（issue #88 缺口 4.2）。
+ *
+ * 改造前一律用 `toLocaleTimeString`（只到时分）。封禁档最长 24 小时，跨天时
+ * 「05:00」会被读成「今天早上 5 点已过」，而实际是**次日**。
+ */
+function formatThawAt(ms: number, now: number): string {
+  const target = new Date(ms);
+  const sameDay = target.toDateString() === new Date(now).toDateString();
+  return target.toLocaleString(
+    undefined,
+    sameDay
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" },
+  );
+}
+
+/** 剩余时长的粗粒度表述（tooltip 逐行用）。 */
+function formatRemaining(ms: number, now: number): string {
+  const minutes = Math.max(0, Math.round((ms - now) / 60_000));
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
 function modelCoolingBadge(account: GatewayPoolAccount, t: ReturnType<typeof useT>): ReactNode {
-  const entries = Object.entries(account.modelCoolings ?? {});
-  if (!entries.length) return null;
+  const details = account.modelCooldownDetails ?? {};
+  const rows = Object.entries(account.modelCoolings ?? {}).map(([model, until]) => ({
+    model,
+    until,
+    fallback: details[model]?.fallback ?? false,
+  }));
   const now = Date.now();
   // 只展示仍有效的（后端已过滤，这里再兜一次防时钟漂移导致的负数）。
-  const live = entries.filter(([, until]) => Number.isFinite(until) && until > now);
+  const live = rows.filter((row) => Number.isFinite(row.until) && row.until > now);
   if (!live.length) return null;
-  const models = live.map(([model]) => model).join("、");
-  // 最早解冻的那个决定「什么时候能再用上其中一部分」。
-  const earliest = Math.min(...live.map(([, until]) => until));
-  const time = new Date(earliest).toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+
+  const earliest = Math.min(...live.map((row) => row.until));
+  const latest = Math.max(...live.map((row) => row.until));
+  // ★ issue #88 缺口 4.2：**不能只给最早**。
+  //
+  // 3 个模型分别冷却 2 分钟 / 10 分钟 / 2 小时时，只说「最近 2 分钟后」会被读成
+  // 「整批都快好了」—— 而实际还有两个要等两小时。所以只要不是同一个时刻，就给区间。
+  const range =
+    latest > earliest
+      ? `${formatThawAt(earliest, now)} – ${formatThawAt(latest, now)}`
+      : formatThawAt(earliest, now);
+
+  // tooltip 逐模型列出：名称 + 剩余时长 +（若是兜底值）标记。
+  // 「兜底」必须显式标出来 —— 那是本仓猜的 10 分钟，不是上游说的，排查含义相反。
+  const hint = live
+    .map((row) =>
+      t("shared.gateway.pool.modelCoolingRow", {
+        model: row.model,
+        remaining: formatRemaining(row.until, now),
+        fallback: row.fallback ? t("shared.gateway.pool.modelCoolingFallback") : "",
+      }),
+    )
+    .join("\n");
+
   return (
-    <Badge
-      variant="secondary"
-      className="shrink-0 text-warning"
-      title={t("shared.gateway.pool.modelCoolingHint", { models, time })}
-    >
-      {t("shared.gateway.pool.modelCoolingBadge", { count: live.length, time })}
+    <Badge variant="secondary" className="shrink-0 text-warning" title={hint}>
+      {t("shared.gateway.pool.modelCoolingBadge", { count: live.length, time: range })}
     </Badge>
   );
 }

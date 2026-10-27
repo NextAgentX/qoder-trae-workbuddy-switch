@@ -185,9 +185,42 @@ export function normalizeGatewayPoolAccounts(raw: unknown): GatewayPoolAccount[]
           typeof record.deviceIdMasked === "string" ? record.deviceIdMasked : null,
         // 模型级冷却（池冷却）—— 探测矩阵的被动底色用；缺省 `{}`。
         modelCoolings: normalizeModelCoolings(record.modelCoolings ?? record.model_coolings),
+        // 带来源的明细（issue #88 缺口 4.1）—— 徽标用；缺省 `{}`（Trae / 旧后端没有）。
+        modelCooldownDetails: normalizeModelCooldownDetails(
+          record.modelCooldownDetails ?? record.model_cooldown_details,
+        ),
       },
     ];
   });
+}
+
+/**
+ * 归一化「模型冷却明细」（issue #88 缺口 4.1）。
+ *
+ * 逐项校验而不是整体信任：这是后端新增字段，Trae / Qoder 侧与旧后端都没有它，
+ * 演示数据也可能缺 —— 任何一项形状不对就**跳过该模型**，而不是让整个对象变成
+ * `undefined` 后在徽标里炸。
+ */
+function normalizeModelCooldownDetails(
+  raw: unknown,
+): NonNullable<GatewayPoolAccount["modelCooldownDetails"]> {
+  if (!raw || typeof raw !== "object") return {};
+  const out: NonNullable<GatewayPoolAccount["modelCooldownDetails"]> = {};
+  for (const [model, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || model.length === 0) continue;
+    const item = value as Record<string, unknown>;
+    const untilMs = asNumber(item.untilMs);
+    if (untilMs === undefined) continue;
+    out[model] = {
+      untilMs,
+      resetAtMs: asNumber(item.resetAtMs) ?? 0,
+      // 后端直接给 `fallback`；缺失时**由 `resetAtMs === 0` 推出**（同一判据，不猜）。
+      fallback: typeof item.fallback === "boolean" ? item.fallback : (asNumber(item.resetAtMs) ?? 0) === 0,
+      reason: typeof item.reason === "string" ? item.reason : "",
+      hits: asNumber(item.hits) ?? 0,
+    };
+  }
+  return out;
 }
 
 /** 归一化诊断行（只保留非空字符串）。 */

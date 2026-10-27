@@ -41,6 +41,19 @@ pub struct ModelCooldown {
     /// 混为一谈的后果是封禁账号的模型会**过早重试**，反复撞同一堵墙、白白消耗额度。
     #[serde(default)]
     pub hits: i32,
+    /// 这个解冻时刻是**上游声明的**（`true`）还是**本仓兜底猜的**（`false`）。
+    ///
+    /// ## 为什么必须单独记（#88 缺口 4.1）
+    ///
+    /// 兜底有两处、且时长不同：真实流量无墙钟 ⇒ `min_model_cooldown_ms`（60s）；
+    /// 探测回填无墙钟 ⇒ `probe_fallback_ms`（10min）。两处都会把**算出来的**
+    /// 时刻写进 `reset_at_ms`，所以「`reset_at_ms == 0`」**推不出**来源 ——
+    /// 改造前前端只看到 `until_ms`，用户无从判断「该等」还是「该怀疑配大了」。
+    ///
+    /// `#[serde(default)]` ⇒ 旧数据按 `false`（兜底）读，方向保守：把上游值误当兜底
+    /// 只是多一句提示，反过来会让「猜的」冒充「上游说的」。
+    #[serde(default)]
+    pub from_upstream: bool,
 }
 
 /// 实测单位成本账本条目（每 1000 token 消耗的积分）。
@@ -310,8 +323,27 @@ impl PoolEntry {
     /// 惰性清理已过期的模型级冷却；返回是否有条目被移除。
     pub fn prune_model_cooldowns(&mut self, now_ms: i64) -> bool {
         let before = self.model_cooldowns.len();
-        self.model_cooldowns
-            .retain(|_, cooldown| now_ms < cooldown.until_ms);
+        // ★★ #88 缺口 4.3：到期**不能整条删** —— `hits` 是 `11102` 封禁的退避指数，
+        // 整条删掉等于「第 3 次封禁」退回「第 1 次」，下次又从 6 小时起步。
+        //
+        // 这与账号级 `prune_expired_cooling` 的纪律必须一致（那边到期清冷却域但
+        // **明确保留 `soft_streak`**，注释理由是「清掉会让反复被限流的账号每次都从
+        // 最短退避重来」）。此前两条路径的纪律正好相反。
+        //
+        // 到期后的处置：`until_ms` 置 0（`healthy_for_model` 用 `now >= until_ms` 判可用，
+        // 所以语义不变），条目**只在有封禁历史时**保留 —— 纯限流条目（`hits == 0`）
+        // 没有记忆价值，删掉免得每账号 × 每模型无限累积。
+        self.model_cooldowns.retain(|_, cooldown| {
+            if now_ms < cooldown.until_ms {
+                return true;
+            }
+            if cooldown.hits > 0 {
+                cooldown.until_ms = 0;
+                cooldown.reset_at_ms = 0;
+                return true;
+            }
+            false
+        });
         before != self.model_cooldowns.len()
     }
 
@@ -521,6 +553,7 @@ impl PoolEntry {
         reset_at_ms: i64,
         max_ms: i64,
         reason: &str,
+        from_upstream: bool,
     ) {
         if model.is_empty() {
             return;
@@ -544,6 +577,7 @@ impl PoolEntry {
                 reset_at_ms,
                 reason: reason.to_string(),
                 hits: 0,
+                from_upstream,
             },
         );
     }
@@ -627,6 +661,8 @@ impl PoolEntry {
                 reset_at_ms: 0,
                 reason: reason.to_string(),
                 hits,
+                // 封禁的时长是「按次数退避」算出来的，不是上游给的时刻。
+                from_upstream: false,
             },
         );
         ttl
@@ -1018,6 +1054,7 @@ mod tests {
             0,
             DEFAULT_SOFT_RATE_MAX_MS,
             "6004 model rate limit",
+            false,
         );
 
         assert_eq!(item.until_ms, 0, "模型级冷却不得写账号级 until");
@@ -1038,8 +1075,8 @@ mod tests {
         let mut item = entry();
         // reset_at 未声明（0）时冷却退化为"瞬时"（now+1ms），并不按 max 计时——
         // 要让条目真正存活一段时间，必须给出**未来**的 reset_at 时刻。
-        item.cooldown_model(1000, "a", 0, 500, "x");
-        item.cooldown_model(1000, "b", 3000, 10_000, "y");
+        item.cooldown_model(1000, "a", 0, 500, "x", false);
+        item.cooldown_model(1000, "b", 3000, 10_000, "y", true);
         assert_eq!(
             item.model_cooldowns["a"].until_ms, 1001,
             "未声明墙钟 → 瞬时冷却"
@@ -1103,7 +1140,7 @@ mod tests {
     #[test]
     fn hard_cooldown_clears_model_cooldowns() {
         let mut item = entry();
-        item.cooldown_model(1000, "m", 0, 1000, "x");
+        item.cooldown_model(1000, "m", 0, 1000, "x", false);
         item.cooldown_until_tomorrow_4am(1000, "余额不足");
         assert_eq!(item.cool_kind, Some(CoolKind::Hard));
         assert!(item.model_cooldowns.is_empty(), "硬冷却清空模型级表");
@@ -1164,6 +1201,7 @@ mod tests {
             0,
             DEFAULT_SOFT_RATE_MAX_MS,
             "6004 model rate limit",
+            false,
         );
         assert_eq!(item.model_cooldowns["m"].hits, 0, "限流不参与封禁计数");
         assert_eq!(
@@ -1235,7 +1273,7 @@ mod tests {
         item.maybe_trip_breaker(1000, 3, 1000, 10_000);
         // 顺序要紧：账号级软冷却会清空模型级表，因此模型冷却必须最后写入。
         item.cooldown_soft_backoff(1000, 1000, 10_000, "429");
-        item.cooldown_model(1000, "m", 50_000, 100_000, "6004");
+        item.cooldown_model(1000, "m", 50_000, 100_000, "6004", true);
 
         item.note_success(2000, "");
         assert_eq!(item.fails, 0);

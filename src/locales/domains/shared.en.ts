@@ -284,6 +284,10 @@ export const en = {
   "shared.gateway.pool.modelCoolingBadge": "{count} model(s) rate-limited · thaw at {time}",
   "shared.gateway.pool.modelCoolingHint":
     "{models} is/are cooling at the model level (only those models are affected; the account still serves others). Earliest thaw at {time}.",
+  // Per-model tooltip rows (issue #88 gap 4.2): name · remaining · fallback marker.
+  "shared.gateway.pool.modelCoolingRow": "{model} · {remaining} left{fallback}",
+  // "fallback" = upstream gave no wall clock; we guessed probe_fallback_ms (10 min).
+  "shared.gateway.pool.modelCoolingFallback": " (fallback)",
   "shared.gateway.pool.empty": "The pool is empty. Add accounts under Accounts first.",
   "shared.gateway.pool.credits": "{credits} credits",
   "shared.gateway.pool.diagnoseNote": "When a request reports \"no available account\", check these reasons one by one:",

@@ -1314,10 +1314,10 @@ impl Pool {
                     //   旧实现这里落了 `now + 1ms`（= 不冷却），于是同一个号**每个请求**都被
                     //   重新选中、每次都 429，重试预算全烧在同一堵墙上 —— 用户看到的就是
                     //   「池里别的号明明可用，请求却一直失败」。
-                    let reset_at = reset_at_ms
-                        .filter(|value| {
-                            *value > now_ms.saturating_add(config.min_model_cooldown_ms)
-                        })
+                    let upstream_reset = reset_at_ms.filter(|value| {
+                        *value > now_ms.saturating_add(config.min_model_cooldown_ms)
+                    });
+                    let reset_at = upstream_reset
                         .unwrap_or_else(|| now_ms.saturating_add(config.min_model_cooldown_ms));
                     entry.cooldown_model(
                         now_ms,
@@ -1328,6 +1328,8 @@ impl Pool {
                         //   429 继续延长，不需要一次押 2 小时。
                         config.rate_window_reset_max_ms,
                         "6004 model rate limit",
+                        // ★ #88 缺口 4.1：记下「这个时刻是谁给的」。
+                        upstream_reset.is_some(),
                     );
                     // O6：这是**模型维度**的失败 ⇒ 记进该模型的健康度，
                     // 账号级 EMA 不动（否则这个号在别的模型上也被一起降权）。
@@ -1461,13 +1463,15 @@ impl Pool {
                         .unwrap_or(0);
                     // ★ 下限 + 兜底：未知 / 已过期的墙钟一律走 `probe_fallback_ms`
                     //   （默认 10 分钟），不再是写死的 60 秒（issue #88）。
-                    let reset_at = probe_cooldown_until(now_ms, *reset_at_ms, &config);
+                    let upstream_reset = reset_at_ms.filter(|value| *value > now_ms);
+                    let reset_at = probe_cooldown_until(now_ms, upstream_reset, &config);
                     entry.cooldown_model(
                         now_ms,
                         model,
                         reset_at,
                         config.soft_rate_max_ms,
                         "6004 model rate limit (probe)",
+                        upstream_reset.is_some(),
                     );
                     entry
                         .model_cooldowns
@@ -1664,6 +1668,36 @@ impl Pool {
                     .filter(|(_, cooldown)| cooldown.until_ms > now_ms)
                     .map(|(model, cooldown)| (model.as_str(), cooldown.until_ms))
                     .collect();
+                // ★★ #88 缺口 4.1：`modelCoolings` 只发 `until_ms`，把**兜底值**藏掉了。
+                //
+                // 「拿不到上游墙钟就冷 `probe_fallback_ms`（默认 10 分钟）」是 #88 引入的
+                // 新行为，而它在界面上没有任何痕迹：用户看到「12:34 解冻」分不清那是
+                // **上游声明的**还是**本仓猜的**。两者对排查的含义正好相反 ——
+                // 前者该等，后者该怀疑是不是配大了。
+                //
+                // 这里另开一份带来源的明细（**不动** `modelCoolings` 的形状：它是
+                // 「限流探测」矩阵的被动底色，改形状会波及 `stores/gateway.ts`）。
+                let model_cooldown_details: BTreeMap<&str, Value> = entry
+                    .model_cooldowns
+                    .iter()
+                    .filter(|(_, cooldown)| cooldown.until_ms > now_ms)
+                    .map(|(model, cooldown)| {
+                        (
+                            model.as_str(),
+                            json!({
+                                "untilMs": cooldown.until_ms,
+                                // 上游声明的重置时刻；`0` = 上游没给（封禁档恒 0）。
+                                "resetAtMs": cooldown.reset_at_ms,
+                                // ★ 来源是**单独记的**（`from_upstream`），不能由
+                                //   `reset_at_ms == 0` 推 —— 兜底时刻也会被写进去。
+                                "fallback": !cooldown.from_upstream,
+                                "reason": cooldown.reason,
+                                // `11102` 封禁的累计次数（退避指数）；`6004` 恒 0。
+                                "hits": cooldown.hits,
+                            }),
+                        )
+                    })
+                    .collect();
                 json!({
                     "uid": entry.uid,
                     "name": entry.nickname,
@@ -1683,7 +1717,10 @@ impl Pool {
                         .map(|item| item.note.clone())
                         .filter(|note| !note.is_empty()),
                     // 模型 → 解冻时刻（ms）。空表 = 该账号此刻没有模型级冷却。
+                    // ⚠️ 形状**保持不变**（`{模型: ms}`）：限流探测矩阵的被动底色在用。
                     "modelCoolings": model_coolings,
+                    // 同一份数据的**带来源**版本（见上面的说明）。前端徽标用这个。
+                    "modelCooldownDetails": model_cooldown_details,
                 })
             })
             .collect()
@@ -1849,8 +1886,40 @@ impl Pool {
             }
         }
 
+        // ★★ #88 缺口 4.4：模型闸门此前**没有任何出口**。
+        //
+        // `model_gates()` 的注释写着「管理面/诊断用」，但 `status_list` 里没有它、
+        // 也没有任何 command 暴露它 —— 于是用户收到「半开试探中：另一个请求正在探路」
+        // 这类拒绝时，界面上找不到对应状态，只能当成「网关坏了」。
+        //
+        // 本出口的键名与同对象其它字段一致用 **snake_case**（`in_flight_full` /
+        // `cool_kind` / `until_ms` 都是），不要按 `status_list` 的 camelCase 写。
+        let model_gates: Vec<Value> = self
+            .gates
+            .snapshot()
+            .iter()
+            .map(|gate| {
+                json!({
+                    "model": gate.model,
+                    "phase": match gate.phase {
+                        GatePhase::Paused => "paused",
+                        GatePhase::HalfOpen => "halfOpen",
+                    },
+                    "until_ms": gate.until_ms,
+                    // 窗口内**失败次数**（不是账号数，见 `ModelGate::failures`）。
+                    "failures": gate.failures,
+                    "trips": gate.trips,
+                    // 探针租约到期时刻；`0` = 没有探针在跑。
+                    "probe_until_ms": gate.probe_until_ms,
+                    // 持票的请求标识（诊断用）：非空表示正有一个请求在探路。
+                    "probe_owner": gate.probe_owner,
+                })
+            })
+            .collect();
+
         json!({
             "accounts": accounts,
+            "model_gates": model_gates,
             "total": self.entries.len(),
             "healthy": healthy,
             "cooling": cooling,
@@ -3456,7 +3525,7 @@ mod tests {
             let entry = pool.entries.get_mut("u1").unwrap();
             entry.breaker_until_ms = NOW - 1000;
             entry.retry_count = 3;
-            entry.cooldown_model(NOW - 5000, "m", 0, 1000, "6004");
+            entry.cooldown_model(NOW - 5000, "m", 0, 1000, "6004", false);
         }
         pool.save(&path).expect("落盘");
 
@@ -4283,5 +4352,157 @@ mod tests {
             probe_state_of(&classify_event(400, "bad request")),
             ProbeState::UpstreamError
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // #88 缺口 4.1 / 4.3 / 4.4
+    // -----------------------------------------------------------------------
+
+    /// ★★ #88 缺口 4.1：`modelCooldowns` 之外必须再给**带来源**的明细。
+    ///
+    /// 「拿不到上游墙钟就冷 10 分钟」是 #88 引入的新行为，而它在界面上没有痕迹：
+    /// 用户看到「12:34 解冻」分不清那是上游声明的还是本仓猜的 —— 两者对排查的含义相反。
+    ///
+    /// 变异验证：把 `modelCooldownDetails` 从 `json!` 里删掉 ⇒ 第一条断言红。
+    #[test]
+    fn model_cooldown_details_expose_whether_the_deadline_was_guessed() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "一号");
+        // ① 上游**没给**墙钟 ⇒ 兜底时长，`fallback` 必须为 true。
+        pool.apply_upstream_error(
+            "u1",
+            "glm-5.3",
+            &UpstreamEvent::SoftRate {
+                reset_at_ms: None,
+                model_scoped: true,
+            },
+            NOW,
+        );
+        let object = &pool.status_list(NOW)[0];
+        // 形状没变（探测矩阵的被动底色在用）。
+        assert!(
+            object["modelCoolings"]["glm-5.3"].is_number(),
+            "`modelCoolings` 必须保持 `{{模型: ms}}` 的形状: {object}"
+        );
+        let detail = &object["modelCooldownDetails"]["glm-5.3"];
+        assert_eq!(detail["fallback"], json!(true), "无墙钟 ⇒ 兜底: {object}");
+        // ⚠️ 兜底的时刻**也会**被写进 `resetAtMs`（`now + min_model_cooldown_ms`）——
+        //    这正是「不能由 `resetAtMs == 0` 推来源」的原因，也是必须单开
+        //    `from_upstream` 字段的原因。所以这里**不**断言它等于 0。
+        assert!(detail["resetAtMs"].is_number(), "{object}");
+        assert!(detail["untilMs"].is_number(), "{object}");
+
+        // ② 上游**给了**墙钟 ⇒ 不是兜底。
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "一号");
+        let reset_at = NOW + 5 * 60_000;
+        pool.apply_upstream_error(
+            "u1",
+            "glm-5.3",
+            &UpstreamEvent::SoftRate {
+                reset_at_ms: Some(reset_at),
+                model_scoped: true,
+            },
+            NOW,
+        );
+        let detail = &pool.status_list(NOW)[0]["modelCooldownDetails"]["glm-5.3"];
+        assert_eq!(detail["fallback"], json!(false), "有墙钟 ⇒ 不是兜底");
+        assert_eq!(detail["resetAtMs"], json!(reset_at));
+    }
+
+    /// ★★ #88 缺口 4.3：模型冷却到期**不能整条删** —— `hits` 是 `11102` 的退避指数。
+    ///
+    /// 与账号级 `prune_expired_cooling` 保留 `soft_streak` 的纪律必须一致；
+    /// 此前两条路径正好相反（一次惰性清理就让「第 3 次封禁」退回「第 1 次」）。
+    ///
+    /// 变异验证：把 `prune_model_cooldowns` 改回 `retain(|_, c| now < c.until_ms)` ⇒ 红。
+    #[test]
+    fn pruning_keeps_the_ban_backoff_counter() {
+        let mut entry = PoolEntry::new("u1");
+        // 有过封禁历史（`hits > 0`）的条目：到期后必须保留计数。
+        entry.model_cooldowns.insert(
+            "banned".to_string(),
+            crate::pool::ModelCooldown {
+                until_ms: 1_000,
+                reset_at_ms: 1_000,
+                reason: "11102".into(),
+                hits: 2,
+                from_upstream: false,
+            },
+        );
+        // 纯限流条目（`hits == 0`）：没有记忆价值，到期即删。
+        entry.model_cooldowns.insert(
+            "limited".to_string(),
+            crate::pool::ModelCooldown {
+                until_ms: 1_000,
+                reset_at_ms: 1_000,
+                reason: "6004".into(),
+                hits: 0,
+                from_upstream: false,
+            },
+        );
+
+        assert!(entry.prune_model_cooldowns(2_000), "两条都到期，应有变化");
+        assert!(
+            !entry.model_cooldowns.contains_key("limited"),
+            "纯限流条目到期即删（否则每账号×每模型无限累积）"
+        );
+        let kept = entry
+            .model_cooldowns
+            .get("banned")
+            .expect("有封禁历史的条目必须保留");
+        assert_eq!(kept.hits, 2, "退避指数不能被一次清理抹掉");
+        assert_eq!(
+            kept.until_ms, 0,
+            "到期后解冻时刻归零（`healthy_for_model` 据此判可用）"
+        );
+        assert_eq!(kept.reset_at_ms, 0);
+
+        // 仍冷却中的条目原样保留。
+        entry.model_cooldowns.insert(
+            "cooling".to_string(),
+            crate::pool::ModelCooldown {
+                until_ms: 9_999,
+                reset_at_ms: 9_999,
+                reason: "6004".into(),
+                hits: 0,
+                from_upstream: false,
+            },
+        );
+        assert!(
+            !entry.prune_model_cooldowns(2_000),
+            "没有到期项 ⇒ 返回 false"
+        );
+        assert_eq!(entry.model_cooldowns["cooling"].until_ms, 9_999);
+    }
+
+    /// ★★ #88 缺口 4.4：模型闸门必须有**出口**。
+    ///
+    /// 此前 `model_gates()` 的注释写着「管理面/诊断用」，但 `status_list` 没有它、
+    /// 也没有 command 暴露 ⇒ 用户收到「另一个请求正在探路」时界面上找不到对应状态。
+    ///
+    /// 变异验证：把 `model_gates` 从 `json!` 里删掉 ⇒ 红。
+    #[test]
+    fn snapshot_exposes_model_gates() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "一号");
+        assert_eq!(
+            pool.snapshot(NOW)["model_gates"],
+            json!([]),
+            "没有闸门时必须是空数组（不是 null）"
+        );
+
+        pool.note_model_failure("glm-5.3", NOW);
+        assert!(pool.note_model_failure("glm-5.3", NOW), "第 2 次失败应开闸");
+
+        let snapshot = pool.snapshot(NOW);
+        let gates = snapshot["model_gates"].as_array().expect("数组");
+        assert_eq!(gates.len(), 1, "{snapshot}");
+        assert_eq!(gates[0]["model"], json!("glm-5.3"));
+        assert_eq!(gates[0]["phase"], json!("paused"));
+        assert_eq!(gates[0]["failures"], json!(2));
+        assert!(gates[0]["until_ms"].is_number());
+        // 键名与同对象其它字段一致用 snake_case（`in_flight_full` / `cool_kind`）。
+        assert!(gates[0].get("probe_until_ms").is_some(), "{snapshot}");
     }
 }
