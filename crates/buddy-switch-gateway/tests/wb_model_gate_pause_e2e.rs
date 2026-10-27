@@ -97,7 +97,7 @@ async fn paused_model_gate_returns_503_with_retry_after_instead_of_401() {
     {
         let mut pool = state.pool.write().await;
         let block = pool
-            .admit_model(model, now_ms)
+            .admit_model(model, now_ms, "req-probe")
             .expect("暂停中必须被挡住（前提自检）");
         assert!(block.remain_ms > 0, "剩余时长必须为正");
         assert_eq!(
@@ -155,10 +155,76 @@ async fn paused_model_gate_returns_503_with_retry_after_instead_of_401() {
     {
         let mut pool = state.pool.write().await;
         assert!(
-            pool.admit_model("deepseek-v4-flash", now_ms).is_none(),
+            pool.admit_model("deepseek-v4-flash", now_ms, "req-probe")
+                .is_none(),
             "另一个模型不得被同一道闸门挡住"
         );
     }
 
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ★★ 安全审计 P1-3：半开探针票必须**有归还路径**。
+///
+/// ## 缺陷形态
+///
+/// 领票的请求可能**根本没得到模型级结论**（这里就是「池里一个号都没有」）：
+/// 它不会调 `note_model_success` / `note_model_failure`，于是票一直挂到
+/// `PROBE_LEASE_MS`（120 s）租约到期 —— 期间**所有**请求都被判成「名额被占用」⇒
+/// 整模型 503，而报错还说是「别的请求」占了名额。
+///
+/// ## 这条用例钉什么
+///
+/// 请求返回后，**下一个请求必须能立刻领到票**（而不是等 120 秒）。
+/// 判据用 `admit_model` 的返回值：能领到票 ⇒ `None`；票被遗弃 ⇒ `Some(block)`。
+///
+/// 变异验证：把 `relay()` 外层那句 `release_probe` 删掉 ⇒ 本条红。
+#[tokio::test]
+async fn abandoned_probe_is_returned_when_the_request_has_no_model_verdict() {
+    let _guard = guard();
+    let home = isolated_home("probe-release");
+    // 把退避压到 1ms，好让「暂停到期 → 半开」在测试里立刻发生。
+    let state = GatewayState::new(GatewayConfig {
+        pool: buddy_switch_gateway::pool::PoolConfig {
+            gate_threshold: 2,
+            gate_base_ms: 1,
+            gate_max_ms: 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let (_record, key) = state.keys.create("e2e-probe".into(), Region::Cn);
+    let app = router(state.clone());
+
+    let model = "glm-5.3";
+    let now_ms = buddy_switch_gateway::timeutil::now_ms();
+    {
+        let mut pool = state.pool.write().await;
+        pool.note_model_failure(model, now_ms);
+        pool.note_model_failure(model, now_ms);
+    }
+    // 等闸门到期（1ms 退避）。
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // 池里没有任何账号 ⇒ 这个请求领票后必然「选不出号」，拿不到模型级结论。
+    let response = app
+        .clone()
+        .oneshot(chat_request(&key, model))
+        .await
+        .expect("请求应完成");
+    assert!(
+        !response.status().is_success(),
+        "空池不可能成功，这条用例的前提是「请求带着票失败了」"
+    );
+
+    // 核心断言：票已归还 ⇒ 下一个请求能立刻领到票。
+    let later = buddy_switch_gateway::timeutil::now_ms();
+    let mut pool = state.pool.write().await;
+    assert!(
+        pool.admit_model(model, later, "req-next").is_none(),
+        "上一个请求没有模型级结论 ⇒ 票必须归还，否则整模型要被白锁 120 秒"
+    );
+
+    drop(pool);
     let _ = std::fs::remove_dir_all(&home);
 }

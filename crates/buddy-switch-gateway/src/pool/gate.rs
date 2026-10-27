@@ -74,6 +74,17 @@ pub struct ModelGate {
     /// 探针的**租约到期时刻**（毫秒）。`probed` 之后超过它仍未回填结果，
     /// 视为「试出去了但没回来」⇒ 按失败处理（见 [`ModelGates::blocked`]）。
     pub probe_until_ms: i64,
+    /// 探针票的**归属请求标识**（空 = 无主）。安全审计 P1-3。
+    ///
+    /// ## 为什么票需要记住「是谁领的」
+    ///
+    /// 改造前 `try_probe` 只判 `probed`：半开时**第一个**请求领票成功，而中继的
+    /// attempt 循环**每轮**都调 `admit_model` ⇒ 同一个请求的第一次换号重试就被
+    /// 自己那张票挡住（`max_rotate` 退化成 1 次），并且换号轨迹里会出现一条
+    /// 假信息「试探名额已被**其它**请求占用」—— 占用的其实是它自己。
+    ///
+    /// 有了归属，同一个请求可以持票继续换号；别的请求仍被挡住（半开的语义不变）。
+    pub probe_owner: String,
 }
 
 /// 被闸门挡住时的可诊断信息。
@@ -129,6 +140,7 @@ impl ModelGates {
                         trips,
                         probed: false,
                         probe_until_ms: 0,
+                        probe_owner: String::new(),
                     },
                 );
                 return true;
@@ -150,6 +162,7 @@ impl ModelGates {
                 trips,
                 probed: false,
                 probe_until_ms: 0,
+                probe_owner: String::new(),
             },
         );
         true
@@ -194,6 +207,7 @@ impl ModelGates {
                             trips,
                             probed: false,
                             probe_until_ms: 0,
+                            probe_owner: String::new(),
                         },
                     );
                     return Some(GateBlock {
@@ -207,14 +221,25 @@ impl ModelGates {
         }
     }
 
-    /// 半开阶段申请**唯一**一张探针票。返回 `true` = 本次请求可以去试。
+    /// 半开阶段申请 / 续用探针票。返回 `true` = 本次请求可以去试。
     ///
-    /// `false` 意味着别的请求已经把这个名额用掉了 —— 此时调用方应把它当成
-    /// 「仍在暂停」，否则一次到期会放出双倍请求（正是半开要避免的）。
-    pub fn try_probe(&mut self, model: &str, now_ms: i64) -> bool {
+    /// ## 三种情形（安全审计 P1-3）
+    ///
+    /// | 状态 | `owner` | 结果 |
+    /// |:--|:--|:--|
+    /// | 半开、票未发 | 任意 | **发一张票**并记下 `owner` ⇒ `true` |
+    /// | 半开、票已发给**同一个**请求 | 相同 | `true`（持票者换号重试，不该被自己挡住） |
+    /// | 半开、票已发给**别的**请求 / 仍在暂停 | — | `false`（否则一次到期会放出双倍探针） |
+    ///
+    /// `owner` 为空串时退化成旧语义（只发一张、永不复用）—— 供不关心归属的调用方使用。
+    pub fn try_probe(&mut self, model: &str, now_ms: i64, owner: &str) -> bool {
         match self.gates.get_mut(model) {
-            Some(gate) if gate.phase == GatePhase::HalfOpen && !gate.probed => {
+            Some(gate) if gate.phase == GatePhase::HalfOpen => {
+                if gate.probed {
+                    return !owner.is_empty() && gate.probe_owner == owner;
+                }
                 gate.probed = true;
+                gate.probe_owner = owner.to_string();
                 // 租约：探针必须在 `PROBE_LEASE_MS` 内回填（成功/失败），否则到期重开暂停。
                 gate.probe_until_ms = now_ms.saturating_add(PROBE_LEASE_MS);
                 true
@@ -222,6 +247,40 @@ impl ModelGates {
             // 没有闸门 = 从未失败过，正常放行。
             None => true,
             _ => false,
+        }
+    }
+
+    /// 探针票的**真实剩余租约**（毫秒）。没有票时返回 `0`。
+    ///
+    /// ★ 用来替换 `GateBlock.remain_ms = 0` 那个哨兵值：改造前「票被占用」的响应
+    /// 会告诉客户端 `Retry-After: 1`，而真实等待可能是整整 `PROBE_LEASE_MS`（120s）——
+    /// 文案写「一两秒」，用户就按 1 秒的节奏去撞一堵 120 秒的墙。
+    pub fn probe_remaining_ms(&self, model: &str, now_ms: i64) -> i64 {
+        self.gates
+            .get(model)
+            .map(|gate| gate.probe_until_ms.saturating_sub(now_ms).max(0))
+            .unwrap_or(0)
+    }
+
+    /// **归还**探针票（幂等）。
+    ///
+    /// ## 为什么必须有归还路径
+    ///
+    /// 领票的请求可能**根本没得到模型级结论**：选不出号、在途满、参数错、
+    /// 上游回的是账号级 429/5xx …… 这些情况都不会调 `record_success` / `record_failure`。
+    /// 改造前票就一直挂到 120s 租约到期，期间**所有**请求都被判成「名额被占用」⇒
+    /// 整模型 503，最长两分钟，而报错还说是「别的请求」占了名额。
+    ///
+    /// ⚠️ 只清 `probed` / `probe_until_ms`，**不动** `trips` / `until_ms`：
+    /// 「试探没有结论」不是「试探失败」，不该把退避翻倍。
+    pub fn release_probe(&mut self, model: &str, owner: &str) {
+        let Some(gate) = self.gates.get_mut(model) else {
+            return;
+        };
+        if gate.probed && !owner.is_empty() && gate.probe_owner == owner {
+            gate.probed = false;
+            gate.probe_owner.clear();
+            gate.probe_until_ms = 0;
         }
     }
 
@@ -333,10 +392,16 @@ mod tests {
 
         // 到期 ⇒ 转入半开并**放行这一次**（票还没被领）
         assert!(gates.blocked("m", until + 1, &cfg).is_none());
-        assert!(gates.try_probe("m", until + 1), "半开必须发一张探针票");
+        assert!(
+            gates.try_probe("m", until + 1, "req-a"),
+            "半开必须发一张探针票"
+        );
         // 第二个请求领不到票 ⇒ 视为仍在暂停（`blocked` 对 HalfOpen 恒 None，
         // 由调用方用 `try_probe` 的返回值兜住）
-        assert!(!gates.try_probe("m", until + 2), "一张票只能领一次");
+        assert!(
+            !gates.try_probe("m", until + 2, "req-b"),
+            "一张票只能领一次（别的请求领不走）"
+        );
     }
 
     #[test]
@@ -352,7 +417,7 @@ mod tests {
         // 到期 → 领票 → 试探失败 ⇒ 重新暂停且翻倍
         let at = first_until + 1;
         assert!(gates.blocked("m", at, &cfg).is_none());
-        assert!(gates.try_probe("m", at));
+        assert!(gates.try_probe("m", at, "req-a"));
         assert!(gates.record_failure("m", at, &cfg));
         let second_pause = gates.get("m").unwrap().until_ms - at;
         assert_eq!(second_pause, 2_000, "半开失败必须退避翻倍");
@@ -374,13 +439,16 @@ mod tests {
         // 到期 → 领票；但**没有人回填结果**（请求根本没发出去）
         let at = until + 1;
         assert!(gates.blocked("m", at, &cfg).is_none());
-        assert!(gates.try_probe("m", at));
+        assert!(gates.try_probe("m", at, "req-a"));
         // 租约内：仍按「票已被领」拒绝
         assert!(
             gates.blocked("m", at + 1_000, &cfg).is_none(),
             "半开期间本身不返回 Blocked"
         );
-        assert!(!gates.try_probe("m", at + 1_000), "一张票只能领一次");
+        assert!(
+            !gates.try_probe("m", at + 1_000, "req-b"),
+            "一张票只能领一次"
+        );
 
         // 超过租约 ⇒ 必须重新暂停（而不是永远停在「票已领」）
         let after_lease = at + PROBE_LEASE_MS + 1;
@@ -396,7 +464,10 @@ mod tests {
         // 而且**仍能**继续走半开（到期后重新发得出票）
         let next = after_lease + blocked.remain_ms + 1;
         assert!(gates.blocked("m", next, &cfg).is_none());
-        assert!(gates.try_probe("m", next), "重开暂停后必须能再发一张票");
+        assert!(
+            gates.try_probe("m", next, "req-c"),
+            "重开暂停后必须能再发一张票"
+        );
     }
 
     #[test]
@@ -429,5 +500,130 @@ mod tests {
         gates.prune(NOW + 120_000, cfg.gate_window_ms);
         assert!(gates.recent.is_empty(), "窗口外的失败记录必须被清掉");
         assert!(gates.snapshot().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // 安全审计 P1-3：探针票的归属与归还
+    // -----------------------------------------------------------------------
+
+    /// 半开 + 已经发过两次失败 ⇒ 进入 `HalfOpen` 并返回闸门到期时刻。
+    fn half_open(gates: &mut ModelGates) -> i64 {
+        let cfg = config();
+        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", NOW, &cfg);
+        gates.get("m").unwrap().until_ms
+    }
+
+    /// ★★ 安全审计 P1-3：**持票的那个请求自己再来，不该被自己那张票挡住**。
+    ///
+    /// 改造前 `try_probe` 只判 `probed` ⇒ 中继的 attempt 循环第 2 轮就被判成
+    /// 「名额已被其它请求占用」，`max_rotate` 退化成 1 次，且换号轨迹里出现一句假话。
+    ///
+    /// 变异验证：把 `try_probe` 里的 owner 判断删回 `!gate.probed` ⇒ 第一条断言红。
+    #[test]
+    fn probe_ticket_belongs_to_the_request_that_claimed_it() {
+        let mut gates = ModelGates::default();
+        let mut cfg = config();
+        cfg.gate_base_ms = 1_000;
+        let until = half_open(&mut gates);
+
+        assert!(gates.blocked("m", until + 1, &cfg).is_none(), "到期转半开");
+        assert!(gates.try_probe("m", until + 1, "req-a"), "第一个请求领到票");
+        // ① 持票者自己换号重试 ⇒ 仍然可以继续。
+        assert!(
+            gates.try_probe("m", until + 2, "req-a"),
+            "持票者第二次尝试不该被自己挡住（max_rotate 不能退化）"
+        );
+        // ② 别的请求 ⇒ 一律领不到（半开的语义不变）。
+        assert!(
+            !gates.try_probe("m", until + 3, "req-b"),
+            "别的请求不能蹭票，否则一次到期会放出双倍探针"
+        );
+        // 反向对照：清空 owner 的调用方退化成旧语义（只发一张、永不复用）。
+        assert!(!gates.try_probe("m", until + 4, ""), "空 owner 不得续用");
+    }
+
+    /// ★★ 安全审计 P1-3：**票必须有归还路径**，且归还不能算作失败。
+    ///
+    /// 改造前根本没有归还入口（全仓无 `release_probe`）⇒ 领票请求若没得到模型级
+    /// 结论（选不出号 / 在途满 / 账号级 429），票会挂满 `PROBE_LEASE_MS`（120s），
+    /// 期间整模型 503。
+    #[test]
+    fn released_probe_reopens_half_open_without_punishing_the_model() {
+        let mut gates = ModelGates::default();
+        let mut cfg = config();
+        cfg.gate_base_ms = 1_000;
+        let until = half_open(&mut gates);
+        let before = gates.get("m").unwrap().clone();
+
+        assert!(gates.blocked("m", until + 1, &cfg).is_none());
+        assert!(gates.try_probe("m", until + 1, "req-a"));
+        let lease = gates.probe_remaining_ms("m", until + 1);
+        assert_eq!(lease, PROBE_LEASE_MS, "租约必须是完整时长");
+
+        gates.release_probe("m", "req-a");
+        // ① 票已归还 ⇒ 另一个请求立刻能领（不必等 120s）。
+        assert!(
+            gates.try_probe("m", until + 2, "req-b"),
+            "归还后别的请求必须能立刻探路"
+        );
+        // ② 归还**不是失败**：退避次数与暂停截止时刻都不能变。
+        let after = gates.get("m").unwrap();
+        assert_eq!(after.trips, before.trips, "归还不该把退避翻倍");
+        assert_eq!(after.until_ms, before.until_ms, "归还不该延长暂停");
+        assert_eq!(after.failures, before.failures, "归还不该记一次失败");
+
+        // ③ 幂等：再归还一次不出错、也不改变状态。
+        gates.release_probe("m", "req-b");
+        // ④ 票已空出来 ⇒ 下一个请求能领到。
+        assert!(
+            gates.try_probe("m", until + 3, "req-c"),
+            "归还后票应可被下一个请求领取"
+        );
+    }
+
+    /// 归还只对**持票者**生效：别人调 `release_probe` 不能把票抢走。
+    #[test]
+    fn only_the_ticket_owner_can_release_it() {
+        let mut gates = ModelGates::default();
+        let mut cfg = config();
+        cfg.gate_base_ms = 1_000;
+        let until = half_open(&mut gates);
+
+        assert!(gates.blocked("m", until + 1, &cfg).is_none());
+        assert!(gates.try_probe("m", until + 1, "req-a"));
+        gates.release_probe("m", "req-b");
+        assert!(
+            gates.try_probe("m", until + 2, "req-a"),
+            "别人归还后持票者必须仍持票"
+        );
+        assert!(
+            !gates.try_probe("m", until + 3, "req-b"),
+            "非持票者不得因为「归还」而获得票"
+        );
+    }
+
+    /// `probe_remaining_ms` 必须是**真实剩余**，而不是 0 哨兵。
+    ///
+    /// 改造前 `GateBlock.remain_ms` 在「票被占用」时恒为 0，于是错误文案只能说
+    /// 「稍等一两秒」，而真实等待是 120s。
+    #[test]
+    fn probe_remaining_reports_the_real_lease() {
+        let mut gates = ModelGates::default();
+        let mut cfg = config();
+        cfg.gate_base_ms = 1_000;
+        let until = half_open(&mut gates);
+
+        assert_eq!(gates.probe_remaining_ms("m", until), 0, "还没发票");
+        assert!(gates.blocked("m", until + 1, &cfg).is_none());
+        assert!(gates.try_probe("m", until + 1, "req-a"));
+        assert_eq!(gates.probe_remaining_ms("m", until + 1), PROBE_LEASE_MS);
+        assert_eq!(
+            gates.probe_remaining_ms("m", until + 1 + PROBE_LEASE_MS / 2),
+            PROBE_LEASE_MS / 2,
+            "半程时剩余应是半程"
+        );
+        // 没有闸门的模型恒 0（不能返回负数或 panic）。
+        assert_eq!(gates.probe_remaining_ms("never", until), 0);
     }
 }

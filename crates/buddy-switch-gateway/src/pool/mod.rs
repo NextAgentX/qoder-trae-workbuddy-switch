@@ -1027,7 +1027,12 @@ impl Pool {
     ///
     /// 放在 `Pool` 上而不是 `relay` 里：闸门状态与池的写锁同一把，
     /// 两处各拿一次锁会给「探针票」留下竞态窗口（两个请求同时领到票）。
-    pub fn admit_model(&mut self, model: &str, now_ms: i64) -> Option<GateBlock> {
+    pub fn admit_model(
+        &mut self,
+        model: &str,
+        now_ms: i64,
+        request_tag: &str,
+    ) -> Option<GateBlock> {
         let config = self.config.clone();
         if let Some(block) = self.gates.blocked(model, now_ms, &config) {
             return Some(block);
@@ -1036,15 +1041,34 @@ impl Pool {
             return None;
         }
         // 走到这里 = 刚到期转入半开（或已在半开）。
-        if self.gates.try_probe(model, now_ms) {
+        //
+        // ★★ 安全审计 P1-3：`request_tag` 是**本次请求**的唯一标识。
+        //   半开时同一请求的换号重试可以继续用它自己那张票，别的请求仍然被挡住。
+        if self.gates.try_probe(model, now_ms, request_tag) {
             None
         } else {
             Some(GateBlock {
                 model: model.to_string(),
-                remain_ms: 0,
-                failures: 0,
+                // ★ 不再是 0：给出**真实**的租约剩余，否则文案只能说「一两秒」，
+                //   而真实等待可能是 120s（见 `probe_remaining_ms` 的文档）。
+                remain_ms: self.gates.probe_remaining_ms(model, now_ms),
+                failures: self
+                    .gates
+                    .snapshot()
+                    .iter()
+                    .find(|gate| gate.model == model)
+                    .map(|gate| gate.failures)
+                    .unwrap_or(0),
             })
         }
+    }
+
+    /// 归还本次请求的探针票（幂等）。见 [`crate::pool::gate::ModelGates::release_probe`]。
+    ///
+    /// 由中继在**函数出口统一调用**（一个归还点，而不是在每个失败分支各写一遍）——
+    /// 漏一处就等于「票遗弃 120 秒、整模型 503」。
+    pub fn release_probe(&mut self, model: &str, request_tag: &str) {
+        self.gates.release_probe(model, request_tag);
     }
 
     /// 记一次**模型级**失败（`6004` / `11102`）。返回是否因此新开了闸门。
@@ -1169,24 +1193,6 @@ impl Pool {
         entry.breaker_until_ms = 0;
         self.dirty = true;
         true
-    }
-
-    /// 指定 uid 此刻是否可用于该请求。
-    ///
-    /// 供**会话粘性**使用：粘性先问「上次那个账号还能不能用」，能用就复用、不能用就解绑换号。
-    /// 粘性是**优化而非约束**，所以这里必须能明确判出「不可用」，绝不能因为粘性而拒绝服务。
-    ///
-    /// ★ 判据与 [`Self::pick_account`] **同源**（共用 `pick::selectable`）——
-    /// 若这里另写一套且更宽松，粘性就会把请求钉到 `pick` 认为不可用的账号上
-    /// （症状：明明有别的号可用却一直失败）。
-    pub fn is_usable_for(&self, uid: &str, now_ms: i64, model: &str) -> bool {
-        let policy = self.policy();
-        let excluded = self.excluded_keys();
-        // ★ issue #76：`is_usable_for` 问的是「账号本身还能不能用」——
-        //   **不带** Key 白名单（那是「这一把 Key 允不允许用它」，两个问题）。
-        //   白名单只在选号入口（`pick_account`）生效，这里若也判，
-        //   「复活」按钮会把白名单外的账号判成不可恢复（语义混淆）。
-        pick::is_usable(&self.entries, &policy, uid, now_ms, model, &excluded, None)
     }
 
     /// 申请在途额度；返回是否成功（失败表示该号已占满）。
@@ -1800,7 +1806,16 @@ impl Pool {
         let mut realm_totals: BTreeMap<&str, [i64; 4]> = BTreeMap::new();
         for entry in self.entries.values() {
             let is_healthy = entry.healthy(now_ms);
-            let is_cooling = now_ms < entry.until_ms || now_ms < entry.breaker_until_ms;
+            // ★ 安全审计 P2-11：`is_cooling` **必须与 `disabled` 互斥**。
+            //
+            // `disable()` 只清冷却域、**保留熔断域**（`clear_cooling` 不动
+            // `breaker_until_ms`）⇒「已禁用 ∧ 熔断未到期」是可到达状态。改造前这里
+            // 不看 `disabled`，于是同一个账号**同时进 `cooling` 和 `disabled`**，
+            // `/status` 的五个计数之和与 `total` 对不上。
+            //
+            // 这与 `summary_filtered` / `status_list`（都走 `status_of` 的五态互斥）口径一致。
+            let is_cooling =
+                !entry.disabled && (now_ms < entry.until_ms || now_ms < entry.breaker_until_ms);
             // ★ 「满没满」必须与选号**同一个判据**（`pick::in_flight_full`：自愈计数 +
             //   realm 上限）。此处曾自己写一遍 `in_flight_now() >= max_in_flight`，
             //   漏了 `max_in_flight_global` —— 国际版上限更严时，`/status` 会说「没占满」
@@ -2506,23 +2521,29 @@ mod tests {
         pool.upsert("u1", None, "");
         pool.upsert("u2", None, "");
 
-        assert!(pool.admit_model("m", NOW).is_none(), "无闸门 ⇒ 放行");
+        assert!(
+            pool.admit_model("m", NOW, "req-1").is_none(),
+            "无闸门 ⇒ 放行"
+        );
         assert!(
             !pool.note_model_failure("m", NOW),
             "第 1 个账号失败不该开闸"
         );
-        assert!(pool.admit_model("m", NOW).is_none());
+        assert!(pool.admit_model("m", NOW, "req-1").is_none());
         assert!(pool.note_model_failure("m", NOW), "第 2 个账号失败必须开闸");
 
-        let block = pool.admit_model("m", NOW).expect("暂停中必须被拒");
+        let block = pool.admit_model("m", NOW, "req-1").expect("暂停中必须被拒");
         assert!(block.remain_ms > 0, "拒绝信息必须带剩余时长");
         assert_eq!(block.failures, 2);
 
         // 另一个模型不受影响（闸门按模型分家）
-        assert!(pool.admit_model("other", NOW).is_none());
+        assert!(pool.admit_model("other", NOW, "req-1").is_none());
 
         pool.note_model_success("m");
-        assert!(pool.admit_model("m", NOW).is_none(), "成功必须立刻关闸");
+        assert!(
+            pool.admit_model("m", NOW, "req-1").is_none(),
+            "成功必须立刻关闸"
+        );
     }
 
     #[test]
@@ -2704,6 +2725,23 @@ mod tests {
         assert!(!pool.revive("no-such-uid"), "不在池里 ⇒ 返回 false");
     }
 
+    /// 「这个号此刻真的能用吗」—— 直接问选号用的那一份判据（[`pick::is_usable`]）。
+    ///
+    /// 安全审计 P3-21：改造前这里调的是 `Pool::is_usable_for`，那是**生产零调用**的
+    /// 一层包装，而它的 doc 还写着「供会话粘性使用」—— 让人以为粘性走它。
+    /// 包装已删，测试直接问底层，判据才是真的同源。
+    fn is_usable(pool: &Pool, uid: &str) -> bool {
+        pick::is_usable(
+            &pool.entries,
+            &pool.policy(),
+            uid,
+            NOW,
+            "",
+            &pool.excluded_keys(),
+            None,
+        )
+    }
+
     /// ★ 复活的**用户可见后果**：该账号真的重新进入选号。
     ///
     /// 只断言「`disabled` 字段被清」是不够的 —— 选号还有别的判据（冷却 / 熔断 / 在途），
@@ -2711,7 +2749,7 @@ mod tests {
     /// 那才是用户点「恢复」想要的结果。
     ///
     /// 阳性对照：把 `PoolEntry::revive` 改成空操作 ⇒ 本用例必红（`disabled` 未清）；
-    /// 只清 `disabled` 而不清 `breaker_until_ms` ⇒ 本用例也必红（`is_usable_for` 为 false）。
+    /// 只清 `disabled` 而不清 `breaker_until_ms` ⇒ 本用例也必红（`is_usable` 为 false）。
     ///
     /// ⚠️ **不能只断言 `pick_account`**：候选全不可用时它会回落到
     /// [`pick_earliest_expiry`]（宁可试一个也不报「没有账号」），于是「只是被回落捞出来」
@@ -2734,15 +2772,12 @@ mod tests {
             pool.get("u1").unwrap().breaker_until_ms > NOW,
             "前置：熔断应仍在"
         );
-        assert!(
-            !pool.is_usable_for("u1", NOW, ""),
-            "前置：被禁用的账号不可用"
-        );
+        assert!(!is_usable(&pool, "u1"), "前置：被禁用的账号不可用");
 
         assert!(pool.revive("u1"));
 
         assert!(
-            pool.is_usable_for("u1", NOW, ""),
+            is_usable(&pool, "u1"),
             "复活后必须**真的可用**（与选号同一套判据，无回落）：禁用 / 冷却 / 熔断都不得再挡"
         );
         assert_eq!(
@@ -2842,6 +2877,50 @@ mod tests {
             .find(|item| item["uid"] == json!("g-dead"))
             .expect("存在");
         assert_eq!(dead["disabled_reason"], json!("12153 session dead"));
+    }
+
+    /// ★★ 安全审计 P2-11：`snapshot()` 的 `cooling` 与 `disabled` **必须互斥**。
+    ///
+    /// `disable()` 只清冷却域、保留熔断域 ⇒「已禁用 ∧ 熔断未到期」是可到达状态。
+    /// 改造前这里不看 `disabled`，同一个账号会**同时进两个计数** ⇒ `/status` 的
+    /// 五个数之和与 `total` 对不上（而且与 `status_list` 的口径不一致）。
+    ///
+    /// 变异验证：把 `is_cooling` 改回 `now_ms < entry.until_ms || now_ms < entry.breaker_until_ms`
+    /// （去掉 `!entry.disabled`）⇒ 第二条断言红。
+    #[test]
+    fn snapshot_counts_each_account_in_at_most_one_bucket() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "先熔断再禁用");
+        // ① 先用 5xx 压出熔断（`breaker_until_ms` 在未来）—— 单次不够，要连着打。
+        for _ in 0..3 {
+            pool.apply_upstream_error("u1", "", &UpstreamEvent::Server, NOW);
+        }
+        assert!(
+            pool.get("u1").unwrap().breaker_until_ms > NOW,
+            "前置：熔断必须仍在"
+        );
+        // ② 再打成禁用 —— `disable()` 只清冷却域，熔断域会保留下来。
+        for _ in 0..3 {
+            pool.apply_upstream_error("u1", "", &UpstreamEvent::SessionDead, NOW);
+        }
+        let entry = pool.get("u1").unwrap();
+        assert!(entry.disabled, "前置：应已禁用");
+        assert!(
+            entry.breaker_until_ms > NOW,
+            "前置：禁用后熔断域仍在（这正是重复计数的成因）"
+        );
+
+        let snapshot = pool.snapshot(NOW);
+        assert_eq!(snapshot["total"], json!(1));
+        assert_eq!(snapshot["disabled"], json!(1));
+        assert_eq!(
+            snapshot["cooling"],
+            json!(0),
+            "已禁用的账号不该再被算进 cooling（否则各计数之和 ≠ total）: {snapshot}"
+        );
+        assert_eq!(snapshot["healthy"], json!(0));
+        assert_eq!(snapshot["realm_totals"]["cn"]["cooling"], json!(0));
+        assert_eq!(snapshot["realm_totals"]["cn"]["disabled"], json!(1));
     }
 
     /// `snapshot()` 的 `in_flight_full` 必须与选号同源：**认 realm 上限**。

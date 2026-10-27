@@ -293,25 +293,13 @@ fn allowed_uids_for(
     policy: &crate::apikey::KeyPolicy,
     region: QoderRegion,
 ) -> Option<HashSet<String>> {
-    use crate::apikey::ScopeMode;
-    if policy.scope_mode != ScopeMode::Selected {
-        return None;
-    }
-    let mut allowed: HashSet<String> = policy.scope_accounts.iter().cloned().collect();
-    if !policy.scope_groups.is_empty() {
-        let file = buddy_switch_core::modules::qoder::account::load_accounts_for(region);
-        for account in file.accounts.iter() {
-            let group = account.group.clone().unwrap_or_default();
-            if group.is_empty() {
-                continue;
-            }
-            if policy.scope_groups.iter().any(|wanted| wanted == &group) {
-                // `RawAccount.uid` 是 `String`（非 Option）—— 与 Trae 的 `userId` 不同。
-                allowed.insert(account.uid.clone());
-            }
-        }
-    }
-    Some(allowed)
+    // ★ 安全审计 P1-7：判定与展开由 `apikey::scope_allows` **唯一提供**。
+    //   这里只负责取 `(uid, 分组)` —— Qoder 的分组是账号记录上的自由文本 `group`。
+    let accounts = buddy_switch_core::modules::qoder::account::load_accounts_for(region)
+        .accounts
+        .into_iter()
+        .map(|account| (account.uid, account.group));
+    crate::apikey::allowed_uids_for_policy(policy, accounts)
 }
 
 /// 一趟 Qoder chat 中继（**认证之后的全部逻辑**）—— 产品线入口与统一网关**共用这一份**。

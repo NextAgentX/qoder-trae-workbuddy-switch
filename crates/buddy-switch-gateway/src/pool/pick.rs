@@ -831,6 +831,166 @@ mod tests {
         )
     }
 
+    // -----------------------------------------------------------------------
+    // 安全审计 P1-6：`allowed` / `excluded` 是**授权边界**，必须在选号层有断言
+    // -----------------------------------------------------------------------
+    //
+    // 改造前：测试简写把 `allowed` 硬写成 `None`、`excluded` 用 `no_exclusions()`，
+    // 全仓 `PickInput { allowed: Some(_) }` **零出现** ⇒ 把 `selectable()` 里的
+    // `allowed` 判据和 `pick_earliest_expiry` 里的 `!in_allowed(...)` 一起删掉，
+    // 测试仍然全绿。症状是最难查的那种：限定到 A 的 Key 被 B 服务、去刷 B 的额度，
+    // 而池卡同时显示「A 可用」（`summary` 是另一套过滤，它绿着）。
+
+    fn entries_of(uids: &[&str]) -> BTreeMap<String, PoolEntry> {
+        uids.iter()
+            .map(|uid| (uid.to_string(), base_entry(uid)))
+            .collect()
+    }
+
+    fn uid_set(uids: &[&str]) -> HashSet<String> {
+        uids.iter().map(|uid| uid.to_string()).collect()
+    }
+
+    /// 四种模式在**同一份输入**下都必须只选白名单内的号。
+    ///
+    /// 变异验证：去掉 `selectable()` 里的 `allowed` 判据 ⇒ 至少一个模式会选出 `b`。
+    #[test]
+    fn every_pick_mode_honours_the_allowlist() {
+        for mode in [
+            PickMode::Weighted,
+            PickMode::MaxCredits,
+            PickMode::Random,
+            PickMode::Sequential,
+        ] {
+            let mut entries = entries_of(&["a", "b"]);
+            let allowed = uid_set(&["a"]);
+            let tried = HashSet::new();
+            let input = PickInput {
+                realm: None,
+                model: "m",
+                tried: &tried,
+                excluded: no_exclusions(),
+                allowed: Some(&allowed),
+                mode,
+                seed: 7,
+            };
+            let mut seq = 0;
+            let picked = super::pick(&mut entries, &mut seq, &policy(), NOW, &input);
+            assert_eq!(
+                picked.as_deref(),
+                Some("a"),
+                "{mode:?} 必须只选白名单内的账号（b 不在名单里）"
+            );
+        }
+    }
+
+    /// 偏好（`pinned` / 会话粘性）**不能越权**：指定的号在名单外时回落到名单内。
+    ///
+    /// 变异验证：把 `pick_with_preference` 里对 `is_usable(...allowed)` 的传参改成
+    /// `None` ⇒ 本用例选出 `b`、红。
+    #[test]
+    fn preference_cannot_escape_the_allowlist() {
+        let mut entries = entries_of(&["a", "b"]);
+        let allowed = uid_set(&["a"]);
+        let tried = HashSet::new();
+        let input = PickInput {
+            realm: None,
+            model: "m",
+            tried: &tried,
+            excluded: no_exclusions(),
+            allowed: Some(&allowed),
+            mode: PickMode::Weighted,
+            seed: 3,
+        };
+        let mut seq = 0;
+        let picked =
+            super::pick_with_preference(&mut entries, &mut seq, &policy(), NOW, &input, Some("b"));
+        assert_eq!(
+            picked.as_deref(),
+            Some("a"),
+            "偏好指向名单外的号时必须回落到名单内，而不是照办"
+        );
+    }
+
+    /// ★ 兜底（`pick_earliest_expiry`）**不得跳到名单外**。
+    ///
+    /// 这是「受限 Key 不许兜底到名单外」的唯一防线：名单内唯一的号在冷却时，
+    /// 正确行为是**放弃**（返回 `None`），而不是「先借一个名单外的号用着」。
+    #[test]
+    fn fallback_never_jumps_outside_the_allowlist() {
+        let mut entries = entries_of(&["a", "b"]);
+        let allowed = uid_set(&["a"]);
+        // 两个号都在冷却（`pick_earliest_expiry` 的语义就是「从冷却中的号里挑最早到期的
+        // 去强试」），且 b 更早到期 ⇒ 它天然是兜底首选，而它**不在**名单里。
+        entries.get_mut("a").unwrap().until_ms = NOW + 60_000;
+        entries.get_mut("b").unwrap().until_ms = NOW + 30_000;
+
+        let tried = HashSet::new();
+        let input = PickInput {
+            realm: None,
+            model: "m",
+            tried: &tried,
+            excluded: no_exclusions(),
+            allowed: Some(&allowed),
+            mode: PickMode::Weighted,
+            seed: 11,
+        };
+        let picked = super::pick_earliest_expiry(&mut entries, &policy(), NOW, &input);
+        assert_ne!(
+            picked.as_deref(),
+            Some("b"),
+            "兜底绝不能越过白名单 —— 那等于用别人的账号刷额度"
+        );
+        // 反向对照：名单**包含两者**时，b 是合法兜底目标（证明上面的断言不是因为
+        // 「兜底根本选不出东西」而假绿）。
+        let both = uid_set(&["a", "b"]);
+        let input_both = PickInput {
+            allowed: Some(&both),
+            ..input
+        };
+        let picked = super::pick_earliest_expiry(&mut entries, &policy(), NOW, &input_both);
+        assert_eq!(picked.as_deref(), Some("b"), "白名单放宽后兜底应当能选中 b");
+    }
+
+    /// `excluded` 同样要在**三条路径**上生效：通用选号 / 偏好 / 兜底。
+    #[test]
+    fn exclusions_apply_on_every_selection_path() {
+        let mut entries = entries_of(&["a", "b"]);
+        let excluded = uid_set(&["a"]);
+        let tried = HashSet::new();
+        let input = PickInput {
+            realm: None,
+            model: "m",
+            tried: &tried,
+            excluded: &excluded,
+            allowed: None,
+            mode: PickMode::Weighted,
+            seed: 5,
+        };
+        let mut seq = 0;
+
+        // ① 通用选号
+        let picked = super::pick(&mut entries, &mut seq, &policy(), NOW, &input);
+        assert_eq!(picked.as_deref(), Some("b"), "被排除的号不得被自动选中");
+
+        // ② 偏好（用户显式指定了被排除的号 —— 硬排除语义优先）
+        let picked =
+            super::pick_with_preference(&mut entries, &mut seq, &policy(), NOW, &input, Some("a"));
+        assert_eq!(
+            picked.as_deref(),
+            Some("b"),
+            "被排除的号即使被显式指定也不可用（硬排除）"
+        );
+
+        // ③ 兜底
+        let picked = super::pick_earliest_expiry(&mut entries, &policy(), NOW, &input);
+        assert_ne!(
+            picked.as_deref(),
+            Some("a"),
+            "兜底同样受排除约束（改造前这条路径就查 excluded，此处钉住它别被删）"
+        );
+    }
+
     /// 同上，用于 `is_usable`（不排除任何账号）。
     fn is_usable(
         entries: &BTreeMap<String, PoolEntry>,

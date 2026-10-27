@@ -1099,23 +1099,27 @@ fn allowed_uids_for(
     policy: &crate::apikey::KeyPolicy,
     variant: TraeVariant,
 ) -> Option<HashSet<String>> {
-    use crate::apikey::ScopeMode;
-    if policy.scope_mode != ScopeMode::Selected {
-        return None;
-    }
-    let mut allowed: HashSet<String> = policy.scope_accounts.iter().cloned().collect();
-    if !policy.scope_groups.is_empty() {
-        /* ★ Trae 的分组是**独立文件**（`user_id -> group_id` 的 `membership` 映射），
-        不像 WB 那样把 `groupName` 挂在账号记录上 ⇒ 读 `load_groups_for` 再反查。
-        这里**只增不删**：`scope_accounts` 里的 uid 即使不在任何分组也保留。 */
-        let groups = buddy_switch_core::modules::trae::account::load_groups_for(variant);
-        for (uid, group_id) in groups.membership.iter() {
-            if policy.scope_groups.iter().any(|wanted| wanted == group_id) {
-                allowed.insert(uid.clone());
-            }
-        }
-    }
-    Some(allowed)
+    // ★ 安全审计 P1-7：判定与展开由 `apikey::scope_allows` **唯一提供**。
+    //   这里只负责取 `(uid, groupId)` —— Trae 的分组是**独立文件**
+    //   （`user_id -> group_id` 的 `membership` 映射），不是账号记录上的字段。
+    //
+    //   `chain(membership)` 是**必须**的：membership 里可能有账号库里已不存在的 uid
+    //   （账号被删但分组映射还没清），改造前那份实现就是直接遍历 membership 的，
+    //   只遍历 `accounts` 会静默缩小授权范围。
+    let groups = buddy_switch_core::modules::trae::account::load_groups_for(variant);
+    let from_accounts = buddy_switch_core::modules::trae::account::load_accounts_for(variant)
+        .accounts
+        .into_iter()
+        .filter_map(|account| {
+            let uid = account.user_id?;
+            let group = groups.membership.get(&uid).cloned();
+            Some((uid, group))
+        });
+    let from_membership = groups
+        .membership
+        .iter()
+        .map(|(uid, group)| (uid.clone(), Some(group.clone())));
+    crate::apikey::allowed_uids_for_policy(policy, from_accounts.chain(from_membership))
 }
 
 /// 非流式路径的按密钥 token 记账（issue #76）。

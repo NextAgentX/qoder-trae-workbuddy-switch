@@ -221,12 +221,45 @@ pub async fn body_text_with_prefix(
     text
 }
 
+/// 进程内的请求序号（半开探针票的归属标识，不需要密码学随机）。
+static PROBE_TAG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_probe_tag() -> String {
+    format!(
+        "req-{}",
+        PROBE_TAG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
 #[allow(clippy::result_large_err)]
 // `RelayFailure` 承载完整上游响应与诊断上下文，装箱会丢掉「一次就能定位」的可读性。
 /// 把一次请求送到上游；内含换号轮换与失败治理。
+///
+/// ## 为什么外面还包一层（安全审计 P1-3）
+///
+/// 半开探针票必须**有归还路径**。领票的请求可能根本没得到模型级结论（选不出号、
+/// 在途满、参数错、上游回账号级 429/5xx…），而 `relay_inner` 内部有十几个 `?`
+/// 提前返回点 —— 在每个分支各写一次归还不现实、也迟早漏。
+///
+/// 所以把「归还」放在**唯一出口**：`relay_inner` 返回后无条件调一次
+/// [`Pool::release_probe`]（幂等：票若已被 `note_model_success` / `note_model_failure`
+/// 结算，这里什么都不做）。
 pub async fn relay(
     state: &GatewayState,
     request: RelayRequest,
+) -> Result<RelayOutcome, RelayFailure> {
+    let probe_tag = next_probe_tag();
+    let model = request.model.clone();
+    let outcome = relay_inner(state, request, &probe_tag).await;
+    state.pool.write().await.release_probe(&model, &probe_tag);
+    outcome
+}
+
+#[allow(clippy::result_large_err)]
+async fn relay_inner(
+    state: &GatewayState,
+    request: RelayRequest,
+    probe_tag: &str,
 ) -> Result<RelayOutcome, RelayFailure> {
     let mut now_ms = timeutil::now_ms();
     let realm = realm_of(request.region);
@@ -252,23 +285,18 @@ pub async fn relay(
     //   而记账口径（period）要跟账号库无关地按 Key 自己的策略走。
     if let Some(policy) = request.key_policy.as_ref() {
         let now = timeutil::now_ms();
-        let used = state.key_usage.used_for(
-            &request.key_id_for_policy(),
-            policy.quota_unit,
-            policy.quota_period,
-            now,
-        );
-        // 请求数在**进入网关后**记（业务代理没有 usage 回包，只有请求数可计）；
-        // token 在流结束记（`UsageTap` 的 sink，见 `logging.rs` 同款接法）。
-        state
-            .key_usage
-            .record_request(&request.key_id_for_policy(), policy.quota_period, now);
-        if let crate::apikey::QuotaVerdict::Exceeded {
-            used,
-            limit,
-            unit,
-            period,
-        } = crate::apikey::quota_verdict_for_policy(policy, used)
+        let key_id = request.key_id_for_policy();
+        // ★★ 安全审计 P2-17：**判定与记账必须是同一个原子操作**，且**超限不记账**。
+        //
+        // 改造前是「`used_for` 判 → `record_request` 记 → 再判」—— 两个问题：
+        // ① **被拒的请求仍然计入分母**（用户会看到 101/100 这种越界数字，且分母被
+        //    持续抬高，越拒越难通过）；② 读-判-写不在同一把锁里，并发会同时通过判定
+        //    并丢计数（`KeyUsageStore::check_and_record` 的文档已就此论证过）。
+        //
+        // `check_and_record` 本来就实现了正确口径（同一把锁、超限不记），
+        // `KeyActor::check_quota_and_count` 也一直用它 —— 只有这条主路径是手写的两步版。
+        if let Some((used, limit, unit, period)) =
+            state.key_usage.check_and_record(&key_id, policy, now)
         {
             return Err(RelayFailure {
                 error: GatewayError::KeyQuotaExceeded {
@@ -326,7 +354,12 @@ pub async fn relay(
         //
         // 与下面的「本轮第 2 个账号失败即停」是两个层次：那条只能挽回**当前**这一轮，
         // 这条让**后续请求**也直接快速失败 —— 否则每个新请求都要重新撞一遍同样的墙。
-        if let Some(block) = state.pool.write().await.admit_model(&request.model, now_ms) {
+        if let Some(block) = state
+            .pool
+            .write()
+            .await
+            .admit_model(&request.model, now_ms, probe_tag)
+        {
             // ★★ issue #106：闸门短路必须**自带错误**，不能落到下面 `last == None` 的兜底。
             //
             // 改造前这里只 push 一条 attempt 就 `break`，于是 `last` 仍是 `None` ⇒ 走
@@ -336,13 +369,18 @@ pub async fn relay(
             //
             // 语义上这是「上游此刻对该模型整体限流」= 可重试的临时不可用 ⇒ 503 + Retry-After。
             let remain_secs = (block.remain_ms.max(0) as u64).div_ceil(1000);
-            let reason = if block.remain_ms > 0 {
+            // ★ 安全审计 P1-3：`remain_ms` 现在给的是**探针租约的真实剩余**（不再是 0），
+            //   所以两种情形可以分开说清 —— 且都不再撒谎。
+            let reason = if block.failures > 0 {
                 format!(
                     "{} 整体暂停（窗口内已失败 {} 次，剩 {}s）",
                     block.model, block.failures, remain_secs
                 )
             } else {
-                format!("{} 半开试探名额已被其它请求占用", block.model)
+                format!(
+                    "{} 半开试探中：另一个请求正在探路，最多再等 {}s",
+                    block.model, remain_secs
+                )
             };
             attempts.push(UpstreamAttempt {
                 account: String::new(),
@@ -883,25 +921,15 @@ async fn acquire_with_wait(
 /// ★ 展开**只增不删**：`scope_accounts` 里的 uid 即使账号库已删除也保留 ——
 ///   那是用户显式写进去的，删掉会让「改完策略发现少一个号」无从解释。
 fn allowed_uids_for(policy: &crate::apikey::KeyPolicy, region: Region) -> Option<HashSet<String>> {
-    use crate::apikey::ScopeMode;
-    if policy.scope_mode != ScopeMode::Selected {
-        return None;
-    }
-    let mut allowed: HashSet<String> = policy.scope_accounts.iter().cloned().collect();
-    if !policy.scope_groups.is_empty() {
-        for account in account::load_accounts_for(region) {
-            let group = account::get_str(&account, "groupName").unwrap_or_default();
-            if group.is_empty() {
-                continue;
-            }
-            if policy.scope_groups.iter().any(|wanted| wanted == &group) {
-                if let Some(uid) = account::get_str(&account, "uid") {
-                    allowed.insert(uid);
-                }
-            }
-        }
-    }
-    Some(allowed)
+    // ★ 安全审计 P1-7：判定与展开由 `apikey::scope_allows` **唯一提供**。
+    //   这里只负责「从 WB 账号库取 (uid, 分组)」—— 分组字段是自由文本 `groupName`。
+    let accounts = account::load_accounts_for(region)
+        .into_iter()
+        .filter_map(|account| {
+            let uid = account::get_str(&account, "uid")?;
+            Some((uid, account::get_str(&account, "groupName")))
+        });
+    crate::apikey::allowed_uids_for_policy(policy, accounts)
 }
 
 /// 选号：优先账号池（有治理状态），池给不出时回落既有策略。

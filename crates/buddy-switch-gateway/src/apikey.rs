@@ -15,6 +15,7 @@
 //! 判定逻辑是**纯函数**（[`quota_verdict`] / [`account_allowed`]）：
 //! 单元测试不需要起监听、不需要真实请求，直接构造记录即可覆盖全部边界。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -178,26 +179,94 @@ pub fn quota_verdict_for_policy(policy: &KeyPolicy, used: u64) -> QuotaVerdict {
     QuotaVerdict::Ok
 }
 
-/// 纯函数：白名单判定。
+/// 白名单判定的**唯一实现**（安全审计 P1-7）。
 ///
 /// `All` ⇒ 放行（不改选号行为）。`Selected` ⇒ 账号 uid 或账号所属分组
-/// **任一命中**即放行（名单是并集）。账号/分组参数由调用方从账号库给出 ——
-/// 本函数不认识账号，只做集合判定（可单测、可在调用方复用）。
+/// **任一命中**即放行（名单是并集）。
+///
+/// ## 为什么抽成 `scope_*` 参数而不是只留 `account_allowed`
+///
+/// 改造前这条判定有 **4 份实现**：`account_allowed`（有测试、**零生产调用**）与
+/// `relay` / `trae::routes` / `qoder::routes` 三份手写的 `allowed_uids_for`（生产在跑、
+/// 零测试）。要改「uid ∪ 分组」的语义时，改那份有测试的会全绿，三份活的原封不动 ⇒
+/// **三个平台行为分叉而构建全绿**。
+///
+/// 现在判定只此一处，`account_allowed` / `policy_allows` / `allowed_uids_for_policy`
+/// 都是它的薄包装。三产品的分组**数据源**仍各不相同（WB 是账号记录上的 `groupName`、
+/// Trae 是独立 membership 文件、Qoder 是账号记录上的 `group`），差异只留在「怎么取
+/// `(uid, group)`」，判定不再可能分家。
+pub fn scope_allows(
+    scope_mode: ScopeMode,
+    scope_accounts: &[String],
+    scope_groups: &[String],
+    account_uid: &str,
+    account_group: Option<&str>,
+) -> bool {
+    if scope_mode != ScopeMode::Selected {
+        return true;
+    }
+    if scope_accounts.iter().any(|uid| uid == account_uid) {
+        return true;
+    }
+    match account_group {
+        Some(group) if !group.is_empty() => scope_groups.iter().any(|g| g == group),
+        _ => false,
+    }
+}
+
+/// 按**Key 记录**判定（`account_allowed` 的原签名）。
 pub fn account_allowed(
     record: &ApiKeyRecord,
     account_uid: &str,
     account_group: Option<&str>,
 ) -> bool {
-    if record.scope_mode != ScopeMode::Selected {
-        return true;
+    scope_allows(
+        record.scope_mode,
+        &record.scope_accounts,
+        &record.scope_groups,
+        account_uid,
+        account_group,
+    )
+}
+
+/// 按**Key 策略**判定（中继路径只拿得到 `KeyPolicy`）。
+pub fn policy_allows(policy: &KeyPolicy, account_uid: &str, account_group: Option<&str>) -> bool {
+    scope_allows(
+        policy.scope_mode,
+        &policy.scope_accounts,
+        &policy.scope_groups,
+        account_uid,
+        account_group,
+    )
+}
+
+/// 把 Key 策略的账号范围**展开**成 uid 集合（`None` = 全部账号，不过滤）。
+///
+/// `accounts` 由调用方从各自的产品线账号库取 `(uid, 分组)`；分组字段三处不同是
+/// **刻意的**（见 [`scope_allows`] 的说明），判定不因此分家。
+///
+/// ★ 展开**只增不删**：`scope_accounts` 里显式写进去的 uid 即使账号库里已经没有，
+/// 也要保留 —— 用户改完策略发现「少了一个号」是无从解释的。
+pub fn allowed_uids_for_policy<I>(policy: &KeyPolicy, accounts: I) -> Option<HashSet<String>>
+where
+    I: IntoIterator<Item = (String, Option<String>)>,
+{
+    if policy.scope_mode != ScopeMode::Selected {
+        return None;
     }
-    if record.scope_accounts.iter().any(|uid| uid == account_uid) {
-        return true;
+    let mut allowed: HashSet<String> = policy.scope_accounts.iter().cloned().collect();
+    for (uid, group) in accounts {
+        if scope_allows(
+            policy.scope_mode,
+            &policy.scope_accounts,
+            &policy.scope_groups,
+            &uid,
+            group.as_deref(),
+        ) {
+            allowed.insert(uid);
+        }
     }
-    match account_group {
-        Some(group) if !group.is_empty() => record.scope_groups.iter().any(|g| g == group),
-        _ => false,
-    }
+    Some(allowed)
 }
 
 /// 单条 API Key 记录（明文不落库）。
@@ -1120,5 +1189,80 @@ mod tests {
             sha256_hex(""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 安全审计 P1-7：白名单展开必须只有**一份**实现
+    // -----------------------------------------------------------------------
+
+    fn scope_policy(accounts: &[&str], groups: &[&str]) -> KeyPolicy {
+        KeyPolicy {
+            quota_mode: QuotaMode::Unlimited,
+            quota_limit: 0,
+            quota_unit: QuotaUnit::Request,
+            quota_period: QuotaPeriod::None,
+            scope_mode: ScopeMode::Selected,
+            scope_accounts: accounts.iter().map(|v| v.to_string()).collect(),
+            scope_groups: groups.iter().map(|v| v.to_string()).collect(),
+        }
+    }
+
+    /// 展开 = 「显式 uid ∪ 命中分组里的 uid」，其余一律不在集合里。
+    ///
+    /// 这条用例的价值在于「三处调用方只剩取 `(uid, group)` 的差异」：
+    /// 它们都走 `allowed_uids_for_policy`，所以平台之间不可能再分叉。
+    #[test]
+    fn allowlist_expansion_is_the_union_of_uids_and_groups() {
+        let policy = scope_policy(&["u-explicit"], &["g1"]);
+        let accounts = vec![
+            ("u-explicit".to_string(), Some("g1".to_string())),
+            ("u-by-group".to_string(), Some("g1".to_string())),
+            ("u-other-group".to_string(), Some("g2".to_string())),
+            ("u-no-group".to_string(), None),
+            ("u-empty-group".to_string(), Some(String::new())),
+        ];
+        let allowed = allowed_uids_for_policy(&policy, accounts).expect("Selected 必须给出集合");
+        assert!(allowed.contains("u-explicit"), "{allowed:?}");
+        assert!(allowed.contains("u-by-group"), "{allowed:?}");
+        assert!(!allowed.contains("u-other-group"), "{allowed:?}");
+        assert!(
+            !allowed.contains("u-no-group"),
+            "没有分组的号不该被分组名单捞进来: {allowed:?}"
+        );
+        assert!(
+            !allowed.contains("u-empty-group"),
+            "空字符串分组不是「命中」——否则所有无分组的号都会被放行: {allowed:?}"
+        );
+    }
+
+    /// ★ 只增不删：显式写进策略的 uid 即使账号库里已经没有了，也必须留在集合里。
+    ///
+    /// 反例（改坏会红）：把 seed 改成「遍历 accounts 的产物」⇒ 用户会看到「改完策略
+    /// 少了一个号」，且毫无解释。
+    #[test]
+    fn explicit_accounts_survive_a_missing_account_record() {
+        let policy = scope_policy(&["u-deleted"], &[]);
+        let allowed = allowed_uids_for_policy(&policy, Vec::<(String, Option<String>)>::new())
+            .expect("Selected 必须给出集合");
+        assert_eq!(
+            allowed.into_iter().collect::<Vec<_>>(),
+            vec!["u-deleted".to_string()],
+            "账号已被删除也不能丢掉显式名单"
+        );
+    }
+
+    /// `All` ⇒ `None`（不过滤）；这条守住「改策略切回全部」时不会留下一个空集合
+    /// 把所有人都挡在外面。
+    #[test]
+    fn scope_all_means_no_filter_at_all() {
+        let mut policy = scope_policy(&["u1"], &[]);
+        policy.scope_mode = ScopeMode::All;
+        assert!(
+            allowed_uids_for_policy(&policy, vec![("u2".to_string(), None)]).is_none(),
+            "`All` 必须返回 None（不过滤），而不是一个空集合"
+        );
+        // 判定侧同口径：`All` 对任何号都放行，哪怕名单里写着别人。
+        assert!(policy_allows(&policy, "u2", None));
+        assert!(scope_allows(ScopeMode::All, &[], &[], "anything", None));
     }
 }
