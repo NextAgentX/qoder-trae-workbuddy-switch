@@ -334,8 +334,21 @@ pub fn account_view(
     let needs_refresh = needs_jwt_refresh(account);
 
     let now = chrono::Local::now().timestamp();
-    let active_cooldown =
-        cooldown.filter(|entry| entry.until > now && !entry.error_type.is_empty());
+    // ★ issue #108 §P0-A：冷却记录必须**自证**它判的是哪一份凭据。
+    //
+    // 改造前这里只有 `until > now` 一个条件，而 `SessionDead` 的 `until` 是
+    // `9_999_999_999` ⇒ 恒成立 ⇒ 卡片永远显示「需重新登录」，即使凭据已经换成
+    // 有效期 336 小时的新令牌、积分也刷得出来。重新登录只写账号库、不碰冷却表，
+    // 于是重启多少次都一样。
+    //
+    // 现在比对「判定时的 JWT `exp`」与「当前 JWT 的 `exp`」：不一致 ⇒ 那条判定针对的是
+    // 上一份凭据 ⇒ 自动失效，**不需要任何调用点配合**。
+    // 反向约束（同批钉住）：`exp` 未变（保活刷新只换了 access token）时**不得**失效。
+    let active_cooldown = cooldown.filter(|entry| {
+        entry.until > now
+            && !entry.error_type.is_empty()
+            && entry.matches_credential(info.exp_timestamp)
+    });
 
     json!({
         "userId": user_id,
@@ -355,6 +368,9 @@ pub fn account_view(
         "cooldownReason": active_cooldown
             .map(|entry| entry.reason.clone())
             .filter(|reason| !reason.is_empty()),
+        // 判定写入时刻（Unix 秒）。前端据此把「很久以前失败过一次」与「刚刚又失败了」
+        // 区分开 —— 只给 reason 原文会让用户误判为后者（issue #108 §P1-A）。
+        "cooldownSince": active_cooldown.and_then(|entry| entry.judged_at),
         "hasRefreshToken": has_refresh_token,
         "jwtAutoRefresh": needs_refresh,
         "addedAt": account.added_at,
@@ -2398,6 +2414,8 @@ mod tests {
             until: chrono::Local::now().timestamp() - 10,
             reason: "旧错误".into(),
             error_count: 1,
+            credential_exp: None,
+            judged_at: None,
         };
         let view = account_view(
             &account,
@@ -2419,6 +2437,8 @@ mod tests {
             until: 9_999_999_999,
             reason: String::new(),
             error_count: 0,
+            credential_exp: None,
+            judged_at: None,
         };
         let view = account_view(
             &account,
@@ -2437,6 +2457,107 @@ mod tests {
         );
         // 原因为空时不下发空串，前端用 null 判定「无原因」
         assert!(view.get("cooldownReason").unwrap().is_null());
+    }
+
+    /// 构造一个真实形态的 JWT（只用于本地解析 `exp`，签名段是假的）。
+    fn jwt_with_exp(uid: &str, exp: i64) -> String {
+        use base64::Engine as _;
+        let payload = serde_json::json!({ "data": { "id": uid }, "exp": exp });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("header.{encoded}.sig")
+    }
+
+    /// ★★ issue #108 §P0-A：**凭据换新后，「需重新登录」必须自己消失**。
+    ///
+    /// 报障现场：卡片红色徽标「需重新登录」+ 一行 11 小时前的 401 原文，而同一张卡片上
+    /// JWT 剩余 336 小时、积分也刷得出来。原因就是这条判定没有「失效路径」——
+    /// 重新登录只写账号库，冷却表一个字不动。
+    ///
+    /// 现在判据是「判定时的 `exp`」与「当前 `exp`」是否一致。三条断言必须同批：
+    /// ① `exp` 变了 ⇒ 失效；② `exp` 未变 ⇒ 仍生效（否则保活刷新会洗白禁用）；
+    /// ③ 旧数据无指纹 ⇒ 保守照旧生效（不误放行）。
+    #[test]
+    fn session_dead_cooldown_self_heals_after_credential_change() {
+        let old_exp = 1_700_000_000_i64;
+        let new_exp = 1_800_000_000_i64;
+        let account = RawAccount {
+            name: "n".into(),
+            user_id: Some("u".into()),
+            jwt: jwt_with_exp("u", new_exp),
+            refresh_token: None,
+            added_at: None,
+            updated_at: None,
+            remark: None,
+        };
+        let dead = crate::modules::trae::credits::CooldownEntry {
+            error_type: "SessionDead".into(),
+            until: 9_999_999_999,
+            reason: "账号「A」上游失败（HTTP 401）".into(),
+            error_count: 0,
+            credential_exp: Some(old_exp),
+            judged_at: None,
+        };
+
+        // ① 凭据已换新（exp 不同）⇒ 旧判定必须失效。
+        let view = account_view(
+            &account,
+            "u",
+            None,
+            None,
+            None,
+            None,
+            Some(&dead),
+            false,
+            None,
+        );
+        assert!(
+            view.get("cooldownType").unwrap().is_null(),
+            "凭据换新后不得再显示 SessionDead（否则重登永远修不好）"
+        );
+        assert!(view.get("cooldownReason").unwrap().is_null());
+
+        // ② 反向对照：`exp` 未变（只换了 access token 原文）⇒ 判定继续生效。
+        let same = crate::modules::trae::credits::CooldownEntry {
+            credential_exp: Some(new_exp),
+            ..dead.clone()
+        };
+        let view = account_view(
+            &account,
+            "u",
+            None,
+            None,
+            None,
+            None,
+            Some(&same),
+            false,
+            None,
+        );
+        assert_eq!(
+            view.get("cooldownType").unwrap().as_str(),
+            Some("SessionDead"),
+            "保活刷新不得洗白永久禁用（三振机制依赖这条）"
+        );
+
+        // ③ 旧数据（无指纹）⇒ 照旧生效，保守方向不误放行。
+        let legacy = crate::modules::trae::credits::CooldownEntry {
+            credential_exp: None,
+            ..dead.clone()
+        };
+        let view = account_view(
+            &account,
+            "u",
+            None,
+            None,
+            None,
+            None,
+            Some(&legacy),
+            false,
+            None,
+        );
+        assert_eq!(
+            view.get("cooldownType").unwrap().as_str(),
+            Some("SessionDead")
+        );
     }
 
     #[test]

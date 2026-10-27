@@ -13,6 +13,7 @@ import { compactTokens } from "@/components/usage/format";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AVATAR_TEXT_CLASS, accountInitials, avatarTone } from "@/components/account-card";
 import { displayText } from "@/lib/display-text";
+import { cooldownAgeKey, describeTraeCooldown } from "@/lib/trae-cooldown";
 import { EXPIRY_TIP_MAX_HEIGHT, summarizeExpiring } from "@/lib/credit-expiry";
 import { formatRelativeTime } from "@/lib/catalog-source";
 import { useT, type Translate } from "@/lib/i18n";
@@ -319,11 +320,20 @@ export function TraeAccountCard({
    *   · 分组 / 自动刷新 JWT ⇒ 详情抽屉（chips 行是原型的固定四槽，不塞第五枚）
    */
   const activeProgramCount = programs.filter((program) => program.current).length;
-  const cooling = Boolean(account.cooldownType) && (account.cooldownUntil ?? 0) * 1000 > Date.now();
-  const cooldownTip = account.cooldownType
+  // ★ issue #108 §P1-A：冷却态的**展示口径**收在 `lib/trae-cooldown.ts` 一处。
+  //   卡片 / 表格 / 聚合页共用同一份映射，不再各自从 `cooldownType` 现推语义
+  //   （改造前三处给出三种说法：需重新登录 / 冷却中 / 视为正常）。
+  const cooldownDisplay = describeTraeCooldown(account.cooldownType);
+  const cooldownAge = cooldownAgeKey(account.cooldownSince);
+  const cooldownTip = cooldownDisplay
     ? [
         account.cooldownType,
-        account.cooldownUntil ? t("trae.comp.card.cooldown.until", { time: shortTime(account.cooldownUntil) }) : "",
+        account.cooldownUntil
+          ? t("trae.comp.card.cooldown.until", { time: shortTime(account.cooldownUntil) })
+          : "",
+        // 「11 小时前」必须出现：只给 reason 原文，用户会读成「刚才又失败了」。
+        cooldownAge ? t(cooldownAge.key, { minutes: cooldownAge.minutes }) : "",
+        t(cooldownDisplay.hintKey),
         account.cooldownReason ?? "",
       ]
         .filter(Boolean)
@@ -332,22 +342,24 @@ export function TraeAccountCard({
 
   /** 第 2 槽「状态」—— 与原型 `accountStatus()` 同一口径（互斥的一枚）。 */
   const statusChip =
-    account.jwtStatus === "expired" || account.cooldownType === "SessionDead" ? (
+    account.jwtStatus === "expired" ? (
+      <Badge variant="destructive" className={chipClass}>
+        {t("trae.comp.card.chip.expired")}
+      </Badge>
+    ) : cooldownDisplay ? (
       <Badge
-        variant="destructive"
+        variant={cooldownDisplay.tone}
         className={chipClass}
-        title={account.cooldownType === "SessionDead" ? cooldownTip : undefined}
+        title={cooldownTip || undefined}
       >
-        {account.cooldownType === "SessionDead"
-          ? t("trae.comp.card.chip.needRelogin")
-          : t("trae.comp.card.chip.expired")}
+        {t(cooldownDisplay.labelKey)}
       </Badge>
     ) : !(checkedTodayOverride ?? account.checkedToday) ? (
-      <Badge variant="warning" className={chipClass} title={cooling ? cooldownTip : undefined}>
+      <Badge variant="warning" className={chipClass}>
         {t("trae.comp.card.chip.unchecked")}
       </Badge>
     ) : (
-      <Badge variant="success" className={chipClass} title={cooling ? cooldownTip : undefined}>
+      <Badge variant="success" className={chipClass}>
         <CircleCheck /> {t("trae.comp.card.chip.checked")}
       </Badge>
     );
@@ -812,10 +824,24 @@ export function TraeAccountCard({
           {metricsRow}
 
           {/* 冷却 / 未查询提示：与 WorkBuddy 的积分错误行同形（同一图标位、同一配色语义）。 */}
-          {account.cooldownType ? (
-            <div className="flex min-w-0 items-center gap-2 py-3 text-sm text-destructive">
+          {cooldownDisplay ? (
+            <div
+              className={cn(
+                "flex min-w-0 items-center gap-2 py-3 text-sm",
+                // ★ issue #108 §P1-A：只有「需要人动手」的那档才用红色。
+                //   改造前所有冷却都是 destructive，于是「等 60 秒就好」的限流与
+                //   「必须重新登录」的会话作废长得一模一样，用户无法分辨优先级。
+                cooldownDisplay.tone === "destructive" ? "text-destructive" : "text-muted-foreground",
+              )}
+              title={cooldownTip || undefined}
+            >
               <Coins className="size-4 shrink-0" />
-              <span className="min-w-0 truncate">{account.cooldownReason || t("trae.comp.card.cooldown.fallback", { type: account.cooldownType })}</span>
+              <span className="min-w-0 truncate">
+                {/* ★ 相对时间必须在前：11 小时前的 401 与刚刚的失败，用户要做的事完全不同。 */}
+                {cooldownAge ? `${t(cooldownAge.key, { minutes: cooldownAge.minutes })} · ` : ""}
+                {account.cooldownReason ||
+                  t("trae.comp.card.cooldown.fallback", { type: account.cooldownType ?? "" })}
+              </span>
             </div>
           ) : !hasCredits ? (
             /* ★ issue #44：这句提示原先写「点右上角菜单『刷新积分』重试」—— 而菜单里没有这一项。

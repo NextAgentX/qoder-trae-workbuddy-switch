@@ -435,6 +435,13 @@ export interface TraeAccount {
   cooldownType: string | null;
   cooldownUntil: number | null;
   cooldownReason: string | null;
+  /**
+   * 这条冷却判定**写入的时刻**（Unix **秒**）；旧数据为 `null`。
+   *
+   * issue #108 §P1-A：只给 `cooldownReason` 原文会让用户把「11 小时前失败过一次」
+   * 读成「刚才又失败了」，于是反复重登、反复重启。
+   */
+  cooldownSince: number | null;
   hasRefreshToken: boolean;
   jwtAutoRefresh: boolean;
   addedAt: string | null;

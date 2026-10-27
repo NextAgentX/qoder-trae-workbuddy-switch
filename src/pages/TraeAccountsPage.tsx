@@ -84,6 +84,7 @@ import {
 } from "@/lib/schedule-config";
 import { traeVariantLabel, type TraeLogEntry } from "@/lib/trae-types";
 import { traeProgramsFor } from "@/lib/trae-programs";
+import { describeTraeCooldown } from "@/lib/trae-cooldown";
 import {
   TRAE_VARIANT_FALLBACK,
   loadTraeVariantLogins,
@@ -1487,6 +1488,7 @@ export default function TraeAccountsPage() {
   /** Trae 状态徽标（表格用；与卡片同一套语义，只是排布不同）。 */
   function renderStatusBadges(account: TraeAccount) {
     const jwt = jwtBadge(account.jwtStatus, account.jwtExpHours, t);
+    const cooldownDisplay = describeTraeCooldown(account.cooldownType);
     return (
       <div className="flex flex-wrap items-center gap-1">
         <Badge
@@ -1495,9 +1497,16 @@ export default function TraeAccountsPage() {
         >
           {account.checkedToday ? t("trae.comp.card.chip.checked") : t("trae.comp.card.chip.unchecked")}
         </Badge>
-        {account.cooldownType && (
-          <Badge variant="warning" className="rounded-md px-1.5 py-0 text-[11px] font-medium">
-            {t("trae.comp.card.chip.cooling")}
+        {/* ★ issue #108 §P1-A：与卡片共用同一份映射（`lib/trae-cooldown.ts`）。
+            改造前这里把 `SessionDead` 也写成「冷却中」，于是同一个账号在卡片上说
+            「需重新登录」、在表格上说「等它自己好」—— 两个界面给出互斥的动作指引。 */}
+        {cooldownDisplay && (
+          <Badge
+            variant={cooldownDisplay.tone}
+            className="rounded-md px-1.5 py-0 text-[11px] font-medium"
+            title={t(cooldownDisplay.hintKey)}
+          >
+            {t(cooldownDisplay.labelKey)}
           </Badge>
         )}
         <Badge variant={jwt.variant} className={cn("rounded-md px-1.5 py-0 text-[11px] font-medium", jwt.className)}>

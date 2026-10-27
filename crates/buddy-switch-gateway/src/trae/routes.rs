@@ -1202,7 +1202,7 @@ async fn attempt_once(
             })
         }
         Err((status, detail)) => {
-            let kind = classify_http(status);
+            let kind = classify_http(status, &detail);
             let failure = UpstreamFailure {
                 // 传输层错误没有 HTTP 状态码，对客户端统一报 502（网关上游不可达）。
                 status: if status == 0 { 502 } else { status },

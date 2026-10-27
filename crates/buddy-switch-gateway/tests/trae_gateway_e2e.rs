@@ -128,8 +128,10 @@ fn cooldowns(home: &std::path::Path) -> serde_json::Value {
 enum Behavior {
     /// 正常返回一段 SOLO 事件流，正文回显 `x-ide-token`（便于断言"这次用的是哪个账号"）。
     Normal,
-    /// 连接期直接 401（会话失效）。
+    /// 连接期直接 401，**响应体里没有**会话作废标记 ⇒ 浅冷却（可自愈）。
     Http401,
+    /// 连接期直接 401，响应体带 `12153` ⇒ 真·会话作废（永久禁用）。
+    Http401SessionDead,
     /// 连接期直接 429（限流）。
     Http429,
     /// 200 + 流内 `event:error`（套餐额度用尽）。
@@ -156,6 +158,10 @@ async fn mock_upstream(State(behavior): State<Behavior>, headers: HeaderMap) -> 
 
     match behavior {
         Behavior::Http401 => plain(StatusCode::UNAUTHORIZED, "unauthorized"),
+        Behavior::Http401SessionDead => plain(
+            StatusCode::UNAUTHORIZED,
+            r#"{"code":12153,"message":"Offline user session not found"}"#,
+        ),
         Behavior::Http429 => plain(StatusCode::TOO_MANY_REQUESTS, "rate limited"),
         Behavior::FailForJwt(target) if jwt == target => {
             plain(StatusCode::UNAUTHORIZED, "session dead")
@@ -410,11 +416,66 @@ async fn non_streaming_request_is_aggregated_locally() {
 // 冷却写回与换号
 // ---------------------------------------------------------------------------
 
+/// ★★ issue #108 §P0-B：**裸 401 不再是「会话作废」**。
+///
+/// 改造前这里断言 `type == "SessionDead"` / `until == 9_999_999_999` —— 那是旧契约，
+/// 而且正是报障的根因：access token 过期（保活刷新一轮就好）被打成**永久终态**，
+/// 用户重新登录也救不回来（冷却表没人清）。
+///
+/// 现在裸 401/403 落 `AuthRejected`：**浅冷却 60 秒、不禁用、不计数**，
+/// 与 WorkBuddy 侧 `UpstreamEvent::AuthRejected` 同一口径。
+///
+/// 真正的会话作废由下一条用例（带 `12153`）钉住 —— 两条必须同批存在，
+/// 缺一条就会把修复做反。
 #[tokio::test]
-async fn upstream_401_marks_the_account_session_dead() {
+async fn plain_401_is_a_shallow_cooldown_not_a_permanent_dead_session() {
     let _guard = guard();
     let home = isolated_home("dead", &[("uid-a", "jwt-a")]);
     let (state, key) = gateway_for(Behavior::Http401).await;
+    let before = chrono::Utc::now().timestamp();
+
+    let response = router(state.clone())
+        .oneshot(chat_request(
+            Some(&key),
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .await
+        .expect("路由调用");
+
+    // 唯一账号 + 上游 401 → 没有可换的账号，对客户端仍报 401（最终错误照旧）。
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // 关键断言：错误必须写回**共享的**冷却文件，签到页才会显示同一个状态。
+    let file = cooldowns(&home);
+    let entry = &file["cooldowns"]["uid-a"];
+    assert_eq!(
+        entry["type"], "AuthRejected",
+        "裸 401 必须归「凭据被拒」而不是「会话作废」\n{file}"
+    );
+    let until = entry["until"].as_i64().expect("until 应为整数");
+    assert_ne!(
+        until, 9_999_999_999_i64,
+        "裸 401 不得写成永久冷却（否则重登也救不回来）\n{file}"
+    );
+    assert!(
+        until <= before + 120,
+        "裸 401 应是浅冷却（≈60s），实际 {until} vs {before}\n{file}"
+    );
+    // 「不得打成禁用终态」这一面由 `trae_pool_credential_fingerprint.rs` 覆盖
+    // （它把冷却文件 → 池 `disabled` 整条链跑通），此处只钉文件语义。
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// ★★ issue #108 §P0-B 的前置条件：**带 `12153` 的 401 必须仍是永久禁用**。
+///
+/// 这条是「降级裸 401」的安全阀：若识别不出真正的会话作废，降级就等于把死号
+/// 反复撞墙。改造前 Trae 侧**完全不识别 `12153`**（只有状态码），本用例在改造前
+/// 会因 `classify_http` 拿不到 body 而无法表达 —— 这正是「先补识别、再降级」的顺序要求。
+#[tokio::test]
+async fn upstream_12153_marks_the_account_session_dead_permanently() {
+    let _guard = guard();
+    let home = isolated_home("dead-12153", &[("uid-a", "jwt-a")]);
+    let (state, key) = gateway_for(Behavior::Http401SessionDead).await;
 
     let response = router(state)
         .oneshot(chat_request(
@@ -423,20 +484,17 @@ async fn upstream_401_marks_the_account_session_dead() {
         ))
         .await
         .expect("路由调用");
-
-    // 唯一账号 + 上游 401 → 没有可换的账号，对客户端报 401（会话失效）。
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    // 关键断言：错误必须写回**共享的**冷却文件，签到页才会显示同一个状态。
     let file = cooldowns(&home);
     let entry = &file["cooldowns"]["uid-a"];
     assert_eq!(
         entry["type"], "SessionDead",
-        "冷却类型必须是 SessionDead\n{file}"
+        "带 12153 的 401 必须判会话作废\n{file}"
     );
     assert_eq!(
         entry["until"], 9_999_999_999_i64,
-        "会话失效必须是永久冷却\n{file}"
+        "会话作废必须是永久冷却（短冷却只会反复撞墙）\n{file}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -496,9 +554,12 @@ async fn rotation_retries_with_the_next_account_and_reports_success() {
         "最终必须由第二个账号完成请求\n{text}"
     );
 
-    // A 被标记为会话失效，B 不得被牵连。
+    // A 被标记为「凭据被拒」（裸 401，无 12153）⇒ 浅冷却 + 换号，B 不得被牵连。
+    //
+    // ★ issue #108：这里原来是 `SessionDead` —— 那意味着「一次 401 就把号打死」。
+    // 现在裸 401 只冷 60 秒，但**换号行为不变**（这才是本用例真正要钉的东西）。
     let file = cooldowns(&home);
-    assert_eq!(file["cooldowns"]["uid-a"]["type"], "SessionDead", "{file}");
+    assert_eq!(file["cooldowns"]["uid-a"]["type"], "AuthRejected", "{file}");
     assert!(
         file["cooldowns"].get("uid-b").is_none(),
         "成功完成的账号不得被写入冷却\n{file}"

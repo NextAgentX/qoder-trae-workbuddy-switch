@@ -367,8 +367,12 @@ async fn cooling_one_region_does_not_touch_the_other() {
     let global_cooldowns = read_cooldowns("account_cooldowns.global.json");
 
     // (1) 方向不变：国内账号必须被冷却，且落在 **国内** 冷却文件里。
+    //
+    // ★ issue #108：类型从 `SessionDead` 改为 `AuthRejected` —— 本用例的 mock 返回
+    // 的是**裸 401（无 12153）**，按新契约它只是 60 秒浅冷却。本用例要证的是
+    // 「冷却落在正确区域的文件里」，与冷却时长/类型无关，故只跟着改口径。
     assert_eq!(
-        cn_cooldowns["cooldowns"]["uid-cn"]["type"], "SessionDead",
+        cn_cooldowns["cooldowns"]["uid-cn"]["type"], "AuthRejected",
         "国内账号必须被冷却并写进国内冷却文件\n{cn_cooldowns}"
     );
     // (2) 国内文件里不得冒出国际版账号。
@@ -392,7 +396,17 @@ async fn cooling_one_region_does_not_touch_the_other() {
         "国际版池不得被国内的冷却影响: {global}"
     );
     let cn = status_view(&state, false, None, "test", TraeVariant::TraeWork).await;
-    assert_eq!(cn["pool"]["disabled"], 1, "国内池该账号应为会话失效: {cn}");
+    // ★ issue #108：mock 返回的是裸 401（无 `12153`）⇒ 按新契约只落**浅冷却**，
+    // 不再把账号打成禁用终态。断言跟着改：`cooling == 1` 且 `disabled == 0`。
+    // 本用例真正要证的是「区域之间不互相污染」，`disabled` 的取值只是顺带的口径。
+    assert_eq!(
+        cn["pool"]["cooling"], 1,
+        "国内池该账号应处于冷却中（裸 401 = 浅冷却）: {cn}"
+    );
+    assert_eq!(
+        cn["pool"]["disabled"], 0,
+        "裸 401 不得把账号打成禁用终态（否则重登也救不回来）: {cn}"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }

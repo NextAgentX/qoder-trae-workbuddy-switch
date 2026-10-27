@@ -451,6 +451,45 @@ pub struct CooldownEntry {
     pub reason: String,
     #[serde(default)]
     pub error_count: i32,
+    /// 判定时那份 JWT 的 `exp`（Unix 秒）。**凭据指纹**（issue #108 §P0-A）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// 冷却表只记了「什么错、多久」，**没记「判的是哪一份凭据」**。于是当凭据被换掉
+    /// （OAuth 重新登录 / JWT 续期 / 手动粘贴），那条「会话已死」的判定无法自证失效 ——
+    /// 用户看到的是「重新登录后仍显示需重新登录」，而且重启多少次都一样。
+    ///
+    /// ## 为什么取 `exp` 而不是 access token 原文
+    ///
+    /// 用 token 原文当指纹等于「每次保活刷新都把所有被禁用的号洗白」，三振机制直接被取消
+    /// （WorkBuddy 侧 `pool/mod.rs` 已就此论证过）。`exp` 是**上游签发**的量：真正换到
+    /// 新令牌时它才变；刷新失败时 token 根本不会被写回，因此不会误放行。
+    ///
+    /// ## 兼容性
+    ///
+    /// 旧文件缺这个键 ⇒ `None` ⇒ 按「无指纹」处理，**照旧生效**（保守方向，不会误放行）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_exp: Option<i64>,
+    /// 这条判定**写入的时刻**（Unix 秒，issue #108 §P1-A）。
+    ///
+    /// 前端此前直接把 `reason` 原文渲染成一行红字，用户会把它读成「刚才又失败了」——
+    /// 而事实可能是「11 小时前失败过一次」。带上时刻才能说「11 小时前」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged_at: Option<i64>,
+}
+
+impl CooldownEntry {
+    /// 这条判定是否仍然针对**当前**这份凭据。
+    ///
+    /// - 记录里没有指纹（旧数据 / 无 JWT）⇒ `true`（照旧生效，保守）；
+    /// - 当前 JWT 解析不出 `exp` ⇒ `true`（拿不到证据时不做放行）；
+    /// - 两者都有 ⇒ 相等才生效。
+    pub fn matches_credential(&self, current_exp: Option<i64>) -> bool {
+        match (self.credential_exp, current_exp) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => true,
+        }
+    }
 }
 
 /// 冷却状态文件。
@@ -920,9 +959,11 @@ pub async fn refresh_all_remaining() -> usize {
 
 /// 批量刷新**该变体**所有账号的剩余积分（按变体分家），返回成功账号数。
 ///
-/// 顺带执行**自动解冻**：某账号查询成功、剩余积分 > 0、且其冷却类型不是
-/// `SessionDead`（会话彻底失效，积分再正常也不代表会话可用）时清除冷却。
-/// 这解决了「账号因临时 5xx 被冷却，实际早已恢复」导致的长期误封。
+/// 顺带执行**自动解冻**：某账号查询成功且剩余积分 > 0 时清除冷却（**含 `SessionDead`**）。
+///
+/// 判据是「这份凭据刚刚成功访问了上游」—— 一个独立的**正向事实**，不是对
+/// 「账号库变没变」的推断（后者已被 WorkBuddy 侧论证为不可靠）。
+/// issue #108 §P0-C：排除 `SessionDead` 会让永久记录没有任何自愈路径。
 pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
     let accounts = crate::modules::trae::account::entries_for(variant);
     let mut remaining = load_remaining_for(variant);
@@ -942,14 +983,16 @@ pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
                 purchased_today += purchased;
                 succeeded += 1;
 
-                let thawable = credits > 0.0
-                    && cooldowns
-                        .cooldowns
-                        .get(uid)
-                        .map(|entry| {
-                            !entry.error_type.is_empty() && entry.error_type != "SessionDead"
-                        })
-                        .unwrap_or(false);
+                // ★★ issue #108 §P0-C：**取积分成功本身就是会话可用的证据**。
+                //
+                // 改造前这里显式排除 `SessionDead`，理由写的是「会话彻底失效，积分再正常
+                // 也不代表会话可用」。这个理由在**凭据未更新**时也站不住：`calc_remaining_credits`
+                // 用的是同一个 JWT 打上游，它能成功就证明这份凭据有效。
+                //
+                // 后果是闭环死锁：`SessionDead` ⇒ `disabled` ⇒ 不路由（`note_success` 断掉）
+                // ⇒ 签到跳过（`clear_cooldown_for` 轮不到）⇒ 只剩人工「解除冷却」一条路。
+                // 现场证据：积分文件 08:07 仍在刷新，冷却文件停在 10-26 19:40 一动不动。
+                let thawable = should_thaw(credits, cooldowns.cooldowns.get(uid));
                 if thawable {
                     cooldowns.cooldowns.remove(uid);
                     thawed += 1;
@@ -986,6 +1029,23 @@ pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
     succeeded
 }
 
+/// 自动解冻的判据（**唯一实现**，issue #108 §P0-C）。
+///
+/// 语义：**这份凭据刚刚成功访问了上游**（取积分成功）⇒ 会话可用 ⇒ 冷却应当清除，
+/// `SessionDead` 也不例外。
+///
+/// 改造前这里显式排除 `SessionDead`，理由是「积分正常不代表会话可用」。该理由在
+/// 凭据未更新时也站不住 —— `calc_remaining_credits` 用同一个 JWT 打上游，它能成功
+/// 就证明这份凭据有效。而排除的后果是**闭环死锁**：
+/// `SessionDead` ⇒ `disabled` ⇒ 不路由（`note_success` 断掉）⇒ 签到跳过
+/// （`clear_cooldown_for` 轮不到）⇒ 只剩人工「解除冷却」一条路，重启也没用。
+pub(crate) fn should_thaw(credits: f64, entry: Option<&CooldownEntry>) -> bool {
+    credits > 0.0
+        && entry
+            .map(|entry| !entry.error_type.is_empty())
+            .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // 冷却
 // ---------------------------------------------------------------------------
@@ -994,16 +1054,30 @@ pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
 ///
 /// `冷却秒数` 语义：`-1` = 永久、`0` = 不冷却（仅计数）、`>0` = 冷却秒数。
 ///
-/// 分类依据是参考实现在长期使用中总结的经验值，不要随意调小：
-/// `SessionDead`（401）是凭据失效，冷却 1 分钟只会让它被反复重试并持续触发风控。
-pub fn classify_error(http_status: u16, code: Option<i64>) -> (&'static str, i64) {
+/// 分类依据是参考实现在长期使用中总结的经验值，不要随意调小。
+///
+/// ★ issue #108 §P0-B：**先看 body 里的会话作废标记，再按状态码归类**。
+///
+/// - 带 `12153` / `Offline user session not found` ⇒ `SessionDead`（`-1` 永久）；
+/// - 裸 401/403 ⇒ `AuthRejected`（60 秒，可自愈，**不禁用**）。
+///
+/// 改造前 401 一律永久，把「access token 过期」这种保活刷新一轮就好、可自愈的问题
+/// 打成了终态 —— 用户看到的是「号没坏却再也用不了」。
+pub fn classify_error(http_status: u16, code: Option<i64>, body: &str) -> (&'static str, i64) {
     // 200 + 业务码 1005：套餐额度限制，半天内不会有变化。
     if http_status == 200 && code == Some(1005) {
         return ("PlanLimit", 43_200);
     }
+    // 作废标记优先于状态码：上游也可能用 200/400 返回它。
+    if crate::modules::upstream::SESSION_DEAD_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker))
+    {
+        return ("SessionDead", -1);
+    }
     match http_status {
         429 => ("SoftRate", 60),
-        401 => ("SessionDead", -1),
+        401 | 403 => ("AuthRejected", 60),
         404 => ("NotFound", 60),
         500..=599 => ("Server", 600),
         400..=499 => ("Client", 600),
@@ -1043,6 +1117,25 @@ pub fn save_cooldown_for(
     cooldown_seconds: i64,
     reason: &str,
 ) {
+    save_cooldown_with_credential_for(variant, user_id, error_type, cooldown_seconds, reason, None);
+}
+
+/// 写入冷却，并记下「判定时那份凭据的 `exp`」作为**指纹**（issue #108 §P0-A）。
+///
+/// `credential_exp` 为 `None` 时与 [`save_cooldown_for`] 完全等价（不写指纹 ⇒
+/// 该条判定永远不会因凭据更新而自动失效，即旧行为）。
+///
+/// 传 `Some(exp)` 后，`account_view` 会在渲染时比对当前 JWT 的 `exp`：
+/// 不一致 ⇒ 这条判定针对的是**上一份**凭据，自动失效。于是「重新登录 / 续期 /
+/// 手动粘贴」这些只写账号库、不碰冷却表的出口，**无需改动即可自愈**。
+pub fn save_cooldown_with_credential_for(
+    variant: TraeVariant,
+    user_id: &str,
+    error_type: &str,
+    cooldown_seconds: i64,
+    reason: &str,
+    credential_exp: Option<i64>,
+) {
     let mut file = load_cooldowns_for(variant);
     let now = chrono::Local::now().timestamp();
 
@@ -1079,6 +1172,8 @@ pub fn save_cooldown_for(
             until,
             reason: reason.to_string(),
             error_count,
+            credential_exp,
+            judged_at: Some(now),
         },
     );
     file.updated_at = Some(store::now_iso());
@@ -1385,30 +1480,110 @@ mod tests {
 
     #[test]
     fn classify_error_maps_known_cases() {
-        assert_eq!(classify_error(200, Some(1005)), ("PlanLimit", 43_200));
-        assert_eq!(classify_error(429, None), ("SoftRate", 60));
-        assert_eq!(classify_error(401, None), ("SessionDead", -1));
-        assert_eq!(classify_error(404, None), ("NotFound", 60));
-        assert_eq!(classify_error(503, None), ("Server", 600));
-        assert_eq!(classify_error(400, None), ("Client", 600));
-        assert_eq!(classify_error(200, Some(7)), ("BusinessError", 300));
-        assert_eq!(classify_error(200, Some(0)), ("Unknown", 0));
-        assert_eq!(classify_error(200, None), ("Unknown", 0));
+        assert_eq!(classify_error(200, Some(1005), ""), ("PlanLimit", 43_200));
+        assert_eq!(classify_error(429, None, ""), ("SoftRate", 60));
+        // ★ issue #108：裸 401 是浅冷却（可自愈）；带作废标记才是永久。
+        assert_eq!(classify_error(401, None, ""), ("AuthRejected", 60));
+        assert_eq!(classify_error(403, None, ""), ("AuthRejected", 60));
+        assert_eq!(
+            classify_error(401, None, r#"{"code":12153}"#),
+            ("SessionDead", -1)
+        );
+        assert_eq!(
+            classify_error(200, None, "Offline user session not found"),
+            ("SessionDead", -1),
+            "作废标记优先于状态码（上游可能用 200 返回业务错误）"
+        );
+        assert_eq!(classify_error(404, None, ""), ("NotFound", 60));
+        assert_eq!(classify_error(503, None, ""), ("Server", 600));
+        assert_eq!(classify_error(400, None, ""), ("Client", 600));
+        assert_eq!(classify_error(200, Some(7), ""), ("BusinessError", 300));
+        assert_eq!(classify_error(200, Some(0), ""), ("Unknown", 0));
+        assert_eq!(classify_error(200, None, ""), ("Unknown", 0));
     }
 
     #[test]
     fn classify_error_plan_limit_only_on_200() {
         // 同样 code=1005 但 HTTP 状态非 200 时不能误判为套餐限制。
-        assert_eq!(classify_error(500, Some(1005)), ("Server", 600));
+        assert_eq!(classify_error(500, Some(1005), ""), ("Server", 600));
+    }
+
+    /// ★★ issue #108 §P0-C：「积分拉到了」必须成为**解冻证据**（含 `SessionDead`）。
+    ///
+    /// 变异：把 `should_thaw` 改回「排除 SessionDead」⇒ 第三条断言红。
+    #[test]
+    fn thaw_accepts_session_dead_because_a_successful_fetch_proves_the_session() {
+        let dead = CooldownEntry {
+            error_type: "SessionDead".into(),
+            until: 9_999_999_999,
+            reason: "401".into(),
+            error_count: 0,
+            credential_exp: None,
+            judged_at: None,
+        };
+        assert!(
+            should_thaw(1.0, Some(&dead)),
+            "取积分成功 ⇒ 凭据有效 ⇒ 永久冷却必须能自愈"
+        );
+        // 反向对照：积分 0 不是「会话可用」的证据（可能只是额度用完），不解冻。
+        assert!(!should_thaw(0.0, Some(&dead)));
+        // 无冷却记录 ⇒ 无事可做。
+        assert!(!should_thaw(1.0, None));
+        // 空类型是「占位记录」，不清（与 `until > now && !error_type.is_empty()` 同口径）。
+        let empty = CooldownEntry {
+            error_type: String::new(),
+            ..dead.clone()
+        };
+        assert!(!should_thaw(1.0, Some(&empty)));
+    }
+
+    /// ★★ issue #108 §P0-A：凭据指纹必须**双向**成立。
+    ///
+    /// - `exp` 变了 ⇒ 判定失效（重新登录 / 续期后自动恢复）；
+    /// - `exp` 未变 ⇒ 判定继续生效（否则保活刷新会洗白所有禁用，三振机制被取消）。
+    #[test]
+    fn credential_fingerprint_only_invalidates_when_exp_actually_changed() {
+        let entry = CooldownEntry {
+            error_type: "SessionDead".into(),
+            until: 9_999_999_999,
+            reason: "401".into(),
+            error_count: 0,
+            credential_exp: Some(1_700_000_000),
+            judged_at: None,
+        };
+        assert!(
+            !entry.matches_credential(Some(1_800_000_000)),
+            "换了新令牌（exp 变）⇒ 旧判定必须失效"
+        );
+        assert!(
+            entry.matches_credential(Some(1_700_000_000)),
+            "exp 未变（只换了 access token 原文）⇒ 判定必须继续生效"
+        );
+        // 拿不到证据时保守：不放行。
+        assert!(entry.matches_credential(None));
+        // 旧数据没有指纹 ⇒ 照旧生效（不会误放行）。
+        let legacy = CooldownEntry {
+            credential_exp: None,
+            ..entry.clone()
+        };
+        assert!(legacy.matches_credential(Some(1_800_000_000)));
     }
 
     #[test]
     fn session_dead_cooldown_is_effectively_permanent() {
-        // 401 的 until 必须远大于任何现实时间，否则会话失效会被反复重试。
+        // **带作废标记**的 401：until 必须远大于任何现实时间，否则会话失效会被反复重试。
+        // ★ issue #108：判据从「状态码 401」改成「body 里有 12153」—— 裸 401 已降级为
+        //   60 秒浅冷却（见 `classify_error_separates_session_dead_from_plain_401`）。
         let now = chrono::Local::now().timestamp();
-        let (_, seconds) = classify_error(401, None);
+        let (kind, seconds) = classify_error(401, None, r#"{"code":12153}"#);
+        assert_eq!(kind, "SessionDead");
         assert_eq!(seconds, -1);
         assert!(9_999_999_999_i64 > now + 100 * 365 * 86_400);
+
+        // 反向对照：裸 401 **不得**是永久（否则可自愈的 token 过期被打成终态）。
+        let (kind, seconds) = classify_error(401, None, "");
+        assert_eq!(kind, "AuthRejected");
+        assert_eq!(seconds, 60, "裸 401 必须是浅冷却，且不禁用");
     }
 
     #[test]
@@ -1437,6 +1612,8 @@ mod tests {
             until: 1,
             reason: "r".into(),
             error_count: 2,
+            credential_exp: None,
+            judged_at: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
         assert_eq!(value.get("type").unwrap().as_str(), Some("Server"));

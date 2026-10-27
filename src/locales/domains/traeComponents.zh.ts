@@ -111,6 +111,19 @@ export const zh = {
   "trae.comp.card.chip.jwtManual": "支持刷新 JWT",
   "trae.comp.card.cooldown.until": " · 至 {time}",
   "trae.comp.card.cooldown.fallback": "冷却中（{type}）",
+  "trae.comp.card.chip.authRejected": "凭据被拒（可自愈）",
+  // ---- 冷却态 → 用户动作（唯一口径，见 src/lib/trae-cooldown.ts） ----
+  "trae.comp.card.cooldown.hint.sessionDead":
+    "上游已作废这个会话（12153）。请重新登录；凭据换新后这条标记会自动消失，也可在菜单里「解除冷却」",
+  "trae.comp.card.cooldown.hint.authRejected":
+    "上游拒了这份 access token，但没有作废会话 —— 多半是过期，保活刷新一轮就会自己恢复（约 60 秒）",
+  "trae.comp.card.cooldown.hint.planLimit": "套餐额度已用尽，等额度重置或换一个账号",
+  "trae.comp.card.cooldown.hint.transient":
+    "限流或上游抖动，冷却到期后自动恢复；到期后第一条成功请求会立刻清掉它",
+  "trae.comp.card.cooldown.age.justNow": "刚刚",
+  "trae.comp.card.cooldown.age.minutes": "{minutes} 分钟前",
+  "trae.comp.card.cooldown.age.hours": "{minutes} 小时前",
+  "trae.comp.card.cooldown.age.days": "{minutes} 天前",
 
   // ---- 程序切换控件 ----
   "trae.comp.card.currentOf": "{label} 当前账号",

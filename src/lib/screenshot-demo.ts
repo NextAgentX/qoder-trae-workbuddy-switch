@@ -1559,7 +1559,7 @@ function traeDemoAccounts(): TraeAccount[] {
         { packageCode: "pkg_work_month", packageName: t("shared.demo.trae.pack.month"), total: 1360, remaining: 740, used: 620, expireAt: Math.floor(futureAt(30, 0, 0) / 1000), expired: false, expiringSoon: false },
         { packageCode: "pkg_work_bonus", packageName: t("shared.demo.trae.pack.checkinBonus"), total: 140, remaining: 140, used: 0, expireAt: Math.floor(futureAt(5, 0, 0) / 1000), expired: false, expiringSoon: true },
       ],
-      deviceIdMasked: "a1b2…9f", cooldownType: null, cooldownUntil: null, cooldownReason: null,
+      deviceIdMasked: "a1b2…9f", cooldownType: null, cooldownUntil: null, cooldownReason: null, cooldownSince: null,
       hasRefreshToken: true, jwtAutoRefresh: true,
       addedAt: "2026-09-10T02:11:00Z", updatedAt: new Date(Date.now() - 30 * 1000).toISOString(),
       remark: t("shared.demo.trae.remark.jackey"),
@@ -1572,7 +1572,7 @@ function traeDemoAccounts(): TraeAccount[] {
       creditPackages: [
         { packageCode: "pkg_cn_plan", packageName: t("shared.demo.trae.pack.cnPlan"), total: 1500, remaining: 1320, used: 180, expireAt: Math.floor(futureAt(33, 0, 0) / 1000), expired: false, expiringSoon: false },
       ],
-      deviceIdMasked: "c3d4…7e", cooldownType: null, cooldownUntil: null, cooldownReason: null,
+      deviceIdMasked: "c3d4…7e", cooldownType: null, cooldownUntil: null, cooldownReason: null, cooldownSince: null,
       hasRefreshToken: true, jwtAutoRefresh: true,
       addedAt: "2026-09-12T08:00:00Z", updatedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
       remark: null,
@@ -1585,7 +1585,7 @@ function traeDemoAccounts(): TraeAccount[] {
       creditPackages: [
         { packageCode: "pkg_trial", packageName: t("shared.demo.trae.pack.trial"), total: 500, remaining: 90, used: 410, expireAt: Math.floor(futureAt(1, 0, 0) / 1000), expired: false, expiringSoon: true },
       ],
-      deviceIdMasked: "e5f6…1a", cooldownType: null, cooldownUntil: null, cooldownReason: null,
+      deviceIdMasked: "e5f6…1a", cooldownType: null, cooldownUntil: null, cooldownReason: null, cooldownSince: null,
       hasRefreshToken: true, jwtAutoRefresh: true,
       addedAt: "2026-09-14T09:30:00Z", updatedAt: new Date(Date.now() - 2 * 86_400_000).toISOString(),
       remark: null,
@@ -1598,7 +1598,7 @@ function traeDemoAccounts(): TraeAccount[] {
       creditPackages: [
         { packageCode: "pkg_cn_plan", packageName: t("shared.demo.trae.pack.cnPlan"), total: 500, remaining: 480, used: 20, expireAt: Math.floor(futureAt(15, 0, 0) / 1000), expired: false, expiringSoon: false },
       ],
-      deviceIdMasked: "1122…3b", cooldownType: null, cooldownUntil: null, cooldownReason: null,
+      deviceIdMasked: "1122…3b", cooldownType: null, cooldownUntil: null, cooldownReason: null, cooldownSince: null,
       hasRefreshToken: true, jwtAutoRefresh: true,
       addedAt: "2026-09-18T03:20:00Z", updatedAt: new Date(Date.now() - 11 * 86_400_000).toISOString(),
       remark: null,
@@ -1611,7 +1611,7 @@ function traeDemoAccounts(): TraeAccount[] {
       creditPackages: [
         { packageCode: "pkg_work_month", packageName: t("shared.demo.trae.pack.month"), total: 1500, remaining: 700, used: 800, expireAt: Math.floor(futureAt(25, 0, 0) / 1000), expired: false, expiringSoon: false },
       ],
-      deviceIdMasked: "7788…4c", cooldownType: null, cooldownUntil: null, cooldownReason: null,
+      deviceIdMasked: "7788…4c", cooldownType: null, cooldownUntil: null, cooldownReason: null, cooldownSince: null,
       hasRefreshToken: true, jwtAutoRefresh: true,
       addedAt: "2026-09-20T06:45:00Z", updatedAt: new Date(Date.now() - 5 * 86_400_000).toISOString(),
       remark: null,

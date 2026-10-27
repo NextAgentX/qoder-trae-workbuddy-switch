@@ -578,8 +578,12 @@ pub fn probe_state_of_trae(kind: TraeErrKind) -> ProbeState {
         TraeErrKind::SoftRate => ProbeState::RateLimitedModel,
         // 套餐额度用尽（1005 / 含 plan）：**不是限流**，独立成 `no_credits`。
         TraeErrKind::PlanLimit => ProbeState::NoCredits,
-        // 会话失效（401，Trae 侧为永久禁用）。
-        TraeErrKind::SessionDead => ProbeState::AuthDead,
+        // 会话失效（带 `12153` 标记）与「凭据被拒」（裸 401/403）都归 `AuthDead`：
+        // 对用户来说下一步都是「去把这个号重新登录一次」，区别只在自动自愈的概率。
+        // ★ issue #108：此前 401 一律进 SessionDead，因此这里只有一条分支；
+        // 现在分类拆开了，**两条都必须映射**，否则 `AuthRejected` 会掉进
+        // `UpstreamError`，把「去重新登录」误报成「上游抖动」。
+        TraeErrKind::SessionDead | TraeErrKind::AuthRejected => ProbeState::AuthDead,
         // 404：该账号看不到 / 不支持这个模型。
         TraeErrKind::NotFound => ProbeState::ModelUnavailable,
         // 5xx / 4xx / 业务码 / 「不归因于账号」（如 code 0 断流、4001 模型配置为空）：
@@ -1581,7 +1585,7 @@ async fn probe_cell_trae(
             let state_key = if status == 0 {
                 ProbeState::TransportError
             } else {
-                probe_state_of_trae(trae_classify_http(status))
+                probe_state_of_trae(trae_classify_http(status, &detail))
             };
             return ProbeCell {
                 uid: uid.to_string(),

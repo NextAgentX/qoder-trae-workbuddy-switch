@@ -78,6 +78,19 @@ export const en = {
   "trae.comp.card.chip.jwtManual": "JWT refreshable",
   "trae.comp.card.cooldown.until": " · until {time}",
   "trae.comp.card.cooldown.fallback": "Cooling down ({type})",
+  "trae.comp.card.chip.authRejected": "Credential rejected (self-healing)",
+  // ---- Cooldown state → user action (single source, see src/lib/trae-cooldown.ts) ----
+  "trae.comp.card.cooldown.hint.sessionDead":
+    "The upstream invalidated this session (12153). Sign in again; the marker clears itself once the credential changes. You can also use \"Clear cooldown\" in the menu.",
+  "trae.comp.card.cooldown.hint.authRejected":
+    "The upstream rejected this access token but did not invalidate the session — usually expiry. The keep-alive refresh recovers it in about 60 seconds.",
+  "trae.comp.card.cooldown.hint.planLimit": "Plan quota exhausted. Wait for the reset or use another account.",
+  "trae.comp.card.cooldown.hint.transient":
+    "Rate limited or upstream hiccup. Recovers when the cooldown expires; the first successful request clears it immediately.",
+  "trae.comp.card.cooldown.age.justNow": "just now",
+  "trae.comp.card.cooldown.age.minutes": "{minutes} min ago",
+  "trae.comp.card.cooldown.age.hours": "{minutes} h ago",
+  "trae.comp.card.cooldown.age.days": "{minutes} d ago",
 
   // ---- Program switch controls ----
   "trae.comp.card.currentOf": "Current account in {label}",

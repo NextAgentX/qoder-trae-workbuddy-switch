@@ -1687,9 +1687,20 @@ async fn perform_login(
     );
 
     // 视图必须走 `account_view` 单点构造（两套形态的转换只允许发生在那儿）。
-    // 刚登录的账号必然无分组、无积分缓存、无冷却，`checkedToday` 也一定是 false，
-    // 故这些都是 `None` / `false`；设备标识用 `device_id` 现算，
-    // `ensure_for` 落盘发生在首次签到或刷新时，这里不提前写。
+    //
+    // ★★ issue #108 §2.2：这里**不能**再把 `cooldown` 硬编码成 `None`。
+    //
+    // 旧注释写的是「刚登录的账号必然无冷却」，这句话是错的：重新登录前若该账号因
+    // 一次 401 被写成 `SessionDead`（`until = 9_999_999_999`），那条记录仍在盘上。
+    // 硬编码 `None` 只让**登录接口这一次返回**假装正常，而页面拿到成功回调后立刻
+    // `loadAll()` 重新读磁盘 ⇒ 陈旧冷却立刻复现，用户看到「刚登录完还是需重新登录」。
+    //
+    // 现在如实读盘并交给 `account_view`：它会用**凭据指纹**（JWT `exp`）比对，
+    // 刚换的新令牌与旧判定不符 ⇒ 该条自动失效 ⇒ 视图正常。凭据没变时仍照旧显示。
+    let cooldown = crate::modules::trae::credits::load_cooldowns_for(variant)
+        .cooldowns
+        .get(&uid)
+        .cloned();
     let device_id = device::derive(&uid).device_id;
     Ok(account::account_view(
         &raw,
@@ -1698,7 +1709,7 @@ async fn perform_login(
         Some(&device_id),
         None,
         None,
-        None,
+        cooldown.as_ref(),
         false,
         None,
     ))

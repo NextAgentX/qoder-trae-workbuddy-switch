@@ -28,6 +28,7 @@
 import type { AccountMeta } from "@/lib/types";
 import type { QoderAccountView } from "@/lib/api";
 import type { TraeAccount, TraeJwtStatus } from "@/lib/trae-types";
+import { cooldownNeedsAttention } from "@/lib/trae-cooldown";
 import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
 import type { PlatformSlug } from "@/lib/platforms/registry";
 
@@ -161,6 +162,10 @@ export function aggregateNeedsAttention(account: AggregateAccount, now: number =
     const a = account.data;
     const dead: TraeJwtStatus[] = ["expired"];
     if (dead.includes(a.jwtStatus)) return true;
+    // ★ issue #108 §P1-A：改造前聚合页**完全不看** `cooldownType`，于是同一个账号
+    //   在渠道页显示「需重新登录」、在这里显示「一切正常」。会话作废是需要人动手的，
+    //   必须进「待处理」；其余冷却会自己到期，算进来会让这个数字永不为 0。
+    if (cooldownNeedsAttention(a.cooldownType)) return true;
     return expiredAt(a.jwtExpTimestamp, now);
   }
   const a = account.data;

@@ -521,15 +521,19 @@ where
             }
             report.total_ok += 1;
         } else {
+            // ★ issue #108：分类必须带 body（作废标记优先于状态码），
+            //   并记下「这次判定所依据的 JWT `exp`」，让凭据更新后该记录自动失效。
             let (error_type, cooldown_seconds) =
-                credits::classify_error(result.http_status, result.code);
+                credits::classify_error(result.http_status, result.code, &result.message);
             if error_type != "Unknown" {
-                credits::save_cooldown_for(
+                let credential_exp = crate::modules::trae::jwt::parse(&raw.jwt).exp_timestamp;
+                credits::save_cooldown_with_credential_for(
                     variant,
                     uid,
                     error_type,
                     cooldown_seconds,
                     &result.message,
+                    credential_exp,
                 );
                 let entry: Option<CooldownEntry> = credits::load_cooldowns_for(variant)
                     .cooldowns
@@ -987,6 +991,8 @@ mod tests {
                 until: chrono::Local::now().timestamp() + 3600,
                 reason: "5xx".into(),
                 error_count: 0,
+                credential_exp: None,
+                judged_at: None,
             },
         );
         let planned = plan(
@@ -1006,6 +1012,8 @@ mod tests {
                 until: chrono::Local::now().timestamp() - 10,
                 reason: "旧".into(),
                 error_count: 0,
+                credential_exp: None,
+                judged_at: None,
             },
         );
         let planned = plan(
