@@ -67,7 +67,17 @@ const state = {
      是两个层次。两条路互斥（都写 `~/.codebuddy/settings.json`），所以用单一 mode 表达。
        `foreignGateway` 是**仅原型**的演示开关：模拟「settings 已被外部改成网关地址」，
        用来看冲突态（护栏把「直连上游」按钮禁掉）长什么样。 */
-  cli: { mode: "direct", model: "", rotate: true, foreignGateway: false },
+  cli: {
+    mode: "direct",
+    model: "",
+    rotate: true,
+    /* 高级区折叠态：默认模型 / Key 是低频项，默认收起（不占主视线）。 */
+    advanced: false,
+    /* 切换后 env 不会热重载 ⇒ 状态条要能说「待重启」，否则用户以为没生效。 */
+    pendingRestart: false,
+    /* **仅原型**的演示开关：模拟「settings 已被外部改成网关地址」，用来看冲突态。 */
+    foreignGateway: false,
+  },
   /* 会话工作台（v2.3）：客户端 Tab + 状态筛选 + 排序 */
   sessionClient: "workbuddy",
   sessionFilter: "all",
@@ -3949,7 +3959,79 @@ function viewSettings() {
  */
 
 /** 模型下拉的候选。真实实现读网关 `/v1/models`（当前启用的命名空间），原型写死三个。 */
+/* ══════════════════════ CodeBuddy CLI 接入方式（issue #109）══════════════════════
+ *
+ * ## 这块 UI 的本质
+ *
+ * 不是「一个功能入口」，而是 **CLI 的凭据通道二选一**：`~/.codebuddy/settings.json`
+ * 只有一份，两条路都要写它。
+ *   · 直连上游：本工具写**上游 token**，选号由本工具的轮换决定（按账号、按积分到期）；
+ *   · 走本机网关：本工具写**网关 Key**，选号由网关按模型决定（一个模型限流只影响它自己）。
+ *
+ * 混用 ⇒ CLI 把上游 token 发到本机网关 ⇒ 401；轮换每轮又重写一次 ⇒ **时好时坏**。
+ *
+ * ## 为什么是「状态条 + 两张模式卡」，而不是一个分段器（设计判断）
+ *
+ * 上一版把它做成了 `.srow` 里一条 `.seg`（直连 / 网关），与「主题：跟随系统 / 浅色 / 深色」
+ * 同一视觉权重。那是**错的语义**：
+ *   ① 分段器表达的是「同一个东西的不同取值」，可随时来回切、无代价；
+ *      而这里是**两套不同的凭据通道**，切换会清 token、关轮换、且要重启 CLI 才生效。
+ *   ② 分段器只能写名字。而用户选哪条路的依据是**能力差异**（按账号切 vs 按模型切），
+ *      这个差异必须在选项上**并列可见**，不能藏在说明文字里。
+ *   ③ 打开这页的第一个问题是「我现在是什么状态」，不是「我能改什么」——
+ *      所以状态条置顶，且要回答「生效了吗」。
+ *
+ * 因此：
+ *   · **状态条**（置顶）：一句话说清「现在走哪条路 / 谁在选号」，右侧给生效态
+ *     （`已生效` / `待重启 CLI`）。env 不热重载，用户最容易在这里误判「没生效」。
+ *   · **两张模式卡**（并列）：名称 + 一句价值主张 + **✓/— 能力对比（左右对齐，可横比）** + 动作。
+ *     当前那张标「当前」且动作位是 disabled 的「已启用」；另一张给「切换到此模式」。
+ *   · **切换走向导**（抽屉）：低频高影响的操作，先列代价、再选默认模型、最后执行。
+ *   · **高级折叠**：默认模型与 Key 是低频项，收起来，不占主视线。
+ *
+ * ## 冲突态不是「禁用 + 一段话」
+ *
+ * 检测到 settings 已被外部改成网关地址时：把**状态条变成警示条**，并给出**唯一出路**
+ * （「接管网关配置」）。只禁用「直连上游」按钮而不给下一步，用户会卡在原地。
+ */
+
+/** 两条通道的**能力矩阵** —— 两卡并列展示，选哪条路的依据就在这里。 */
+const CLI_MODES = [
+  {
+    id: "direct",
+    name: "直连上游",
+    tagline: "本工具管理凭据，并按积分到期选号",
+    icon: "key",
+    caps: [
+      ["按账号切换（积分到期优先）", true],
+      ["自动轮换 / 到期提醒", true],
+      ["某个模型限流时自动换号", false],
+    ],
+  },
+  {
+    id: "gateway",
+    name: "走本机网关",
+    tagline: "CLI 指向本机网关，由网关按模型选号",
+    icon: "route",
+    caps: [
+      ["某个模型限流时自动换号", true],
+      ["按模型统计用量与成本", true],
+      ["按账号指定", false],
+    ],
+    recommended: true,
+  },
+];
+
 const CLI_MODELS = ["", "glm-5.3", "deepseek-v4-flash", "claude-sonnet-4.5"];
+
+/* 图标用 inline SVG：全局 `svg { stroke: currentColor; fill: none }` 已定义，
+   所以这里只写路径，颜色自动跟随文字色。 */
+const CLI_ICON = {
+  key: '<svg viewBox="0 0 24 24"><circle cx="8.5" cy="15.5" r="3.5"/><path d="M11 13l7.5-7.5 2.5 2.5-7.5 7.5"/></svg>',
+  route: '<svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 6h5a5 5 0 0 1 5 5v5"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></svg>',
+  dash: '<svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>',
+};
 
 function viewCliIntegration() {
   const c = state.cli;
@@ -3957,97 +4039,113 @@ function viewCliIntegration() {
   /* 冲突 = settings 里已有网关地址（外部改的），而当前 mode 还是直连。 */
   const blocked = c.foreignGateway && !gateway;
 
-  const modeRow = `<div class="srow">
-    <div class="lab"><b>凭据来源</b><span>CLI 的凭据只有一份（<code>~/.codebuddy/settings.json</code>），两条路都写它，所以互斥</span></div>
-    <div class="seg wide" role="group" aria-label="接入方式">
-      <button class="${gateway ? "" : "on"}" data-act="cli-mode|direct"${blocked ? " disabled" : ""}>直连上游</button>
-      <button class="${gateway ? "on" : ""}" data-act="cli-mode|gateway"${blocked ? " disabled" : ""}>走本机网关</button>
-    </div>
-  </div>`;
-
-  const conflictNote = blocked ? `<div class="note-warn" style="margin:0 16px 14px">
-      <b>检测到 settings 已指向本机网关（<span class="mono">127.0.0.1:57891</span>）</b>，所以「直连上游」暂时不可选。
-      再写上游 token 会让 CLI 把上游 token 发到网关 ⇒ 401，而且轮换每轮重写一次 ⇒ <b>时好时坏</b>。
-      <br>要回直连，先把 settings 里的网关地址删掉（或在这里选「走本机网关」接管它）。
-      <span class="muted">这不是错误，是护栏。</span>
-    </div>` : "";
-
-  const gatewayRows = gateway ? `
-    <div class="srow">
-      <div class="lab"><b>网关地址</b><span>CLI 的请求会打到本机网关，由它按模型选号</span></div>
-      <span class="mono">http://127.0.0.1:57891</span>
-    </div>
-    <div class="srow">
-      <div class="lab"><b>CLI 专用 Key</b><span>切换时自动创建；列表里显示为 <span class="mono">CodeBuddy CLI（网关）</span></span></div>
-      <span class="mono">sk-wb-a1b2••••••••9f3c</span>
-    </div>
-    <div class="srow">
-      <div class="lab"><b>自动轮换</b><span>选号已交给网关，轮换每轮都会把网关 Key 覆盖回去，故已关闭</span></div>
-      <span class="badge warn">已关闭</span>
-    </div>` : `
-    <div class="srow">
-      <div class="lab"><b>自动轮换</b><span>按积分到期择优换号（直连上游时由本工具负责选号）</span></div>
-      <span class="badge ok">开启</span>
-    </div>`;
-
-  const modelRow = `<div class="srow">
-    <div class="lab"><b>默认模型</b><span>留空 = 由 CLI 自己决定；固定模型会让「网关按模型选号」失去一半意义</span></div>
-    <select class="inp" data-act="cli-model">
-      ${CLI_MODELS.map((m) => `<option value="${esc(m)}"${c.model === m ? " selected" : ""}>${m === "" ? "留空 · 由 CLI 自己决定" : esc(m)}</option>`).join("")}
-    </select>
-  </div>`;
-
-  const tail = gateway
-    ? `<div class="note-warn">
-        改了 <code>settings.json</code> 的 <code>env</code>，<b>需要重启终端与 CodeBuddy CLI</b> 才生效
-        （环境变量不热重载）。当前运行中的会话仍走旧配置。
-        <br>想回到本工具选号：点「直连上游」—— 会清掉网关配置并恢复上游 token。
+  /* ── 状态条：先回答「我现在是什么状态 / 生效了吗」 ── */
+  const strip = blocked
+    ? `<div class="mode-strip warn" role="status">
+        <span class="ms-ico">${CLI_ICON.route}</span>
+        <div class="ms-main">
+          <b>检测到 settings 已指向本机网关（<span class="mono">127.0.0.1:57891</span>）</b>
+          <span>「直连上游」暂时不可选：再写上游 token，CLI 会把 token 发到网关 ⇒ 401，而且轮换每轮重写一次 ⇒ <b>时好时坏</b>。这不是错误，是护栏。</span>
+        </div>
+        <button class="btn primary" data-act="cli-mode|gateway">接管网关配置</button>
       </div>`
-    : `<div class="note-ok">
-        直连上游：本工具把上游 token 写进 <code>settings.json</code>，并按积分到期自动换号。
-        切到「走本机网关」会<b>清掉上游 token 与 <code>apiKeyHelper</code></b>、<b>关闭自动轮换</b>，
-        并创建一把 CLI 专用网关 Key。
+    : `<div class="mode-strip ${gateway ? "info" : "ok"}" role="status">
+        <span class="ms-ico">${CLI_ICON[gateway ? "route" : "key"]}</span>
+        <div class="ms-main">
+          <b>${gateway ? "走本机网关" : "直连上游"}<span class="ms-sep">·</span>${gateway ? "由网关按模型选号" : "由本工具按积分到期选号"}</b>
+          <span>${gateway
+            ? "CLI 的请求打到 <span class=\"mono\">127.0.0.1:57891</span>，凭据是一把专用网关 Key"
+            : "上游 token 写在 <span class=\"mono\">~/.codebuddy/settings.json</span>，由本工具维护"}</span>
+        </div>
+        ${c.pendingRestart
+          ? `<span class="badge warn" title="env 不热重载">待重启 CLI</span>`
+          : `<span class="badge ok">已生效</span>`}
       </div>`;
 
-  /* 演示开关（**仅原型**）：真实实现里这个状态由后端 `status().gatewayMode` 给出。 */
-  const demoRow = `<div class="srow">
-    <div class="lab"><b>演示：模拟「settings 已被外部改成网关地址」</b><span>仅原型可见 —— 用来看冲突态（护栏把「直连上游」禁用）长什么样</span></div>
-    <button class="switch${c.foreignGateway ? " on" : ""}" data-act="cli-demo-foreign" aria-label="演示开关"></button>
-  </div>`;
-
-  return `<section class="card">
-    <div class="card-head">
-      <h3>接入方式</h3>
-      <span class="grow"></span>
-      <span class="badge ${gateway ? "info" : "ok"}">${gateway ? "走本机网关" : "直连上游"}</span>
-    </div>
-    ${conflictNote}
-    ${modeRow}
-    ${gatewayRows}
-    ${modelRow}
-    <div style="padding:0 16px 16px">${tail}${demoRow}</div>
-  </section>
-  <section class="card">
-    <div class="card-head"><h3>为什么只能二选一</h3></div>
-    <div style="padding:0 16px 16px">
-      <ul class="notes">
-        <li>两条路都往同一份 <code>settings.json</code> 写凭据，<b>同一时刻只有一个生效</b>。</li>
-        <li>混用的症状是<b>时好时坏</b>的 401：CLI 把上游 token 发到本机网关，而轮换每轮又把网关 Key 覆盖回去。</li>
-        <li>「走本机网关」之后，账号卡上的「切到 CLI」会失效 —— 选号由网关按模型决定，不归本工具了。</li>
+  /* ── 两张模式卡：能力并列可比 ── */
+  const card = (m) => {
+    const on = c.mode === m.id;
+    const dis = blocked && m.id === "direct";
+    return `<div class="mode-card${on ? " on" : ""}${dis ? " off" : ""}">
+      <div class="mc-head">
+        <span class="mc-ico">${CLI_ICON[m.icon]}</span>
+        <div class="mc-ttl">
+          <div class="mc-name">${m.name}${m.recommended && !on ? ' <span class="badge info">推荐</span>' : ""}</div>
+          <div class="mc-tag">${m.tagline}</div>
+        </div>
+        ${on ? '<span class="badge ok mc-cur">当前</span>' : ""}
+      </div>
+      <ul class="cap">
+        ${m.caps
+          .map(([text, yes]) => `<li class="${yes ? "yes" : "no"}">${yes ? CLI_ICON.check : CLI_ICON.dash}<span>${text}</span></li>`)
+          .join("")}
       </ul>
+      <div class="mc-foot">
+        ${on
+          ? '<button class="btn ghost" disabled>已启用</button>'
+          : `<button class="btn${m.recommended ? " primary" : ""}" data-act="cli-mode|${m.id}"${dis ? " disabled" : ""}>切换到此模式</button>`}
+      </div>
+    </div>`;
+  };
+
+  /* ── 高级（折叠）：默认模型与 Key 是低频项 ── */
+  const adv = `<section class="card">
+    <button class="adv-toggle" data-act="cli-advanced" aria-expanded="${c.advanced ? "true" : "false"}">
+      <span class="adv-caret">${c.advanced ? "▾" : "▸"}</span>高级
+      <span class="tiny muted">默认模型 · CLI 专用 Key</span>
+    </button>
+    ${c.advanced
+      ? `<div class="adv-body">
+          <div class="srow">
+            <div class="lab"><b>默认模型</b><span>留空 = 由 CLI 自己决定；固定模型会让「按模型选号」失去一半意义</span></div>
+            <select class="inp" data-act="cli-model">
+              ${CLI_MODELS.map((m) => `<option value="${esc(m)}"${c.model === m ? " selected" : ""}>${m === "" ? "留空 · 由 CLI 自己决定" : esc(m)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="srow">
+            <div class="lab"><b>CLI 专用 Key</b><span>${gateway ? "切换时自动创建，网关页可吊销" : "切到网关模式时才会创建"}</span></div>
+            ${gateway
+              ? '<span class="mono">sk-wb-a1b2••••••••9f3c</span>'
+              : '<span class="muted tiny">—</span>'}
+          </div>
+          ${gateway
+            ? `<div class="srow">
+                <div class="lab"><b>自动轮换</b><span>选号已交给网关；轮换每轮都会把网关 Key 覆盖回去，故已关闭</span></div>
+                <span class="badge warn">已关闭</span>
+              </div>`
+            : ""}
+        </div>`
+      : ""}
+  </section>`;
+
+  /* 演示开关（**仅原型**）：真实实现里这个状态由后端 `status().gatewayMode` 给出。 */
+  const demo = `<section class="card">
+    <div class="srow">
+      <div class="lab"><b>演示：模拟「settings 已被外部改成网关地址」</b><span>仅原型可见 —— 用来看冲突态（状态条变警示 + 只留一条出路）</span></div>
+      <button class="switch${c.foreignGateway ? " on" : ""}" data-act="cli-demo-foreign" aria-label="演示开关"></button>
     </div>
   </section>`;
+
+  return `${strip}
+  <section class="card">
+    <div class="card-head"><h3>接入方式</h3><span class="grow"></span>
+      <span class="tiny muted">两者互斥，切换会重写 settings.json</span>
+    </div>
+    <div class="mode-cards">${CLI_MODES.map(card).join("")}</div>
+  </section>
+  ${adv}
+  ${demo}`;
 }
 
 /**
- * 切换确认抽屉：把「会清掉什么」逐条说清。
+ * 切换向导（抽屉）：先列代价 → 再选默认模型 → 最后执行。
  *
- * 为什么必须确认：「清掉上游 token」是**不可见的破坏性操作** —— 用户的 token 是导入来的，
- * 被清掉后界面上看不出任何变化，直到 CLI 报错。说清「账号库里仍有、切回来不需要重新登录」
- * 能省掉一次「我的号怎么没了」的报障。
+ * 为什么是向导而不是一个确认框：这次切换会**清掉上游 token**（不可见的破坏性操作），
+ * 还要选一个可能长期生效的默认模型。两件事挤在一个「确定/取消」里，用户只会点确定。
  */
 function drawerCliConfirm(target) {
   const toGateway = target === "gateway";
+  const c = state.cli;
   const body = toGateway
     ? `<p class="tiny muted" style="margin:0 0 8px">会改写 <code>~/.codebuddy/settings.json</code>：</p>
        <ul class="notes">
@@ -4055,6 +4153,12 @@ function drawerCliConfirm(target) {
          <li><b>清掉</b>现有的上游 token 与 <code>apiKeyHelper</code></li>
          <li><b>关闭自动轮换</b>（选号改由网关负责）</li>
        </ul>
+       <div class="srow" style="padding:12px 0 0;border:0">
+         <div class="lab"><b>默认模型</b><span>留空 = 由 CLI 自己决定（推荐）</span></div>
+         <select class="inp" id="cli-wiz-model">
+           ${CLI_MODELS.map((m) => `<option value="${esc(m)}"${c.model === m ? " selected" : ""}>${m === "" ? "留空 · 由 CLI 自己决定" : esc(m)}</option>`).join("")}
+         </select>
+       </div>
        <div class="note-warn">改完需要<b>重启终端与 CodeBuddy CLI</b> 才生效（环境变量不热重载）。<br>
          上游 token 只是不再写进 settings，<b>账号库里仍有</b> —— 想切回来点「直连上游」即可，不需要重新登录。</div>`
     : `<p class="tiny muted" style="margin:0 0 8px">会改写 <code>~/.codebuddy/settings.json</code>：</p>
@@ -6499,11 +6603,22 @@ document.addEventListener("click", (e) => {
       drawerCliConfirm("direct");
       break;
     }
+    case "cli-advanced": {
+      stop();
+      state.cli.advanced = !state.cli.advanced;
+      renderContent();
+      break;
+    }
     case "cli-confirm": {
       stop();
       const target = a1;
+      /* 向导里的模型下拉（`#cli-wiz-model`）在抽屉里，不是 `data-act` ⇒ 直接读值。 */
+      const wiz = $("#cli-wiz-model");
+      if (wiz) state.cli.model = wiz.value || "";
       closeDrawer();
       state.cli.mode = target;
+      /* env 不热重载：切换后一律标「待重启 CLI」，直到用户下次进来重看。 */
+      state.cli.pendingRestart = true;
       /* 切到网关后，settings 里的网关地址就是**我们自己**写的 ⇒ 冲突态解除。 */
       if (target === "gateway") state.cli.foreignGateway = false;
       state.cli.rotate = target === "direct";

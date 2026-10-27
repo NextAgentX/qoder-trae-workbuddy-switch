@@ -2367,80 +2367,130 @@ async function boot(query) {
 
   /* ══════════════════════ CodeBuddy CLI 接入方式（issue #109）══════════════════════
    *
-   * 这块 UI 的本质是**一个二选一开关**（两条路都写同一份 settings.json），
-   * 所以断言集中在三件事上，而不是「长得对不对」：
-   *   ① 同一时刻只有一档选中；
-   *   ② 切换**先确认**，且确认框把「会清掉上游 token / 关掉轮换」说清；
-   *   ③ 冲突态把「直连上游」**真的禁用**（属性，不是样式）。
+   * 这块是「两套凭据通道二选一」，不是偏好开关 —— 所以断言钉的是**设计判断**，不是像素：
+   *   ① 状态条先说「现在走哪条 / 谁在选号 / 生效了吗」；
+   *   ② 两张卡的能力用 ✓/— **条数一致**（否则没法横着比）；
+   *   ③ 切换**先向导**，且「确认前状态不能变」；
+   *   ④ 切完状态条必须变「待重启 CLI」（env 不热重载，这是最容易误判「没生效」的地方）；
+   *   ⑤ 冲突态：状态条变警示 + 直连卡禁用 + **给一条出路**（只禁用不给下一步 = 用户卡住）。
    */
   const domCli = await boot("dest=settings&set=cli&hint=0");
   const dc = domCli.window.document;
   const cByAct = (act) => [...dc.querySelectorAll("[data-act]")].find((el) => el.dataset.act === act);
   const cClick = (el) => el.dispatchEvent(new domCli.window.MouseEvent("click", { bubbles: true }));
+  const stripText = () => (dc.querySelector(".mode-strip") || {}).textContent || "";
+  const onCard = () => dc.querySelector(".mode-card.on");
 
-  check("CodeBuddy CLI 子页：默认「直连上游」，且自动轮换为开启", () => {
-    const badge = [...dc.querySelectorAll(".card-head .badge")].map((b) => b.textContent.trim());
-    if (!badge.includes("直连上游")) throw new Error("卡片头没有「直连上游」徽章：" + badge.join("/"));
-    const text = dc.querySelector(".split-main").textContent;
-    if (!text.includes("自动轮换")) throw new Error("缺「自动轮换」行");
-    if (!text.includes("开启")) throw new Error("直连模式下轮换应显示「开启」");
-    if (text.includes("http://127.0.0.1:57891")) throw new Error("直连模式下不该显示网关地址");
-    return badge.join("/");
+  check("CLI 接入：状态条置顶，说清「走哪条路 + 谁在选号 + 已生效」", () => {
+    const strip = dc.querySelector(".mode-strip");
+    if (!strip) throw new Error("没有状态条（打开这页的第一个问题就是「我现在是什么状态」）");
+    const text = strip.textContent;
+    if (!text.includes("直连上游")) throw new Error("状态条没说明当前模式：" + text.slice(0, 80));
+    if (!text.includes("按积分到期选号")) throw new Error("状态条没说清「谁在选号」");
+    if (!text.includes("已生效")) throw new Error("状态条必须回答「生效了吗」（这里应是已生效）");
+    /* 状态条必须在模式卡**之前**（DOM 顺序即视觉顺序）。 */
+    const cards = dc.querySelector(".mode-cards");
+    if (!(strip.compareDocumentPosition(cards) & domCli.window.Node.DOCUMENT_POSITION_FOLLOWING)) {
+      throw new Error("状态条应在模式卡之前");
+    }
+    return text.replace(/\s+/g, " ").trim().slice(0, 60);
   });
 
-  check("CodeBuddy CLI 子页：切到网关**先弹确认**，且逐条列出代价", () => {
-    cClick(cByAct("cli-mode|gateway"));
+  check("CLI 接入：两张模式卡并列，能力项**条数一致**（可横比）+ 有 yes/no", () => {
+    const cards = [...dc.querySelectorAll(".mode-card")];
+    if (cards.length !== 2) throw new Error(`应有 2 张模式卡，实际 ${cards.length}`);
+    const counts = cards.map((card) => card.querySelectorAll(".cap li").length);
+    if (counts[0] !== counts[1]) {
+      throw new Error(`两卡能力项条数不一致（${counts.join(" vs ")}）—— 用户没法横着比`);
+    }
+    if (counts[0] < 2) throw new Error("能力项太少，等于没说明差异");
+    const hasNo = cards.every((card) => card.querySelector(".cap li.no"));
+    if (!hasNo) throw new Error("每张卡都该有一条「—」（只说优点等于广告，不是对比）");
+    return `2 卡 × ${counts[0]} 项 · 各有 yes/no`;
+  });
+
+  check("CLI 接入：当前卡标「当前」，且动作是 disabled 的「已启用」", () => {
+    const card = onCard();
+    if (!card) throw new Error("没有 .mode-card.on（当前模式不可辨）");
+    if (!card.textContent.includes("当前")) throw new Error("当前卡没有「当前」标记");
+    const btn = card.querySelector(".mc-foot .btn");
+    if (!btn || !btn.disabled) throw new Error("当前卡的动作必须是 disabled（不能重复切换）");
+    return card.querySelector(".mc-name").textContent.trim();
+  });
+
+  check("CLI 接入：切到网关**先弹向导**，且确认前状态不变", () => {
+    const other = [...dc.querySelectorAll(".mode-card")].find((card) => card !== onCard());
+    const btn = other.querySelector(".mc-foot .btn");
+    cClick(btn);
     const drawer = dc.querySelector("#drawer-body");
-    if (!drawer || !drawer.textContent.trim()) throw new Error("没有弹出确认抽屉");
+    if (!drawer || !drawer.textContent.trim()) throw new Error("没有弹切换向导");
     const text = drawer.textContent;
     for (const must of ["清掉", "关闭自动轮换", "重启终端"]) {
-      if (!text.includes(must)) throw new Error(`确认框缺「${must}」：${text.slice(0, 120)}`);
+      if (!text.includes(must)) throw new Error(`向导缺「${must}」：${text.slice(0, 100)}`);
     }
-    /* 关键：没点确认之前**状态不能变**（否则确认就是装饰）。 */
-    const badge = [...dc.querySelectorAll(".card-head .badge")].map((b) => b.textContent.trim());
-    if (!badge.includes("直连上游")) throw new Error("确认前状态就变了 —— 确认框成了装饰");
-    return "确认前状态不变 · 三项代价齐";
+    /* 向导里必须能选默认模型（这是它区别于「确认框」的地方）。 */
+    if (!drawer.querySelector("#cli-wiz-model")) throw new Error("向导里没有默认模型下拉");
+    if (!onCard().textContent.includes("直连上游")) throw new Error("确认前状态就变了 —— 向导成了装饰");
+    return "代价三项 + 模型下拉 · 确认前不变";
   });
 
-  check("CodeBuddy CLI 子页：确认后切到网关，展示地址/Key/轮换已关闭", () => {
+  check("CLI 接入：确认后状态条变「走本机网关 · 待重启 CLI」", () => {
     cClick(cByAct("cli-confirm|gateway"));
-    const main = dc.querySelector(".split-main").textContent;
-    for (const must of ["http://127.0.0.1:57891", "sk-wb-", "已关闭", "需要重启终端"]) {
-      if (!main.includes(must)) throw new Error(`网关态缺「${must}」`);
+    const text = stripText();
+    if (!text.includes("走本机网关")) throw new Error("状态条没切到网关：" + text.slice(0, 80));
+    if (!text.includes("由网关按模型选号")) throw new Error("状态条没说清「谁在选号」");
+    if (!text.includes("待重启 CLI")) {
+      throw new Error("切换后必须标「待重启 CLI」—— env 不热重载，不标用户会以为没生效");
     }
-    const badge = [...dc.querySelectorAll(".card-head .badge")].map((b) => b.textContent.trim());
-    if (!badge.includes("走本机网关")) throw new Error("徽章没切到「走本机网关」：" + badge.join("/"));
-    return "地址 / Key 掩码 / 轮换已关闭 / 重启提示";
+    if (text.includes("已生效")) throw new Error("刚切完就写「已生效」是假话（还没重启 CLI）");
+    return text.replace(/\s+/g, " ").trim().slice(0, 60);
   });
 
-  check("CodeBuddy CLI 子页：Key 只出现掩码，不出现完整 Key", () => {
-    const main = dc.querySelector(".split-main").textContent;
-    if (!main.includes("••••")) throw new Error("Key 必须是掩码形态");
-    if (/sk-wb-[a-z0-9]{20,}/i.test(main)) throw new Error("出现了疑似完整 Key");
-    return "掩码 · 无完整 Key";
+  check("CLI 接入：高级默认收起；展开后才有模型下拉与 Key（且 Key 是掩码）", () => {
+    if (dc.querySelector('select[data-act="cli-model"]')) {
+      throw new Error("高级区默认应收起（默认模型是低频项，不该占主视线）");
+    }
+    const toggle = dc.querySelector(".adv-toggle");
+    if (!toggle) throw new Error("没有高级折叠入口");
+    cClick(toggle);
+    const select = dc.querySelector('select[data-act="cli-model"]');
+    if (!select) throw new Error("展开后仍没有模型下拉");
+    if (![...select.options].some((o) => o.textContent.includes("留空"))) {
+      throw new Error("模型下拉缺「留空 · 由 CLI 自己决定」");
+    }
+    const body = dc.querySelector(".adv-body").textContent;
+    if (!body.includes("••••")) throw new Error("Key 必须是掩码");
+    if (/sk-wb-[a-z0-9]{20,}/i.test(body)) throw new Error("出现了疑似完整 Key");
+    if (!body.includes("已关闭")) throw new Error("网关模式下自动轮换应显示「已关闭」");
+    return "默认收起 · 展开有模型/Key/轮换";
   });
 
-  check("CodeBuddy CLI 子页：冲突态把「直连上游」**真的禁用**（属性不是样式）", () => {
+  check("CLI 接入：冲突态 = 状态条警示 + 直连卡禁用 + **给一条出路**", () => {
     /* 先切回直连，再打开演示开关（模拟 settings 已被外部改成网关地址）。 */
-    cClick(cByAct("cli-mode|direct"));
+    const gwCard = [...dc.querySelectorAll(".mode-card")].find((card) => card !== onCard());
+    cClick(gwCard.querySelector(".mc-foot .btn"));
     cClick(cByAct("cli-confirm|direct"));
     cClick(cByAct("cli-demo-foreign"));
-    const direct = cByAct("cli-mode|direct");
-    if (!direct) throw new Error("找不到「直连上游」按钮");
-    if (!direct.disabled) throw new Error("冲突态下「直连上游」必须是 disabled 属性（只改样式等于没禁）");
-    const text = dc.querySelector(".split-main").textContent;
-    if (!text.includes("这不是错误，是护栏")) throw new Error("冲突提示缺「这不是错误，是护栏」");
-    if (!text.includes("时好时坏")) throw new Error("冲突提示缺「时好时坏」——那是这个故障最难查的地方");
-    return "disabled 属性 · 护栏文案";
-  });
 
-  check("CodeBuddy CLI 子页：模型下拉可改，且含「留空」选项", () => {
-    const select = dc.querySelector('select[data-act="cli-model"]');
-    if (!select) throw new Error("没有模型下拉");
-    const options = [...select.options].map((o) => o.textContent);
-    if (!options.some((o) => o.includes("留空"))) throw new Error("缺「留空」选项：" + options.join("/"));
-    if (select.options.length < 2) throw new Error("模型下拉至少要有留空 + 一个具体模型");
-    return options.join(" / ");
+    const strip = dc.querySelector(".mode-strip");
+    if (!strip.classList.contains("warn")) throw new Error("冲突态的状态条必须是警示态");
+    const text = strip.textContent;
+    if (!text.includes("这不是错误，是护栏")) throw new Error("缺「这不是错误，是护栏」");
+    if (!text.includes("时好时坏")) throw new Error("缺「时好时坏」—— 那是这个故障最难查的地方");
+
+    const directCard = [...dc.querySelectorAll(".mode-card")].find((card) =>
+      card.textContent.includes("直连上游"),
+    );
+    if (!directCard.classList.contains("off")) throw new Error("冲突时直连卡应标 .off");
+    const btn = directCard.querySelector(".mc-foot .btn");
+    if (btn && !btn.disabled) throw new Error("冲突时直连卡的动作必须 disabled（只改样式等于没禁）");
+
+    /* ★ 只禁用不给下一步 = 用户卡住：状态条里必须有一条可点的出路。 */
+    const way = [...strip.querySelectorAll("[data-act]")].find((el) =>
+      el.dataset.act.startsWith("cli-mode|"),
+    );
+    if (!way) throw new Error("冲突态必须给出一条出路（接管网关配置），否则用户卡在原地");
+    return "警示条 · 直连卡禁用 · 出路：" + way.textContent.trim();
   });
 
   const pass = results.filter((r) => r.ok).length;

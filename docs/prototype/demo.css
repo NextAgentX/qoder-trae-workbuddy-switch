@@ -1731,3 +1731,86 @@ td.num.full { color: var(--destructive); font-weight: 600; }
 .seg.wide button { padding: 5px 12px; white-space: nowrap; }
 .seg button:disabled { cursor: not-allowed; opacity: .45; }
 .seg button:disabled:hover { color: var(--muted-fg); }
+
+/* ─────────── CodeBuddy CLI 接入方式（issue #109） ───────────
+   这块是「两套凭据通道二选一」，不是偏好开关 —— 所以用**状态条 + 模式卡**，
+   而不是设置页常规的 `.srow` + `.seg`。完整设计判断见 `demo-app.js` 里
+   `viewCliIntegration()` 的头注释。要点：
+     · 分段器的语义是「同一事物的不同取值」（主题：深/浅），可随时来回切、无代价；
+       而这里切换会清 token、关轮换、要重启 CLI ⇒ 视觉权重必须更重。
+     · 能力差异用 ✓/— **左右对齐**，让两卡可以横着比；写成两段话就没法比。
+     · 冲突态把状态条染成警示色并只留一条出路 —— 只禁用按钮而不给下一步，用户会卡住。 */
+.mode-strip {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; border-radius: 12px; margin-bottom: 12px;
+  border: 1px solid var(--border); background: var(--card);
+}
+.mode-strip .ms-ico {
+  flex: none; width: 30px; height: 30px; border-radius: 9px;
+  display: grid; place-items: center; background: var(--muted); color: var(--muted-fg);
+}
+.mode-strip .ms-ico svg { width: 16px; height: 16px; }
+.mode-strip .ms-main { flex: 1; min-width: 0; }
+.mode-strip .ms-main b { display: block; font-size: 12.5px; font-weight: 600; }
+.mode-strip .ms-main span { display: block; font-size: 11.5px; color: var(--muted-fg); margin-top: 2px; line-height: 1.55; }
+.mode-strip .ms-sep { margin: 0 6px; color: var(--faint); }
+.mode-strip.ok {
+  border-color: color-mix(in oklab, var(--success) 34%, transparent);
+  background: color-mix(in oklab, var(--success) 7%, var(--card));
+}
+.mode-strip.info {
+  border-color: color-mix(in oklab, var(--primary) 36%, transparent);
+  background: color-mix(in oklab, var(--primary) 7%, var(--card));
+}
+.mode-strip.warn {
+  border-color: color-mix(in oklab, var(--warning) 38%, transparent);
+  background: color-mix(in oklab, var(--warning) 8%, var(--card));
+}
+.mode-strip.warn .ms-ico {
+  background: color-mix(in oklab, var(--warning) 18%, transparent); color: var(--warning);
+}
+
+.mode-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px 16px 16px; }
+@media (max-width: 880px) { .mode-cards { grid-template-columns: 1fr; } }
+.mode-card {
+  display: flex; flex-direction: column; padding: 14px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--card-2);
+  transition: border-color .12s, background .12s;
+}
+.mode-card.on {
+  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+  background: color-mix(in oklab, var(--primary) 6%, var(--card-2));
+}
+/* 冲突时被护栏挡住的卡：降不透明度而不是隐藏 —— 隐藏会让「这条路存在」这件事消失。 */
+.mode-card.off { opacity: .55; }
+.mode-card .mc-head { display: flex; align-items: flex-start; gap: 10px; }
+.mode-card .mc-ico {
+  flex: none; width: 30px; height: 30px; border-radius: 9px;
+  display: grid; place-items: center; background: var(--muted); color: var(--muted-fg);
+}
+.mode-card.on .mc-ico {
+  background: color-mix(in oklab, var(--primary) 18%, transparent); color: var(--primary);
+}
+.mode-card .mc-ico svg { width: 16px; height: 16px; }
+.mode-card .mc-ttl { flex: 1; min-width: 0; }
+.mode-card .mc-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; }
+.mode-card .mc-tag { font-size: 11.5px; color: var(--muted-fg); margin-top: 2px; }
+.mode-card .mc-cur { flex: none; }
+.mode-card ul.cap { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.mode-card ul.cap li { display: flex; align-items: flex-start; gap: 7px; font-size: 11.5px; line-height: 1.5; }
+.mode-card ul.cap li svg { width: 13px; height: 13px; margin-top: 1px; flex: none; }
+.mode-card ul.cap li.yes { color: var(--foreground); }
+.mode-card ul.cap li.yes svg { color: var(--success); }
+.mode-card ul.cap li.no { color: var(--faint); }
+.mode-card .mc-foot { margin-top: auto; padding-top: 14px; }
+.mode-card .mc-foot .btn { width: 100%; justify-content: center; }
+
+.adv-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  appearance: none; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 550;
+  color: var(--foreground); background: transparent; border: 0;
+  padding: 12px 16px; text-align: left;
+}
+.adv-toggle:hover { background: oklch(1 0 0 / 4%); }
+.adv-toggle .adv-caret { width: 12px; color: var(--muted-fg); }
+.adv-body { border-top: 1px solid var(--border); }
