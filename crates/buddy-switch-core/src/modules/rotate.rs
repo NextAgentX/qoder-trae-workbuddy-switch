@@ -217,6 +217,21 @@ pub async fn run_rotate_cycle() -> Value {
         return json!({"status": "disabled"});
     }
 
+    // ★★ issue #109 §PR-1：CLI 已被指向**本机网关**时，选号由网关按模型决定 ——
+    // 轮换必须跳过，否则每轮都会把 `settings.json` 里的**网关 Key** 覆盖成上游 token，
+    // 于是 CLI 把上游 token 发到本机网关 ⇒ 401，且下一轮又改回去 ⇒ **时好时坏**。
+    //
+    // 放在这里（`enabled` 之后、拉积分之前）：禁用的优先级最高，而拉积分是网络请求，
+    // 既然注定跳过就不该发出去。
+    if let Some(endpoint) = codebuddy_cli::local_gateway_endpoint() {
+        return json!({
+            "status": "skipped",
+            "reason": "cli_points_to_local_gateway",
+            "endpoint": endpoint,
+            "message": "CodeBuddy CLI 已指向本机网关：选号由网关按模型决定，自动轮换已跳过（否则每轮都会覆盖网关 Key）",
+        });
+    }
+
     let cooldown_minutes = cfg
         .get("cooldown_minutes")
         .and_then(|v| v.as_i64())
@@ -565,5 +580,43 @@ mod tests {
             decide_target(&candidates, Some("a"), None, 0, GAP, URG, None, GUARD, 5.0),
             Decision::Switch("b".to_string())
         );
+    }
+
+    /// ★★ issue #109 §PR-1：CLI 指向本机网关时，自动轮换必须**跳过**。
+    ///
+    /// 否则每轮都会把 `settings.json` 里的**网关 Key** 覆盖成上游 token ⇒ CLI 把上游
+    /// token 发到本机网关 ⇒ 401；下一轮又改回去 ⇒ 用户看到的是「时好时坏」，
+    /// 而且很像「API 密钥无效」。
+    ///
+    /// 变异验证：删掉 `run_rotate_cycle` 开头那段判断 ⇒ 本用例会真的去拉积分
+    /// （`credits::get_credit_expiry` 发网络请求），在离线环境里变红或超时。
+    #[tokio::test]
+    async fn rotate_skips_when_cli_points_to_the_local_gateway() {
+        let dir =
+            std::env::temp_dir().join(format!("buddy-switch-rotate-gw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".buddy-switch")).unwrap();
+        std::fs::create_dir_all(dir.join(".codebuddy")).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        std::fs::write(
+            dir.join(".buddy-switch").join("auto_rotate_config.json"),
+            json!({ "enabled": true }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".codebuddy").join("settings.json"),
+            json!({ "env": { "CODEBUDDY_BASE_URL": "http://127.0.0.1:57891" } }).to_string(),
+        )
+        .unwrap();
+
+        let out = run_rotate_cycle().await;
+        assert_eq!(out["status"], "skipped", "{out}");
+        assert_eq!(out["reason"], "cli_points_to_local_gateway", "{out}");
+        assert!(
+            out["endpoint"].as_str().unwrap_or("").contains("57891"),
+            "跳过时要带上命中的地址，否则用户不知道该改哪一处：{out}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

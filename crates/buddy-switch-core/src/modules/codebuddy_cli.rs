@@ -22,6 +22,13 @@ const LEGACY_WINDOWS_HELPER_FILE: &str = "helper.cmd";
 const SETTINGS_DIR: &str = ".codebuddy";
 const SETTINGS_FILE: &str = "settings.json";
 const CODEBUDDY_AUTH_TOKEN: &str = "CODEBUDDY_AUTH_TOKEN";
+/// CLI 可能被指向的**本机网关**端口（WB 网关 / 统一网关）。
+///
+/// ★ 只认这两个（issue #109）。用户把 CLI 指向自建反代（别的端口）不算「网关模式」——
+/// 那种情况下本工具写上游 token 也不会造成「上游 token 发到本机网关」。
+const LOCAL_GATEWAY_PORTS: [u16; 2] = [57891, 57892];
+/// 网关模式探测时看的第二个文件（文档 §3.5.1 给的另一种写法）。
+const MODELS_FILE: &str = "models.json";
 const STANDARD_HELPER: &str = include_str!("../../../../scripts/codebuddy-cli-helper.cjs");
 
 fn rotate_dir() -> PathBuf {
@@ -57,6 +64,73 @@ fn settings_env_token(value: &Value) -> Option<&str> {
 fn process_env_token_present() -> bool {
     std::env::var_os(CODEBUDDY_AUTH_TOKEN)
         .is_some_and(|token| !token.to_string_lossy().trim().is_empty())
+}
+
+/// 这段文本是否是**指向本机网关**的 URL（回环主机 + 网关端口）。
+fn is_local_gateway_url(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    ["127.0.0.1", "localhost", "[::1]"].iter().any(|host| {
+        LOCAL_GATEWAY_PORTS
+            .iter()
+            .any(|port| lower.contains(&format!("{host}:{port}")))
+    })
+}
+
+/// 在任意 JSON 结构里找第一个「指向本机网关」的字符串（递归，不依赖字段名）。
+fn mentions_local_gateway(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => is_local_gateway_url(text).then(|| text.clone()),
+        Value::Array(items) => items.iter().find_map(mentions_local_gateway),
+        Value::Object(map) => map.values().find_map(mentions_local_gateway),
+        _ => None,
+    }
+}
+
+/// CLI 是否已被指向**本机网关**（issue #109）。返回命中的那段 URL（诊断用）。
+///
+/// ## 为什么需要它
+///
+/// 本工具给 CLI 提供凭据有两条通道，**都往 `settings.json` 写**：
+/// ①「接入 CodeBuddy CLI」/「自动轮换」写**上游 token**（直连上游）；
+/// ② 用户按 `docs/guides/GATEWAY-CLIENT-INTEGRATION.md` §3.5.1 把
+///    `CODEBUDDY_BASE_URL` 指向 `127.0.0.1:57891` + 网关 Key（走本机网关）。
+///
+/// 两者混用的结果是**最难查的那种**：CLI 把**上游 token** 发到本机网关 ⇒ 网关回 401
+/// 「unauthorized」；而自动轮换每轮又会把 settings 重写一遍 ⇒ 表现为**时好时坏**，
+/// 看起来正像「API 密钥无效」（#106 那类观感）。
+///
+/// ## 为什么整份递归扫，而不是按字段取
+///
+/// 文档给了两种写法：`env.CODEBUDDY_BASE_URL` 与 `~/.codebuddy/models.json`。
+/// 后者是 CLI 自己的模型清单，本仓**没有取证过它的结构** —— 与其猜字段名，
+/// 不如判「这个文件里出现了指向本机网关的 URL」。判据只需要这一个事实。
+pub fn local_gateway_endpoint() -> Option<String> {
+    let settings = read_json_file(&settings_path()).unwrap_or(Value::Null);
+    if let Some(found) = settings.get("env").and_then(mentions_local_gateway) {
+        return Some(found);
+    }
+    let models =
+        read_json_file(&home_dir().join(SETTINGS_DIR).join(MODELS_FILE)).unwrap_or(Value::Null);
+    mentions_local_gateway(&models)
+}
+
+/// 写入口的**统一守卫**：CLI 已走本机网关时，不要再用上游 token 覆盖它的凭据。
+///
+/// 文案刻意把「为什么」和「怎么办」都写全 —— 这条错误出现在用户主动点击的操作上，
+/// 只说「互斥」等于让人自己猜。
+fn ensure_not_gateway_mode(stage: &str) -> Result<(), String> {
+    if let Some(endpoint) = local_gateway_endpoint() {
+        return Err(format!(
+            "{stage}：检测到 CodeBuddy CLI 已指向本机网关（{endpoint}）。\
+             网关模式与「接入 CLI / 自动轮换」互斥：两者都往 settings.json 提供凭据，\
+             混用会让 CLI 把**上游 token** 发到本机网关（网关回 401，而轮换每轮又重写一次 ⇒ 时好时坏）。\
+             请二选一：要么把 CLI 的网关地址改回直连上游，要么停用本工具的 CLI 集成（选号交给网关）。"
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_no_process_env_override() -> Result<(), String> {
@@ -635,6 +709,12 @@ pub fn sync_windows_env_for_account(
     if !cfg!(windows) {
         return Ok(false);
     }
+    // ★ issue #109 §PR-1：这是**后台旁路**（刷新后顺带同步 token）⇒ 网关模式下
+    //   静默跳过而不是报错 —— 报错会让每次刷新都在界面上冒一条失败，而这里本来就
+    //   不该动 settings（那是网关 Key）。
+    if local_gateway_endpoint().is_some() {
+        return Ok(false);
+    }
     ensure_no_process_env_override()?;
     let settings = settings_path();
     let Some(current_settings) = read_json_file(&settings) else {
@@ -711,11 +791,17 @@ pub fn status() -> Value {
         "activeAccountName": active.and_then(|(_, id)| account::find_account(&id).map(|account| account::account_display_name(&account))),
         "accountCount": accounts.len(),
         "statePath": state_path().to_string_lossy(),
+        // ★ issue #109 §PR-1：CLI 是否已被指向**本机网关**。非 `null` 时：
+        //   「接入 CLI / 切号」会被拒绝、「自动轮换」会跳过 —— 选号由网关按模型决定。
+        //   前端据此把这两个控件置灰并说明原因（而不是让用户点了才看到报错）。
+        "gatewayMode": local_gateway_endpoint(),
     })
 }
 
 fn install_env_auth() -> Result<Value, String> {
     ensure_no_process_env_override()?;
+    // ★ issue #109 §PR-1：CLI 已走本机网关时，**不要再写上游 token**。
+    ensure_not_gateway_mode("接入 CodeBuddy CLI")?;
     let settings = settings_path();
     let accounts = account::load_accounts();
     let state = load_state();
@@ -873,6 +959,8 @@ pub fn install_helper() -> Result<Value, String> {
 
 /// 将 CodeBuddy CLI 的当前账号设置为 WorkBuddy 账号库中的目标账号。
 pub fn set_active_account(account_id: &str) -> Result<Value, String> {
+    // ★ issue #109 §PR-1：网关模式下切号无效（选号由网关决定），且会覆盖网关 Key。
+    ensure_not_gateway_mode("切换 CLI 默认账号")?;
     if cfg!(windows) {
         ensure_no_process_env_override()?;
     }
@@ -1348,5 +1436,141 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // issue #109 §PR-1：CLI 指向本机网关时，三条写入口都必须退让
+    // -----------------------------------------------------------------------
+
+    /// 判据刻意**窄**：只认「回环主机 + 网关端口」。别的端口是用户自建反代，
+    /// 那种情况下写上游 token 不会造成「上游 token 发到本机网关」。
+    #[test]
+    fn local_gateway_url_detection_is_narrow() {
+        for url in [
+            "http://127.0.0.1:57891",
+            "http://127.0.0.1:57891/v1",
+            "http://localhost:57892",
+            "http://[::1]:57891",
+            "HTTP://127.0.0.1:57891",
+        ] {
+            assert!(is_local_gateway_url(url), "{url} 应判为本机网关");
+        }
+        for url in [
+            "http://127.0.0.1:8080",
+            "https://api.example.com/v1",
+            "http://192.168.1.5:57891",
+            "",
+            "   ",
+        ] {
+            assert!(!is_local_gateway_url(url), "{url} 不该判为本机网关");
+        }
+    }
+
+    /// 两种写法都要认：`env.CODEBUDDY_BASE_URL` 与 `~/.codebuddy/models.json`
+    /// （后者结构未取证 ⇒ 递归扫，不按字段取）。
+    #[test]
+    fn gateway_mode_is_found_in_env_and_in_models_json() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        // ① env 里
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({ "env": { "CODEBUDDY_BASE_URL": "http://127.0.0.1:57891" } }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            local_gateway_endpoint().as_deref(),
+            Some("http://127.0.0.1:57891")
+        );
+
+        // ② 只写在 models.json 里
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({ "env": {} }).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            codebuddy.join(MODELS_FILE),
+            json!({ "models": [{ "id": "x", "url": "http://localhost:57892" }] }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            local_gateway_endpoint().as_deref(),
+            Some("http://localhost:57892")
+        );
+
+        // ③ 两份都没有 ⇒ 直连模式（不得误报）
+        fs::write(codebuddy.join(MODELS_FILE), json!({}).to_string()).unwrap();
+        assert_eq!(local_gateway_endpoint(), None, "直连模式不该被判成网关模式");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ★★ 写入口的守卫：网关模式下必须**拒绝**，且文案要同时说清「为什么」与「怎么办」。
+    ///
+    /// 变异验证：把 `ensure_not_gateway_mode` 的三处调用删掉 ⇒ 本用例仍绿（它只测守卫本身），
+    /// 所以真正钉住接线的是「三个入口各自的返回」—— 见下一条。
+    #[test]
+    fn guard_rejects_writes_in_gateway_mode() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        // 直连模式：放行。
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({ "env": {} }).to_string(),
+        )
+        .unwrap();
+        assert!(ensure_not_gateway_mode("测试").is_ok());
+
+        // 网关模式：拒绝，且文案要给出两条出路。
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({ "env": { "CODEBUDDY_BASE_URL": "http://127.0.0.1:57891" } }).to_string(),
+        )
+        .unwrap();
+        let error = ensure_not_gateway_mode("切换 CLI 默认账号").expect_err("必须拒绝");
+        assert!(
+            error.contains("127.0.0.1:57891"),
+            "要点名命中的地址：{error}"
+        );
+        assert!(error.contains("401"), "要说清混用的后果：{error}");
+        assert!(error.contains("二选一"), "要给出两条出路：{error}");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 三个入口的**接线**：网关模式下 `set_active_account` 必须报错，
+    /// 且**不改动** settings.json（这是「拒绝」而不是「改一半再报错」）。
+    #[test]
+    fn set_active_account_refuses_and_leaves_settings_untouched() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        let original = json!({
+            "env": {
+                "CODEBUDDY_BASE_URL": "http://127.0.0.1:57891",
+                "CODEBUDDY_API_KEY": "sk-gateway-key",
+            }
+        })
+        .to_string();
+        fs::write(codebuddy.join(SETTINGS_FILE), &original).unwrap();
+
+        let error = set_active_account("any-account").expect_err("网关模式下必须拒绝切号");
+        assert!(error.contains("本机网关"), "{error}");
+        assert_eq!(
+            fs::read_to_string(codebuddy.join(SETTINGS_FILE)).unwrap(),
+            original,
+            "拒绝时必须一个字节都不改（网关 Key 不能被覆盖成上游 token）"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
