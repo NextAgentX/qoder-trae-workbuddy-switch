@@ -312,6 +312,7 @@ const ROUTES: Record<string, Route> = {
   install_codebuddy_cli_helper: { method: "POST", path: "/api/codebuddy-cli/install-helper" },
   // issue #109 §PR-2：一键把 CLI 切到本机网关（建 Key + 写 settings + 关轮换）。
   codebuddy_cli_enable_gateway: { method: "POST", path: "/api/codebuddy-cli/enable-gateway" },
+  codebuddy_cli_disable_gateway: { method: "POST", path: "/api/codebuddy-cli/disable-gateway" },
   switch_codebuddy_cli_account: { method: "POST", path: "/api/codebuddy-cli/switch" },
   get_codebuddy_cn_ide_status: { method: "GET", path: "/api/codebuddy-cn-ide/status" },
   switch_codebuddy_cn_ide_account: { method: "POST", path: "/api/codebuddy-cn-ide/switch" },
@@ -856,6 +857,24 @@ export function installCodebuddyCliHelper(): Promise<CodeBuddyCliInstallResult> 
  * `apiKeyHelper`）、关掉自动轮换。**互斥**：与「接入 CLI / 切号」不能同时开
  * （两条通道都往 settings 写凭据，混用会让 CLI 把上游 token 发到网关 ⇒ 401）。
  */
+/**
+ * 从「走本机网关」切回**直连上游**（issue #109）。
+ *
+ * 会做两件事：清掉 settings 里的三个网关键、按当前账号重建直连凭据。
+ * **不会**自动重开自动轮换（切到网关时是被强制关掉的，但自动开启后台任务比自动关闭
+ * 更危险 —— 用户可能本来就因别的原因关着）⇒ 看 `rotateDisabled` 决定要不要提示。
+ */
+export function disableCodebuddyCliGateway(): Promise<{
+  ok: boolean;
+  changed?: boolean;
+  restored?: boolean;
+  rotateDisabled?: boolean;
+  message?: string;
+  error?: string;
+}> {
+  return call("codebuddy_cli_disable_gateway");
+}
+
 export function enableCodebuddyCliGateway(input: {
   region?: string;
   model?: string;

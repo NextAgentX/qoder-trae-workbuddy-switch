@@ -817,6 +817,61 @@ pub async fn codebuddy_cli_enable_gateway(region: Option<String>, model: Option<
     }
 }
 
+/// POST /api/codebuddy-cli/disable-gateway —— 从「走本机网关」切回**直连上游**（issue #109）。
+///
+/// 两步，顺序不可颠倒：
+/// ① 先清掉 settings 里的三个网关键（`BASE_URL` / `API_KEY` / `MODEL`）——
+///    不清的话第 ② 步会被 PR #114 的护栏拦住（那正是它的职责）；
+/// ② 再按当前账号重建直连凭据（`install_helper`）。
+///
+/// **不自动重开自动轮换**：切到网关时是**强制**关掉它的（轮换每轮会覆盖网关 Key），
+/// 但自动开启一个后台任务比自动关闭更危险 —— 用户可能本来就因为别的原因关着。
+/// 返回 `rotateDisabled` 让界面提示一句，由用户决定。
+#[tauri::command]
+pub async fn codebuddy_cli_disable_gateway() -> Value {
+    let cleared = match codebuddy_cli::disable_gateway_mode() {
+        Ok(value) => value,
+        Err(error) => return json!({ "ok": false, "error": error }),
+    };
+    /* `models.json` 里仍有网关地址 ⇒ 本工具没写过那个文件，**停下并让用户处理**，
+    否则下一步 install_helper 又会被护栏拦住，报错更难懂。 */
+    if let Some(warning) = cleared.get("warning").and_then(Value::as_str) {
+        return json!({ "ok": false, "error": warning, "detail": cleared });
+    }
+
+    let restored =
+        tauri::async_runtime::spawn_blocking(|| programs::install_helper("codebuddy_cli"))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+
+    let rotate_enabled = config::load_auto_rotate_config()
+        .get("enabled")
+        .and_then(Value::as_bool)
+        == Some(true);
+    match restored {
+        Ok(_) => json!({
+            "ok": true,
+            "changed": cleared.get("changed").cloned().unwrap_or(json!(false)),
+            "restored": true,
+            "rotateDisabled": !rotate_enabled,
+            "message": if rotate_enabled {
+                "已切回直连上游：网关配置已清理，直连凭据已重建；重启终端与 CLI 后生效"
+            } else {
+                "已切回直连上游：网关配置已清理，直连凭据已重建。\u{26a0} 自动轮换仍是关闭的 —— 需要的话在「签到与积分」里开启"
+            },
+        }),
+        Err(error) => json!({
+            "ok": false,
+            /* 网关配置**已经清掉了**，但凭据没重建 —— 必须说清，否则用户看到「失败」会以为一切没变。 */
+            "error": format!("网关配置已清理，但重建直连凭据失败：{error}"),
+            "changed": true,
+            "restored": false,
+            "detail": cleared,
+        }),
+    }
+}
+
 /// POST /api/codebuddy-cli/switch —— 只切换 CodeBuddy CLI，不重启 WorkBuddy。
 ///
 /// **表驱动**：`programs::switch("codebuddy_cli", …)`（CLI 不重启客户端 ⇒ `restart` 传 `None`）。

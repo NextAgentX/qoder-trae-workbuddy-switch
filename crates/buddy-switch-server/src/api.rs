@@ -162,6 +162,11 @@ fn api_routes() -> Router {
             "/api/codebuddy-cli/enable-gateway",
             post(api_codebuddy_cli_enable_gateway),
         )
+        // issue #109：切回直连（清网关键 + 重建上游凭据）。没有它，用户切过去就回不来。
+        .route(
+            "/api/codebuddy-cli/disable-gateway",
+            post(api_codebuddy_cli_disable_gateway),
+        )
         .route(
             "/api/codebuddy-cn-ide/status",
             get(api_codebuddy_cn_ide_status),
@@ -1568,6 +1573,47 @@ async fn api_codebuddy_cli_enable_gateway(Json(body): Json<Value>) -> Response {
             let _ = state.keys.revoke(&record.id);
             json_err(error, StatusCode::BAD_REQUEST)
         }
+    }
+}
+
+/// POST /api/codebuddy-cli/disable-gateway —— 从「走本机网关」切回直连（issue #109）。
+///
+/// 与桌面宿主同名命令**刻意各写一份**（本仓惯例），但逻辑一致：先清网关键、再重建凭据。
+async fn api_codebuddy_cli_disable_gateway() -> Response {
+    let cleared = match codebuddy_cli::disable_gateway_mode() {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
+    /* `models.json` 里仍有网关地址 ⇒ 本工具没写过那个文件，停下让用户处理。 */
+    if let Some(warning) = cleared.get("warning").and_then(Value::as_str) {
+        return json_err(warning.to_string(), StatusCode::BAD_REQUEST);
+    }
+
+    let restored = tokio::task::spawn_blocking(|| programs::install_helper("codebuddy_cli"))
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
+
+    let rotate_enabled = config::load_auto_rotate_config()
+        .get("enabled")
+        .and_then(Value::as_bool)
+        == Some(true);
+    match restored {
+        Ok(_) => json_ok(json!({
+            "ok": true,
+            "changed": cleared.get("changed").cloned().unwrap_or(json!(false)),
+            "restored": true,
+            "rotateDisabled": !rotate_enabled,
+            "message": if rotate_enabled {
+                "已切回直连上游：网关配置已清理，直连凭据已重建；重启终端与 CLI 后生效"
+            } else {
+                "已切回直连上游：网关配置已清理，直连凭据已重建。⚠ 自动轮换仍是关闭的 —— 需要的话在「签到与积分」里开启"
+            },
+        })),
+        Err(error) => json_err(
+            format!("网关配置已清理，但重建直连凭据失败：{error}"),
+            StatusCode::BAD_REQUEST,
+        ),
     }
 }
 

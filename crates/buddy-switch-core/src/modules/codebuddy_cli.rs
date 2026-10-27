@@ -230,6 +230,80 @@ pub fn enable_gateway_mode(
     }))
 }
 
+/// 从网关模式切回直连（issue #109 §PR-2 的另一半）。
+///
+/// 只做一件事：**删掉三个网关 env**（`BASE_URL` / `API_KEY` / `MODEL`）。
+/// **不动上游凭据** —— 那是 `install_helper` / `set_active_account` 的职责
+/// （它们有「哪个账号、哪份 token」的上下文，这里没有）。
+///
+/// ## 为什么需要它（不做就是死路）
+///
+/// PR #114 的护栏会在「CLI 已指向网关」时拒绝 `install_env_auth` —— 那是对的，
+/// 否则又回到混用。但如果没有这条反向通道，用户切到网关后就**再也回不来**
+/// （手工删 env 才算）。
+///
+/// ## `models.json` 里的网关地址不自动清
+///
+/// 本工具只写过 `settings.json` 的 `env`，**从没写过** `models.json`（那是用户
+/// 手改或另一套工具写的）。所以发现它仍指向网关时：**不删**，返回 `warning`
+/// 让用户自己处理 —— 删别人的配置比留一条警告危险得多。
+pub fn disable_gateway_mode() -> Result<Value, String> {
+    let settings = settings_path();
+    let Some(mut value) = read_json_file(&settings) else {
+        /* 没有 settings ⇒ 本来就不是网关模式，幂等返回。 */
+        return Ok(json!({ "ok": true, "changed": false, "gatewayMode": null }));
+    };
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| auth_config_error("配置阶段", "CodeBuddy settings.json 顶层不是对象"))?;
+
+    let mut removed = 0usize;
+    if let Some(env) = object.get_mut("env").and_then(Value::as_object_mut) {
+        for key in [CODEBUDDY_BASE_URL, CODEBUDDY_API_KEY, CODEBUDDY_MODEL] {
+            if env.remove(key).is_some() {
+                removed += 1;
+            }
+        }
+    }
+    if removed == 0 {
+        return Ok(
+            json!({ "ok": true, "changed": false, "gatewayMode": local_gateway_endpoint() }),
+        );
+    }
+
+    persist_settings_at(&settings, &value)?;
+
+    /* 回读：`env` 里必须已经不剩网关键。剩下的命中只可能来自 `models.json`。 */
+    let written = read_json_file(&settings).unwrap_or(Value::Null);
+    let env_still_has_gateway = written
+        .get("env")
+        .and_then(Value::as_object)
+        .map(|env| {
+            [CODEBUDDY_BASE_URL, CODEBUDDY_API_KEY]
+                .iter()
+                .any(|key| env.contains_key(*key))
+        })
+        .unwrap_or(false);
+    if env_still_has_gateway {
+        return Err(auth_config_error(
+            "校验阶段",
+            "清理网关配置失败：settings.json 的 env 里仍有 CODEBUDDY_BASE_URL / CODEBUDDY_API_KEY",
+        ));
+    }
+
+    let remaining = local_gateway_endpoint();
+    Ok(json!({
+        "ok": true,
+        "changed": true,
+        "removed": removed,
+        "gatewayMode": remaining,
+        /* 非空 = 命中来自 `models.json`（本工具没写过它，交给用户处理）。 */
+        "warning": remaining.map(|url| format!(
+            "settings.json 已清理，但 models.json 里仍指向本机网关（{url}）—— 本工具没有写过那个文件，请手工删除后重试"
+        )),
+    }))
+}
+
 /// 写入口的**统一守卫**：CLI 已走本机网关时，不要再用上游 token 覆盖它的凭据。
 ///
 /// 文案刻意把「为什么」和「怎么办」都写全 —— 这条错误出现在用户主动点击的操作上，
@@ -1806,6 +1880,102 @@ mod tests {
         // 拒绝时一个字节都不该改。
         let after = fs::read_to_string(codebuddy.join(SETTINGS_FILE)).unwrap();
         assert_eq!(after, json!({}).to_string(), "拒绝时不得改动 settings");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // issue #109 §PR-2 的另一半：切回直连
+    // -----------------------------------------------------------------------
+
+    /// 切回直连只删三个网关键，**其它 env 与上游凭据都不动**（后者由 install_helper 负责）。
+    #[test]
+    fn disabling_gateway_mode_removes_only_the_three_keys() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({
+                "env": {
+                    "CODEBUDDY_BASE_URL": "http://127.0.0.1:57891",
+                    "CODEBUDDY_API_KEY": "sk-gw-123",
+                    "CODEBUDDY_MODEL": "glm-5.3",
+                    "HTTPS_PROXY": "http://127.0.0.1:7890",
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let out = disable_gateway_mode().expect("应能切回直连");
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(out["changed"], json!(true));
+        assert_eq!(out["removed"], json!(3));
+        assert_eq!(out["gatewayMode"], Value::Null, "切干净后不该再命中网关");
+        assert_eq!(out["warning"], Value::Null);
+
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(codebuddy.join(SETTINGS_FILE)).unwrap())
+                .unwrap();
+        let env = written["env"].as_object().expect("env 仍在");
+        for key in ["CODEBUDDY_BASE_URL", "CODEBUDDY_API_KEY", "CODEBUDDY_MODEL"] {
+            assert!(!env.contains_key(key), "{key} 应被删掉");
+        }
+        assert_eq!(
+            env["HTTPS_PROXY"],
+            json!("http://127.0.0.1:7890"),
+            "与本次无关的 env 必须保留"
+        );
+        assert_eq!(local_gateway_endpoint(), None);
+
+        // 幂等：再调一次不报错、changed=false。
+        let again = disable_gateway_mode().expect("幂等");
+        assert_eq!(again["changed"], json!(false));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// ★ `models.json` 里的网关地址**不自动删**（本工具没写过那个文件），只回 `warning`。
+    ///
+    /// 变异验证：把 `warning` 改成直接删 `models.json` ⇒ 本用例红（那是越权改用户文件）。
+    #[test]
+    fn disabling_gateway_mode_warns_but_does_not_touch_models_json() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({ "env": { "CODEBUDDY_BASE_URL": "http://127.0.0.1:57891", "CODEBUDDY_API_KEY": "k" } })
+                .to_string(),
+        )
+        .unwrap();
+        let models =
+            json!({ "models": [{ "id": "x", "url": "http://localhost:57892" }] }).to_string();
+        fs::write(codebuddy.join(MODELS_FILE), &models).unwrap();
+
+        let out = disable_gateway_mode().expect("settings 侧清理成功即可返回 ok");
+        assert_eq!(out["changed"], json!(true));
+        assert_eq!(
+            out["gatewayMode"],
+            json!("http://localhost:57892"),
+            "仍命中说明来自 models.json"
+        );
+        let warning = out["warning"].as_str().expect("必须给出 warning");
+        assert!(warning.contains("models.json"), "{warning}");
+        assert!(
+            warning.contains("没有写过"),
+            "要说清「本工具没写过它」，否则用户会以为是我们留下的：{warning}"
+        );
+        assert_eq!(
+            fs::read_to_string(codebuddy.join(MODELS_FILE)).unwrap(),
+            models,
+            "models.json 必须逐字节未变（越权改用户文件比留警告更危险）"
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }

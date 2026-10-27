@@ -513,6 +513,7 @@ pub fn run() {
             commands::install_codebuddy_cli_helper,
             commands::switch_codebuddy_cli_account,
             commands::codebuddy_cli_enable_gateway,
+            commands::codebuddy_cli_disable_gateway,
             commands::get_codebuddy_cn_ide_status,
             commands::switch_codebuddy_cn_ide_account,
             commands::detect_codebuddy_cn_ide_account,
