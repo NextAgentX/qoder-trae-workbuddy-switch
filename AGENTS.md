@@ -32,6 +32,44 @@ Managed by Trellis. Edits outside this block are preserved; edits inside may be 
 - Use Conventional Commit type prefixes such as `feat:`, `fix:`, and `docs:`.
 - Write the commit subject and body in Chinese by default. Use English only when the user explicitly requests it.
 
+## 并行提交（同一工作树里还有别人的改动时）
+
+这个仓库**经常有两个及以上会话同时改同一个 checkout**。`git status` 里出现你不认识的文件时，
+先判断归属，再动手 —— 别 `git add -A`，也别 `git checkout -- <file>`（会直接抹掉对方未提交的工作）。
+
+三种情形，三种做法：
+
+| 情形 | 做法 |
+|:--|:--|
+| 你改的文件**没有**别人的 hunk | 正常 `git add <你的文件>` 后提交；**共享 index 里若有别人已暂存的条目**，见下面第 3 行 |
+| 同一文件里既有你的 hunk 又有别人的 | `git diff -- <file>` 切出 patch，按 `@@` 序号只取自己的（`awk '/^@@/{n++} n<=K'`），再 `git apply --cached`（只进暂存区、不动工作树） |
+| 想提交时**共享 index 混着别人的暂存**，或要改写已有提交 | 用**独立 index + plumbing**，全程不碰 `.git/index` 与工作树 |
+
+独立 index 的完整姿势（**不要**用 `git commit`，它会连带别人的暂存一起提交）：
+
+```bash
+export GIT_INDEX_FILE="$PWD/.git/index.tmp"   # 独立 index
+git read-tree HEAD                            # 以当前提交为底
+BLOB=$(git hash-object -w <你的文件>)          # 或 update-index --cacheinfo 取历史版本
+git update-index --cacheinfo 100644,$BLOB,<你的文件>
+TREE=$(git write-tree)
+git diff-tree -r --name-status HEAD^{tree} "$TREE"   # ★ 先自证「差异只有我要改的」
+git commit-tree "$TREE" -p HEAD -F msg.txt
+git update-ref refs/heads/<branch> <new-commit>
+rm -f .git/index.tmp                          # ⚠️ 必须用相对路径
+```
+
+三个坑：
+
+- **`rm` 用绝对 Windows 路径会被安全护栏拦下**（`[SAFE_DELETE_INVALID_PATH] embedded drive prefix`），
+  而且会让整条 `&&` 链**中断**（后面的 `git log` 之类全不执行，看起来像提交失败）。
+- **rename 型冲突不要靠改文件内容解决**：如果对方正在把 `A` 改名/删除成 `B`，正确做法是让你的提交
+  **完全不碰 `A`**；否则无论谁先合都会撞。
+- 改写已推送的 PR 分支用 `git push --force-with-lease`，**不要** `--force`。
+
+提交后三个自查：① `git diff-tree` 差异清单 = 你打算改的文件；② `git status` 里别人的条目**仍然在**；
+③ `git show --stat HEAD` 不包含别人的文件。
+
 ## 文档规范（Documentation Layout）
 
 `docs/` 按**生命周期**分区，入口是 [`docs/README.md`](docs/README.md)（文档地图）。**新增或移动文档前先读它。**
