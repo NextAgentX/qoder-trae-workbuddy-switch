@@ -22,6 +22,8 @@
 //! 与本组变量无关。
 
 mod api;
+// 管理面的来源校验（Host / Origin / Content-Type）。**必须在 `api::router()` 之前装载策略。**
+mod api_guard;
 mod gateway_host;
 // Qoder 网关（第三个平台，默认 57895）：独立端口，不与另三个 merge（axum 同路径 merge 会 panic）。
 mod qoder_gateway_host;
@@ -94,6 +96,19 @@ fn resolve_port(args: &[String], env: Option<&str>) -> u16 {
 /// 把 `0.0.0.0` / 局域网 IP / 域名误判成回环 ⇒ 警告不出现，用户不知道 webui 已对外。
 fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+/// 「给浏览器的地址」：监听地址是回环就用它，否则换成 `127.0.0.1`。
+///
+/// `--host 0.0.0.0` 时 `http://0.0.0.0:57890` 打不开（Windows 上还会被当成
+/// 不可路由地址），而且 `Host: 0.0.0.0` 会被管理面的来源校验拒绝。
+/// 端口保留用户给的那个 —— 对外监听与本地打开用的是同一个端口。
+fn browser_addr(host: &str, port: u16) -> String {
+    if is_loopback_host(host) {
+        format!("{host}:{port}")
+    } else {
+        format!("127.0.0.1:{port}")
+    }
 }
 
 /// 为某一类任务起一个独立排程循环。
@@ -457,6 +472,11 @@ async fn serve(args: &[String]) {
     let port = resolve_port(args, std::env::var(BUDDY_SWITCH_PORT_ENV).ok().as_deref());
     let host = resolve_host(args, std::env::var(BUDDY_SWITCH_HOST_ENV).ok().as_deref());
 
+    // ★ 安全审计 P0-1：装载管理面的 Host 白名单（默认只有回环）。
+    //   必须在 `api::router()` 之前 —— `router()` 里的中间件会在构造时取策略。
+    let allowed_hosts = std::env::var(api_guard::ALLOWED_HOSTS_ENV).ok();
+    api_guard::init(allowed_hosts.as_deref());
+
     let app = api::router();
     let addr = format!("{host}:{port}");
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -480,6 +500,19 @@ async fn serve(args: &[String]) {
             "⚠️  webui 正对外监听（{host}）—— 它能读写账号库与网关 Key。\
              请确保只在可信网络内暴露，或用反向代理加上鉴权。"
         );
+        // ★ 安全审计 P0-1：管理面默认只接受回环 Host。对外监听时**必须**告知怎么放开，
+        //   否则远程用户只会看到一个 403，然后以为软件坏了。
+        match api_guard::init(allowed_hosts.as_deref()).clone() {
+            policy if policy == api_guard::Policy::default() => println!(
+                "⚠️  管理面只接受本机访问（Host 必须是 127.0.0.1 / localhost / ::1）。\
+                 远程访问请在启动前设置 {}（逗号分隔，可带端口）。",
+                api_guard::ALLOWED_HOSTS_ENV
+            ),
+            _ => println!(
+                "管理面允许的额外 Host 来自 {}。",
+                api_guard::ALLOWED_HOSTS_ENV
+            ),
+        }
     }
     println!("按 Ctrl+C 停止服务。");
 
@@ -491,7 +524,9 @@ async fn serve(args: &[String]) {
 
     let no_open = args.iter().any(|a| a == "--no-open");
     if !no_open {
-        open_browser(&addr);
+        // ★ 打开浏览器要用**回环**地址：`--host 0.0.0.0` 时 `http://0.0.0.0:57890`
+        //   既不是有效访问方式，也会被管理面的 Host 校验拒掉（见 `api_guard`）。
+        open_browser(&browser_addr(&host, port));
     }
 
     spawn_background_loops();
@@ -626,6 +661,19 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// ★ 安全审计 P0-1：`--host 0.0.0.0` 时给浏览器打开的必须是**回环**地址。
+    ///
+    /// 反例（改坏会红）：直接 `http://0.0.0.0:57890` —— 打不开，而且
+    /// `Host: 0.0.0.0` 会被管理面的来源校验拒成 403，用户会以为软件坏了。
+    #[test]
+    fn browser_url_uses_loopback_even_when_listening_wide() {
+        assert_eq!(browser_addr("127.0.0.1", 57890), "127.0.0.1:57890");
+        assert_eq!(browser_addr("localhost", 57890), "localhost:57890");
+        // 对外监听：地址换成回环，**端口不变**（否则打开的就不是刚起的那个服务）。
+        assert_eq!(browser_addr("0.0.0.0", 57890), "127.0.0.1:57890");
+        assert_eq!(browser_addr("192.168.1.5", 1234), "127.0.0.1:1234");
     }
 
     /// ★ 默认必须仍是**回环**：改坏这条等于「不声不响把 webui 暴露到局域网」。

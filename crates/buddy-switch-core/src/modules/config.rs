@@ -345,7 +345,7 @@ pub fn save_auto_backup_config(cfg: &Value) -> std::io::Result<()> {
     if let Some(enabled) = cfg.get("enabled").and_then(Value::as_bool) {
         merged["enabled"] = json!(enabled);
     }
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
     atomic_write(&auto_backup_config_file(), &content)
 }
@@ -495,7 +495,7 @@ pub fn load_workbuddy_exe_cache() -> Option<PathBuf> {
 
 /// 记住已存在的 WorkBuddy.exe，供下次未运行时启动。
 pub fn save_workbuddy_exe_cache(exe: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content =
         serde_json::to_string_pretty(&json!({ "exe": exe.to_string_lossy() })).unwrap_or_default();
     atomic_write(&workbuddy_exe_cache_file(), &content)
@@ -531,7 +531,7 @@ pub fn save_workbuddy_exe_cache_for(
     region: crate::modules::region::Region,
     exe: &Path,
 ) -> std::io::Result<()> {
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content =
         serde_json::to_string_pretty(&json!({ "exe": exe.to_string_lossy() })).unwrap_or_default();
     atomic_write(&workbuddy_exe_cache_file_for(region), &content)
@@ -561,7 +561,7 @@ pub fn load_codebuddy_cn_app_cache() -> Option<PathBuf> {
 }
 
 pub fn save_codebuddy_cn_app_cache(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content =
         serde_json::to_string_pretty(&json!({ "exe": path.to_string_lossy() })).unwrap_or_default();
     atomic_write(&codebuddy_cn_app_cache_file(), &content)
@@ -621,7 +621,7 @@ pub fn load_checkin_config() -> Value {
 /// 保存签到配置（只保留已知字段）。
 pub fn save_checkin_config(cfg: &Value) -> std::io::Result<()> {
     let merged = merge_checkin_config(cfg);
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
     atomic_write(&checkin_config_file(), &content)
 }
@@ -641,7 +641,7 @@ pub fn load_checkin_logs() -> Vec<Value> {
 
 fn save_checkin_logs_unlocked(logs: &[Value]) -> std::io::Result<()> {
     let kept = normalize_checkin_logs(logs, now_ms());
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&kept).unwrap_or_default();
     atomic_write(&checkin_logs_file(), &content)
 }
@@ -810,7 +810,7 @@ pub fn save_travel_config(cfg: &Value) -> std::io::Result<()> {
     if let Some(enabled) = cfg.get("enabled").and_then(Value::as_bool) {
         merged["enabled"] = json!(enabled);
     }
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
     atomic_write(&travel_config_file(), &content)
 }
@@ -830,7 +830,7 @@ pub fn load_travel_cache() -> Value {
 
 /// 保存旅行缓存。
 pub fn save_travel_cache(cache: &Value) -> std::io::Result<()> {
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(cache).unwrap_or_default();
     atomic_write(&travel_cache_file(), &content)
 }
@@ -885,7 +885,7 @@ pub fn save_auto_rotate_config(cfg: &Value) -> std::io::Result<()> {
             merged[k] = v.clone();
         }
     }
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
     atomic_write(&auto_rotate_config_file(), &content)
 }
@@ -937,7 +937,7 @@ pub fn load_switch_config() -> Value {
 /// 保存账号切换配置（只保留已知字段）。
 pub fn save_switch_config(cfg: &Value) -> std::io::Result<()> {
     let merged = normalize_switch_config(cfg);
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&merged).unwrap_or_default();
     atomic_write(&switch_config_file(), &content)
 }
@@ -961,7 +961,7 @@ pub fn save_rotate_logs(logs: &[Value]) -> std::io::Result<()> {
     if kept.len() > ROTATE_LOG_MAX_RECORDS {
         kept.drain(..kept.len() - ROTATE_LOG_MAX_RECORDS);
     }
-    std::fs::create_dir_all(store_dir())?;
+    ensure_private_dir(&store_dir())?;
     let content = serde_json::to_string_pretty(&kept).unwrap_or_default();
     atomic_write(&auto_rotate_logs_file(), &content)
 }
@@ -1038,14 +1038,70 @@ pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 ///
 /// 用途：会话指纹缓存是**定长二进制**（25k × 512 × 8B ≈ 100 MB），
 /// 用 JSON / 文本写一遍要额外转义与编码，纯浪费。
+/// 以 `0600` 创建/覆盖一个文件（POSIX）。Windows 由 `%USERPROFILE%` 的 ACL 保证，不做处理。
+///
+/// ## 为什么必须从这里改（安全审计 P0-2）
+///
+/// `~/.buddy-switch/` 下的 `accounts.json`（含 `access_token` / `refresh_token` **明文**）、
+/// `backups/*.json`、用户导出的账号文件**全部**经由本模块落盘。此前只用
+/// `std::fs::write`，于是文件权限跟随 umask（通常是 **0644**）⇒ **同机其他用户可读**。
+/// 项目支持 macOS / Linux，这不是理论风险。
+///
+/// 两个细节：
+/// 1. 用 `OpenOptions::mode(0o600)` **创建时**就带权限，而不是写完再 `set_permissions`
+///    —— 后者在「写入 → chmod」之间留了一个真实可读窗口；
+/// 2. 仍然显式 `set_permissions` 一次：目标文件若**已存在且是 0644**（升级前的历史文件），
+///    仅靠创建参数改不了它的模式（`create` 不会重置已有文件的权限）。
+fn write_private_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content)?;
+        file.flush()?;
+        drop(file);
+        // 历史文件（升级前按 umask 建的 0644）必须在这里被纠正。
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)
+    }
+}
+
+/// 建目录并收紧到 `0700`（POSIX）。
+///
+/// 与 [`write_private_file`] 配套：文件 0600 只挡住「读到文件内容」，目录 0700 还挡住
+/// 「枚举出有哪些文件」—— 后者本身就会泄漏「这个用户在用哪些产品线 / 有几个账号」。
+/// 目录已存在时同样纠一次权限（历史目录是 0755）。
+pub fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // 失败不致命：某些挂载点（如把 store 目录挂到 NFS / 只读卷）不允许 chmod，
+        // 此时文件级的 0600 仍然生效，不该因此让整个写入失败。
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
 pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> std::io::Result<()> {
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let tmp = path.with_file_name(format!("{file_name}.tmp-{}", uuid::Uuid::new_v4().simple()));
-    if let Err(e) = std::fs::write(&tmp, content) {
+    if let Err(e) = write_private_file(&tmp, content) {
         eprintln!("[atomic] write tmp FAILED: {e}");
+        let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
@@ -1901,5 +1957,44 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&base).expect("cleanup");
+    }
+
+    /// ★★ 安全审计 P0-2：凭据落盘必须是 `0600`，目录 `0700`。
+    ///
+    /// 变异验证：把 `write_private_file` 改回 `std::fs::write` ⇒ 第一条断言红
+    /// （umask 022 下得到 644，同机其他用户可读 `access_token`）。
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_owner_only_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-perm-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        ensure_private_dir(&dir).expect("建目录");
+        let mode_of = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        // 目录 0700：挡住「枚举出有哪几个账号文件」。
+        assert_eq!(mode_of(&dir), 0o700, "store 目录必须 0700");
+
+        let file = dir.join("accounts.json");
+        atomic_write(&file, "{\"access_token\":\"secret\"}").expect("写文件");
+        assert_eq!(mode_of(&file), 0o600, "账号库必须 0600（含明文 token）");
+
+        // 升级路径：历史文件是 0644 ⇒ 覆盖写之后必须被纠正回 0600。
+        // 这条单独断言，因为 `OpenOptions::create` **不会**重置已存在文件的模式。
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(mode_of(&file), 0o644, "前提：夹具已把权限改成 0644");
+        atomic_write(&file, "{}").expect("覆盖写");
+        assert_eq!(
+            mode_of(&file),
+            0o600,
+            "覆盖写必须把历史 0644 文件纠正成 0600"
+        );
+
+        // 反向对照：写入内容本身不受权限改动影响（不是靠「写不进去」实现的）。
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

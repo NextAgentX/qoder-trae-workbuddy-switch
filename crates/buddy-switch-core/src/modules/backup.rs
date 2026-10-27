@@ -745,7 +745,9 @@ fn resolve_managed_backup_path(file_name: &str) -> Result<std::path::PathBuf, St
 /// 原子写一份 envelope 到指定文件（自动建目录）。
 fn write_envelope_file(path: &std::path::Path, envelope: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("创建备份目录失败：{error}"))?;
+        // ★ 备份是**明文全量**（`snapshot_before_import` 刻意不剥凭据），目录必须 0700：
+        //   否则同机其他用户能枚举出「这个用户在什么时候导出过账号」。
+        config::ensure_private_dir(parent).map_err(|error| format!("创建备份目录失败：{error}"))?;
     }
     let text = serde_json::to_string_pretty(envelope).map_err(|error| error.to_string())?;
     config::atomic_write(path, &text).map_err(|error| format!("写入备份文件失败：{error}"))

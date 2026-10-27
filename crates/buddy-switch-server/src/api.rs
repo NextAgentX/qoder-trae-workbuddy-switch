@@ -88,7 +88,16 @@ static SWITCH_REGION: Mutex<Option<Region>> = Mutex::new(None);
 /// 否则 axum 会因 fallback 冲突直接 panic。
 pub fn router() -> Router {
     let gateway_state = crate::gateway_host::shared_state();
+    // ★ 安全审计 P0-1：**管理面必须有来源校验**。
+    //
+    // 这里 `.layer(...)` 的位置很关键：它在 `merge` **之前**，所以只作用于
+    // `api_routes()`（`/api/*`）；网关那棵树有自己的 Bearer 鉴权与独立端口，
+    // 不该被 webui 的 Host 策略牵连。
+    //
+    // 也不能挂在最外层：那会把 `static_handler`（SPA 静态资源）一起拦掉，
+    // 而静态资源是公开的、且它的 GET 请求不带 `Content-Type`。
     api_routes()
+        .layer(axum::middleware::from_fn(crate::api_guard::guard))
         .merge(buddy_switch_gateway::router(gateway_state))
         .fallback(static_handler)
 }
@@ -4995,6 +5004,7 @@ mod tests {
         let request = Request::builder()
             .method(method)
             .uri(uri)
+            .header("host", "127.0.0.1:57890")
             .body(Body::empty())
             .unwrap();
         let response = router().oneshot(request).await.expect("router call");
@@ -5015,11 +5025,123 @@ mod tests {
         )
     }
 
+    /// 驱动**完整** `router()`（含 `api_guard` 中间件），只回状态码。
+    ///
+    /// 三个 header 分别对应 guard 的三条判据，`None` 表示该头**不发送**。
+    async fn status_with_headers(
+        method: Method,
+        uri: &str,
+        host: Option<&str>,
+        origin: Option<&str>,
+        sec_fetch_site: Option<&str>,
+        content_type: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in [
+            ("host", host),
+            ("origin", origin),
+            ("sec-fetch-site", sec_fetch_site),
+            ("content-type", content_type),
+        ] {
+            if let Some(value) = value {
+                builder = builder.header(name, value);
+            }
+        }
+        router()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .expect("router call")
+            .status()
+    }
+
+    /// ★★ 安全审计 P0-1：**`api_guard` 必须真的挂在 `router()` 上**。
+    ///
+    /// 这条是「中间件写好了但没接线」的唯一防线 —— `api_guard` 自己的单测只能证明
+    /// `judge()` 判得对，证明不了它被装进了管理面。变异验证：把 `router()` 里的
+    /// `.layer(...)` 去掉，本用例立刻红。
+    #[tokio::test]
+    async fn management_surface_rejects_foreign_host_and_cross_site_requests() {
+        let _home = isolated_home();
+
+        // ① 正常同源访问 ⇒ 放行。
+        assert_ne!(
+            status_with_headers(
+                Method::GET,
+                "/api/status",
+                Some("127.0.0.1:57890"),
+                None,
+                None,
+                None
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "回环 Host 必须放行"
+        );
+
+        // ② DNS rebinding 形态：Host 与 Origin **同源**，但主机名是攻击者的。
+        assert_eq!(
+            status_with_headers(
+                Method::GET,
+                "/api/status",
+                Some("attacker.com:57890"),
+                Some("http://attacker.com:57890"),
+                None,
+                None,
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "同源 Origin 不是防线，Host 必须是回环"
+        );
+
+        // ③ 普通跨站（Host 是回环、Origin 是别人的）⇒ 也拒。
+        assert_eq!(
+            status_with_headers(
+                Method::GET,
+                "/api/status",
+                Some("127.0.0.1:57890"),
+                Some("http://evil.example"),
+                None,
+                None,
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+
+        // ④ 完全没有 Host（HTTP/1.0 / 伪造）⇒ 拒。
+        assert_eq!(
+            status_with_headers(Method::GET, "/api/status", None, None, None, None).await,
+            StatusCode::FORBIDDEN
+        );
+
+        // ⑤ 写接口必须是 JSON —— 挡「`text/plain` 简单请求绕过预检」的 CSRF。
+        assert_eq!(
+            status_with_headers(
+                Method::POST,
+                "/api/accounts/remark",
+                Some("127.0.0.1:57890"),
+                None,
+                None,
+                Some("text/plain"),
+            )
+            .await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+
+        // ⑥ 静态资源（fallback）**不受**管理面校验影响：公开可读，且 GET 没有 Content-Type。
+        let (status, _, _) = call_full(Method::GET, "/").await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "SPA 首页不能被管理面校验拦掉（它不在 /api/* 上）"
+        );
+    }
+
     /// 取响应的 `Cache-Control`（无该头时返回空串）。
     async fn call_cache_control(uri: &str) -> (StatusCode, String) {
         let request = Request::builder()
             .method(Method::GET)
             .uri(uri)
+            .header("host", "127.0.0.1:57890")
             .body(Body::empty())
             .unwrap();
         let response = router().oneshot(request).await.expect("router call");
