@@ -497,8 +497,45 @@ fn macos_safe_storage_services() -> Vec<String> {
         .collect()
 }
 
+/// 本进程内已读到的钥匙串密码（`service` → 密码），issue #104。
+///
+/// ## 为什么要缓存
+///
+/// `security find-generic-password -w` 每调一次都可能弹一次「允许访问钥匙串」框。
+/// 而一次切换 / 读取会**多次**经过 `decrypt_secret_payload` / `encrypt_secret_payload`
+/// （`state.vscdb` 的多条加密记录各解一次），于是用户看到的是「输入密码允许了还一直弹」。
+///
+/// ## 为什么可以缓存
+///
+/// - 同一进程内客户端的 Safe Storage 主密钥不会变（它由客户端在登录时写入一次）；
+/// - 值只存在内存里，不落盘、不进日志；进程退出即消失。
+///
+/// ⚠️ **不要**把它做成跨进程文件缓存：那等于把系统钥匙串的密码复制到磁盘上。
+#[cfg(target_os = "macos")]
+fn safe_storage_password_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 #[cfg(target_os = "macos")]
 fn get_macos_safe_storage_password(service: &str) -> Result<String, String> {
+    // ① 进程内已读到过 ⇒ 直接返回，**不再调 security**（不再弹框）。
+    if let Ok(cache) = safe_storage_password_cache().lock() {
+        if let Some(hit) = cache.get(service) {
+            return Ok(hit.clone());
+        }
+    }
+    let password = read_macos_safe_storage_password(service)?;
+    if let Ok(mut cache) = safe_storage_password_cache().lock() {
+        cache.insert(service.to_string(), password.clone());
+    }
+    Ok(password)
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_safe_storage_password(service: &str) -> Result<String, String> {
     // ① 先试表里的名字（真机取证值）。**只查一次** —— 每次查询都可能触发一次授权弹窗。
     let primary_error = match run_security(&["find-generic-password", "-w", "-s", service], 10) {
         Ok(value) if !value.is_empty() => return Ok(value),
