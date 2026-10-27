@@ -9,9 +9,10 @@ use std::sync::Mutex;
 
 use buddy_switch_core::modules::{
     account, app_prefs, auth_file, backup, cache, capability, checkin, client_limits,
-    client_settings, config, credit_usage, credits, diagnostics, export_import, migrate, oauth,
-    process, programs, qoder, refresh, region::Region, region::RegionFilter, rotate, runtime_log,
-    session, skill, switch, token_daily, token_stats, trae, travel, update, vscode_session,
+    client_settings, codebuddy_cli, config, credit_usage, credits, diagnostics, export_import,
+    migrate, oauth, process, programs, qoder, refresh, region::Region, region::RegionFilter,
+    rotate, runtime_log, session, skill, switch, token_daily, token_stats, trae, travel, update,
+    vscode_session,
 };
 use tauri::{Emitter, Manager};
 // P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
@@ -776,6 +777,44 @@ pub async fn install_codebuddy_cli_helper() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| programs::install_helper("codebuddy_cli"))
         .await
         .map_err(|e| e.to_string())?
+}
+
+/// POST /api/codebuddy-cli/enable-gateway —— 把 CLI 切到**本机网关**模式（issue #109 §PR-2）。
+///
+/// 三件事必须**一起**做，缺一件都会留下「两条通道混用」：
+/// ① 建一把 CLI 专用网关 Key；
+/// ② 写 settings（并**清掉**上游 token 与 `apiKeyHelper`）；
+/// ③ 关掉自动轮换 —— 否则每轮都会把网关 Key 覆盖成上游 token。
+///
+/// 写失败时把刚建的 Key **吊销**，不留一把没人用的凭据。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn codebuddy_cli_enable_gateway(region: Option<String>, model: Option<String>) -> Value {
+    let region = parse_region(region.as_deref());
+    let state = gateway::shared_state();
+    // 端口取**当前生效**的配置，不写死 57891（用户可改端口）。
+    let port = state.config_snapshot().await.port;
+    let base_url = format!("http://127.0.0.1:{port}");
+    let (record, plaintext) = state
+        .keys
+        .create("CodeBuddy CLI（网关）".to_string(), region);
+    match codebuddy_cli::enable_gateway_mode(&base_url, &plaintext, model.as_deref()) {
+        Ok(detail) => {
+            let rotate_disabled = rotate::disable_auto_rotate().is_ok();
+            json!({
+                "ok": true,
+                "baseUrl": base_url,
+                "keyPrefix": record.prefix,
+                "key": record.masked(),
+                "rotateDisabled": rotate_disabled,
+                "detail": detail,
+                "message": "已切到本机网关模式：重启终端与 CodeBuddy CLI 后生效（env 不支持热重载）",
+            })
+        }
+        Err(error) => {
+            let _ = state.keys.revoke(&record.id);
+            json!({ "ok": false, "error": error })
+        }
+    }
 }
 
 /// POST /api/codebuddy-cli/switch —— 只切换 CodeBuddy CLI，不重启 WorkBuddy。

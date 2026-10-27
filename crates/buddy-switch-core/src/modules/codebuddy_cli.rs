@@ -29,6 +29,12 @@ const CODEBUDDY_AUTH_TOKEN: &str = "CODEBUDDY_AUTH_TOKEN";
 const LOCAL_GATEWAY_PORTS: [u16; 2] = [57891, 57892];
 /// 网关模式探测时看的第二个文件（文档 §3.5.1 给的另一种写法）。
 const MODELS_FILE: &str = "models.json";
+/// 网关模式写入的三个键（文档 §3.5.1）。
+const CODEBUDDY_BASE_URL: &str = "CODEBUDDY_BASE_URL";
+const CODEBUDDY_API_KEY: &str = "CODEBUDDY_API_KEY";
+const CODEBUDDY_MODEL: &str = "CODEBUDDY_MODEL";
+/// 顶层键：`apiKeyHelper`（macOS / Linux 的直连通道）。
+const API_KEY_HELPER: &str = "apiKeyHelper";
 const STANDARD_HELPER: &str = include_str!("../../../../scripts/codebuddy-cli-helper.cjs");
 
 fn rotate_dir() -> PathBuf {
@@ -115,6 +121,113 @@ pub fn local_gateway_endpoint() -> Option<String> {
     let models =
         read_json_file(&home_dir().join(SETTINGS_DIR).join(MODELS_FILE)).unwrap_or(Value::Null);
     mentions_local_gateway(&models)
+}
+
+/// 把 CLI 切到**本机网关**模式（issue #109 §PR-2）。
+///
+/// 写 `CODEBUDDY_BASE_URL` / `CODEBUDDY_API_KEY`（可选 `CODEBUDDY_MODEL`），并
+/// **清掉**上游凭据 —— `CODEBUDDY_AUTH_TOKEN` 与顶层 `apiKeyHelper`。
+///
+/// ## 为什么必须清掉那两项
+///
+/// 它们是「直连上游」通道的凭据。与网关 Key 并存时「谁生效」取决于 CLI 内部优先级，
+/// 但无论哪种结果都是**两条通道混用** —— 正是 [`ensure_not_gateway_mode`] 在拦的故障
+/// （上游 token 发到本机网关 ⇒ 401，且轮换每轮重写 ⇒ 时好时坏）。
+///
+/// ## 为什么写完要**回读校验**
+///
+/// 这里动的是用户级配置文件，写坏了的症状是「CLI 直接登不上」，而用户不会想到
+/// 是本工具改的。回读确认三件事：token 真的没了、helper 真的没了、Key 真的写进去了。
+///
+/// 其它 `env` 键（`HTTPS_PROXY` 之类）**保留** —— 与 `write_settings_env_token`
+/// 的既有纪律一致。
+pub fn enable_gateway_mode(
+    base_url: &str,
+    api_key: &str,
+    model: Option<&str>,
+) -> Result<Value, String> {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if !is_local_gateway_url(base_url) {
+        return Err(auth_config_error(
+            "参数阶段",
+            &format!("`{base_url}` 不是本机网关地址（只接受回环主机 + 57891/57892 端口）"),
+        ));
+    }
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return Err(auth_config_error("参数阶段", "网关 Key 为空"));
+    }
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+
+    let settings = settings_path();
+    let previous = std::fs::read_to_string(&settings).ok();
+    let mut value: Value = previous
+        .as_deref()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| json!({}));
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| auth_config_error("配置阶段", "CodeBuddy settings.json 顶层不是对象"))?;
+
+    // ① 清掉直连通道的两份凭据。
+    object.remove(API_KEY_HELPER);
+    let env = object
+        .entry("env")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            auth_config_error("配置阶段", "CodeBuddy settings.json 的 env 字段不是对象")
+        })?;
+    env.remove(CODEBUDDY_AUTH_TOKEN);
+
+    // ② 写网关模式的三个键（`model` 为空则删掉旧值，不留下"上一把模型"）。
+    env.insert(CODEBUDDY_BASE_URL.to_string(), json!(base_url));
+    env.insert(CODEBUDDY_API_KEY.to_string(), json!(api_key));
+    match model {
+        Some(model) => {
+            env.insert(CODEBUDDY_MODEL.to_string(), json!(model));
+        }
+        None => {
+            env.remove(CODEBUDDY_MODEL);
+        }
+    }
+
+    persist_settings_at(&settings, &value)?;
+
+    // ③ 回读校验（不信自己写对了）。
+    let written = read_json_file(&settings)
+        .ok_or_else(|| auth_config_error("校验阶段", "写入后读不回 settings.json"))?;
+    if settings_env_token(&written).is_some() {
+        return Err(auth_config_error(
+            "校验阶段",
+            "清理 CODEBUDDY_AUTH_TOKEN 失败：settings.json 里仍有上游 token",
+        ));
+    }
+    if written.get(API_KEY_HELPER).is_some() {
+        return Err(auth_config_error(
+            "校验阶段",
+            "清理 apiKeyHelper 失败：settings.json 里仍有 apiKeyHelper",
+        ));
+    }
+    let written_env = written.get("env").and_then(Value::as_object);
+    if written_env
+        .and_then(|env| env.get(CODEBUDDY_API_KEY))
+        .and_then(Value::as_str)
+        != Some(api_key)
+    {
+        return Err(auth_config_error(
+            "校验阶段",
+            "CODEBUDDY_API_KEY 未写入 settings.json",
+        ));
+    }
+
+    Ok(json!({
+        "ok": true,
+        "baseUrl": base_url,
+        "model": model,
+        // 回读一次，把「此刻的判定」一起返回 —— 调用方不必再猜是否生效。
+        "gatewayMode": local_gateway_endpoint(),
+    }))
 }
 
 /// 写入口的**统一守卫**：CLI 已走本机网关时，不要再用上游 token 覆盖它的凭据。
@@ -1570,6 +1683,129 @@ mod tests {
             original,
             "拒绝时必须一个字节都不改（网关 Key 不能被覆盖成上游 token）"
         );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // issue #109 §PR-2：一键切到本机网关模式
+    // -----------------------------------------------------------------------
+
+    /// 切网关模式要**写三个键、清两份上游凭据、保留其它 env**，且回读能验证生效。
+    ///
+    /// 变异验证：把 `object.remove(API_KEY_HELPER)` 或 `env.remove(CODEBUDDY_AUTH_TOKEN)`
+    /// 删掉 ⇒ 对应断言红（那正是「两条通道混用」的成因）。
+    #[test]
+    fn enabling_gateway_mode_replaces_upstream_credentials() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        // 起点：直连模式（有上游 token、有 apiKeyHelper、还有一条与本次无关的 env）。
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({
+                "apiKeyHelper": "/Users/me/.codebuddy-rotate/helper.cjs",
+                "env": {
+                    "CODEBUDDY_AUTH_TOKEN": "upstream-token",
+                    "HTTPS_PROXY": "http://127.0.0.1:7890",
+                    "CODEBUDDY_MODEL": "stale-model",
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let out = enable_gateway_mode("http://127.0.0.1:57891/", "sk-gw-123", Some("glm-5.3"))
+            .expect("应能切到网关模式");
+        assert_eq!(out["ok"], json!(true));
+        assert_eq!(
+            out["baseUrl"],
+            json!("http://127.0.0.1:57891"),
+            "尾斜杠要去掉"
+        );
+        assert_eq!(out["model"], json!("glm-5.3"));
+        assert_eq!(
+            out["gatewayMode"],
+            json!("http://127.0.0.1:57891"),
+            "返回里要带上回读结果，调用方不必再猜"
+        );
+
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(codebuddy.join(SETTINGS_FILE)).unwrap())
+                .unwrap();
+        let env = written["env"].as_object().expect("env 仍是对象");
+        assert_eq!(env["CODEBUDDY_BASE_URL"], json!("http://127.0.0.1:57891"));
+        assert_eq!(env["CODEBUDDY_API_KEY"], json!("sk-gw-123"));
+        assert_eq!(env["CODEBUDDY_MODEL"], json!("glm-5.3"));
+        assert!(
+            !env.contains_key("CODEBUDDY_AUTH_TOKEN"),
+            "上游 token 必须被清掉（否则两条通道混用）"
+        );
+        assert!(
+            written.get("apiKeyHelper").is_none(),
+            "apiKeyHelper 必须被清掉（macOS/Linux 的直连通道）"
+        );
+        assert_eq!(
+            env["HTTPS_PROXY"],
+            json!("http://127.0.0.1:7890"),
+            "与本次无关的 env 必须保留"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 不传 model ⇒ 删掉旧值（不能留下「上一把模型」）。
+    #[test]
+    fn enabling_gateway_mode_without_model_clears_the_stale_one() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        fs::write(
+            codebuddy.join(SETTINGS_FILE),
+            json!({ "env": { "CODEBUDDY_MODEL": "old-model" } }).to_string(),
+        )
+        .unwrap();
+        enable_gateway_mode("http://127.0.0.1:57892", "sk-gw-456", None).expect("应成功");
+
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(codebuddy.join(SETTINGS_FILE)).unwrap())
+                .unwrap();
+        assert!(
+            written["env"].get("CODEBUDDY_MODEL").is_none(),
+            "不传 model 时必须删掉旧值: {written}"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 入参守卫：非本机网关地址 / 空 Key 都必须拒绝（不能把 CLI 指到任意地址）。
+    #[test]
+    fn enabling_gateway_mode_rejects_foreign_hosts_and_empty_keys() {
+        let dir = helper_test_dir();
+        let codebuddy = dir.join(SETTINGS_DIR);
+        fs::create_dir_all(&codebuddy).unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+        fs::write(codebuddy.join(SETTINGS_FILE), json!({}).to_string()).unwrap();
+
+        for bad in [
+            "https://api.example.com",
+            "http://127.0.0.1:8080",
+            "http://192.168.1.5:57891",
+        ] {
+            let error = enable_gateway_mode(bad, "sk-x", None).expect_err("必须拒绝");
+            assert!(error.contains("不是本机网关"), "{bad}: {error}");
+        }
+        let error = enable_gateway_mode("http://127.0.0.1:57891", "   ", None)
+            .expect_err("空 Key 必须拒绝");
+        assert!(error.contains("Key"), "{error}");
+
+        // 拒绝时一个字节都不该改。
+        let after = fs::read_to_string(codebuddy.join(SETTINGS_FILE)).unwrap();
+        assert_eq!(after, json!({}).to_string(), "拒绝时不得改动 settings");
 
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -17,10 +17,10 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::{
-    account, auth_file, backup, checkin, client_limits, client_settings, config, credit_usage,
-    credits, diagnostics, export_import, migrate, oauth, process, programs, qoder, refresh,
-    region::Region, region::RegionFilter, rotate, schedule, scheduler, session, skill, switch,
-    token_daily, token_stats, trae, travel, update, vscode_session,
+    account, auth_file, backup, checkin, client_limits, client_settings, codebuddy_cli, config,
+    credit_usage, credits, diagnostics, export_import, migrate, oauth, process, programs, qoder,
+    refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler, session, skill,
+    switch, token_daily, token_stats, trae, travel, update, vscode_session,
 };
 use buddy_switch_gateway::unified::UnifiedGatewayConfig;
 use buddy_switch_gateway::GatewayProduct;
@@ -157,6 +157,11 @@ fn api_routes() -> Router {
             post(api_codebuddy_cli_install_helper),
         )
         .route("/api/codebuddy-cli/switch", post(api_codebuddy_cli_switch))
+        // issue #109 §PR-2：一键把 CLI 切到本机网关（建 Key + 写 settings + 关轮换）。
+        .route(
+            "/api/codebuddy-cli/enable-gateway",
+            post(api_codebuddy_cli_enable_gateway),
+        )
         .route(
             "/api/codebuddy-cn-ide/status",
             get(api_codebuddy_cn_ide_status),
@@ -1524,6 +1529,45 @@ async fn api_codebuddy_cli_install_helper() -> Response {
     match programs::install_helper("codebuddy_cli") {
         Ok(result) => json_ok(result),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/codebuddy-cli/enable-gateway —— 把 CLI 切到**本机网关**模式（issue #109 §PR-2）。
+///
+/// 与桌面宿主的同名命令**刻意各写一份**（本仓惯例）：两宿主的接线各自独立，
+/// 但都只调 core 的 `codebuddy_cli::enable_gateway_mode` + `rotate::disable_auto_rotate`，
+/// 判定逻辑不重复。
+async fn api_codebuddy_cli_enable_gateway(Json(body): Json<Value>) -> Response {
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let state = crate::gateway_host::shared_state();
+    let port = state.config_snapshot().await.port;
+    let base_url = format!("http://127.0.0.1:{port}");
+    let (record, plaintext) = state
+        .keys
+        .create("CodeBuddy CLI（网关）".to_string(), region);
+    match codebuddy_cli::enable_gateway_mode(&base_url, &plaintext, model) {
+        Ok(detail) => {
+            let rotate_disabled = rotate::disable_auto_rotate().is_ok();
+            json_ok(json!({
+                "ok": true,
+                "baseUrl": base_url,
+                "keyPrefix": record.prefix,
+                "key": record.masked(),
+                "rotateDisabled": rotate_disabled,
+                "detail": detail,
+                "message": "已切到本机网关模式：重启终端与 CodeBuddy CLI 后生效（env 不支持热重载）",
+            }))
+        }
+        Err(error) => {
+            // 写失败 ⇒ 吊销刚建的 Key，不留一把没人用的凭据。
+            let _ = state.keys.revoke(&record.id);
+            json_err(error, StatusCode::BAD_REQUEST)
+        }
     }
 }
 

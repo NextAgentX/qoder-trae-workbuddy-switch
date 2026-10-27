@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use crate::modules::account;
 use crate::modules::codebuddy_cli;
 use crate::modules::config::{
-    add_rotate_log, load_auto_rotate_config, load_rotate_logs, now_ms, RunFlagGuard,
+    add_rotate_log, load_auto_rotate_config, load_rotate_logs, now_ms, save_auto_rotate_config,
+    RunFlagGuard,
 };
 use crate::modules::credits;
 
@@ -204,6 +205,23 @@ pub fn cli_recent_activity() -> Option<i64> {
         }
     }
     newest
+}
+
+/// 关掉自动轮换（issue #109 §PR-2）。
+///
+/// 切到「CLI 走本机网关」模式时必须调它：轮换的存在意义是「按积分到期择优换号」，
+/// 而网关模式下选号已经交给网关 ⇒ 轮换不但没用，每轮还会把 `settings.json` 里的
+/// **网关 Key** 覆盖成上游 token（就是 PR-1 拦的那个故障）。
+///
+/// 已经是关的 ⇒ 直接返回 `Ok(())`（幂等，不写盘）。写盘失败才报错 ——
+/// 调用方据此告诉用户「网关模式已生效，但轮换没关掉，请手动关」。
+pub fn disable_auto_rotate() -> Result<(), String> {
+    let mut cfg = load_auto_rotate_config();
+    if cfg.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return Ok(());
+    }
+    cfg["enabled"] = json!(false);
+    save_auto_rotate_config(&cfg).map_err(|error| format!("关闭自动轮换失败：{error}"))
 }
 
 /// 一次轮换周期（后台定时任务 / 手动触发共用）。

@@ -310,6 +310,8 @@ const ROUTES: Record<string, Route> = {
   checkin_status: { method: "POST", path: "/api/checkin/status/query" },
   get_codebuddy_cli_status: { method: "GET", path: "/api/codebuddy-cli/status" },
   install_codebuddy_cli_helper: { method: "POST", path: "/api/codebuddy-cli/install-helper" },
+  // issue #109 §PR-2：一键把 CLI 切到本机网关（建 Key + 写 settings + 关轮换）。
+  codebuddy_cli_enable_gateway: { method: "POST", path: "/api/codebuddy-cli/enable-gateway" },
   switch_codebuddy_cli_account: { method: "POST", path: "/api/codebuddy-cli/switch" },
   get_codebuddy_cn_ide_status: { method: "GET", path: "/api/codebuddy-cn-ide/status" },
   switch_codebuddy_cn_ide_account: { method: "POST", path: "/api/codebuddy-cn-ide/switch" },
@@ -845,6 +847,20 @@ export function getCodebuddyCliStatus(): Promise<CodeBuddyCliStatus> {
 
 export function installCodebuddyCliHelper(): Promise<CodeBuddyCliInstallResult> {
   return call("install_codebuddy_cli_helper");
+}
+
+/**
+ * 把 CodeBuddy CLI 切到**本机网关**模式（issue #109 §PR-2）。
+ *
+ * 一次调用做三件事：建一把 CLI 专用网关 Key、写 `settings.json`（并清掉上游 token 与
+ * `apiKeyHelper`）、关掉自动轮换。**互斥**：与「接入 CLI / 切号」不能同时开
+ * （两条通道都往 settings 写凭据，混用会让 CLI 把上游 token 发到网关 ⇒ 401）。
+ */
+export function enableCodebuddyCliGateway(input: {
+  region?: string;
+  model?: string;
+}): Promise<{ ok: boolean; baseUrl?: string; message?: string; error?: string }> {
+  return call("codebuddy_cli_enable_gateway", input);
 }
 
 export function switchCodebuddyCliAccount(accountId: string): Promise<CodeBuddyCliSwitchResult> {
