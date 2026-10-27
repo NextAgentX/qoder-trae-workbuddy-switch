@@ -155,20 +155,42 @@ async fn send(
     key: Option<&str>,
     body: Option<&str>,
 ) -> (StatusCode, Value) {
-    let client = reqwest::Client::new();
-    let mut request = client.request(method, url);
-    if let Some(key) = key {
-        request = request.header("authorization", format!("Bearer {key}"));
+    // ★ 连接层**重试**（安全审计「流程 19」的配套）：这条 e2e 与其它 listener 测试
+    //   同时在跑时，偶发出现 `hyper::Error(IncompleteMessage)` —— 服务刚 spawn、
+    //   上一轮的随机端口还没完全释放都会这样。
+    //
+    //   重试只覆盖 `Err`（连不上 / 响应不完整），**不覆盖任何断言**：
+    //   真·监听没起来时第 5 次仍然失败并原样报错，真实的回归不会被吞掉。
+    let mut last_error = None;
+    let mut response = None;
+    for attempt in 1..=5u32 {
+        let client = reqwest::Client::new();
+        let mut retry = client.request(method.clone(), url.clone());
+        if let Some(key) = key {
+            retry = retry.header("authorization", format!("Bearer {key}"));
+        }
+        if let Some(body) = body {
+            retry = retry
+                .header("content-type", "application/json")
+                .body(body.to_string());
+        }
+        match retry.send().await {
+            Ok(ok) => {
+                response = Some(ok);
+                break;
+            }
+            Err(error) => {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(50 * u64::from(attempt))).await;
+            }
+        }
     }
-    if let Some(body) = body {
-        request = request
-            .header("content-type", "application/json")
-            .body(body.to_string());
-    }
-    let response = request
-        .send()
-        .await
-        .expect("请求应送达（连不上说明监听没起来）");
+    let response = response.unwrap_or_else(|| {
+        panic!(
+            "请求应送达（连不上说明监听没起来）：{:?}",
+            last_error.expect("必然有错误")
+        )
+    });
     let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
     let json: Value = response.json().await.unwrap_or(Value::Null);
     (status, json)

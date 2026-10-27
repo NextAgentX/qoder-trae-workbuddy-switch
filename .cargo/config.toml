@@ -1,0 +1,21 @@
+# Rust 测试的**默认串行**（安全审计「流程 19」）。
+#
+# ## 为什么需要它
+#
+# 本仓的测试大量依赖进程级环境变量（`BUDDY_SWITCH_HOME` / `HOME` / `APPDATA`）来
+# 隔离数据目录。`env_lock()` 只串行化**写方**，而读取侧散落在 1400+ 个用例里
+# （`home_dir()` / `store_dir()` 不加锁）—— 漏一个就继续抖。
+#
+# 实测后果：并行跑 1422 项时**每轮约挂 1~2 条**（`qoder::paths` / `proxy_kpi_view` /
+# `session::paths` / `vscode_session` 都中过），串行 33s 稳定全绿。
+#
+# ## 为什么放在 `.cargo/config.toml` 而不是只写在 CI 里
+#
+# 此前只有 `pr-check.yml` 的 `cargo test` 行带 `--test-threads=1`，而
+# `CONTRIBUTING.md` 教的是**裸 `cargo test`** ⇒ 本地默认 flaky。
+# 「默认 flaky 的套件会训练人重跑到绿」，而真实回归正是这样被重跑掉的。
+#
+# libtest 直接读 `RUST_TEST_THREADS`，等价于命令行加 `--test-threads=1`；
+# 显式传参仍然优先（CI 那条不受影响）。
+[env]
+RUST_TEST_THREADS = "1"

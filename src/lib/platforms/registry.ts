@@ -99,8 +99,13 @@ export interface ProgramSpec {
 /**
  * WorkBuddy 侧的程序位表（**顺序即 UI 展示顺序**）。
  *
- * ⚠️ **顺序与后端 `programs.rs::PROGRAMS` 逐字对齐**（单测
- * `programs_table_lists_the_five_wb_slots` 钉死后端；本表由门禁核对）。
+ * ⚠️ **只保证「集合与后端一致」，不保证顺序**（安全审计「流程 20」纠正了这条注释）：
+ * 改造前这里写着「顺序与后端 `programs.rs::PROGRAMS` 逐字对齐」，而事实是**前两项互换**
+ * （后端 `codebuddy_cli` 在前、这里 `codebuddy_cn_ide` 在前），门禁也只校集合成员、
+ * 从不比较顺序 —— 一句「已保证」的假话比没写更容易误导人（后来人会「按文档修正 UI 顺序」）。
+ *
+ * 顺序是**产品决策**（这一版的视觉次序），后端表是**派发顺序**，两者没有必须相同的理由；
+ * 真要锁定顺序，应当在门禁里逐位比较，而不是靠注释承诺。
  *
  * ⚠️ **显示名两两不同**：`vscode_cn_inject`（只读探测槽，名「VS Code CodeBuddy 插件」）
  * 与 `vscode_codebuddy_plugin`（可切换槽，名「VS Code CodeBuddy 扩展」）**都是 VS Code

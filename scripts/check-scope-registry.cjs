@@ -5063,7 +5063,7 @@ check("★ P7 边界：损坏文件（非法 JSON）返回可读错误、不崩�
  *
  * ⚠️ 判据只锚**代码**（`readCode` 先剥注释）—— 锚在注释上会被「注释里写着反例」骗过去。
  * ⚠️ 第 ④ 条的 api.rs 一侧是**文件级**「读到了 scope」（与 `check-api-contract.cjs` 第 8 条
- *    同款粗粒度）；逐命令的四处同步由 `check:api` 兜住，本段只锁「恰 18 条 + 后端带 scope」
+ *    同款粗粒度）；逐命令的四处同步由 `check:api` 兜住，本段只锁「恰 40 条 + 后端带 scope」
  *    （2026-10-15：模型禁用两条从 region 升级为 scope、Qoder 账号运维四件 ——
  *     刷新 / 签到状态 / 签到领取 / 额度 —— 一并并入）。
  */
@@ -5176,7 +5176,23 @@ check("★ P5-④ 参数化命令**恰 40 条**且后端带 scope（commands.rs 
   return `${names.length} 条 · commands.rs 带 scope · api.ts 有 · api.rs 读 scope`;
 });
 
-check("★ P5-⑤ 程序位表驱动：4 个入口走 `find(table, id)`，无按 id 硬编码；表 3 项", () => {
+/// 从 `programs.rs` 的 `PROGRAMS` 表里解析**有序 id 列表**。
+///
+/// ★ 安全审计「流程 20」：此前这里（以及 B5）把 id 写死成 3 项，而表里实际有 5 项
+/// （`vscode_codebuddy_plugin` / `jetbrains_codebuddy_plugin` 从来没被校验过）——
+/// 标题还写着「表 3 项」。写死清单的门禁会**自己过期而没人发现**，所以改成从表里解析。
+function programSlotIds(rustSource) {
+  const start = rustSource.indexOf("PROGRAMS");
+  if (start < 0) throw new Error("programs.rs 里找不到 `PROGRAMS`");
+  const end = rustSource.indexOf("];", start);
+  if (end < 0) throw new Error("`PROGRAMS` 表没有闭合的 `];`");
+  const block = rustSource.slice(start, end);
+  const ids = [...block.matchAll(/id:\s*"([a-z0-9_]+)"/g)].map((m) => m[1]);
+  if (ids.length === 0) throw new Error("`PROGRAMS` 表里解析不到任何 `id:`");
+  return ids;
+}
+
+check("★ P5-⑤ 程序位表驱动：4 个入口走 `find(table, id)`，无按 id 硬编码；表内每一项都校验", () => {
   /* 变异⑤（落点 = programs.rs）：把 `status_in` 改成按 id 的 `match` 硬编码 ⇒ 本条变红
      （「加第 3 个程序位无需改代码」被破）。 */
   const programs = readCode(P5_PROGRAMS_RS);
@@ -5186,13 +5202,15 @@ check("★ P5-⑤ 程序位表驱动：4 个入口走 `find(table, id)`，无按
     if (!/find\(table,\s*id\)/.test(body)) throw new Error(`\`${fn}\` 未走表驱动 \`find(table, id)\``);
     if (/match\s+id\s*\{/.test(body)) throw new Error(`\`${fn}\` 出现按 id 的 match 硬编码`);
   }
-  for (const id of ["codebuddy_cli", "codebuddy_cn_ide", "vscode_cn_inject"]) {
+  const ids = programSlotIds(programs);
+  // 每个 id 必须真的出现在表里（解析来源就是表本身；这里防的是解析口径漂移）。
+  for (const id of ids) {
     if (!programs.includes(`"${id}"`)) throw new Error(`PROGRAMS 缺程序位 ${id}`);
   }
   if (!/fn adding_a_slot_needs_no_dispatch_change/.test(programs)) {
     throw new Error("缺「加程序位无需改派发」可证伪单测");
   }
-  return "4 入口走 find(table,id) · 无 id 硬编码 · 3 程序位 · 单测在";
+  return `4 入口走 find(table,id) · 无 id 硬编码 · ${ids.length} 程序位（${ids.join(",")}）· 单测在`;
 });
 
 check("★ P5 边界：WB 选号基线未动（expiry_urgency_weight=0.0 / deterministic=false）", () => {
@@ -8597,6 +8615,20 @@ check("★ B5-程序位：卡片 = 注册表 ∪ {WorkBuddy 主位}（刻意例�
   for (const id of ids) {
     if (!rust.includes(`id: "${id}"`)) {
       throw new Error(`后端 PROGRAMS 缺少程序位 \`${id}\` —— 两侧注册表漂移`);
+    }
+  }
+  // ★ 安全审计「流程 20」：**必须双向**。
+  //
+  // 改造前只校「前端 → 后端」。于是后端加第 6 个程序位（`programs.rs` 加一行 + 一个
+  // adapter）后：编译绿、本条绿、P5-⑤ 绿（它当时只认写死的 3 个）—— 而前端没有这一格
+  // ⇒ 新程序位在 UI 里**完全不可见**，也没有任何测试或门禁会红。
+  // 这与 `background.rs::both_hosts_register_every_task_kind`（读两侧源码做双向校验）
+  // 是同一套思路。
+  for (const id of programSlotIds(rust)) {
+    if (!ids.includes(id)) {
+      throw new Error(
+        `后端 PROGRAMS 有程序位 \`${id}\`，但前端 \`WORKBUDDY_PROGRAMS\` 没有镜像 —— UI 里看不到它`,
+      );
     }
   }
   // 卡片必须有主位控件（公式的另一半）。

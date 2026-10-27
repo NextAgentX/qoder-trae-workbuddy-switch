@@ -240,6 +240,17 @@ jobs:
           key: ${{ runner.os }}-${{ github.repository }}-cargo-macos-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ github.repository }}-cargo-macos-
 
+      # ★ 安全审计 P1-8：**PR 此前只在 macOS 上跑 core 的 lib 测试**。
+      #   `buddy-switch-gateway` 里的 `cfg(target_os = "macos")` 代码、以及 core 的
+      #   **测试目标**（`--all-targets`）在 PR 里从不编译 —— 类型错误可以一路绿着合入。
+      #
+      #   这里只 `check`（不跑测试）：编一遍就能捉住这类问题，而完整的 macOS 测试矩阵
+      #   成本高（macOS runner 按分钟计费且慢），交给 build.yml 的打包流程兜底。
+      #   **不含** `buddy-switch-server` / `src-tauri`：它们要 `dist/`（`RustEmbed`
+      #   编译期读目录），为 check 目的去构建前端不划算。
+      - name: Check (core + gateway, all targets)
+        run: cargo check -p buddy-switch-core -p buddy-switch-gateway --all-targets --locked
+
       - name: Test (buddy-switch-core)
         shell: bash
         run: |
@@ -264,24 +275,72 @@ jobs:
             echo "::error title=macOS 失败现场::${line}"
           done
 
+  # ★★ 安全审计 P1-8：**Windows 专有代码此前在 PR 里从不编译**。
+  #
+  # 仓里 `cfg(target_os = ...)` 共 253 处，其中 `cfg(target_os = "windows")` **81 处**
+  # （`process.rs` 一个文件就 19 个 fn）。这些代码只有 windows runner 才会展开 ——
+  # 类型错误、API 误用、`CommandExt` 用错位置，都能在 ubuntu + macos 双绿的情况下合入。
+  #
+  # 这是一个 **Windows 为主平台**的产品，而 Windows 恰好是 CI 覆盖最差的平台
+  # （`build.yml` 里 `cargo test` 零命中，且不在 PR 上触发）。
+  #
+  # 只做 `cargo check --workspace --all-targets`（不跑测试）：成本约 3~5 分钟，
+  # 换「任何平台专有代码都不会静默编译失败」。
+  rust-windows:
+    name: Rust check on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 `rust` job 同因：`RustEmbed` 的 `folder = "../../dist/"` 在 derive 展开时
+      # 就会检查目录存在，缺了会报十几条「方法不存在」的假象。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build webui assets (RustEmbed needs dist/)
+        run: |
+          npm ci
+          npm run build:fast
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ github.repository }}-cargo-win-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ github.repository }}-cargo-win-
+
+      # `--locked`：CI 只校验，不该顺手改 `Cargo.lock`（否则「本地能过、CI 才炸」
+      # 会因为锁文件被自动解析而变成另一种形态）。
+      - name: Check (workspace, all targets)
+        run: cargo check --workspace --all-targets --locked
+
   pr-summary:
     name: PR summary
     runs-on: ubuntu-latest
     # 汇总门禁：任一 job 失败 ⇒ 整体红。放在最后而不是让前端/Rust 互相 `needs`，
     # 是为了让两个 job 并行跑完、失败信息一次性看全。
     if: always()
-    needs: [frontend, rust, rust-macos]
+    needs: [frontend, rust, rust-macos, rust-windows]
     steps:
       # `skipped` 视为通过：某个 job 因条件未触发而跳过时，不该把整轮门禁判成红。
       # 只有 failure / cancelled 才算不通过。
       - name: Verdict
         run: |
           FAIL=""
-          for r in "${{ needs.frontend.result }}" "${{ needs.rust.result }}" "${{ needs.rust-macos.result }}"; do
+          for r in "${{ needs.frontend.result }}" "${{ needs.rust.result }}" "${{ needs.rust-macos.result }}" "${{ needs.rust-windows.result }}"; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then FAIL=1; fi
           done
           if [ -n "$FAIL" ]; then
-            echo "::error::PR 校验未通过（frontend=${{ needs.frontend.result }}, rust=${{ needs.rust.result }}, rust-macos=${{ needs.rust-macos.result }}）"
+            echo "::error::PR 校验未通过（frontend=${{ needs.frontend.result }}, rust=${{ needs.rust.result }}, rust-macos=${{ needs.rust-macos.result }}, rust-windows=${{ needs.rust-windows.result }}）"
             exit 1
           fi
           echo "PR 校验通过"
