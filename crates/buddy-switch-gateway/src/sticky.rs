@@ -63,12 +63,29 @@ impl StickyTable {
         self.ttl_ms
     }
 
-    /// 生效中的绑定数（不含已过期条目）。
+    /// **表大小**（含已过期但尚未被 GC 清掉的条目）。
+    ///
+    /// ⚠️ 这不是「生效中的绑定数」——安全审计 P2-10 之前这里写着「不含已过期条目」，
+    /// 而实现直接返回 `bindings.len()`（`get()` 才做 TTL 过滤，`len()` 没有）。
+    /// 于是 `/status` 的 `sticky_sessions` 只增不减：会话停了半小时，这个数还在。
+    ///
+    /// 要「生效中的数量」请用 [`Self::len_active`]（它需要 `now_ms` 才能过滤）。
     pub fn len(&self) -> usize {
         self.bindings.len()
     }
 
-    /// 是否为空。
+    /// **生效中**的绑定数（不含已过期条目）。
+    ///
+    /// `/status` 用的是这一条：那个数字的语义是「此刻还粘着多少个会话」，
+    /// 而不是「表里堆了多少条」。
+    pub fn len_active(&self, now_ms: i64) -> usize {
+        self.bindings
+            .values()
+            .filter(|binding| now_ms.saturating_sub(binding.bound_at_ms) < self.ttl_ms)
+            .count()
+    }
+
+    /// 是否为空（同样只说明**表**是空的；判「有没有生效中的绑定」用 `len_active`）。
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
@@ -196,6 +213,32 @@ mod tests {
         table.bind("k", "u1", NOW);
         assert_eq!(table.get("k", NOW + 999), Some("u1"), "TTL 内有效");
         assert_eq!(table.get("k", NOW + 1000), None, "边界即失效");
+    }
+
+    /// ★★ 安全审计 P2-10：**`len()` 是表大小，`len_active()` 才是生效中的数量**。
+    ///
+    /// 改造前 `len()` 的文档写「不含已过期条目」而实现返回 `bindings.len()`，
+    /// 于是 `/status` 的 `sticky_sessions` 只增不减（GC 是摊销触发的，不是每读一次就跑）。
+    ///
+    /// 变异验证：把 `/status` 改回 `len()` ⇒ 第二条断言红。
+    #[test]
+    fn len_active_excludes_expired_bindings_without_waiting_for_gc() {
+        let mut table = StickyTable::new(1000);
+        table.bind("a", "u1", NOW);
+        table.bind("b", "u2", NOW);
+        // 只有 a 还活着。
+        let later = NOW + 1_500;
+        table.bind("a", "u1", later); // 刷新 a
+        assert_eq!(table.get("b", later), None, "前置：b 已过期");
+
+        assert_eq!(table.len(), 2, "表里仍是两条（GC 还没触发）");
+        assert_eq!(
+            table.len_active(later),
+            1,
+            "生效中的只有 a —— `/status` 数的是这个"
+        );
+        // 全部过期 ⇒ 0（而不是「表里有几条算几条」）。
+        assert_eq!(table.len_active(later + 10_000), 0);
     }
 
     #[test]

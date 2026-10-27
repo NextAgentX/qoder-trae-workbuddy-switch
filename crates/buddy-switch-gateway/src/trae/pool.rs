@@ -193,11 +193,10 @@ pub struct TraePoolEntry {
     pub cool_kind: Option<CoolKind>,
     /// 最近被选中时刻（毫秒；`0` = 从未）。
     ///
-    /// ⚠️ **不跨请求保留**：池在每次选号前都会 [`TraePool::sync_for`] 重建，
-    /// 该字段随之归零。因此共用内核的「防惊群」与「LRU 兜底」在 Trae 侧
-    /// **不生效**（属已知降级，见模块文档）。
+    /// ★ 安全审计 P1-5：**现在跨请求保留**（[`TraePool::sync_for`] 会按 uid 继承）。
+    /// 改造前每次重建都归零，于是「顺序」档退化成「永远选 uid 最小的那个」。
     pub last_used_ms: i64,
-    /// 选中单调序号（同上，不跨请求保留）。
+    /// 选中单调序号（**跨请求保留**，理由同上）。
     pub used_seq: u64,
 }
 
@@ -263,6 +262,33 @@ pub struct TraePool {
     pick_seq: u64,
 }
 
+/// 把上一轮条目的选号序号继承到新条目上，并返回**对齐后的 `pick_seq`**。
+///
+/// ## 为什么必须独立成纯函数（可单测）
+///
+/// `sync_for` 需要读账号库（文件），而这条继承逻辑是最容易被「重建时忘了带」的地方 ——
+/// 出错的症状是「顺序档又退回按 uid 升序」，且只有连发两个请求才看得出来。
+/// 抽出来之后单测能直接钉住它，不必搭文件夹具。
+///
+/// `pick_seq` 必须**不小于**任何已用序号：共用内核的 `mark_selected` 会
+/// `pick_seq += 1` 再写进条目，若起点落后于历史值，新选中的号会与历史条目并列。
+fn inherit_order(
+    entries: &mut [TraePoolEntry],
+    previous: &std::collections::HashMap<String, (u64, i64)>,
+) -> u64 {
+    for entry in entries.iter_mut() {
+        if let Some((seq, at)) = previous.get(&entry.uid) {
+            entry.used_seq = *seq;
+            entry.last_used_ms = *at;
+        }
+    }
+    entries
+        .iter()
+        .map(|entry| entry.used_seq)
+        .max()
+        .unwrap_or(0)
+}
+
 impl TraePool {
     /// 新建空池（默认变体；首次 [`Self::sync_for`] 前为空）。
     pub fn new() -> Self {
@@ -300,6 +326,20 @@ impl TraePool {
         self.variant = variant;
         let remaining = credits::load_remaining_for(variant);
         let cooldowns = credits::load_cooldowns_for(variant);
+
+        // ★★ 安全审计 P1-5：**选号序号必须跨请求保留**。
+        //
+        // `sync_for` 每个请求都会整体重建 `entries`。改造前重建时把 `used_seq` 一律
+        // 置 0 ⇒ 共用内核的「顺序」档（`PickMode::Sequential`，语义是「粘住最近用过的
+        // 那个号」）在 Trae 侧退化成「永远选 uid 最小的那个」—— 而 Trae 页面上
+        // 摆着这一档（issue #102 的功能在这里名不副实）。
+        //
+        // 按 uid 继承，与 Qoder 侧的做法一致（`qoder/pool.rs::sync_for`）。
+        let previous_order: std::collections::HashMap<String, (u64, i64)> = self
+            .entries
+            .iter()
+            .map(|entry| (entry.uid.clone(), (entry.used_seq, entry.last_used_ms)))
+            .collect();
 
         // 账号库按**区域**分家（见 `core::modules::trae::region`）：国内两个产品线标识
         // 读到的是**同一本**库。这里显式传 `variant.region()`，让"按区域取号"这件事
@@ -346,7 +386,8 @@ impl TraePool {
                         // 限流 / 4xx / 5xx：值得再试一次 ⇒ 软冷却。
                         _ => Some(CoolKind::Soft),
                     }),
-                    // 选号产生的使用痕迹不跨请求保留（池每次 `sync_for` 重建）。
+                    // 默认 0（从未用过）；若池里已有同 uid 的历史条目，
+                    // 下面会按 uid 继承 —— 见本函数开头的说明。
                     last_used_ms: 0,
                     used_seq: 0,
                     uid,
@@ -354,6 +395,9 @@ impl TraePool {
             })
             .filter(|entry| !entry.jwt.is_empty())
             .collect();
+
+        // 继承历史选号序号（见本函数开头的说明）。
+        self.pick_seq = inherit_order(&mut self.entries, &previous_order);
 
         self.entries.len()
     }
@@ -381,7 +425,6 @@ impl TraePool {
     ///
     /// ## 已知降级（缺数据走中性默认，见 [`crate::pool::entry_like`]）
     ///
-    /// - `last_used_ms` / `used_seq` 不跨请求保留 ⇒ **防惊群与 LRU 兜底不生效**；
     /// - `in_flight` 恒 0 ⇒ 在途限流不生效；
     /// - 无成本观测 ⇒ 成本分层恒为 `Unknown`（不产生过滤）。
     ///
@@ -445,6 +488,17 @@ impl TraePool {
             &input,
             preferred_uid,
         )?;
+
+        // ★★ 安全审计 P1-5：**把选号的副作用写回池**。
+        //
+        // `candidates` 是临时表，`mark_selected` 改的是它的 `used_seq` / `last_used_ms`；
+        // 不回写的话，连「请求内」都不保留 —— 顺序档每次都要从零重新决定「最近用过谁」。
+        if let Some(selected) = candidates.get(&uid) {
+            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.uid == uid) {
+                entry.used_seq = selected.used_seq;
+                entry.last_used_ms = selected.last_used_ms;
+            }
+        }
 
         self.account_for(&uid)
     }
@@ -890,6 +944,104 @@ mod tests {
         let mut pool = TraePool::for_variant(TraeVariant::default());
         pool.entries = entries;
         pool
+    }
+
+    /// ★★ 安全审计 P1-5：`sync_for` 重建条目时**必须继承**选号序号。
+    ///
+    /// 这是顺序档真正失效的**主要原因**：`pick` 的写回只活到下一次 `sync_for`，
+    /// 而 Trae 每个请求都会 sync 一次 ⇒ 不继承就等于每次请求都从零开始。
+    ///
+    /// 变异验证：删掉 `sync_for` 里的 `inherit_order(...)` 调用（或让它返回 0）⇒ 红。
+    #[test]
+    fn sync_inherits_the_order_state_and_realigns_pick_seq() {
+        let mut entries = vec![
+            entry("uid-a", Some(1.0), None),
+            entry("uid-b", Some(1.0), None),
+            entry("uid-c", Some(1.0), None),
+        ];
+        let mut previous = std::collections::HashMap::new();
+        previous.insert("uid-a".to_string(), (7_u64, 1_234_i64));
+        previous.insert("uid-b".to_string(), (3_u64, 999_i64));
+
+        let seq = inherit_order(&mut entries, &previous);
+        assert_eq!(entries[0].used_seq, 7, "历史序号必须继承");
+        assert_eq!(entries[0].last_used_ms, 1_234);
+        assert_eq!(entries[1].used_seq, 3);
+        assert_eq!(entries[2].used_seq, 0, "没有历史记录的号保持 0");
+        assert_eq!(
+            seq, 7,
+            "`pick_seq` 必须追上历史最大值，否则新选中会与历史并列"
+        );
+
+        // 反向对照：历史里有、账号库里已没有的 uid 不该把 `pick_seq` 抬到 99
+        //（那会让序号凭空跳一大截，虽然无害但没有依据）。
+        previous.insert("uid-deleted".to_string(), (99_u64, 0));
+        let seq = inherit_order(&mut entries, &previous);
+        assert_eq!(seq, 7, "{seq}");
+        assert!(
+            !entries.iter().any(|entry| entry.uid == "uid-deleted"),
+            "已删除的账号不该被「复活」进池里"
+        );
+    }
+
+    /// ★★ 安全审计 P1-5：「顺序」档在 Trae 上必须**真的粘住**最近用过的号。
+    ///
+    /// 改造前有两个原因让它名不副实：
+    /// ① [`TraePool::sync_for`] 每请求重建 `entries`，`used_seq` 一律归零；
+    /// ② [`TraePool::pick`] 把 entries clone 进临时表，`mark_selected` 的写回随函数
+    ///    返回丢弃 —— 连**请求内**都不保留。
+    ///
+    /// 于是这一档退化成「永远选 uid 最小的号」，而 Trae 页面下拉里摆着它（issue #102）。
+    ///
+    /// 变异验证：去掉 `pick` 里的回写 ⇒ 第二条断言红；去掉 `sync_for` 里的继承 ⇒
+    /// 第三条断言红。
+    #[test]
+    fn sequential_sticks_to_the_last_used_account_across_picks() {
+        let mut pool = pool_with(vec![
+            entry("uid-a", Some(10.0), None),
+            entry("uid-b", Some(10.0), None),
+        ]);
+        let tried = HashSet::new();
+        let now = 1_700_000_000_i64;
+
+        // ① 第一次：冷启动按 uid 序取最小。
+        let first = pool
+            .pick(now, &tried, Some("__sequential__"), None)
+            .expect("必须能选出账号")
+            .uid;
+        assert_eq!(first, "uid-a");
+
+        // ② 副作用必须写回池（改造前写进了临时表就丢了）。
+        let used = pool
+            .entries()
+            .iter()
+            .find(|entry| entry.uid == first)
+            .map(|entry| entry.used_seq)
+            .unwrap_or(0);
+        assert!(
+            used > 0,
+            "选中后 `used_seq` 必须大于 0，否则「最近用过谁」这个信息根本不存在"
+        );
+
+        // ③ 第二次：顺序档必须粘住**刚刚用过的那个**，而不是又回到 uid 序的第一个。
+        let second = pool
+            .pick(now + 60, &tried, Some("__sequential__"), None)
+            .expect("必须能选出账号")
+            .uid;
+        assert_eq!(
+            second, first,
+            "顺序档的语义是「粘住最近使用的账号」，第二次必须还是它"
+        );
+
+        // ④ 让 a 冷却后，必须换到 b（证明「粘住」不是「永远只选它」）。
+        if let Some(entry) = pool.entries.iter_mut().find(|entry| entry.uid == "uid-a") {
+            entry.cooldown_until = now + 3_600;
+        }
+        let third = pool
+            .pick(now + 120, &tried, Some("__sequential__"), None)
+            .expect("a 冷却后必须能换到 b")
+            .uid;
+        assert_eq!(third, "uid-b");
     }
 
     #[test]

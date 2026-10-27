@@ -26,7 +26,9 @@ pub async fn handler(State(state): State<GatewayState>, headers: HeaderMap) -> R
     let config = state.config_snapshot().await;
 
     let pool_snapshot = { state.pool.read().await.snapshot(now_ms) };
-    let sticky_sessions = state.sticky.read().await.len();
+    // ★ 安全审计 P2-10：`len()` 是**表大小**（含过期未 GC 的条目），
+    //   这里要的是「此刻还粘着多少个会话」⇒ 用 `len_active(now_ms)`。
+    let sticky_sessions = state.sticky.read().await.len_active(now_ms);
     let degrade_until_ms = state.degrade.read().await.until_ms();
     let prompt = state.prompt.read().await.clone();
 
