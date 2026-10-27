@@ -790,14 +790,100 @@ fn build_authorize_url(
 /// 而 `icube_base`（`https://api.trae.com.cn`）是**另一台主机**。
 /// 客户端源码里 `apiHost` 的取值顺序是「回调回传的 host → `account.trae.normal`」，
 /// 从不是 iCube 基址。
-fn resolve_exchange_host(callback_host: Option<&str>, variant: TraeVariant) -> (String, bool) {
-    match callback_host
+fn resolve_exchange_host(
+    callback_host: Option<&str>,
+    variant: TraeVariant,
+) -> (String, ExchangeHostSource) {
+    let endpoints = endpoints_for(variant);
+    let callback_host = callback_host
         .map(|host| host.trim().trim_end_matches('/'))
-        .filter(|host| !host.is_empty())
-    {
-        Some(host) => (host.to_string(), false),
-        None => (endpoints_for(variant).account_base.to_string(), true),
+        .filter(|host| !host.is_empty());
+    let Some(host) = callback_host else {
+        return (
+            endpoints.account_base.to_string(),
+            ExchangeHostSource::Missing,
+        );
+    };
+    // ★★ 安全审计 P2-12：`host` 来自**回调 URL 的查询串**（浏览器可控 / 用户可粘贴），
+    // 却直接被用来拼接兑换请求的 base URL ⇒ 等于「把 `authCode` + PKCE `code_verifier`
+    // POST 到任意地址」，同时构成无条件 SSRF。
+    //
+    // 判据刻意用**白名单**而不是黑名单：这个值只可能来自 Trae 自己的几个域
+    // （`bootConfig` 里那四台主机），枚举得完。
+    if !is_known_exchange_host(&host, endpoints) {
+        // 回落 + 留痕（不静默改写）：症状是「登录莫名失败」，留痕才查得动。
+        return (
+            endpoints.account_base.to_string(),
+            ExchangeHostSource::Rejected,
+        );
     }
+    (host.to_string(), ExchangeHostSource::Callback)
+}
+
+/// [`resolve_exchange_host`] 的取值来源 —— 决定要不要写留痕、写什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExchangeHostSource {
+    /// 回调给的就是已知主机（正常路径）。
+    Callback,
+    /// 回调没给 host（上游版本差异）⇒ 回落 `account_base`。
+    Missing,
+    /// 回调给了 host，但**不在**本变体的已知主机里 ⇒ 回落并留痕。
+    Rejected,
+}
+
+impl ExchangeHostSource {
+    /// 是否需要写一条留痕。
+    pub(crate) fn used_fallback(self) -> bool {
+        !matches!(self, ExchangeHostSource::Callback)
+    }
+}
+
+/// 把 URL 归一成「主机名小写」（去 scheme、去路径、去尾斜杠、去端口）。
+fn host_name_of(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let without_scheme = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    let authority = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .to_ascii_lowercase();
+    // 去掉端口（Trae 的四个域都不带端口；带端口的形式归一后仍应能匹配）。
+    authority
+        .split(':')
+        .next()
+        .unwrap_or(&authority)
+        .to_string()
+}
+
+/// `host` 是否属于该变体的已知主机集合。
+///
+/// 四个域都算：兑换打的是 `account_base`，但上游不同版本的回调可能回传
+/// `icube_base` / `agent_host` / `console_base`（同一账号体系的兄弟域）。
+/// 把它们一起放行是为了**不误杀**既有可用路径 —— 这道校验的目标是挡掉
+/// 「完全不相干的主机」，不是收紧上游自己的域。
+fn is_known_exchange_host(
+    host: &str,
+    endpoints: &crate::modules::trae::variant::EndpointSet,
+) -> bool {
+    let name = host_name_of(host);
+    if name.is_empty() {
+        return false;
+    }
+    // 回环单独放行（不是「放宽」，而是「另一类合法场景」）：
+    // 本仓的回调联调与自建反代都跑在 `127.0.0.1:<port>` 上，上游真机不会回传它。
+    // 而本机进程本来就与用户同权限 —— 挡不住也无意义（真正要挡的是「把 authCode
+    // 发到**外部**地址」）。
+    if name == "127.0.0.1" || name == "localhost" || name == "::1" || name == "[::1]" {
+        return true;
+    }
+    [
+        endpoints.account_base,
+        endpoints.icube_base,
+        endpoints.agent_host,
+        endpoints.console_base,
+    ]
+    .iter()
+    .any(|known| host_name_of(known) == name)
 }
 
 /// 构造 `ExchangeToken` 请求体里的 `DeviceInfo`（**AuthCode 与 refresh 共用的唯一派生点**）。
@@ -1367,8 +1453,27 @@ pub async fn login_start_for(variant: TraeVariant) -> Result<Value, String> {
                 continue;
             }
 
-            // CSRF：期望值来自在途会话（无会话时宽容放行）。
-            let expected = (!view.trace_id.is_empty()).then_some(view.trace_id.as_str());
+            // CSRF：期望值就是本次会话的 `trace_id`。
+            //
+            // ★★ 安全审计 P2-13：改造前这里写的是
+            // `(!view.trace_id.is_empty()).then_some(view.trace_id.as_str())`
+            // —— `trace_id` 为空时传 `None`，而 `verify_login_trace` 的语义是
+            // 「无在途会话 ⇒ 宽容放行」⇒ **CSRF 校验会静默失效**。
+            //
+            // 这与 `submit_callback`（下面那个入口）的 `if view.trace_id.is_empty() {
+            // return Err(...) }` 口径相反：同一件事两个入口，一个 fail-closed、
+            // 一个 fail-open。现在统一成 fail-closed。
+            if view.trace_id.is_empty() {
+                let page = result_page(
+                    PageKind::Failure,
+                    "登录失败",
+                    &["登录会话异常，请回到应用重新授权。".to_string()],
+                );
+                let _ = respond_html(&mut stream, &page, &method).await;
+                finish_session(&session_id, None, Some("登录会话缺少 loginTraceID".into()));
+                return;
+            }
+            let expected = Some(view.trace_id.as_str());
             if let Err(error) = verify_login_trace(&params, expected) {
                 let page = result_page(
                     PageKind::Failure,
@@ -1525,20 +1630,45 @@ async fn write_response(
 /// （查询串里带 AuthCode）；不让浏览器留副本。
 fn build_response(content_type: &str, body: &str, method: &str) -> String {
     // 预检请求不要 body，回一组头即可。
-    let (status, body) = if method.eq_ignore_ascii_case("OPTIONS") {
+    let is_preflight = method.eq_ignore_ascii_case("OPTIONS");
+    let (status, body) = if is_preflight {
         ("204 No Content", "")
     } else {
         ("200 OK", body)
+    };
+
+    // ★★ 安全审计 P2-16：**CORS 只给探测响应，不给结果页**。
+    //
+    // 改造前这条 `Access-Control-Allow-Origin: *` 对**两种**响应都生效，
+    // 而结果页里带**账号昵称**（`oauth_result_page::success_page`）⇒ 用户登录成功
+    // 后的那一小段时间里，任意网页都能 `fetch('http://127.0.0.1:17388/authorize')`
+    // 把结果页 HTML 读走。`Cache-Control: no-store` 挡不住 CORS 读取。
+    //
+    // 探测响应必须保留 `*`（理由见 `respond` 的注释：两个区域的授权页都会来探，
+    // 写死一个域会让另一个区域卡在「认证中」）—— 它没有 body、没有个人信息。
+    // 预检（OPTIONS）也保留：预检本身不带任何数据，且浏览器要靠它才能放行探测。
+    let cors = content_type.starts_with("text/plain") || is_preflight;
+    let headers = if cors {
+        "Access-Control-Allow-Origin: *\r\n\
+         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+         Access-Control-Allow-Headers: *\r\n\
+         Access-Control-Max-Age: 600\r\n"
+            .to_string()
+    } else {
+        // 结果页：不给 CORS，另加三道纵深（转义本身已经做对，这些是第二道防线）。
+        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; \
+         base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         X-Frame-Options: DENY\r\n\
+         Referrer-Policy: no-referrer\r\n"
+            .to_string()
     };
 
     format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: {content_type}\r\n\
          Cache-Control: no-store\r\n\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-         Access-Control-Allow-Headers: *\r\n\
-         Access-Control-Max-Age: 600\r\n\
+         {headers}\
          Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
@@ -1615,16 +1745,24 @@ async fn perform_login(
     facts: &ClientFacts,
 ) -> Result<Value, String> {
     let (jwt, refresh_token) = if let Some(auth_code) = callback.auth_code.as_deref() {
-        let (host, used_fallback) = resolve_exchange_host(callback.host.as_deref(), variant);
-        if used_fallback {
-            // 脱敏留痕：只有 host 与变体名，没有凭据。
+        let (host, host_source) = resolve_exchange_host(callback.host.as_deref(), variant);
+        if host_source.used_fallback() {
+            // 脱敏留痕：只有变体名与回落的基址，没有凭据。
+            let why = match host_source {
+                ExchangeHostSource::Missing => "未回传 host",
+                // ★ 安全审计 P2-12：这条曾经是**静默**的 —— 回调给了个不相干的主机，
+                //   我们要么把 authCode POST 过去（旧行为），要么悄悄回落。
+                //   现在必须留痕，否则「登录失败」查不出成因。
+                ExchangeHostSource::Rejected => "回传的 host 不在已知主机内，已拒绝",
+                ExchangeHostSource::Callback => unreachable!("used_fallback 已排除该分支"),
+            };
             store::append_log(
                 &crate::modules::trae::paths::checkin_log_file_for(variant),
                 &format!(
                     // 文案必须跟着 [`resolve_exchange_host`] 的回落值走：它已从
                     // `icube_base` 改为 `account_base`（真机客户端打的就是后者）。
                     // 留旧词会让排障的人去查一台根本没被访问的主机。
-                    "OAuth 回调未回传 host，回落【{}】的 account_base（{host}）",
+                    "OAuth 兑换地址：{why}，回落【{}】的 account_base（{host}）",
                     variant.display_name()
                 ),
             );
@@ -2829,26 +2967,87 @@ mod tests {
     #[test]
     fn resolve_exchange_host_falls_back_to_variant_account_base() {
         // 正常：原样使用（只去尾斜杠）。
-        let (host, used) =
+        let (host, source) =
             resolve_exchange_host(Some("https://api.trae.cn"), TraeVariant::TraeWork);
         assert_eq!(host, "https://api.trae.cn");
-        assert!(!used);
-        let (host, used) =
+        assert_eq!(source, ExchangeHostSource::Callback);
+        let (host, source) =
             resolve_exchange_host(Some("  https://api.trae.cn/  "), TraeVariant::TraeWork);
         assert_eq!(host, "https://api.trae.cn");
-        assert!(!used);
+        assert_eq!(source, ExchangeHostSource::Callback);
         // 缺失 / 空串：回落该变体的 **account_base**（真机客户端兑换打的就是它，
         // 见 `resolve_exchange_host` 的说明）。曾经回落成 `icube_base`（另一台主机）。
         for missing in [None, Some(""), Some("   ")] {
-            let (host, used) = resolve_exchange_host(missing, TraeVariant::Global);
+            let (host, source) = resolve_exchange_host(missing, TraeVariant::Global);
             assert_eq!(host, "https://grow-normal.trae.ai");
-            assert!(used, "回落必须被标记，以便留痕");
+            assert_eq!(
+                source,
+                ExchangeHostSource::Missing,
+                "回落必须被标记，以便留痕"
+            );
+            assert!(source.used_fallback());
         }
         // 阳性对照：CN 侧的 account_base 与 icube_base **不是**同一个值，
         // 否则本用例根本分不出「回落到哪一台主机」。
         let (cn, _) = resolve_exchange_host(None, TraeVariant::TraeWork);
         assert_eq!(cn, "https://api.trae.cn");
         assert_ne!(cn, endpoints_for(TraeVariant::TraeWork).icube_base);
+    }
+
+    /// ★★ 安全审计 P2-12：**回调里的 `host` 不能把 `authCode` + PKCE verifier
+    /// 送到任意地址**。
+    ///
+    /// 改造前 `Some(host) => (host.to_string(), false)` 无条件采信 —— 而 `host` 来自
+    /// 回调 URL 的查询串（浏览器可控 / 用户能粘贴），于是构成无条件 SSRF，
+    /// 且本次登录的 `code_verifier` 会跟着 POST 到攻击者的机器上。
+    ///
+    /// 变异验证：把 `is_known_exchange_host` 判据删掉 ⇒ 第一条断言立刻红。
+    #[test]
+    fn exchange_host_must_be_one_of_the_variants_known_hosts() {
+        for evil in [
+            "https://attacker.example",
+            "http://169.254.169.254",               // 云元数据地址
+            "https://api.trae.cn.attacker.example", // 后缀伪装
+            "https://10.0.0.5:8080",                // 私网地址：本机之外的一台机器
+            "http://api.trae.cn@attacker.example",  // userinfo 伪装
+        ] {
+            let (host, source) = resolve_exchange_host(Some(evil), TraeVariant::TraeWork);
+            assert_eq!(
+                host, "https://api.trae.cn",
+                "不可信 host 必须回落到本变体的 account_base：{evil}"
+            );
+            assert_eq!(
+                source,
+                ExchangeHostSource::Rejected,
+                "必须标记为「拒绝」而不是「没给」，否则留痕会写错原因：{evil}"
+            );
+            assert!(source.used_fallback(), "拒绝必须留痕");
+        }
+
+        // 反向对照：本变体自己的四个域**都要放行**（这道校验不该误杀上游兄弟域）。
+        let endpoints = endpoints_for(TraeVariant::TraeWork);
+        for known in [
+            endpoints.account_base,
+            endpoints.icube_base,
+            endpoints.agent_host,
+            endpoints.console_base,
+        ] {
+            let (host, source) = resolve_exchange_host(Some(known), TraeVariant::TraeWork);
+            assert_eq!(source, ExchangeHostSource::Callback, "{known} 应当被放行");
+            assert_eq!(host, known.trim_end_matches('/'));
+        }
+
+        // 大小写与尾斜杠不影响判定（回调里两种写法都见过）。
+        let (_, source) =
+            resolve_exchange_host(Some("HTTPS://API.TRAE.CN/"), TraeVariant::TraeWork);
+        assert_eq!(source, ExchangeHostSource::Callback);
+
+        // 回环单独放行：本仓的回调联调 / 自建反代跑在 `127.0.0.1:<port>` 上，
+        // 而本机进程与用户同权限，挡它没有意义（真正要挡的是「发到外部」）。
+        for local in ["http://127.0.0.1:17388", "http://localhost:8080"] {
+            let (_, source) = resolve_exchange_host(Some(local), TraeVariant::TraeWork);
+            assert_eq!(source, ExchangeHostSource::Callback, "{local} 应当放行");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3846,7 +4045,54 @@ mod tests {
         );
     }
 
-    /// 结果页响应必须同时具备：`text/html`、`no-store`、CORS（探测与结果页共用组装）。
+    /// ★★ 安全审计 P2-16：结果页**不得**带 `Access-Control-Allow-Origin`。
+    ///
+    /// 结果页含账号昵称，带上 `ACAO: *` 就等于「任意网页都能读走登录结果」。
+    /// 探测响应（`text/plain`）反过来**必须**带 —— 两个区域的授权页都靠它判断客户端在线。
+    ///
+    /// 变异验证：把 `cors` 判据改回无条件 `true` ⇒ 第一条断言红。
+    #[test]
+    fn only_the_probe_response_is_readable_cross_origin() {
+        let probe = build_response("text/plain; charset=utf-8", "ok", "GET");
+        assert!(
+            probe
+                .to_ascii_lowercase()
+                .contains("access-control-allow-origin: *"),
+            "探测响应必须允许跨源读取（授权页要判断客户端在线）: {probe}"
+        );
+
+        let page = build_response("text/html; charset=utf-8", "<html>昵称</html>", "GET");
+        assert!(
+            !page
+                .to_ascii_lowercase()
+                .contains("access-control-allow-origin"),
+            "结果页含账号昵称，不得对任意源开放: {page}"
+        );
+        // 纵深：CSP / nosniff / 防嵌套 / 不泄漏 Referer。
+        assert!(
+            page.contains("Content-Security-Policy: default-src 'none'"),
+            "结果页必须有 CSP: {page}"
+        );
+        assert!(
+            page.to_ascii_lowercase()
+                .contains("x-content-type-options: nosniff"),
+            "结果页必须禁嗅探: {page}"
+        );
+        assert!(
+            page.to_ascii_lowercase().contains("x-frame-options: deny"),
+            "结果页不该被嵌套: {page}"
+        );
+        // 预检（OPTIONS）即使走 html 也保留 CORS：它没有 body、没有个人信息。
+        let preflight = build_response("text/html; charset=utf-8", "", "OPTIONS");
+        assert!(
+            preflight
+                .to_ascii_lowercase()
+                .contains("access-control-allow-origin"),
+            "预检必须带 CORS 头，否则授权页的探测连第一步都过不去: {preflight}"
+        );
+    }
+
+    /// 结果页响应必须同时具备：`text/html`、`no-store`（探测与结果页共用组装）。
     #[test]
     fn html_response_declares_html_type_and_forbids_caching() {
         let response = build_response("text/html; charset=utf-8", "<html></html>", "GET");
@@ -3860,11 +4106,13 @@ mod tests {
                 .contains("cache-control: no-store"),
             "结果页含账号昵称且 URL 一次性，不该被缓存: {response}"
         );
+        // ★ 安全审计 P2-16：结果页**不再**带 CORS（含账号昵称）。
+        // 该判据的完整对照见 `only_the_probe_response_is_readable_cross_origin`。
         assert!(
-            response
+            !response
                 .to_ascii_lowercase()
                 .contains("access-control-allow-origin"),
-            "{response}"
+            "结果页不得对任意源开放: {response}"
         );
     }
 

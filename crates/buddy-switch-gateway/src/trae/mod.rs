@@ -629,15 +629,30 @@ impl TraeGatewayStatusView {
 /// Key 脱敏：保留前缀与末 4 位，中间省略。
 ///
 /// 返回的字符串**不包含**可复原的完整 Key，因此可安全下发到前端。
+///
+/// ## ⚠️ 一律按**字符**切，不按字节（安全审计 P2-18）
+///
+/// 改造前这里是 `&trimmed[..12]` / `&trimmed[trimmed.len() - 4..]` —— **字节**切片。
+/// Trae 的 legacy Key 由用户从 `settings.json` 手填，未必是纯 ASCII，而字节切片
+/// 落在多字节字符中间会**直接 panic**（`byte index is not a char boundary`）。
+///
+/// 生产路径早已改用 `trae/apikey.rs` 的 `legacy_prefix` / `legacy_suffix`
+/// （它们就是按 `chars` 切的），所以这个函数只剩测试在用 —— 但「留着一个会 panic 的
+/// 脱敏函数」本身是陷阱：谁按 doc 拿它做展示就会炸。现在两者口径完全一致
+/// （`legacy_prefix` 取前 12 个字符、`legacy_suffix` 取末 4 个），
+/// 测试里那条「两段式与整串脱敏逐段一致」也因此对非 ASCII 也成立。
 pub fn mask_api_key(key: &str) -> String {
     let trimmed = key.trim();
     if trimmed.is_empty() {
         return String::new();
     }
-    if trimmed.len() <= 12 {
-        return format!("{}…", &trimmed[..trimmed.len().min(4)]);
+    let total = trimmed.chars().count();
+    if total <= 12 {
+        return format!("{}…", trimmed.chars().take(4).collect::<String>());
     }
-    format!("{}…{}", &trimmed[..12], &trimmed[trimmed.len() - 4..])
+    let head: String = trimmed.chars().take(12).collect();
+    let tail: String = trimmed.chars().skip(total - 4).collect();
+    format!("{head}…{tail}")
 }
 
 /// 当前 Unix 秒。
@@ -963,6 +978,24 @@ mod tests {
     fn body_limit_falls_back_to_default_when_zero() {
         assert_eq!(body_limit_bytes(0), DEFAULT_MAX_BODY_MB * 1024 * 1024);
         assert_eq!(body_limit_bytes(2), 2 * 1024 * 1024);
+    }
+
+    /// ★★ 安全审计 P2-18：脱敏函数**不得因多字节字符 panic**。
+    ///
+    /// 改造前按**字节**切片（`&trimmed[..12]`）⇒ 用户从 `settings.json` 手填的非 ASCII
+    /// legacy Key 会在这里 `byte index is not a char boundary` 崩掉。
+    /// 变异验证：改回字节切片 ⇒ 本用例 panic。
+    #[test]
+    fn api_key_mask_handles_multibyte_keys_without_panicking() {
+        // 13 个中文字符：第 12 个字节边界落在字符中间。
+        let key = "密钥密钥密钥密钥密钥密钥密";
+        let masked = mask_api_key(key);
+        // 前 12 个字符 + 省略号 + 末 4 个字符（13 字符的 Key）。
+        assert_eq!(masked, "密钥密钥密钥密钥密钥密钥…钥密钥密");
+        // 短串（≤ 12 字符）走另一条分支，同样不能 panic。
+        let short = mask_api_key("短密钥");
+        assert_eq!(short, "短密钥…", "不足 4 个字符时不能凭空补字");
+        assert_eq!(mask_api_key("一二三四五六"), "一二三四…");
     }
 
     #[test]

@@ -326,20 +326,41 @@ pub fn client_executable_for(region: Region) -> PathBuf {
     path
 }
 
-/// 探针脚本落盘路径（固定名，每次覆盖写；内容只有 1 KB）。
+/// 探针脚本落盘路径（**每次随机名**，用完即删）。
 ///
-/// ⚠️ **固定名是刻意的**（避免每次调用泄漏一个新文件）⇒ 因此**写与读必须互斥**：
-/// 并发调用 [`fetch_build_key`] 时，若 A 刚写完、B 又写，A 的子进程可能读到**半个文件**
-/// （`fs::write` 先截断再写）。⇒ 用 [`PROBE_LOCK`] 把「写 → 起子进程（读）」串起来。
+/// ## 为什么从「固定名」改成「随机名」（安全审计 P2-14）
+///
+/// 改造前是 `temp_dir()/buddy-switch-at-rest-key.js` —— 一个**可预测的固定路径**，
+/// 而 `/tmp` 是全世界可写的（sticky 位只防删别人的文件，**不防**对已知名字持续覆写）。
+/// 于是「写脚本 → 起子进程 → 子进程读脚本」之间有一个真实窗口：同机任意进程可以把
+/// 那个文件换成自己的 JS，`WorkBuddy.exe` 就会以当前用户身份执行它。
+///
+/// `PROBE_LOCK` 是**进程内**互斥，跨进程无效，挡不住这个。
+///
+/// 现在：随机名（不可预测）+ `create_new`（防预创建）+ `Drop` 删除（不残留）。
 fn key_probe_path() -> PathBuf {
-    std::env::temp_dir().join("buddy-switch-at-rest-key.js")
+    std::env::temp_dir().join(format!(
+        "buddy-switch-at-rest-key-{}.js",
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
-/// 探针文件的**进程级互斥**（理由见 [`key_probe_path`]）。
+/// 探针文件的**作用域守卫**：任何返回路径（含 panic）都会删掉它。
 ///
-/// ⚠️ 不是性能优化，是**正确性**：`fs::write` 会先截断，两个并发写会让读者看到空/半文件。
-/// 持锁范围覆盖「写脚本 + 起子进程」——取钥本身是慢操作（起 Electron 子进程），
-/// 串行化它不会成为瓶颈。
+/// 随机名解决了「被别人覆写」，删除解决「残留一堆探针文件」——
+/// 两者必须同时成立，否则只是把固定名的泄漏换成了随机名的泄漏。
+struct ProbeFile(PathBuf);
+
+impl Drop for ProbeFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// 取钥的**进程级节流**（并发取钥会同时拉起多个 Electron 子进程）。
+///
+/// ⚠️ 从安全审计 P2-14 起，**正确性不再依赖它**：探针文件已是随机名 + `create_new`，
+/// 并发写不会互相踩。保留它只是因为「起 N 个 Electron 子进程」本身昂贵。
 static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 起子进程取 `atRestSecretKey`。
@@ -357,12 +378,21 @@ pub fn fetch_build_key(exe: &Path) -> Result<String, AtRestError> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let probe = key_probe_path();
-    std::fs::write(&probe, KEY_PROBE_JS)
-        .map_err(|e| AtRestError::Spawn(format!("写探针脚本失败：{e}")))?;
+    // 随机名 + `create_new`：同机其他进程既猜不到名字，也无法**预先**占位。
+    let probe = ProbeFile(key_probe_path());
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe.0)
+            .map_err(|e| AtRestError::Spawn(format!("写探针脚本失败：{e}")))?;
+        file.write_all(KEY_PROBE_JS.as_bytes())
+            .map_err(|e| AtRestError::Spawn(format!("写探针脚本失败：{e}")))?;
+    }
 
     let mut child = crate::modules::process::cmd_builder(exe)
-        .arg(&probe)
+        .arg(&probe.0)
         .env("ELECTRON_RUN_AS_NODE", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
