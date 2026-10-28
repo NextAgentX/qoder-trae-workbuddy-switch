@@ -12,6 +12,7 @@
 use buddy_switch_core::modules::region::Region;
 use buddy_switch_gateway::outbound::{prepare_outbound_body, OutboundMeta, OutboundOptions};
 use buddy_switch_gateway::protocol::anthropic::to_upstream_request;
+use buddy_switch_gateway::protocol::responses::to_upstream_request as responses_to_upstream;
 use serde_json::{json, Value};
 
 /// 校验工具调用序列：每条 `assistant.tool_calls` 后面必须紧邻 id 一一对应的
@@ -178,5 +179,55 @@ fn well_formed_parallel_tool_turn_stays_intact() {
             .count(),
         2,
         "两条配对完整的工具结果都必须保留：{messages:?}"
+    );
+}
+
+/// `/v1/responses` 入站的并行调用必须并进**同一条** assistant 消息（issue #119）。
+///
+/// 修复前每条 `function_call` item 各起一条 assistant 消息，于是位置 1 的
+/// `tool_calls: ["c0"]` 后面紧跟的是另一条 assistant 而不是 id 为 `c0` 的结果 ——
+/// 正是本文件开头那条上游规则判死的形态。这里走**完整管线**（入站转换 → 出站改写），
+/// 因为出站清理孤儿调用时也可能把它拆开，只测转换层不足以钉住。
+#[test]
+fn responses_parallel_calls_stay_in_one_assistant_message() {
+    let inbound = json!({
+        "model": "deepseek-v4.1-flash",
+        "input": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+            {"type": "function_call", "call_id": "c0", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+            {"type": "function_call", "call_id": "c1", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
+            {"type": "function_call_output", "call_id": "c0", "output": "ok"},
+            {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+        ]
+    });
+
+    let raw = serde_json::to_string(&responses_to_upstream(&inbound)).expect("可序列化");
+    let prepared = prepare_outbound_body(
+        Region::Cn,
+        &raw,
+        &OutboundOptions::default(),
+        &OutboundMeta::default(),
+        false,
+    );
+    let messages: Vec<Value> = serde_json::from_str::<Value>(&prepared)
+        .expect("改写结果可解析")
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("messages 是数组");
+
+    check_tool_sequence(&messages).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .count(),
+        1,
+        "并行调用只能有一条 assistant 消息：{messages:?}"
+    );
+    assert_eq!(
+        messages[1]["tool_calls"].as_array().map(Vec::len),
+        Some(2),
+        "两个调用都必须在同一条 tool_calls 里：{messages:?}"
     );
 }
