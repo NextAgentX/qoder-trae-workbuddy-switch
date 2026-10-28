@@ -242,6 +242,12 @@ fn input_to_messages(input: &Value, out: &mut Vec<Value>) {
     match input {
         Value::String(text) => out.push(json!({"role": "user", "content": text})),
         Value::Array(items) => {
+            // ★ 并行的多个调用必须并进**同一条** assistant 消息的 `tool_calls`（issue #119）。
+            // 每条 item 各自产出一条 assistant 消息，等于把「一次并行调用」拆成多轮：
+            // 上游按「assistant 消息数与 tool 结果数」校验 ⇒ 回 400/11148
+            // `tool calls and tool results do not match`。`merge_into` 记住可续写的那条消息的下标，
+            // 遇到任何**真的产出**了新消息的 item 就清空（否则会把不同轮次合并）。
+            let mut merge_into: Option<usize> = None;
             for item in items {
                 match item.get("type").and_then(Value::as_str) {
                     // `type` 缺省：容忍 `{role, content}` 简写。
@@ -249,6 +255,7 @@ fn input_to_messages(input: &Value, out: &mut Vec<Value>) {
                         let role = item.get("role").and_then(Value::as_str).unwrap_or("user");
                         let content = parts_to_content(item.get("content"));
                         out.push(json!({"role": role, "content": content}));
+                        merge_into = None;
                     }
                     Some("function_call") => {
                         let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
@@ -257,15 +264,15 @@ fn input_to_messages(input: &Value, out: &mut Vec<Value>) {
                             .get("arguments")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        out.push(json!({
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [{
+                        push_tool_call(
+                            out,
+                            &mut merge_into,
+                            json!({
                                 "id": call_id,
                                 "type": "function",
                                 "function": {"name": name, "arguments": arguments},
-                            }],
-                        }));
+                            }),
+                        );
                     }
                     // ★ freeform 调用的历史项：还原成 chat 的 function 调用 + `{"input": …}`
                     // 参数（与出站降级的形状对得上，多轮 Codex 才不会断）。
@@ -276,20 +283,20 @@ fn input_to_messages(input: &Value, out: &mut Vec<Value>) {
                             .get("input")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        out.push(json!({
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [{
+                        push_tool_call(
+                            out,
+                            &mut merge_into,
+                            json!({
                                 "id": call_id,
                                 "type": "function",
                                 "function": {
                                     "name": name,
                                     "arguments": json!({"input": input}).to_string(),
                                 },
-                            }],
-                        }));
+                            }),
+                        );
                     }
-                    Some("custom_tool_call_output") => {
+                    Some("custom_tool_call_output") | Some("function_call_output") => {
                         let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
                         let content = match item.get("output") {
                             Some(Value::String(text)) => text.clone(),
@@ -301,27 +308,39 @@ fn input_to_messages(input: &Value, out: &mut Vec<Value>) {
                             "tool_call_id": call_id,
                             "content": content,
                         }));
-                    }
-                    Some("function_call_output") => {
-                        let call_id = item.get("call_id").and_then(Value::as_str).unwrap_or("");
-                        let content = match item.get("output") {
-                            Some(Value::String(text)) => text.clone(),
-                            Some(other) => other.to_string(),
-                            None => String::new(),
-                        };
-                        out.push(json!({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": content,
-                        }));
+                        merge_into = None;
                     }
                     // `reasoning` 是**出站**产物；上游不接受 reasoning 作为输入 ⇒ 丢弃。
+                    // 丢弃不打断合并：调用之间穿插 reasoning 是 Codex 的常态形状。
                     _ => {}
                 }
             }
         }
         _ => {}
     }
+}
+
+/// 追加一条 tool call：上一段仍是「只有 tool_calls 的 assistant」就续写，否则另起一条。
+///
+/// 判据刻意收窄成「上一条消息 `content` 为 `null` 且已有 `tool_calls`」——
+/// 带正文的 assistant 消息不参与合并，避免把上一轮的收尾文本与这一轮的调用并成一条。
+fn push_tool_call(out: &mut Vec<Value>, merge_into: &mut Option<usize>, call: Value) {
+    if let Some(index) = *merge_into {
+        if let Some(array) = out
+            .get_mut(index)
+            .and_then(|message| message.get_mut("tool_calls"))
+            .and_then(Value::as_array_mut)
+        {
+            array.push(call);
+            return;
+        }
+    }
+    out.push(json!({
+        "role": "assistant",
+        "content": Value::Null,
+        "tool_calls": [call],
+    }));
+    *merge_into = Some(out.len().saturating_sub(1));
 }
 
 /// 把 Responses 的 content（字符串 / parts 数组）转成 chat content。
@@ -1251,6 +1270,72 @@ mod tests {
         assert_eq!(upstream["tools"].as_array().unwrap().len(), 1);
         assert_eq!(upstream["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(upstream["tool_choice"]["function"]["name"], "get_weather");
+    }
+
+    /// issue #119：并行的多个 `function_call` 若各自产出一条 assistant 消息，上游按
+    /// 「tool calls ↔ tool results 对不上」回 400/11148。必须并进同一条消息。
+    #[test]
+    fn parallel_function_calls_share_one_assistant_message() {
+        let body = json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+                {"type": "reasoning", "summary": []},
+                {"type": "function_call", "call_id": "c0", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+                // 调用之间穿插 reasoning 不打断合并（Codex 的常态形状）
+                {"type": "reasoning", "summary": []},
+                {"type": "function_call", "call_id": "c1", "name": "exec_command", "arguments": "{\"cmd\":\"pwd\"}"},
+                {"type": "function_call_output", "call_id": "c0", "output": "ok"},
+                {"type": "function_call_output", "call_id": "c1", "output": "ok"}
+            ]
+        });
+        let upstream = to_upstream_request(&body);
+        let messages = upstream["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            4,
+            "user + 一条 assistant + 两条 tool: {messages:?}"
+        );
+        assert_eq!(messages[1]["role"], "assistant");
+        let calls = messages[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(
+            calls.len(),
+            2,
+            "并行调用必须在同一条 assistant 消息里: {calls:?}"
+        );
+        assert_eq!(calls[0]["id"], "c0");
+        assert_eq!(calls[1]["id"], "c1");
+        assert_eq!(messages[2]["tool_call_id"], "c0");
+        assert_eq!(messages[3]["tool_call_id"], "c1");
+    }
+
+    /// 反向守卫：调用 → 结果 → 再调用（第二轮）**不得**被并进上一轮的 assistant 消息。
+    #[test]
+    fn tool_calls_after_tool_result_start_a_new_assistant_message() {
+        let body = json!({
+            "model": "m",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+                {"type": "function_call", "call_id": "c0", "name": "f", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c0", "output": "ok"},
+                {"type": "function_call", "call_id": "c1", "name": "f", "arguments": "{}"},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+                {"type": "function_call", "call_id": "c2", "name": "f", "arguments": "{}"}
+            ]
+        });
+        let upstream = to_upstream_request(&body);
+        let messages = upstream["messages"].as_array().unwrap();
+        // user / assistant(c0) / tool / assistant(c1) / assistant(text) / assistant(c2)
+        assert_eq!(messages.len(), 6, "{messages:?}");
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[3]["tool_calls"].as_array().unwrap().len(), 1);
+        // 带正文的 assistant 消息不参与合并
+        assert_eq!(messages[4]["content"], "done");
+        assert!(
+            messages[4].get("tool_calls").is_none(),
+            "文本消息不得被塞 tool_calls"
+        );
+        assert_eq!(messages[5]["tool_calls"].as_array().unwrap().len(), 1);
     }
 
     #[test]
