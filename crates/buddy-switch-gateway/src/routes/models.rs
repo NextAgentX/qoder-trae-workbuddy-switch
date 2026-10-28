@@ -19,6 +19,14 @@ use buddy_switch_core::modules::product::{scope_of_wb_region, Scope};
 /// ★ 图片能力（issue #101）走 [`crate::model_capability::apply`]：上游 `supportsImages`
 /// 优先、用户在「模型」页的覆盖次之、两边都没有就**不下发**该字段。这里**只传上游原值**，
 /// 合并判断只有一处（`model_capability`），别在此处再写一遍 `if override`。
+///
+/// ★ 思考档位（issue #127）与**管理面**（[`snapshot_view`]）同源同值：上游目录声明的
+/// `reasoning.efforts` 优先、内置静态表次之，`efforts_source` 标明是哪一份。
+/// 客户端据此才知道「这个模型能传哪些 `reasoning_effort`」—— 改造前只有管理面有，
+/// 出口 ① 一条都不给，客户端只能猜（猜错的档位会被 [`crate::outbound::effort`] 静默降级）。
+///
+/// ⚠️ 两边都没声明时**不写这三个字段**（不是写空数组）：`[]` 会被读成「该模型不支持思考」，
+/// 而真相是「上游没下发、内置表也没有」—— 与 `supports_images` 的取舍一致，不编事实。
 pub fn model_entry(model: &CatalogModel, max_context: bool, scope: Scope) -> serde_json::Value {
     // 开关决定声明「上限档」还是「默认档」（上游两档：如 300k 默认 / 1M 上限）。
     let window = if max_context {
@@ -46,6 +54,23 @@ pub fn model_entry(model: &CatalogModel, max_context: bool, scope: Scope) -> ser
     });
     if let Some(object) = value.as_object_mut() {
         crate::model_capability::apply(object, scope, &model.id, Some(model.supports_images));
+        // 思考档位（issue #127）：与 `snapshot_view` 共用 `ModelAbility::resolve`，
+        // 否则「管理面显示的档位」与「网关下发的档位」迟早漂移。
+        if let Some(region) = scope.wb_region() {
+            let ability =
+                ModelAbility::resolve(model, crate::outbound::effort::static_effort_cap(region));
+            if !ability.efforts.is_empty() {
+                object.insert(
+                    "reasoning_efforts".into(),
+                    serde_json::json!(ability.efforts),
+                );
+                object.insert(
+                    "default_effort".into(),
+                    serde_json::json!(ability.default_effort),
+                );
+                object.insert("efforts_source".into(), serde_json::json!(ability.source));
+            }
+        }
     }
     value
 }
@@ -305,6 +330,48 @@ mod tests {
             models,
             note: None,
         }
+    }
+
+    /// ★ issue #127：出口 ①（`/v1/models`）必须下发思考档位，且与管理面同源同值。
+    ///
+    /// 改造前只有管理面（`snapshot_view`）有 `reasoning_efforts`，客户端拿到的清单里
+    /// 一条都没有 —— 用户只能猜档位，猜错的会被 `outbound::effort` 静默降级。
+    ///
+    /// 变异：删掉 `model_entry` 里那段 `ModelAbility::resolve` ⇒ 前两条断言红。
+    #[test]
+    fn wb_model_entry_declares_reasoning_efforts() {
+        // ① 上游声明优先，`efforts_source = "upstream"`。
+        let upstream = model(
+            "kimi-k2.8-preview",
+            None,
+            Some(CatalogReasoning {
+                efforts: vec!["low".into(), "high".into(), "max".into()],
+                default_effort: Some("high".into()),
+                can_disable_thinking: None,
+            }),
+        );
+        let entry = model_entry(&upstream, true, Scope::WbCn);
+        assert_eq!(
+            entry["reasoning_efforts"],
+            serde_json::json!(["low", "high", "max"])
+        );
+        assert_eq!(entry["default_effort"], "high");
+        assert_eq!(entry["efforts_source"], "upstream");
+
+        // ② 上游没声明 ⇒ 回落内置静态表，来源必须标明 `"static"`（否则用户以为网关读错了）。
+        let fallback = model_entry(&model("glm-5.3", None, None), true, Scope::WbCn);
+        assert!(
+            fallback["reasoning_efforts"]
+                .as_array()
+                .is_some_and(|list| !list.is_empty()),
+            "{fallback}"
+        );
+        assert_eq!(fallback["efforts_source"], "static");
+
+        // ③ 两边都没有 ⇒ **不下发**这三个字段（不是空数组：空数组会被读成「不支持思考」）。
+        let unknown = model_entry(&model("not-anywhere", None, None), true, Scope::WbCn);
+        assert!(unknown.get("reasoning_efforts").is_none(), "{unknown}");
+        assert!(unknown.get("efforts_source").is_none(), "{unknown}");
     }
 
     /// ★ issue #65：思考档位三档来源必须能区分 —— 上游声明 / 内置静态表 / 都没有。
