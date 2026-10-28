@@ -334,6 +334,15 @@ fn apply_linux_render_workarounds() {
     }
 }
 
+/// 读一个环境变量用于启动日志：未设置写 `unset`。
+///
+/// **不折叠空串**（`GDK_BACKEND=` 是「显式设成空」）—— 排障时要能区分
+/// 「用户没设」与「用户设了但值是空 / 被别的启动方式覆盖成空」。
+#[cfg(target_os = "linux")]
+fn linux_env(key: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| "unset".into())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ★ 必须在 `tauri::Builder` 起来之前 —— WebKitGTK 在进程启动早期读这些环境变量。
@@ -366,17 +375,25 @@ pub fn run() {
             //   用户贴出来的日志总是「很干净」，排查只能靠猜。
             #[cfg(target_os = "linux")]
             {
-                let session =
-                    std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".into());
-                let wayland_display =
-                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "-".into());
-                let dmabuf = std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER")
-                    .unwrap_or_else(|_| "unset".into());
+                // ★ 这一段是**唯一**能自证「App 实际看到的环境」的地方（issue #80 第二轮）。
+                //   用户在 shell 里 `export GDK_BACKEND=x11` / `WEBKIT_DISABLE_*`，与进程真正
+                //   继承到的值**可能对不上**（.desktop 启动、systemd user unit、AppImage 包装
+                //   脚本各有一套环境）⇒ 报告里写「已经设了」，日志却说不清设没设到进程里。
+                //   所以：只记**进程真实读到**的值，缺失一律写 `unset`（与空串区分）。
                 runtime_log::info(
                     "startup",
                     &format!(
-                        "图形栈 · session={session} · WAYLAND_DISPLAY={wayland_display} · \
-                         WEBKIT_DISABLE_DMABUF_RENDERER={dmabuf}"
+                        "图形栈 · session={} · WAYLAND_DISPLAY={} · desktop={} · gdk_backend={} · \
+                         WEBKIT_DISABLE_DMABUF_RENDERER={} · WEBKIT_DISABLE_COMPOSITING_MODE={} · \
+                         GDK_SCALE={} · GDK_DPI_SCALE={}",
+                        linux_env("XDG_SESSION_TYPE"),
+                        linux_env("WAYLAND_DISPLAY"),
+                        linux_env("XDG_CURRENT_DESKTOP"),
+                        linux_env("GDK_BACKEND"),
+                        linux_env("WEBKIT_DISABLE_DMABUF_RENDERER"),
+                        linux_env("WEBKIT_DISABLE_COMPOSITING_MODE"),
+                        linux_env("GDK_SCALE"),
+                        linux_env("GDK_DPI_SCALE"),
                     ),
                 );
             }
