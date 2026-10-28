@@ -20,6 +20,7 @@
 
 | 我要做的事 | 先读 |
 |:--|:--|
+| Linux 桌面「创建密钥」弹窗打不开 / 用浏览器管理 | [`guides/LINUX-WEBUI-FALLBACK.md`](guides/LINUX-WEBUI-FALLBACK.md) |
 | 本地跑起来 / 出安装包 / 发版 | [`guides/DEVELOPMENT.md`](guides/DEVELOPMENT.md) |
 | 用 Docker 部署服务端 | [`guides/DOCKER.md`](guides/DOCKER.md) |
 | 服务器上没有客户端，怎么登录 / 能不能开网关 | [`specs/CLIENTLESS-AUTH-PLAN.md`](specs/CLIENTLESS-AUTH-PLAN.md) |
