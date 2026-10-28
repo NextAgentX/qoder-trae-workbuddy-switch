@@ -412,6 +412,8 @@ pub struct ResponsesParts<'a> {
     /// 本次请求里声明为 **custom（freeform）** 的工具名 —— 命中的调用要还原成
     /// `custom_tool_call`，而不是 `function_call`。
     pub custom: &'a HashSet<String>,
+    /// 上游原始 usage 统计，用于提取缓存命中及思考细节。
+    pub raw_usage: Option<&'a Value>,
 }
 
 /// 由聚合结果构造 Responses 对象（非流式出口）。
@@ -441,9 +443,102 @@ pub fn to_response_object(
             input_tokens: accumulator.prompt_tokens.unwrap_or(0),
             output_tokens: accumulator.completion_tokens.unwrap_or(0),
             custom,
+            raw_usage: accumulator.raw_usage.as_ref(),
         },
         fallback_model,
     )
+}
+
+/// 构造符合 Responses 协议规范的 `usage` 结构。
+///
+/// 保留 `input_tokens`、`output_tokens`、`total_tokens`，
+/// 并从上游原始 `usage` 中提取并映射 `input_tokens_details.cached_tokens`
+/// 与 `output_tokens_details.reasoning_tokens`。
+pub(crate) fn build_responses_usage(
+    raw_usage: Option<&Value>,
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Value {
+    let mut cached_tokens: Option<u64> = None;
+    let mut reasoning_tokens: Option<u64> = None;
+
+    if let Some(raw) = raw_usage {
+        // 1. 尝试从 prompt_tokens_details 提取 cached_tokens
+        if let Some(details) = raw.get("prompt_tokens_details").and_then(Value::as_object) {
+            if let Some(cached) = details.get("cached_tokens").and_then(Value::as_u64) {
+                cached_tokens = Some(cached);
+            }
+        }
+        // 若 prompt_tokens_details 未包含或为 0，回退尝试 prompt_cache_hit_tokens / cache_read_input_tokens / cached_tokens
+        if cached_tokens.is_none() || cached_tokens == Some(0) {
+            if let Some(hit) = raw.get("prompt_cache_hit_tokens").and_then(Value::as_u64) {
+                if hit > 0 {
+                    cached_tokens = Some(hit);
+                }
+            } else if let Some(hit) = raw.get("cache_read_input_tokens").and_then(Value::as_u64) {
+                if hit > 0 {
+                    cached_tokens = Some(hit);
+                }
+            } else if let Some(hit) = raw.get("cached_tokens").and_then(Value::as_u64) {
+                if hit > 0 {
+                    cached_tokens = Some(hit);
+                }
+            }
+        }
+
+        // 2. 尝试从 completion_tokens_details 提取 reasoning_tokens
+        if let Some(details) = raw.get("completion_tokens_details").and_then(Value::as_object) {
+            if let Some(reasoning) = details.get("reasoning_tokens").and_then(Value::as_u64) {
+                reasoning_tokens = Some(reasoning);
+            }
+        }
+        // 若 completion_tokens_details 未包含或为 0，回退尝试 completion_thinking_tokens
+        if reasoning_tokens.is_none() || reasoning_tokens == Some(0) {
+            if let Some(reasoning) = raw.get("completion_thinking_tokens").and_then(Value::as_u64) {
+                if reasoning > 0 {
+                    reasoning_tokens = Some(reasoning);
+                }
+            }
+        }
+    }
+
+    let mut input_details = serde_json::Map::new();
+    input_details.insert(
+        "cached_tokens".to_string(),
+        json!(cached_tokens.unwrap_or(0)),
+    );
+
+    let mut output_details = serde_json::Map::new();
+    output_details.insert(
+        "reasoning_tokens".to_string(),
+        json!(reasoning_tokens.unwrap_or(0)),
+    );
+
+    // 若上游存在 prompt_tokens_details，透传其它扩展字段
+    if let Some(raw) = raw_usage {
+        if let Some(ptd) = raw.get("prompt_tokens_details").and_then(Value::as_object) {
+            for (key, val) in ptd {
+                if key != "cached_tokens" {
+                    input_details.insert(key.clone(), val.clone());
+                }
+            }
+        }
+        if let Some(ctd) = raw.get("completion_tokens_details").and_then(Value::as_object) {
+            for (key, val) in ctd {
+                if key != "reasoning_tokens" {
+                    output_details.insert(key.clone(), val.clone());
+                }
+            }
+        }
+    }
+
+    json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "input_tokens_details": Value::Object(input_details),
+        "output_tokens_details": Value::Object(output_details),
+    })
 }
 
 /// 由**部件**构造 Responses 对象（非流式出口的唯一形状实现，两条上游共用）。
@@ -520,11 +615,7 @@ pub fn to_response_object_from(parts: &ResponsesParts<'_>, fallback_model: &str)
         "output_text": parts.content,
         "parallel_tool_calls": true,
         "tools": [],
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-        },
+        "usage": build_responses_usage(parts.raw_usage, input_tokens, output_tokens),
     })
 }
 
@@ -1095,11 +1186,7 @@ impl<S> ResponsesSseStream<S> {
             object.insert("output".to_string(), Value::Array(output));
             object.insert(
                 "usage".to_string(),
-                json!({
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": input_tokens + output_tokens,
-                }),
+                build_responses_usage(self.usage.as_ref(), input_tokens, output_tokens),
             );
         }
         self.push_event(
@@ -1702,5 +1789,64 @@ mod tests {
         assert_eq!(unwrap_custom_input("\"bare\""), "bare");
         assert_eq!(unwrap_custom_input("not json"), "not json");
         assert_eq!(unwrap_custom_input("{\"input\":{\"a\":1}}"), "{\"a\":1}");
+    }
+
+    /// 验证 Responses usage 能正确映射上游标准缓存命中及思考 token。
+    #[test]
+    fn build_responses_usage_maps_cache_hit_and_reasoning_details() {
+        let raw = json!({
+            "prompt_tokens": 1500,
+            "completion_tokens": 200,
+            "total_tokens": 1700,
+            "prompt_tokens_details": {
+                "cached_tokens": 1200
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": 80
+            }
+        });
+        let usage = build_responses_usage(Some(&raw), 1500, 200);
+        assert_eq!(usage["input_tokens"], 1500);
+        assert_eq!(usage["output_tokens"], 200);
+        assert_eq!(usage["total_tokens"], 1700);
+        assert_eq!(usage["input_tokens_details"]["cached_tokens"], 1200);
+        assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 80);
+    }
+
+    /// 验证 Responses usage 能兼容厂商自定义的缓存命中与思考字段。
+    #[test]
+    fn build_responses_usage_falls_back_to_vendor_cache_and_thinking_fields() {
+        let raw = json!({
+            "prompt_tokens": 2000,
+            "completion_tokens": 150,
+            "total_tokens": 2150,
+            "prompt_cache_hit_tokens": 1800,
+            "completion_thinking_tokens": 60,
+        });
+        let usage = build_responses_usage(Some(&raw), 2000, 150);
+        assert_eq!(usage["input_tokens_details"]["cached_tokens"], 1800);
+        assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 60);
+    }
+
+    /// 验证流式终帧的 response.completed 事件能够正确携带缓存详情。
+    #[tokio::test]
+    async fn stream_emits_cache_details_in_terminal_response() {
+        let input = vec![
+            chunk("data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"),
+            chunk("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":800},\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"),
+        ];
+        let stream = ResponsesSseStream::new(
+            futures_util::stream::iter(input),
+            "deepseek-v4.1-flash".to_string(),
+            empty_custom(),
+        );
+        let events = collect_events(stream).await;
+        let completed = events.last().expect("must have response.completed");
+        assert_eq!(completed["type"], "response.completed");
+        let usage = &completed["response"]["usage"];
+        assert_eq!(usage["input_tokens"], 1000);
+        assert_eq!(usage["output_tokens"], 10);
+        assert_eq!(usage["input_tokens_details"]["cached_tokens"], 800);
+        assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 5);
     }
 }

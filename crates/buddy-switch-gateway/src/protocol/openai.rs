@@ -137,6 +137,8 @@ pub struct CompletionAccumulator {
     /// 单独保存是必要的：账号池的「实测成本账本」以 `credit / tokens` 折算单价，
     /// 若拿不到 `credit` 就写入样本，会把账号误标为「免费」，比不写更糟。
     pub credit: Option<f64>,
+    /// 上游返回的原始 usage 对象，供下游协议提取 prompt_tokens_details / cached_tokens 等详情。
+    pub raw_usage: Option<Value>,
 }
 
 impl CompletionAccumulator {
@@ -158,6 +160,9 @@ impl CompletionAccumulator {
             }
         }
         if let Some(usage) = chunk.get("usage") {
+            if !usage.is_null() {
+                self.raw_usage = Some(usage.clone());
+            }
             if let Some(prompt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
                 self.prompt_tokens = Some(prompt);
             }
@@ -344,6 +349,19 @@ impl CompletionAccumulator {
 
         let prompt = self.prompt_tokens.unwrap_or(0);
         let completion = self.completion_tokens.unwrap_or(0);
+        let mut usage = json!({
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        });
+        if let Some(raw) = &self.raw_usage {
+            if let Some(ptd) = raw.get("prompt_tokens_details") {
+                usage["prompt_tokens_details"] = ptd.clone();
+            }
+            if let Some(ctd) = raw.get("completion_tokens_details") {
+                usage["completion_tokens_details"] = ctd.clone();
+            }
+        }
         json!({
             "id": id,
             "object": "chat.completion",
@@ -354,11 +372,7 @@ impl CompletionAccumulator {
                 "message": Value::Object(message),
                 "finish_reason": self.finish_reason.clone().unwrap_or_else(|| "stop".to_string()),
             }],
-            "usage": {
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": prompt + completion,
-            },
+            "usage": usage,
         })
     }
 }
