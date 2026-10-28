@@ -88,9 +88,11 @@ systemctl --user stop buddy-switch-web.service
 上报时请带上 `~/.buddy-switch/logs/runtime-*.log` 里的**启动横幅**与**「图形栈」那一行**：
 
 ```txt
-图形栈 · session=wayland · WAYLAND_DISPLAY=wayland-0 · WEBKIT_DISABLE_DMABUF_RENDERER=1
+图形栈 · session=wayland · WAYLAND_DISPLAY=wayland-0 · desktop=KDE · gdk_backend=x11 ·
+WEBKIT_DISABLE_DMABUF_RENDERER=1 · WEBKIT_DISABLE_COMPOSITING_MODE=unset ·
+GDK_SCALE=unset · GDK_DPI_SCALE=unset
 ```
 
-只有它能证明 App 实际看到的会话类型与合成开关（自己设了没生效、或只改了 shell 里的变量都可能对不上），比贴 `Gtk-Message` 有用得多。
+只有它能证明 App **实际读到**的会话类型与合成开关（自己设了没生效、或只改了 shell 里的变量都可能对不上），比贴 `Gtk-Message` 有用得多。更早的版本只记前三项，`desktop` / `gdk_backend` / `COMPOSITING` / 缩放是后加的 —— 缺项说明版本较旧，先升级再报。
 
 `Gtk-Message: Failed to load module...` 和 `libayatana-appindicator is deprecated` 仅凭这两种提示不能判断密钥创建失败。请区分桌面**弹窗不显示**与后台 **HTTP API 错误**。
