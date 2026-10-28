@@ -1176,9 +1176,13 @@ impl Pool {
     ///
     /// 只该由中继在 `apply_upstream_error` 之后调用，且**仅当**事件归因到模型 ——
     /// 账号级失败计进来会让闸门频繁误触发（一个号额度耗尽就把整个模型停掉）。
-    pub fn note_model_failure(&mut self, model: &str, now_ms: i64) -> bool {
+    ///
+    /// `account` 必须是**这次失败归属的 uid**（issue #125）：闸门的开闸判据是
+    /// 「窗口内**去重账号数** ≥ 阈值」，同一个号连撞两次不该把整个模型停掉 ——
+    /// 那会让还没试过的账号永远轮不到（用户观感＝「不自动切号了」）。
+    pub fn note_model_failure(&mut self, model: &str, account: &str, now_ms: i64) -> bool {
         let config = self.config.clone();
-        self.gates.record_failure(model, now_ms, &config)
+        self.gates.record_failure(model, account, now_ms, &config)
     }
 
     /// 该模型成功一次 ⇒ 立刻关闸（成功是最强的反证）。
@@ -2190,6 +2194,8 @@ impl Pool {
                     "until_ms": gate.until_ms,
                     // 窗口内**失败次数**（不是账号数，见 `ModelGate::failures`）。
                     "failures": gate.failures,
+                    // 窗口内**去重账号数**（开闸判据，issue #125）。
+                    "accounts": gate.accounts,
                     "trips": gate.trips,
                     // 探针租约到期时刻；`0` = 没有探针在跑。
                     "probe_until_ms": gate.probe_until_ms,
@@ -2880,11 +2886,14 @@ mod tests {
             "无闸门 ⇒ 放行"
         );
         assert!(
-            !pool.note_model_failure("m", NOW),
+            !pool.note_model_failure("m", "u1", NOW),
             "第 1 个账号失败不该开闸"
         );
         assert!(pool.admit_model("m", NOW, "req-1").is_none());
-        assert!(pool.note_model_failure("m", NOW), "第 2 个账号失败必须开闸");
+        assert!(
+            pool.note_model_failure("m", "u2", NOW),
+            "第 2 个账号失败必须开闸"
+        );
 
         let block = pool.admit_model("m", NOW, "req-1").expect("暂停中必须被拒");
         assert!(block.remain_ms > 0, "拒绝信息必须带剩余时长");
@@ -4774,8 +4783,11 @@ mod tests {
             "没有闸门时必须是空数组（不是 null）"
         );
 
-        pool.note_model_failure("glm-5.3", NOW);
-        assert!(pool.note_model_failure("glm-5.3", NOW), "第 2 次失败应开闸");
+        pool.note_model_failure("glm-5.3", "u1", NOW);
+        assert!(
+            pool.note_model_failure("glm-5.3", "u2", NOW),
+            "第 2 个账号失败应开闸"
+        );
 
         let snapshot = pool.snapshot(NOW);
         let gates = snapshot["model_gates"].as_array().expect("数组");
@@ -4783,6 +4795,7 @@ mod tests {
         assert_eq!(gates[0]["model"], json!("glm-5.3"));
         assert_eq!(gates[0]["phase"], json!("paused"));
         assert_eq!(gates[0]["failures"], json!(2));
+        assert_eq!(gates[0]["accounts"], json!(2), "开闸判据是去重账号数");
         assert!(gates[0]["until_ms"].is_number());
         // 键名与同对象其它字段一致用 snake_case（`in_flight_full` / `cool_kind`）。
         assert!(gates[0].get("probe_until_ms").is_some(), "{snapshot}");

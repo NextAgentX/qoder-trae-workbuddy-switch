@@ -89,8 +89,14 @@ async fn paused_model_gate_returns_503_with_retry_after_instead_of_401() {
     // 把闸门真的压下去：默认 `gate_threshold = 2` ⇒ 连记两次模型级失败即暂停。
     {
         let mut pool = state.pool.write().await;
-        assert!(!pool.note_model_failure(model, now_ms), "第 1 次不该开闸");
-        assert!(pool.note_model_failure(model, now_ms), "第 2 次必须开闸");
+        assert!(
+            !pool.note_model_failure(model, "u1", now_ms),
+            "第 1 个账号失败不该开闸"
+        );
+        assert!(
+            pool.note_model_failure(model, "u2", now_ms),
+            "第 2 个账号失败必须开闸"
+        );
     }
 
     // 前提自检：此刻闸门确实挡着（否则下面的 503 可能来自别的原因，断言就假了）。
@@ -200,8 +206,8 @@ async fn abandoned_probe_is_returned_when_the_request_has_no_model_verdict() {
     let now_ms = buddy_switch_gateway::timeutil::now_ms();
     {
         let mut pool = state.pool.write().await;
-        pool.note_model_failure(model, now_ms);
-        pool.note_model_failure(model, now_ms);
+        pool.note_model_failure(model, "u1", now_ms);
+        pool.note_model_failure(model, "u2", now_ms);
     }
     // 等闸门到期（1ms 退避）。
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;

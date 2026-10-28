@@ -545,7 +545,7 @@ async fn relay_inner(
                             let disabled =
                                 pool.apply_upstream_error(&uid, &request.model, &event, now_ms);
                             let gate_opened = if is_model_level(&event) {
-                                pool.note_model_failure(&request.model, now_ms)
+                                pool.note_model_failure(&request.model, &uid, now_ms)
                             } else {
                                 false
                             };
@@ -617,7 +617,7 @@ async fn relay_inner(
                     // 只有**模型级**失败才计入闸门：账号级 429 / 402 / 5xx 是「那个号的事」，
                     // 计进来会让「一个号额度耗尽」把整个模型停掉（误触发比不触发更糟）。
                     let gate_opened = if is_model_level(&event) {
-                        pool.note_model_failure(&request.model, now_ms)
+                        pool.note_model_failure(&request.model, &uid, now_ms)
                     } else {
                         false
                     };
@@ -821,7 +821,7 @@ pub async fn note_envelope_failure(
     let mut pool = state.pool.write().await;
     pool.apply_upstream_error(uid, model, event, now_ms);
     if is_model_level(event) {
-        pool.note_model_failure(model, now_ms);
+        pool.note_model_failure(model, uid, now_ms);
     }
 }
 

@@ -63,6 +63,18 @@ pub struct ModelGate {
     /// 得到 `2`。于是文案渲染成「已在 2 个账号上被限流」，单号池时是假话，
     /// 用户数了数自己的号，对不上这句话。
     pub failures: usize,
+    /// 窗口内**去重账号数** —— 开闸的**唯一判据**（issue #125）。
+    ///
+    /// ## 为什么判据必须是去重账号数，而不是失败次数
+    ///
+    /// 闸门的立意是「**同一个模型在一批账号上一起被限流**」（见模块头）。改造前
+    /// 判的是 `entry.len()`，即**事件数**，于是同一个号连撞两次就开闸 —— 一次请求
+    /// 在 `max_rotate` 里先撞 A、再撞 A（粘性未解绑 / 半开持票换号）就会把整个模型
+    /// 停 60s，**其余账号根本没被尝试过**。用户的观感正是「不自动切号了」。
+    ///
+    /// 去重之后：只要还有**没试过**的账号，闸门就不开，换号继续；
+    /// 只有当 N 个**不同**账号在该模型上都失败，才认定「这是上游对模型整体的限流」。
+    pub accounts: usize,
     /// 暂停截止时刻（毫秒）。
     pub until_ms: i64,
     /// 阶段。
@@ -102,23 +114,38 @@ pub struct GateBlock {
 #[derive(Debug, Default)]
 pub struct ModelGates {
     gates: HashMap<String, ModelGate>,
-    /// 每个模型**窗口内**的失败时刻（毫秒，升序）。
-    recent: HashMap<String, Vec<i64>>,
+    /// 每个模型**窗口内**的失败事件 `(时刻毫秒, 账号 uid)`，按时刻升序。
+    ///
+    /// ★ 必须带 uid（issue #125）：开闸判据是「窗口内**去重账号数**」，只有时间戳
+    /// 分不出「同一个号连撞两次」与「两个号各撞一次」—— 而这两种情况的结论完全相反。
+    recent: HashMap<String, Vec<(i64, String)>>,
 }
 
 impl ModelGates {
-    /// 记一次「该模型在某账号上失败」。返回是否**因此**新开了闸门。
+    /// 记一次「该模型在**某账号**上失败」。返回是否**因此**新开了闸门。
     ///
     /// 只用于**模型级**失败（`6004` 模型限流 / `11102` 封禁）—— 账号级 429 / 402 / 5xx
     /// 是「那个号的事」，换个号大概率就好，计进模型失败数会让闸门频繁误触发。
-    pub fn record_failure(&mut self, model: &str, now_ms: i64, config: &PoolConfig) -> bool {
+    ///
+    /// `account` 是该次失败**归属的 uid**（issue #125）：开闸判据是窗口内**去重账号数**
+    /// ≥ `gate_threshold`，因此同一个号重复失败不会累加判据。传空串视为一个
+    /// 独立的「未知账号」槽位（仅用于不关心归属的调用方 / 单测）。
+    pub fn record_failure(
+        &mut self,
+        model: &str,
+        account: &str,
+        now_ms: i64,
+        config: &PoolConfig,
+    ) -> bool {
         if model.is_empty() {
             return false;
         }
         let window = config.gate_window_ms.max(1);
         let entry = self.recent.entry(model.to_string()).or_default();
-        entry.retain(|at| now_ms.saturating_sub(*at) <= window);
-        entry.push(now_ms);
+        entry.retain(|(at, _)| now_ms.saturating_sub(*at) <= window);
+        entry.push((now_ms, account.to_string()));
+        let failures = entry.len();
+        let accounts = distinct_accounts(entry);
 
         // 已经在暂停中：只累计计数，不重复开闸（退避在**重新**触发时才翻倍）。
         if let Some(gate) = self.gates.get(model) {
@@ -129,12 +156,14 @@ impl ModelGates {
                 // 半开试探失败 ⇒ 重新暂停且退避翻倍（这正是半开要判的东西）。
                 let trips = gate.trips.saturating_add(1);
                 let until = now_ms.saturating_add(backoff_ms(config, trips));
-                let failures = gate.failures.max(entry.len());
+                let failures = gate.failures.max(failures);
+                let accounts = gate.accounts.max(accounts);
                 self.gates.insert(
                     model.to_string(),
                     ModelGate {
                         model: model.to_string(),
                         failures,
+                        accounts,
                         until_ms: until,
                         phase: GatePhase::Paused,
                         trips,
@@ -147,7 +176,8 @@ impl ModelGates {
             }
         }
 
-        if entry.len() < config.gate_threshold.max(1) as usize {
+        // ★ 判据：去重账号数（不是失败次数）。见 [`ModelGate::accounts`]。
+        if accounts < config.gate_threshold.max(1) as usize {
             return false;
         }
         let trips = self.gates.get(model).map(|gate| gate.trips).unwrap_or(0) + 1;
@@ -156,7 +186,8 @@ impl ModelGates {
             model.to_string(),
             ModelGate {
                 model: model.to_string(),
-                failures: entry.len(),
+                failures,
+                accounts,
                 until_ms: until,
                 phase: GatePhase::Paused,
                 trips,
@@ -196,12 +227,14 @@ impl ModelGates {
                     let trips = gate.trips.saturating_add(1);
                     let until = now_ms.saturating_add(backoff_ms(config, trips));
                     let failures = gate.failures;
+                    let accounts = gate.accounts;
                     let model = gate.model.clone();
                     self.gates.insert(
                         model.clone(),
                         ModelGate {
                             model: model.clone(),
                             failures,
+                            accounts,
                             until_ms: until,
                             phase: GatePhase::Paused,
                             trips,
@@ -308,7 +341,7 @@ impl ModelGates {
     pub fn prune(&mut self, now_ms: i64, window_ms: i64) {
         let window = window_ms.max(1);
         self.recent.retain(|_, times| {
-            times.retain(|at| now_ms.saturating_sub(*at) <= window);
+            times.retain(|(at, _)| now_ms.saturating_sub(*at) <= window);
             !times.is_empty()
         });
         // 闸门只在 `Paused` 时保留；`HalfOpen` 且从未被探测过的也保留（等票）。
@@ -326,6 +359,20 @@ impl ModelGates {
     fn get(&self, model: &str) -> Option<&ModelGate> {
         self.gates.get(model)
     }
+}
+
+/// 窗口内失败事件里的**去重账号数**（issue #125 的开闸判据）。
+///
+/// 用线性扫描而不是 `HashSet`：窗口内的条目是个位数（阈值 2、窗口 10 分钟，
+/// 同一模型在窗口内被撞几十次已经意味着闸门早开了），为它建哈希表是纯开销。
+fn distinct_accounts(entry: &[(i64, String)]) -> usize {
+    let mut seen: Vec<&str> = Vec::with_capacity(entry.len());
+    for (_, uid) in entry {
+        if !seen.contains(&uid.as_str()) {
+            seen.push(uid.as_str());
+        }
+    }
+    seen.len()
 }
 
 /// 退避：`base * 2^(trips-1)`，封顶 `gate_max_ms`。
@@ -358,12 +405,12 @@ mod tests {
         let mut gates = ModelGates::default();
         let cfg = config();
         assert!(
-            !gates.record_failure("m", NOW, &cfg),
+            !gates.record_failure("m", "a", NOW, &cfg),
             "第 1 个账号失败不该开闸"
         );
         assert!(gates.blocked("m", NOW, &cfg).is_none(), "未开闸 ⇒ 放行");
         assert!(
-            gates.record_failure("m", NOW, &cfg),
+            gates.record_failure("m", "b", NOW, &cfg),
             "第 2 个账号失败必须开闸"
         );
         let blocked = gates.blocked("m", NOW, &cfg).expect("必须被挡住");
@@ -371,14 +418,45 @@ mod tests {
         assert!(blocked.remain_ms > 0);
     }
 
+    /// ★★ issue #125：**同一个账号**重复失败不能把整个模型停掉。
+    ///
+    /// 现场：一次请求在 `max_rotate` 里先撞 A、又撞 A（粘性未解绑 / 半开持票换号），
+    /// 判据按事件数 ⇒ 2 次就开闸 ⇒ 其余账号**根本没被尝试过**，用户看到的是
+    /// 「模型被整体暂停」，观感即「不自动切号了」。
+    ///
+    /// 变异验证：把 `record_failure` 里的 `accounts` 换回 `entry.len()` ⇒ 本用例红。
+    #[test]
+    fn repeated_failures_from_one_account_never_open_the_gate() {
+        let mut gates = ModelGates::default();
+        let cfg = config();
+        for _ in 0..5 {
+            assert!(
+                !gates.record_failure("m", "a", NOW, &cfg),
+                "同一个号撞 5 次也不该开闸（还有别的号没试过）"
+            );
+        }
+        assert!(gates.blocked("m", NOW, &cfg).is_none(), "必须继续换号");
+        // 换成**另一个**号再失败 ⇒ 这才满足「≥2 个不同账号」的判据。
+        assert!(
+            gates.record_failure("m", "b", NOW, &cfg),
+            "第 2 个号失败才开闸"
+        );
+        let gate = gates.get("m").expect("已开闸");
+        assert_eq!(gate.accounts, 2, "判据是去重账号数");
+        assert_eq!(
+            gate.failures, 6,
+            "诊断计数仍是事件数（1 号 5 次 + 2 号 1 次）"
+        );
+    }
+
     #[test]
     fn window_expiry_forgets_old_failures() {
         let mut gates = ModelGates::default();
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", "a", NOW, &cfg);
         // 窗口外的第二次失败 ⇒ 计数从 0 重来，不该开闸。
         let later = NOW + 120_000;
-        assert!(!gates.record_failure("m", later, &cfg));
+        assert!(!gates.record_failure("m", "a", later, &cfg));
         assert!(gates.blocked("m", later, &cfg).is_none());
     }
 
@@ -386,8 +464,8 @@ mod tests {
     fn half_open_lets_exactly_one_probe_through() {
         let mut gates = ModelGates::default();
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg);
-        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", "a", NOW, &cfg);
+        gates.record_failure("m", "b", NOW, &cfg);
         let until = gates.get("m").unwrap().until_ms;
 
         // 到期 ⇒ 转入半开并**放行这一次**（票还没被领）
@@ -408,8 +486,8 @@ mod tests {
     fn half_open_failure_doubles_backoff() {
         let mut gates = ModelGates::default();
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg);
-        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", "a", NOW, &cfg);
+        gates.record_failure("m", "b", NOW, &cfg);
         let first_until = gates.get("m").unwrap().until_ms;
         let first_pause = first_until - NOW;
         assert_eq!(first_pause, 1_000, "首次暂停 = base");
@@ -418,7 +496,7 @@ mod tests {
         let at = first_until + 1;
         assert!(gates.blocked("m", at, &cfg).is_none());
         assert!(gates.try_probe("m", at, "req-a"));
-        assert!(gates.record_failure("m", at, &cfg));
+        assert!(gates.record_failure("m", "a", at, &cfg));
         let second_pause = gates.get("m").unwrap().until_ms - at;
         assert_eq!(second_pause, 2_000, "半开失败必须退避翻倍");
         assert_eq!(gates.get("m").unwrap().trips, 2);
@@ -432,8 +510,8 @@ mod tests {
     fn lost_probe_ticket_reopens_pause_instead_of_locking_forever() {
         let mut gates = ModelGates::default();
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg);
-        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", "a", NOW, &cfg);
+        gates.record_failure("m", "b", NOW, &cfg);
         let until = gates.get("m").unwrap().until_ms;
 
         // 到期 → 领票；但**没有人回填结果**（请求根本没发出去）
@@ -474,8 +552,8 @@ mod tests {
     fn success_closes_the_gate() {
         let mut gates = ModelGates::default();
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg);
-        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", "a", NOW, &cfg);
+        gates.record_failure("m", "b", NOW, &cfg);
         assert!(gates.blocked("m", NOW, &cfg).is_some());
         gates.record_success("m");
         assert!(gates.blocked("m", NOW, &cfg).is_none(), "成功必须立刻关闸");
@@ -496,7 +574,7 @@ mod tests {
     fn prune_drops_stale_bookkeeping() {
         let mut gates = ModelGates::default();
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg); // 1 次，未开闸
+        gates.record_failure("m", "a", NOW, &cfg); // 1 次，未开闸
         gates.prune(NOW + 120_000, cfg.gate_window_ms);
         assert!(gates.recent.is_empty(), "窗口外的失败记录必须被清掉");
         assert!(gates.snapshot().is_empty());
@@ -509,8 +587,8 @@ mod tests {
     /// 半开 + 已经发过两次失败 ⇒ 进入 `HalfOpen` 并返回闸门到期时刻。
     fn half_open(gates: &mut ModelGates) -> i64 {
         let cfg = config();
-        gates.record_failure("m", NOW, &cfg);
-        gates.record_failure("m", NOW, &cfg);
+        gates.record_failure("m", "a", NOW, &cfg);
+        gates.record_failure("m", "b", NOW, &cfg);
         gates.get("m").unwrap().until_ms
     }
 
