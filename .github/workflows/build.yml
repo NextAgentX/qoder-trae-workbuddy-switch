@@ -71,13 +71,24 @@ jobs:
                   "update_archive_name": "BuddySwitch-windows-x86_64-setup.exe",
               },
               {
+                  # 桌面端只发 deb + AppImage，但**只有 AppImage 能自更新**
+                  # （tauri-plugin-updater 在 Linux 上仅支持 AppImage，deb 无法原地升级）。
+                  # update_* 四个字段必须给全：Generate updater manifest 的进入条件是
+                  # matrix.update_arch 非空串；缺一个整步就被跳过 ⇒ 不产出
+                  # latest-linux-x86_64.json ⇒ 合并出的 latest.json 里没有 linux-* 平台键
+                  # ⇒ 已安装的 Linux 客户端「检查更新」永远报
+                  #   None of the fallback platforms ["linux-x86_64-appimage","linux-x86_64"]
+                  #   were found in the response "platforms" object
                   "name": "linux-x64",
                   "os": "ubuntu-latest",
                   "target": "x86_64-unknown-linux-gnu",
                   "cli_bin": "buddy-switch-linux-x64",
                   "platform_tag": "linux-x64",
                   "bundles": "deb,appimage",
-                  "update_arch": "",
+                  "update_os": "linux",
+                  "update_arch": "x86_64",
+                  "update_bundle": "appimage",
+                  "update_archive_name": "BuddySwitch-linux-x86_64.AppImage.tar.gz",
               },
               {
                   # ⚠️ **只编 CLI，不编桌面 App**（`bundles` 为空 ⇒ 跳过 `Build desktop app`）。
@@ -355,14 +366,23 @@ jobs:
           # 那样产出的安装包名与后面的断言/清单就会互相对不上。
           echo "updater bundle dir: $BUNDLE_DIR (version $VER)"
           ls -la "$BUNDLE_DIR" || true
+          # createUpdaterArtifacts 产出的「可自更新归档」各平台后缀不同：
+          #   macos   → <Product>_<ver>_<arch>.app.tar.gz
+          #   linux   → <Product>_<ver>_<arch>.AppImage.tar.gz（deb 不产 updater 归档）
+          #   windows → 直接用 nsis 安装包本身，路径可推导，不必 find
           if [ "$UPDATE_OS" = "windows" ]; then
             ARCHIVE="$BUNDLE_DIR/BuddySwitch_${VER}_x64-setup.exe"
           else
-            ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name '*.app.tar.gz' | sort)"
+            case "$UPDATE_OS" in
+              linux) ARCHIVE_GLOB='*.AppImage.tar.gz' ;;
+              *)     ARCHIVE_GLOB='*.app.tar.gz' ;;
+            esac
+            ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name "$ARCHIVE_GLOB" | sort)"
             COUNT=$(printf '%s\n' "$ARCHIVE" | sed '/^$/d' | wc -l | tr -d ' ')
             if [ "$COUNT" != 1 ]; then
-              echo "error: expected exactly 1 .app.tar.gz, found $COUNT" >&2
+              echo "error: expected exactly 1 $ARCHIVE_GLOB, found $COUNT" >&2
               printf '%s\n' "$ARCHIVE" >&2
+              ls -la "$BUNDLE_DIR" >&2 || true
               exit 1
             fi
           fi

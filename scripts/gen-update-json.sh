@@ -3,6 +3,7 @@
 # 用法：
 #   UPDATE_OS=macos UPDATE_ARCH=aarch64 sh scripts/gen-update-json.sh [owner] [repo]
 #   UPDATE_OS=windows UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh [owner] [repo]
+#   UPDATE_OS=linux   UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh [owner] [repo]
 # 可选：BUNDLE_DIR、UPDATE_ARCHIVE_NAME
 set -e
 cd "$(dirname "$0")/.." || exit 1
@@ -34,8 +35,19 @@ case "$UPDATE_OS" in
     SIG_GLOB="*_${VERSION}_x64-setup.exe.sig"
     PLATFORM_KEYS="windows-$UPDATE_ARCH-nsis windows-$UPDATE_ARCH"
     ;;
+  linux)
+    # 桌面端只发 deb + AppImage，其中**只有 AppImage 能自更新**：tauri-plugin-updater
+    # 在 Linux 上仅支持 AppImage（deb 归系统包管理器，无法原地升级）。
+    # createUpdaterArtifacts=true 时 appimage 目标会额外产出
+    #   <Product>_<ver>_<arch>.AppImage.tar.gz 与同名 .sig
+    DEFAULT_BUNDLE="appimage"
+    SIG_GLOB="*.AppImage.tar.gz.sig"
+    # 已装的旧客户端按 tauri 的平台候选顺序回退查找，第一个就是带 bundle 后缀的键。
+    # 两个键都给，新老客户端都能命中（与 windows-*-nsis / windows-* 同一做法）。
+    PLATFORM_KEYS="linux-$UPDATE_ARCH-appimage linux-$UPDATE_ARCH"
+    ;;
   *)
-    echo "gen-update-json: 不支持的系统：$UPDATE_OS（只支持 macos 或 windows）" >&2
+    echo "gen-update-json: 不支持的系统：$UPDATE_OS（只支持 macos / linux / windows）" >&2
     exit 1
     ;;
 esac
