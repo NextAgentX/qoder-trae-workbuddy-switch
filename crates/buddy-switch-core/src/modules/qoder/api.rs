@@ -2047,7 +2047,8 @@ pub enum RefreshKind {
 pub struct TokenRefresh {
     pub access_token: String,
     pub refresh_token: Option<String>,
-    /// 过期时刻（unix 秒）。`expires_in` 单位是**毫秒**；缺省按 30 天。
+    /// 过期时刻（unix 秒）。`expires_in` 单位是**毫秒**；两个字段都缺时按**令牌家族**兜底
+    /// （`jrt-` 24 小时 / `drt-` 30 天，见 [`FALLBACK_EXPIRY_JOB_SECS`]）。
     pub expires_at: i64,
 }
 
@@ -2085,7 +2086,16 @@ pub fn parse_refresh_response(
     TokenRefresh {
         access_token,
         refresh_token,
-        expires_at: token_expiry(data),
+        // ★ issue #130 §5.3：兜底寿命按**令牌家族**取 —— `jrt-` 约 24 小时，
+        //   `drt-` 约 30 天。共用 30 天会把 24 小时寿命的令牌标成「还有一个月」，
+        //   于是保活永远跳过它，直到它 401。
+        expires_at: token_expiry_with_fallback(
+            data,
+            match kind {
+                RefreshKind::Job => FALLBACK_EXPIRY_JOB_SECS,
+                RefreshKind::Device => FALLBACK_EXPIRY_DEFAULT_SECS,
+            },
+        ),
     }
 }
 
@@ -2110,8 +2120,33 @@ pub(crate) fn as_num(value: &Value) -> Option<i64> {
         })
 }
 
+/// 兜底寿命（秒）：`jrt-`（Job 家族）的 access token 实测约 **24 小时**，
+/// 其余（`drt-` 设备令牌 / OAuth 登录）约 **30 天**。
+///
+/// ## 为什么必须按家族分开（issue #130 §5.3）
+///
+/// 改造前两者共用「30 天」这一个兜底。若某次 `jrt-` 刷新响应里既没有 `expires_in`
+/// 也没有 `expires_at`，到期时刻会被写成「30 天后」，而**真实寿命只有 24 小时** ⇒
+/// 此后 `needs_keepalive` 一直判「还剩 29 天，不用刷」，保活对这个号**彻底失效**，
+/// 直到它 401（再被判 `AuthDead`，只能人工恢复）。
+///
+/// 这条与窗口大小无关：窗口调到 48 小时也救不了，因为**判据输入本身是错的**。
+pub const FALLBACK_EXPIRY_JOB_SECS: i64 = 24 * 3_600;
+
+/// 兜底寿命（秒）：`drt-` / OAuth 家族（约 30 天）。
+pub const FALLBACK_EXPIRY_DEFAULT_SECS: i64 = 30 * 86_400;
+
 /// `expires_in`（毫秒）/ `expires_at`（RFC3339）→ unix 秒；都没有按 30 天。
+///
+/// ⚠️ 不知道令牌家族时**只能**用 30 天兜底。刷新路径请用
+/// [`token_expiry_with_fallback`] 并按 [`RefreshKind`] 传对应家族的兜底值
+/// （见 [`FALLBACK_EXPIRY_JOB_SECS`]）。
 pub fn token_expiry(data: &Value) -> i64 {
+    token_expiry_with_fallback(data, FALLBACK_EXPIRY_DEFAULT_SECS)
+}
+
+/// 同 [`token_expiry`]，但「两个字段都没有」时用调用方给的家族兜底。
+pub fn token_expiry_with_fallback(data: &Value, fallback_secs: i64) -> i64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
@@ -2127,7 +2162,7 @@ pub fn token_expiry(data: &Value) -> i64 {
             return datetime.and_utc().timestamp();
         }
     }
-    now + 30 * 86_400
+    now + fallback_secs
 }
 
 /// 签到状态。
@@ -2574,6 +2609,44 @@ pub async fn fetch_model_list_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★★ issue #130 §5.3：兜底寿命必须按**令牌家族**取。
+    ///
+    /// `jrt-`（Job）家族的 access token 实测约 24 小时；共用 30 天兜底会把
+    /// 「24 小时后过期」标成「还有一个月」，于是 `needs_keepalive` 永远判「不用刷」，
+    /// 保活对这个号彻底失效，直到它 401（再被判 `AuthDead`，只能人工恢复）。
+    ///
+    /// 变异：把 `parse_refresh_response` 里按 `kind` 取兜底改回 `token_expiry(data)`
+    /// ⇒ 第一条断言红（24h 变成 30 天）。
+    #[test]
+    fn refresh_fallback_expiry_follows_the_token_family() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        // 两个字段都没有 ⇒ 走兜底。
+        let empty = serde_json::json!({ "token": "jt-new" });
+        let job = parse_refresh_response(RefreshKind::Job, &empty, "jrt-old");
+        let delta = job.expires_at - now;
+        assert!(
+            (FALLBACK_EXPIRY_JOB_SECS - 5..=FALLBACK_EXPIRY_JOB_SECS + 5).contains(&delta),
+            "jrt- 家族兜底必须是 24 小时，实际 {delta}s"
+        );
+        let device = parse_refresh_response(RefreshKind::Device, &empty, "drt-old");
+        let delta = device.expires_at - now;
+        assert!(
+            (FALLBACK_EXPIRY_DEFAULT_SECS - 5..=FALLBACK_EXPIRY_DEFAULT_SECS + 5).contains(&delta),
+            "drt- 家族兜底仍是 30 天，实际 {delta}s"
+        );
+        // 上游给了 `expires_in` ⇒ 一律以它为准（毫秒），兜底不参与。
+        let with_field = serde_json::json!({ "token": "jt-new", "expires_in": 3_600_000 });
+        let job = parse_refresh_response(RefreshKind::Job, &with_field, "jrt-old");
+        let delta = job.expires_at - now;
+        assert!(
+            (3_595..=3_605).contains(&delta),
+            "`expires_in` 是毫秒，3600000 应折算成 1 小时，实际 {delta}s"
+        );
+    }
 
     fn meta() -> ModelMeta {
         ModelMeta {

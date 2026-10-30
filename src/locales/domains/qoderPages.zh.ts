@@ -340,7 +340,7 @@ export const zh = {
   "qoder.page.settings.schedule.keepaliveGroup": "令牌保活",
   "qoder.page.settings.schedule.keepaliveEnable": "自动续期 refresh token",
   "qoder.page.settings.schedule.keepaliveDesc":
-    "在令牌到期前 4 小时内续期（默认开启：refresh token 的唯一用途就是续期，它本来就是你在网页登录时交出来的）。",
+    "在令牌到期前 48 小时内续期（默认开启：refresh token 的唯一用途就是续期，它本来就是你在网页登录时交出来的）。窗口必须大于巡检间隔（默认每天 1 次），否则每轮巡检都判「还不需要刷」，账号会在两轮之间过期。",
   "qoder.page.settings.schedule.keepaliveTimesLabel": "保活时点",
   "qoder.page.settings.schedule.keepaliveTimesDesc": "每天在这些时刻检查一次是否临近到期。",
   "qoder.page.settings.schedule.saveFailed": "保存计划任务失败",

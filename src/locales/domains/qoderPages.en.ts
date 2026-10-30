@@ -336,7 +336,7 @@ export const en = {
   "qoder.page.settings.schedule.keepaliveGroup": "Token keep-alive",
   "qoder.page.settings.schedule.keepaliveEnable": "Refresh the token automatically",
   "qoder.page.settings.schedule.keepaliveDesc":
-    "Refreshes within 4 hours of expiry (on by default: a refresh token exists solely to be refreshed, and you handed it over at login).",
+    "Refreshes within 48 hours of expiry (on by default: a refresh token exists solely to be refreshed, and you handed it over at login). The window must be longer than the sweep interval (once a day by default); otherwise every sweep decides \"not yet\" and the account expires between sweeps.",
   "qoder.page.settings.schedule.keepaliveTimesLabel": "Keep-alive times",
   "qoder.page.settings.schedule.keepaliveTimesDesc": "Checks once at each of these times whether the token is close to expiry.",
   "qoder.page.settings.schedule.saveFailed": "Failed to save scheduled tasks",
