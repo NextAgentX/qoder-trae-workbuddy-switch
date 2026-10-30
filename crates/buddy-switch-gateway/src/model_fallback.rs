@@ -382,8 +382,7 @@ pub fn plan_for(fb: &ModelFallback, scope: Scope, model: &str) -> Vec<FallbackTa
         }
         // 同一请求内每个 (作用域, 模型) 只试一次：链里写重了也只保留一份。
         if plan.iter().any(|seen| {
-            seen.scope_or(scope) == target.scope_or(scope)
-                && same_model(&seen.model, &target.model)
+            seen.scope_or(scope) == target.scope_or(scope) && same_model(&seen.model, &target.model)
         }) {
             continue;
         }
@@ -663,9 +662,7 @@ pub fn build_view(
                         // 闸门列表是**入口作用域**的：跨作用域的目标查不到它的闸门，
                         // 只按禁用状态判（并在视图里带 `scope`，前端据此标注「跨平台」）。
                         let gate = if target_scope == scope {
-                            gates
-                                .iter()
-                                .find(|(name, _)| same_model(name, &model))
+                            gates.iter().find(|(name, _)| same_model(name, &model))
                         } else {
                             None
                         };
@@ -792,9 +789,7 @@ pub fn preview_payload(
         if name.is_empty() {
             continue;
         }
-        let gate = gates
-            .iter()
-            .find(|(model, _)| same_model(model, name));
+        let gate = gates.iter().find(|(model, _)| same_model(model, name));
         let (action, gated_for_secs) = if crate::disabled_models::is_disabled(disabled, scope, name)
         {
             ("skip_disabled", None)
@@ -1147,17 +1142,14 @@ mod tests {
 
         let normalized = normalize(Scope::WbGlobal, scoped);
         let targets = &normalized.chains["Deepseek-V4.1-Flash"].targets;
-        assert_eq!(
-            targets.len(),
-            1,
-            "跨作用域同名备选被误删了：{targets:?}"
-        );
+        assert_eq!(targets.len(), 1, "跨作用域同名备选被误删了：{targets:?}");
         assert_eq!(targets[0].scope.as_deref(), Some("wb-cn"));
         assert_eq!(targets[0].model, "Deepseek-V4.1-Flash");
     }
 
     #[test]
-    fn view_marks_gated_and_disabled_targets() {        let mut scoped = ScopeFallback {
+    fn view_marks_gated_and_disabled_targets() {
+        let mut scoped = ScopeFallback {
             enabled: true,
             ..Default::default()
         };
