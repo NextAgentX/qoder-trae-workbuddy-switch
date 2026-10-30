@@ -1,6 +1,6 @@
 {
   "name": "@nextagentx/buddy-switch-darwin-x64",
-  "version": "2026.10.300935",
+  "version": "2026.10.300953",
   "description": "Buddy Switch platform binary (darwin-x64)",
   "os": [
     "darwin"
