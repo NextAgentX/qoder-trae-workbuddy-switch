@@ -54,7 +54,8 @@ mv dist dist.old.$$ && npm run build:fast
 3. Windows：`UPDATE_OS=windows UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh` 生成 `latest-windows-x86_64.json`
 4. Linux：`UPDATE_OS=linux UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh` 生成 `latest-linux-x86_64.json`。
    只有 **AppImage** 能自更新（`deb` 归系统包管理器，无法原地升级）⇒ 认的是
-   `*_amd64.AppImage.tar.gz` + `.sig`（`createUpdaterArtifacts` 产出，与 `.AppImage` 同目录）；
+   `*_amd64.AppImage` + 同名 `.sig`（**不是 tar.gz**：tauri-bundler ≥2.10 把 AppImage 当
+   v2 自包含更新目标，updater 直接下载 AppImage 本体替换自身）；
    清单同时写 `linux-x86_64-appimage` 与 `linux-x86_64` 两个平台键（前者是新版客户端的首选候选，
    后者兜住回退路径）。
 5. `python3 scripts/merge-update-manifests.py <产物目录>` 合并为 `latest.json`，并把 Windows 平台项写入 `latest-macos-x86_64.json`（兼容已安装的 Windows 客户端）

@@ -38,11 +38,20 @@ case "$UPDATE_OS" in
   linux)
     # 桌面端只发 deb + AppImage，其中**只有 AppImage 能自更新**：tauri-plugin-updater
     # 在 Linux 上仅支持 AppImage（deb 归系统包管理器，无法原地升级）。
-    # createUpdaterArtifacts=true 时 appimage 目标会额外产出
-    #   <Product>_<ver>_<arch>.AppImage.tar.gz 与同名 .sig
+    #
+    # ★★ 更新包**就是 `.AppImage` 本身**，不是 `.AppImage.tar.gz`（2026-10-30 实测）：
+    # tauri-bundler ≥2.10 把 AppImage 归为 **v2 自包含目标**（`bundle.rs` 的
+    # `has_self_contained_target`），只有 legacy v1 兼容模式才把它包成 tar.gz。
+    # 实测 v2026.10.300935 的 CI 产物只有
+    #   BuddySwitch_<ver>_amd64.AppImage  +  同名 .sig
+    # 而 `tauri-plugin-updater` 的 `install_appimage` 是把下载到的字节**直接写成**
+    # 新的 AppImage 再替换自身 —— 不需要解包。
+    #
+    # ⇒ 签名 glob 认 `.AppImage.sig`，归档 = 去掉 `.sig` 的那个 AppImage。
+    # 写成 `*.AppImage.tar.gz.sig` 会让步骤永远匹配 0 个、直接 exit 1（本次发版现场）。
     DEFAULT_BUNDLE="appimage"
-    SIG_GLOB="*.AppImage.tar.gz.sig"
-    # 已装的旧客户端按 tauri 的平台候选顺序回退查找，第一个就是带 bundle 后缀的键。
+    SIG_GLOB="*.AppImage.sig"
+    # 已装的旧客户端按 tauri 的平台候选顺序回退查找（`{os}-{arch}-{installer}` 再 `{os}-{arch}`）。
     # 两个键都给，新老客户端都能命中（与 windows-*-nsis / windows-* 同一做法）。
     PLATFORM_KEYS="linux-$UPDATE_ARCH-appimage linux-$UPDATE_ARCH"
     ;;

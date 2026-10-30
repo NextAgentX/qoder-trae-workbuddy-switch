@@ -88,7 +88,12 @@ jobs:
                   "update_os": "linux",
                   "update_arch": "x86_64",
                   "update_bundle": "appimage",
-                  "update_archive_name": "BuddySwitch-linux-x86_64.AppImage.tar.gz",
+                  # ★ 刻意留空：Linux 的更新包**就是那个版本化的 `.AppImage` 本身**
+                  # （tauri-bundler ≥2.10 把 AppImage 归为 v2 自包含目标，不再包 tar.gz），
+                  # 而 `Stage artifacts` 步骤已经把它原样放进 dist-bin。
+                  # 留空 ⇒ 清单里的 url 用产物名（`…_<ver>_amd64.AppImage`），
+                  # 既不会 404，也不必为了一个「稳定名」再复制一份 ~98MB 的资产。
+                  "update_archive_name": "",
               },
               {
                   # ⚠️ **只编 CLI，不编桌面 App**（`bundles` 为空 ⇒ 跳过 `Build desktop app`）。
@@ -366,15 +371,19 @@ jobs:
           # 那样产出的安装包名与后面的断言/清单就会互相对不上。
           echo "updater bundle dir: $BUNDLE_DIR (version $VER)"
           ls -la "$BUNDLE_DIR" || true
-          # createUpdaterArtifacts 产出的「可自更新归档」各平台后缀不同：
+          # createUpdaterArtifacts 产出的「可自更新归档」各平台不同：
           #   macos   → <Product>_<ver>_<arch>.app.tar.gz
-          #   linux   → <Product>_<ver>_<arch>.AppImage.tar.gz（deb 不产 updater 归档）
+          #   linux   → **`.AppImage` 本身**（+ 同名 `.sig`），**没有 tar.gz**
+          #             tauri-bundler ≥2.10 把 AppImage 归为 v2 自包含目标
+          #             （`bundle.rs::has_self_contained_target`），只有 legacy v1
+          #             兼容模式才包 tar.gz。`install_appimage` 是直接把下载的字节
+          #             写成新 AppImage，不需要解包。
           #   windows → 直接用 nsis 安装包本身，路径可推导，不必 find
           if [ "$UPDATE_OS" = "windows" ]; then
             ARCHIVE="$BUNDLE_DIR/BuddySwitch_${VER}_x64-setup.exe"
           else
             case "$UPDATE_OS" in
-              linux) ARCHIVE_GLOB='*.AppImage.tar.gz' ;;
+              linux) ARCHIVE_GLOB='*.AppImage' ;;
               *)     ARCHIVE_GLOB='*.app.tar.gz' ;;
             esac
             ARCHIVE="$(find "$BUNDLE_DIR" -maxdepth 1 -type f -name "$ARCHIVE_GLOB" | sort)"
@@ -390,10 +399,16 @@ jobs:
             echo "error: missing signed updater archive ($ARCHIVE)" >&2
             exit 1
           fi
-          cp "$ARCHIVE" "dist-bin/$UPDATE_ARCHIVE_NAME"
-          cp "$ARCHIVE.sig" "dist-bin/$UPDATE_ARCHIVE_NAME.sig"
+          # 目标资产名：给了就改名（mac/win 要**稳定名**，这样 `releases/latest/download/<name>`
+          # 跨版本都指向同一个键）；没给就沿用产物名 —— Linux 的 `.AppImage` 已经是版本化名字，
+          # 而且上一步（Stage artifacts）已经把它放进 dist-bin 了，再复制一份 ~98MB 纯浪费。
+          TARGET_NAME="${UPDATE_ARCHIVE_NAME:-$(basename "$ARCHIVE")}"
+          if [ "$TARGET_NAME" != "$(basename "$ARCHIVE")" ]; then
+            cp "$ARCHIVE" "dist-bin/$TARGET_NAME"
+            cp "$ARCHIVE.sig" "dist-bin/$TARGET_NAME.sig"
+          fi
           if [ "$UPDATE_OS" = "windows" ]; then
-            cmp -s "dist-bin/$UPDATE_ARCHIVE_NAME" "dist-bin/BuddySwitch_${VER}_x64-setup.exe"
+            cmp -s "dist-bin/$TARGET_NAME" "dist-bin/BuddySwitch_${VER}_x64-setup.exe"
           fi
           UPDATE_VERSION="$VER" sh scripts/gen-update-json.sh
           MANIFEST="$BUNDLE_DIR/latest-${UPDATE_OS}-${UPDATE_ARCH}.json"
