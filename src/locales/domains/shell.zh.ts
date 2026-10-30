@@ -251,6 +251,7 @@ export const zh = {
   "wbSettings.cli.loadFailed": "读取 CLI 状态失败",
   "settings.subnav.diagnostics": "权限与诊断",
   "settings.subnav.logs": "日志",
+  "settings.subnav.network": "网络",
   "settings.subnav.backup": "备份与恢复",
 
   // ---- 网关工作台子导航（PLAN §3.9 / §3.20：7 项，两个产品线共用同一份表；Trae 侧去掉「请求代理」）----

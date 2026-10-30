@@ -330,6 +330,17 @@ export const en = {
 
   // ---- Settings ----
   "qoder.page.settings.title": "Settings",
+  // ---- Settings · Network (per-pack outbound proxy, issue #111) ----
+  "qoder.page.settings.proxy.group": "Per-pack outbound proxy",
+  "qoder.page.settings.proxy.cn": "China proxy",
+  "qoder.page.settings.proxy.cnHint": "China region works via direct connection; usually leave empty.",
+  "qoder.page.settings.proxy.global": "International proxy",
+  "qoder.page.settings.proxy.globalHint": "International endpoints judge region by IP; direct connections from CN networks get blocked, so a proxy is usually required.",
+  "qoder.page.settings.proxy.note": "Applies only to per-pack detail requests (http:// or socks5://). The sign-in window follows the system proxy and is not affected. Saves take effect immediately.",
+  "qoder.page.settings.proxy.save": "Save proxy",
+  "qoder.page.settings.proxy.saving": "Saving…",
+  "qoder.page.settings.proxy.saved": "Proxy settings saved",
+  "qoder.page.settings.proxy.saveFailed": "Failed to save proxy settings",
   "qoder.page.settings.section.client": "Client detection",
   "qoder.page.settings.client.description": "Probe result for the two official credential stores (read-only).",
   "qoder.page.settings.client.error": "Probe failed: {error}",
