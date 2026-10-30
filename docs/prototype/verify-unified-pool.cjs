@@ -174,15 +174,30 @@ function rowOf(doc, ns) {
     return "gw-type|unified → 统一网关";
   });
 
-  check("★ 没有新增覆盖全局 `.seg` 的样式规则（它被用量页 / 接入方式 / 会话筛选共用）", () => {
+  check("★ 全局 `.seg` 的**布局**没被改写（它被用量页 / 接入方式 / 会话筛选共用）", () => {
     /* 曾经把「网关类型」也叫 `.seg` ⇒ 那个**全局**分段控件被改成 grid，用量页 tabs、
-       接入方式选择器、会话筛选全变了形。这条守卫钉住「不许再犯」。 */
+       接入方式选择器、会话筛选全变了形。这条守卫钉住「不许再犯」。
+
+       ⚠️ 判据从「数规则条数 == 4」改成「钉布局 + 给总数一个上限」：
+       数条数会被**合法的增量**逼着改数字（`.seg button:disabled` 两条、`.seg.book` /
+       `.seg.wide` 两个变体后加的都是正当需求），一旦为了过门禁改数字，这条守卫就等于
+       自己废掉了 —— 它再也拦不住真正的覆盖（把 `.seg {` 改成 grid 同样会让数字变）。
+       现在钉的是**事故本体**：基础规则必须仍是 `inline-flex`，不许出现 grid。 */
     const src = fs.readFileSync(FILE, "utf8");
-    const n = (src.match(/^\.seg[ {]/gm) || []).length;
-    if (n !== 4) throw new Error("顶层 `.seg` 规则数 = " + n + "，期望 4（原有 4 条，不得新增）");
+    const base = (src.match(/^\.seg\s*\{([^}]*)\}/m) || [])[1] || "";
+    if (!base.includes("inline-flex")) {
+      throw new Error("`.seg` 基础规则不再是 inline-flex：" + base.trim());
+    }
+    if (base.includes("grid")) throw new Error("`.seg` 被改成 grid（正是那次事故）");
+    /* 纯 `.seg` 规则（`.seg` / `.seg button…`）的总数上限：变体 `.seg.xxx` 不计入。
+       加规则不是罪；无节制加才是 —— 超过上限请先想清楚是不是该用变体。 */
+    const n = (src.match(/^\.seg(?![.\w-])/gm) || []).length;
+    if (n > 6) {
+      throw new Error("纯 `.seg` 规则数 = " + n + "（上限 6）—— 新增的布局覆盖请改成变体 `.seg.xxx`");
+    }
     const own = (src.match(/^\.gw-type-seg/gm) || []).length;
     if (own !== 4) throw new Error("`.gw-type-seg` 规则数 = " + own + "，期望 4");
-    return ".seg 4 条（未动）· .gw-type-seg 4 条";
+    return "inline-flex 未变 · 纯 .seg " + n + "/6 · .gw-type-seg 4";
   });
 
   /* ════════ B · 统一网关类型 ════════ */

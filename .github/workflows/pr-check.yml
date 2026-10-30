@@ -40,9 +40,12 @@ jobs:
 
       # `npm run build` = tsc --noEmit + 7 个契约检查（check:api / check:docker /
       # check:store-selectors / check:hooks / check:scope / check:npm-platforms /
-      # check:agent-sources）+ vite build。⚠️ 不要拆成 `tsc` + `vite build` 两条：
-      # 那 7 个检查会静默消失，而它们才是这仓真正的「架构契约」门禁
-      # （API 契约、store 选择器、hook 顺序、scope 注册表…）。
+      # check:agent-sources）+ check:proto（12 个 jsdom 行为校验套件）+ vite build。
+      # ⚠️ 不要拆成 `tsc` + `vite build` 两条：那些检查会静默消失，而它们才是
+      # 这仓真正的「架构契约」门禁（API 契约、store 选择器、hook 顺序、
+      # scope 注册表…）。check:proto 是 2026-10-30 补的：此前 jsdom 没进依赖、
+      # CI 也没跑过一次，`demo-app.js` 里一个同名函数重复声明（整份脚本不执行）
+      # 活到了 main —— 「有校验」和「校验真的在跑」必须合成一件。
       - name: Build (tsc + contract checks + vite)
         run: npm run build
 
