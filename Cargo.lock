@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-core"
-version = "2026.10.301545"
+version = "2026.10.301704"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-gateway"
-version = "2026.10.301545"
+version = "2026.10.301704"
 dependencies = [
  "anyhow",
  "axum",
@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-rust"
-version = "2026.10.301545"
+version = "2026.10.301704"
 dependencies = [
  "buddy-switch-core",
  "buddy-switch-gateway",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-server"
-version = "2026.10.301545"
+version = "2026.10.301704"
 dependencies = [
  "axum",
  "buddy-switch-core",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "buddy-switch-vault"
-version = "2026.10.301545"
+version = "2026.10.301704"
 dependencies = [
  "rusqlite",
 ]
