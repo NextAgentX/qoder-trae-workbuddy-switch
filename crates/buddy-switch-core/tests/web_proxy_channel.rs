@@ -135,7 +135,7 @@ async fn global_per_pack_request_goes_through_proxy() {
 #[tokio::test]
 #[ignore = "真网络测试：需要出站网络；CI 与默认 cargo test 不跑"]
 async fn cn_request_without_proxy_bypasses_tunnel() {
-    let (port, seen) = spawn_tunnel();
+    let (_port, seen) = spawn_tunnel();
     let _home = temp_home_with_proxy(""); // CN/国际版都留空 = 直连
 
     let result = web_usage::fetch_credit_packs_raw(
@@ -153,5 +153,4 @@ async fn cn_request_without_proxy_bypasses_tunnel() {
         Err(error) => assert!(error.unauthorized, "直连 401 才说明真的到了上游: {error}"),
         Ok(_) => panic!("假会话不应成功"),
     }
-    drop(port);
 }
