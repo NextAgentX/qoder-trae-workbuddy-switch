@@ -2,7 +2,7 @@
 
 > 状态：现行（issue #129，2026-10-30 落地）
 > 代码入口：[`crates/buddy-switch-gateway/src/failover.rs`](../crates/buddy-switch-gateway/src/failover.rs)
-> 关联：`PLAN.md` §9.2（换号决策矩阵）、issue #66 / #106（换号与闸门的上一轮排查）
+> 关联：[`POOL-PICK-EXCLUDE-PLAN.md`](POOL-PICK-EXCLUDE-PLAN.md) §9.2（换号决策矩阵，已同步本开关）、[`VOCABULARY.md`](VOCABULARY.md) 文末附节（6 个术语）、issue #66 / #106（换号与闸门的上一轮排查）
 
 ## 一、这个开关做什么
 

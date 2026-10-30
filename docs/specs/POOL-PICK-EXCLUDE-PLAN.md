@@ -30,7 +30,7 @@
 > | O1 跨请求模型闸门 + 半开探测（含探针 120s 租约） | ✅ | `pool/gate.rs`（新）、`routes/relay.rs` |
 > | P0-4 在途租约自愈 | ✅ | `pool/entry.rs::in_flight_now`、`pool/mod.rs::acquire` |
 > | **P0-3 200 信封错误（非流式）** | ✅ | `protocol/error_sniffer.rs`（新）+ `chat`/`messages`/`responses` 三条路由 + `relay::note_envelope_failure` |
-> | **P0-3 流内信封错误（流式）** | ✅ | `UsageTap::with_error_sink` + `relay::EnvelopeErrorSink`（旁听、不改字节、spawn 落治理）+ 末端残帧也判 |
+> | **P0-3 流内信封错误（流式）** | ✅ | `UsageTap::with_error_sink` + `relay::EnvelopeErrorSink`（旁听、spawn 落治理）+ 末端残帧也判。★ 2026-10-30：`UsageTap` 仍**只旁听不改字节**；收尾是否追加错误帧由**协议出口**按 `auto_failover` 决定（见 [`ACCOUNT-FAILOVER.md`](ACCOUNT-FAILOVER.md)） |
 > | **O6 模型 × 账号维度 EMA** | ✅ | `PoolEntry.model_health` + `weight_of_model`（样本 <3 回落账号级） |
 > | **Trae / Qoder 策略枚举** | ✅ | `pool::parse_preferred`（哨兵值 `__auto__` / `__max_credits__` / `__random__`）+ 两平台 `pick` 内部解析 + 两页池卡下拉三档 |
 >
@@ -627,14 +627,15 @@ while attempt < max_rotate:
 |:--|:--|:--|:--|
 | 429 + `6004`（模型级） | **是** | 模型冷却 60s 起（P0-1） | 换到「同模型可用」的号就有救 |
 | 429（账号级） | **是** | 账号软冷却（≤15min） | 该号整体被限 |
-| 402 / 余额文案 | **是** | 硬冷却至次日 04:00 | 换号能救 |
+| 402 / 余额文案 | **是** | 硬冷却至次日 04:00 | 换号能救（★ 2026-10-30 修：`apply_upstream_error` 曾返回 `true` ⇒ `relay_once` 在 402 上一击 `break`，与本行自相矛盾） |
 | 5xx | **是** | 熔断计数 | 上游抖动，换号常能过 |
 | `12153` 会话失效 | **是** | 三振禁用 | 该号登录态坏了 |
 | **401 / 403（无 `12153`）** | **是** | 浅冷却 60s，**不计数、不禁用**（#100） | 凭据被拒多半是 token 过期 ⇒ 保活刷新可自愈；打终态会让「号没坏却用不了」 |
 | 404 | **只换 1 次** | 60s | 可能是账号级模型清单差异；换第 3 次纯浪费 |
 | 400 / 422 参数错 | **否** | 无 | 同一份坏参数喂给下一个号 = 白烧配额（现在会白撞 3 次） |
 | `11128` 内容审核 | 否（走降级提示词） | 无 | 与账号无关 |
-| 流内错误（响应头已发） | **否** | 记冷却 + 解绑粘性 | 协议上无法换（见 P0-3） |
+| 流内错误（响应头已发） | **否** | 记冷却 + 解绑粘性 + 写 `last_error` | 协议上无法换（见 P0-3）：字节已经发出去，退不回来 |
+| **流内错误 + `auto_failover` 开启** | **否**（但**不再补终止标记**） | 同上 + 日志写真实状态码 | 网关改为发一条**可重试**错误帧（429 / 502），由**客户端**整步重跑 ⇒ 下一轮自然落到别的号。见 [`ACCOUNT-FAILOVER.md`](ACCOUNT-FAILOVER.md) |
 
 ### 9.3 四种策略在换号时的行为（同一段代码，只有「选谁」不同）
 
