@@ -6509,6 +6509,8 @@ mod tests {
                 "allow_model_region_prefix",
                 "max_body_mb",
                 "max_context",
+                // ★ issue #129：账号故障时自动切换（WB / Trae / Qoder 三份配置同名）。
+                "auto_failover",
             ])
         );
 
