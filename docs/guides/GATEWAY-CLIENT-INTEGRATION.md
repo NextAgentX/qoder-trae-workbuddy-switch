@@ -456,6 +456,10 @@ DSH 判断一个模型能不能收图**只看配置里声明的输入模态**，
   换成 `openai-responses` 则是 `input_image` + `detail`，多数 OpenAI 兼容网关不接受。
 - Fetch 返回 401 = 凭据问题，手动填模型**绕不过**认证。
 - 自定义 provider 的**模型名必须手填**（不像内置目录有清单）。
+- **上下文占用与 token 明细**：走 `api: anthropic-messages` 时，`message_start` 的
+  `usage.input_tokens` 由网关按请求体**估算**占位（上游的真实 `prompt_tokens` 要到流末
+  才到），末帧 `message_delta` 用真实值覆盖。所以占用率是「先估后校」——同一轮里可能
+  先看到估算值，流结束即变成真实值；`cache_read_input_tokens` 只在上游报了缓存命中时非 0。
 
 ### 3.5 WorkBuddy 侧客户端
 

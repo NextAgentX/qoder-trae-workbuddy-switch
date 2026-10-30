@@ -42,6 +42,113 @@ fn tool_result_to_text(content: Option<&Value>) -> String {
     }
 }
 
+/// 入站 Anthropic 请求 → 输入 token 的**本地估算**。
+///
+/// # 为什么必须估
+///
+/// Anthropic 的 `message_start` 要求**立刻**给出 `usage.input_tokens`，而上游
+/// （OpenAI 兼容）只在**流末**才报 `prompt_tokens` —— 两个时序对不上，从前这里只能
+/// 写 0。客户端（dsh / Claude Code / 任何按 Anthropic 口径画「上下文占用」的 UI）
+/// 拿 `input_tokens` 当上下文长度 ⇒ **占用率恒为 0%**，用户看不出何时该 compact
+/// （issue #139）。
+///
+/// 因此：`message_start` 用本函数的值**占位**，流末 `message_delta` 用上游**真实**
+/// `prompt_tokens` 覆盖（见 [`AnthropicSseStream::finalize`]）。
+///
+/// # 口径
+///
+/// 按字符分档估算（不做真正的 BPE —— 词表随模型变，且不值得为一个占位值引入分词器依赖）：
+/// CJK/全角 ≈ 1 token/字，其余 ≈ 3 字符/token，再加消息 / block 的结构开销。
+/// 实测误差约 ±15%：够用来判断「该不该压缩」，但**不是计费口径** —— 计费仍走上游 `usage`。
+pub fn estimate_input_tokens(body: &Value) -> u64 {
+    /// 每条消息的角色 / 分隔符开销（Anthropic 官方按 3~4 token 计）。
+    const MESSAGE_OVERHEAD: u64 = 4;
+    /// 每个工具的声明开销（`name` / `description` / JSON Schema 的固定部分）。
+    const TOOL_OVERHEAD: u64 = 8;
+
+    let mut total = 0u64;
+    match body.get("system") {
+        Some(Value::String(text)) => total += text_tokens(text),
+        Some(Value::Array(blocks)) => {
+            for block in blocks {
+                total += block_tokens(block);
+            }
+        }
+        _ => {}
+    }
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for message in messages {
+            total += MESSAGE_OVERHEAD;
+            match message.get("content") {
+                Some(Value::String(text)) => total += text_tokens(text),
+                Some(Value::Array(blocks)) => {
+                    for block in blocks {
+                        total += block_tokens(block);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            total += TOOL_OVERHEAD + text_tokens(&tool.to_string());
+        }
+    }
+    // 至少 1：`0` 在下游是「未知」，与本函数的语义（「有请求就有输入」）冲突。
+    total.max(1)
+}
+
+/// 单段文本的 token 估算（CJK 1 token/字、其余 3 字符/token，向上取整）。
+fn text_tokens(text: &str) -> u64 {
+    let mut wide = 0u64;
+    let mut narrow = 0u64;
+    for ch in text.chars() {
+        if is_wide_char(ch) {
+            wide += 1;
+        } else {
+            narrow += 1;
+        }
+    }
+    wide + (narrow + 2) / 3
+}
+
+/// 单个 content block 的 token 估算。
+///
+/// 兼容两种入站形状（Anthropic 的 `image` / OpenAI 的 `image_url` parts）：
+/// 图片按固定值计，**绝不**把 base64 当文本估 —— 那会把 200KB 的图算成 6 万 token。
+fn block_tokens(block: &Value) -> u64 {
+    const IMAGE_TOKENS: u64 = 1500;
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(text_tokens)
+            .unwrap_or(0),
+        Some("image") | Some("image_url") | Some("input_image") => IMAGE_TOKENS,
+        // `tool_use` / `tool_result` / 其它：整块序列化后按文本估（覆盖 `input` 与
+        // `content` 的两种形态，避免为每种 block 再写一份取字段的代码）。
+        _ => text_tokens(&block.to_string()),
+    }
+}
+
+/// 宽字符（CJK / 假名 / 谚文 / 全角标点）：这些字符基本是 1 字 ≈ 1 token。
+fn is_wide_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE6F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD)
+}
+
 /// Anthropic 的 `image` block → URL（`data:` URI 或 http(s) 链接）。
 ///
 /// Anthropic 图片形态：
@@ -368,6 +475,20 @@ pub fn message_from_response(response: &Value, fallback_model: &str) -> Value {
     )
 }
 
+/// 从上游 `usage` 里取缓存命中 token（四种写法：OpenAI 明细 / DeepSeek / Anthropic / 裸字段）。
+///
+/// 收在一个函数里是刻意的：流式（[`AnthropicSseStream::capture_usage`]）与非流式
+/// （[`message_from_accumulator`]）两个出口都读它，分两份写迟早漂移。
+fn cached_tokens_of(usage: &Value) -> Option<u64> {
+    usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64))
+        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
+}
+
 /// Anthropic `message` 对象的**唯一构造点**（见上面两个入口）。
 fn message_from_accumulator(accumulator: &CompletionAccumulator, fallback_model: &str) -> Value {
     let id = accumulator
@@ -404,6 +525,12 @@ fn message_from_accumulator(accumulator: &CompletionAccumulator, fallback_model:
         "stop_sequence": Value::Null,
         "usage": {
             "input_tokens": accumulator.prompt_tokens.unwrap_or(0),
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": accumulator
+                .raw_usage
+                .as_ref()
+                .and_then(cached_tokens_of)
+                .unwrap_or(0),
             "output_tokens": accumulator.completion_tokens.unwrap_or(0),
         },
     })
@@ -424,8 +551,15 @@ pub struct AnthropicSseStream<S> {
     text_index: Option<i64>,
     tool_index: HashMap<i64, i64>,
     open_tools: Vec<i64>,
+    /// 上游在流里报的 `prompt_tokens`（**真实值**，通常到末帧才有）。
     input_tokens: u64,
     output_tokens: u64,
+    /// ★ issue #139：`message_start` 用的**估算**输入 token（见 [`estimate_input_tokens`]）。
+    ///
+    /// 只在 `input_tokens` 仍为 0（上游还没报）时生效 —— 真实值一到就让位。
+    estimated_input: u64,
+    /// 上游报的缓存命中 token（`prompt_tokens_details.cached_tokens` 等形态）。
+    cache_read_tokens: u64,
     stop_reason: String,
     pending: VecDeque<Bytes>,
     /// ★ issue #129：账号故障自动切换的失败信号（`None` = 开关关闭 / 未接入）。
@@ -458,9 +592,29 @@ impl<S> AnthropicSseStream<S> {
             open_tools: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            estimated_input: 0,
+            cache_read_tokens: 0,
             stop_reason: "end_turn".to_string(),
             pending: VecDeque::new(),
             failover: None,
+        }
+    }
+
+    /// ★ issue #139：给 `message_start` 的 `input_tokens` 一个**估算**占位值。
+    ///
+    /// 不传（= 0）时行为与改造前逐字一致（`input_tokens: 0`），因此既有单测与
+    /// 未接线的产品线不受影响。
+    pub fn with_estimated_input(mut self, tokens: u64) -> Self {
+        self.estimated_input = tokens;
+        self
+    }
+
+    /// 对外报的输入 token：**真实值优先**，没到就退回估算。
+    fn effective_input_tokens(&self) -> u64 {
+        if self.input_tokens > 0 {
+            self.input_tokens
+        } else {
+            self.estimated_input
         }
     }
 
@@ -486,6 +640,12 @@ impl<S> AnthropicSseStream<S> {
             return;
         }
         self.started = true;
+        // ★ issue #139：`message_start` 必须当场给 `usage.input_tokens`，而上游的
+        //   `prompt_tokens` 通常到末帧才到。写 0 会让客户端把「上下文占用」画成 0%
+        //   （dsh / Claude Code 都按这个字段算），用户因此无法判断何时该 compact。
+        //   这里用请求侧的估算占位；真实值一到（`handle_delta` 里 capture）就在
+        //   `message_delta` 覆盖，且若首帧就带 usage，这里已经是真实值。
+        let input_tokens = self.effective_input_tokens();
         self.emit(
             "message_start",
             json!({
@@ -498,7 +658,12 @@ impl<S> AnthropicSseStream<S> {
                     "content": [],
                     "stop_reason": Value::Null,
                     "stop_sequence": Value::Null,
-                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": self.cache_read_tokens,
+                        "output_tokens": 0,
+                    },
                 }
             }),
         );
@@ -580,14 +745,17 @@ impl<S> AnthropicSseStream<S> {
             self.finished = true;
             return;
         }
+        /* ★ issue #139：先把这一帧的 `usage` 收下来**再**发 `message_start`。
+        上游若在首帧就带用量（部分实现会），`message_start` 直接就是真实值，
+        不必等 `message_delta` 才纠正；顺序反了则永远只能报估算值。 */
+        if let Some(usage) = value.get("usage") {
+            self.capture_usage(usage);
+        }
         self.ensure_started();
         if let Some(model) = value.get("model").and_then(Value::as_str) {
             if !model.is_empty() {
                 self.model = model.to_string();
             }
-        }
-        if let Some(usage) = value.get("usage") {
-            self.capture_usage(usage);
         }
 
         let Some(choice) = value
@@ -709,11 +877,26 @@ impl<S> AnthropicSseStream<S> {
     }
 
     fn capture_usage(&mut self, usage: &Value) {
-        if let Some(prompt) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+        // `prompt_tokens` 是上游 OpenAI 形状；`input_tokens` 是 Anthropic 形状 ——
+        // 两条产品线（含 Trae/Qoder 的聚合结果）都可能落到这里，认两种写法。
+        if let Some(prompt) = usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("input_tokens").and_then(Value::as_u64))
+        {
             self.input_tokens = prompt;
         }
-        if let Some(completion) = usage.get("completion_tokens").and_then(Value::as_u64) {
+        if let Some(completion) = usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("output_tokens").and_then(Value::as_u64))
+        {
             self.output_tokens = completion;
+        }
+        // ★ issue #139：缓存命中量。客户端（dsh）把「缓存读取」单列一行，缺这个字段
+        //   就会永远显示 0 —— 与「确实没命中」长得一模一样。四种上游写法都认。
+        if let Some(cached) = cached_tokens_of(usage) {
+            self.cache_read_tokens = cached;
         }
     }
 
@@ -770,12 +953,22 @@ impl<S> AnthropicSseStream<S> {
                 json!({"type": "content_block_stop", "index": index}),
             );
         }
+        /* ★ issue #139：`message_delta.usage` 是**累积用量**（Anthropic 语义）。
+        从前这里只给 `output_tokens`，于是「本轮消耗」永远看不到输入侧 —— 而输入才是
+        上下文长度的真值。把 `input_tokens` / 缓存命中一并补上：客户端收到末帧即得到
+        上游的真实值，与 `message_start` 的估算值无关。 */
+        let input_tokens = self.effective_input_tokens();
         self.emit(
             "message_delta",
             json!({
                 "type": "message_delta",
                 "delta": { "stop_reason": self.stop_reason, "stop_sequence": Value::Null },
-                "usage": { "output_tokens": self.output_tokens },
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": self.cache_read_tokens,
+                    "output_tokens": self.output_tokens,
+                },
             }),
         );
         self.emit("message_stop", json!({"type": "message_stop"}));
@@ -1319,6 +1512,118 @@ mod tests {
         let tool_start = text.find("\"type\":\"tool_use\"").unwrap();
         assert!(text_stop < tool_start, "文本块必须在工具块前关闭");
         assert!(text.contains("\"output_tokens\":3"));
+    }
+
+    /// ★★ issue #139：`message_start` 的 `input_tokens` 不得恒为 0。
+    ///
+    /// 客户端（dsh / Claude Code）拿这个字段当「上下文长度」画占用率；写 0 就等于
+    /// 告诉用户「上下文空着」，于是永远不知道该 compact。
+    ///
+    /// 可证伪：把 `ensure_started` 里的 `effective_input_tokens()` 换回字面量 0 ⇒
+    /// 第一条断言红；把 `message_delta` 的 usage 换回只有 `output_tokens` ⇒ 第二条红。
+    #[tokio::test]
+    async fn message_start_carries_estimated_input_and_delta_carries_the_real_one() {
+        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":5}}\n\n",
+                "data: [DONE]\n\n",
+            )
+            .as_bytes(),
+        ))];
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string())
+            .with_estimated_input(1200);
+        let text = collect_text(&stream.map(|item| item.unwrap()).collect::<Vec<_>>().await);
+
+        // `message_start` 在上游 usage 到达之前就已发出 ⇒ 只能用估算值。
+        let start = text.split("event: content_block_start").next().unwrap();
+        assert!(
+            start.contains("\"input_tokens\":1200"),
+            "message_start 必须带估算的输入 token：{start}"
+        );
+        // 末帧拿到真实值 ⇒ `message_delta` 必须是真实值，而不是估算值。
+        assert!(
+            text.contains("\"input_tokens\":1234"),
+            "message_delta 必须用上游真实 prompt_tokens：{text}"
+        );
+    }
+
+    /// 首帧就带 `usage` 时，`message_start` 直接是**真实值**（估算不生效）。
+    ///
+    /// 可证伪：把 `handle_delta` 里的 `capture_usage` 挪回 `ensure_started` **之后** ⇒
+    /// 本用例红（`message_start` 会退回 1200）。
+    #[tokio::test]
+    async fn message_start_prefers_first_frame_usage_over_the_estimate() {
+        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            concat!(
+                "data: {\"usage\":{\"prompt_tokens\":777,\"completion_tokens\":0},\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            )
+            .as_bytes(),
+        ))];
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string())
+            .with_estimated_input(1200);
+        let text = collect_text(&stream.map(|item| item.unwrap()).collect::<Vec<_>>().await);
+        let start = text.split("event: content_block_start").next().unwrap();
+        assert!(
+            start.contains("\"input_tokens\":777"),
+            "首帧的真实用量必须优先于估算值：{start}"
+        );
+    }
+
+    /// 不接估算（`with_estimated_input` 不调）时保持旧行为：`input_tokens: 0`。
+    #[tokio::test]
+    async fn message_start_stays_zero_without_an_estimate() {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![];
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string());
+        let text = collect_text(&stream.map(|item| item.unwrap()).collect::<Vec<_>>().await);
+        assert!(text.contains("\"input_tokens\":0"));
+    }
+
+    /// ★ issue #139：缓存命中量必须映射到 `cache_read_input_tokens`（dsh 单列一行显示）。
+    #[tokio::test]
+    async fn cache_hit_tokens_are_mapped_to_cache_read_input_tokens() {
+        let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":900,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":640}}}\n\n",
+                "data: [DONE]\n\n",
+            )
+            .as_bytes(),
+        ))];
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string());
+        let text = collect_text(&stream.map(|item| item.unwrap()).collect::<Vec<_>>().await);
+        assert!(text.contains("\"cache_read_input_tokens\":640"), "{text}");
+    }
+
+    /// 估算：中文 ≈ 1 token/字、英文 ≈ 3 字符/token，且图片按固定值（不是 base64 长度）。
+    #[test]
+    fn estimate_input_tokens_is_cjk_aware_and_ignores_base64_payloads() {
+        let body = json!({
+            "system": "你是助手。",
+            "messages": [
+                {"role": "user", "content": "hello world this is a plain english sentence"},
+                {"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A".repeat(200_000)}},
+                    {"type": "text", "text": "这张图里是什么？"}
+                ]}
+            ],
+            "tools": [{"name": "read_file", "description": "读文件", "input_schema": {"type": "object"}}]
+        });
+        let estimate = estimate_input_tokens(&body);
+        // 图片按 1500 计：若把 base64 当文本，这里会是 6 万级。
+        assert!(
+            (1500..4000).contains(&estimate),
+            "估算应落在合理区间，实际 {estimate}"
+        );
+
+        // 空请求也要 ≥1（0 在下游等于「未知」）。
+        assert_eq!(estimate_input_tokens(&json!({})), 1);
+        // 纯中文按字计：20 字 ≈ 20 token（远大于同长度英文的 1/3 口径）。
+        let chinese = estimate_input_tokens(
+            &json!({"messages": [{"role": "user", "content": "一二三四五六七八九十一二三四五六七八九十"}]}),
+        );
+        assert!((20..40).contains(&chinese), "中文估算 {chinese}");
     }
 
     #[tokio::test]
