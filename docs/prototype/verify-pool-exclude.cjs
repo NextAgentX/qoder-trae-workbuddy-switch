@@ -366,6 +366,29 @@ function chainText(d) {
     return "拒绝 → 打开 → qa-bot";
   });
 
+  /* ── ⑥b 账号故障时自动切换（issue #129） ──
+     ★ 钉住的是**存储粒度**：真实实现是三份 config 各一个同名布尔（按产品线），
+     不是按 scope。写成按 scope 存的话，切到国际版开关会自己变回关 —— 那个 bug 在
+     真机上根本不存在（纯属演示造出来的），反过来会误导下一个改这块的人。
+     ⚠️ 这里刻意不切 scope 再断言（那要调 `renderContent()`，依赖它挂在 window 上）：
+     直接钉「键是产品线、不是 scope」这个结构事实，等价且更稳。 */
+  const domAF = await boot("scope=wb-cn&dest=gateway&gw=pool&hint=0");
+  const dAF = domAF.window.document;
+  check("账号故障时自动切换：默认关，且状态按产品线存（不是按 scope）", () => {
+    const sw = dAF.querySelector('[data-act="pool-autofailover"]');
+    if (!sw) throw new Error("工具条里没有这个开关");
+    if (sw.getAttribute("aria-checked") !== "false") throw new Error("默认不是关");
+    if (domAF.window.eval("!!state.gwAutoFailover.workbuddy")) throw new Error("状态默认不是关的");
+    click(domAF.window, act(dAF, "pool-autofailover"));
+    if (domAF.window.eval("state.gwAutoFailover.workbuddy") !== true) {
+      throw new Error("点了没生效");
+    }
+    if (domAF.window.eval("Object.keys(state.gwAutoFailover).some((k) => k.includes('-'))")) {
+      throw new Error("按 scope 存的（应落在产品线：WB 两个版本共用一份）");
+    }
+    return "默认关 → 打开 → key=workbuddy";
+  });
+
   /* ── ⑦ 统一网关的池摘要仍与池数据同源 ── */
   const domF = await boot("scope=wb-cn&dest=gateway&type=unified&gw=u-pool&hint=0");
   check("统一网关的池明细：已排除不再算进「可用」（摘要条与池数据同源）", () => {
