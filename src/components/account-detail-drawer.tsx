@@ -212,6 +212,20 @@ export interface AccountDetailDrawerProps {
   loading?: boolean;
   /** 积分 / 资源包明细；空数组 = 不渲染该区块。 */
   packs?: DetailPack[];
+  /**
+   * 积分包区块下方的**说明 + 一个动作**（文案由调用方给，本组件不含平台专属词条）。
+   *
+   * 用途：某些平台的逐包明细要额外授权才拿得到（Qoder 需要网页端登录一次），
+   * 此时列表里只剩聚合回落行 —— 不说明原因的话，用户会以为「这个账号没有包」。
+   * 传 `null` / 不传 ⇒ 不渲染（WB / Trae 的逐包本来就齐，不需要说明）。
+   */
+  packsNotice?: {
+    text: string;
+    actionLabel?: string;
+    onAction?: () => void;
+    /** 动作进行中（按钮置灰 + 转圈由调用方文案体现）。 */
+    busy?: boolean;
+  } | null;
   /** 登录态快照（空数组 = 不渲染「快照」页签）。 */
   snapshots?: DetailSnapshot[];
   /** 顶部指标块（按序渲染；空数组 = 不渲染该区域）。 */
@@ -336,6 +350,7 @@ export function AccountDetailDrawer({
   avatarSeed,
   loading = false,
   packs = [],
+  packsNotice = null,
   stats = [],
   snapshots = [],
   refreshingKinds,
@@ -858,6 +873,25 @@ export function AccountDetailDrawer({
                       </div>
                     ))}
                   </div>
+                  {packsNotice ? (
+                    <div className="mt-3 rounded-md border border-border/60 bg-muted/30 px-2.5 py-2">
+                      <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                        {packsNotice.text}
+                      </p>
+                      {packsNotice.actionLabel && packsNotice.onAction ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="mt-1.5 h-7"
+                          disabled={packsNotice.busy}
+                          onClick={packsNotice.onAction}
+                        >
+                          {packsNotice.actionLabel}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </section>
               )}
 

@@ -40,6 +40,7 @@ import {
   FolderTree,
   Globe,
   Info,
+  PackageSearch,
   Sparkles,
   StickyNote,
   Trash2,
@@ -230,6 +231,13 @@ export interface QoderAccountMenuProps {
    * 这一项就是补那条链路的入口：不传 ⇒ 不渲染（例如 headless 宿主）。
    */
   onWebLogin?: (account: QoderAccountView) => void;
+  /**
+   * 「更多 → 读取逐包明细」（issue #111 复核 P0-2）。
+   *
+   * 与「登录 Qoder 网页端」是**两个**动作：前者开窗，后者只用已登录的会话读一次。
+   * 用户登录完把窗口关掉之后，仍需要一条自己能走的路（关窗那一刻的轮询不保证覆盖）。
+   */
+  onReadPacks?: (account: QoderAccountView) => void;
   onDelete?: (account: QoderAccountView) => void;
   onRefreshPart?: (kind: AccountRefreshKind) => void;
   refreshingKinds?: readonly AccountRefreshKind[];
@@ -249,6 +257,7 @@ export function QoderAccountMenu({
   onCheckin,
   onExport,
   onWebLogin,
+  onReadPacks,
   onDelete,
   onRefreshPart,
   refreshingKinds,
@@ -335,6 +344,12 @@ export function QoderAccountMenu({
             {t("qoder.page.accounts.web.loginMenu")}
           </DropdownMenuItem>
         )}
+        {onReadPacks && (
+          <DropdownMenuItem onSelect={() => onReadPacks(account)}>
+            <PackageSearch />
+            {t("qoder.page.accounts.web.read")}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem disabled={!onEditRemark} onSelect={() => onEditRemark?.(account)}>
           <StickyNote />
           {t("qoder.page.accounts.card.editRemark")}
@@ -407,6 +422,8 @@ export interface QoderAccountCardProps {
   onExport?: (account: QoderAccountView) => void;
   /** 「更多 → 登录 Qoder 网页端」（issue #111；不传 ⇒ 不渲染该项）。 */
   onWebLogin?: (account: QoderAccountView) => void;
+  /** 「更多 → 读取逐包明细」/ 浮层里的显式读取入口（不传 ⇒ 不渲染）。 */
+  onReadPacks?: (account: QoderAccountView) => void;
   /** 该账号的逐包明细（`undefined` = 还没请求；`null` = 请求过但没结果）。 */
   packs?: QoderWebCreditPacks | null;
   packsLoading?: boolean;
@@ -441,6 +458,7 @@ export function QoderAccountCard({
   onCheckin,
   onExport,
   onWebLogin,
+  onReadPacks,
   packs,
   packsLoading = false,
   onRequestPacks,
@@ -483,6 +501,7 @@ export function QoderAccountCard({
       onCheckin={onCheckin}
       onExport={onExport}
       onWebLogin={onWebLogin}
+      onReadPacks={onReadPacks}
       onDelete={onDelete}
       onRefreshPart={onRefreshPart ? (kind) => onRefreshPart(account, kind) : undefined}
       refreshingKinds={refreshingKinds}
@@ -587,6 +606,7 @@ export function QoderAccountCard({
               loading={packsLoading}
               onRequest={() => onRequestPacks?.(account)}
               onWebLogin={() => onWebLogin?.(account)}
+              onReadPacks={() => onReadPacks?.(account)}
             />
           </div>
         ) : null}

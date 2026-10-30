@@ -225,7 +225,17 @@ export const zh = {
 
   // ---- 网页端逐包明细（issue #111）----
   "qoder.page.accounts.web.loginMenu": "登录 Qoder 网页端（看逐包明细）",
-  "qoder.page.accounts.web.loginToast": "已打开登录窗：登录完成后回到这里刷新即可看到逐包明细",
+  "qoder.page.accounts.web.loginToast": "已打开登录窗：登录完成后会自动读取逐包明细，也可以关窗后点「读取逐包明细」",
+  // 显式读取入口（#111 复核 P0-2）：关窗之后仍要有路可走，不能只靠「开窗」这一个动作。
+  "qoder.page.accounts.web.read": "已登录，读取逐包明细",
+  "qoder.page.accounts.web.readDone": "已读取 {n} 个资源包",
+  "qoder.page.accounts.web.readFailed": "没读到逐包明细：请确认登录窗里已完成登录，再试一次",
+  "qoder.page.accounts.web.readMismatch": "登录窗里登的不是这个账号，已丢弃该会话",
+  // 抽屉里的逐包区块说明（未授权不得留白，已授权要说明存在哪）。
+  "qoder.page.accounts.web.packsNotice": "逐包明细需要先在网页端登录一次（会话仅存本机）。当前显示的是账号聚合额度。",
+  "qoder.page.accounts.web.packsNoticeReady": "{n} 个资源包 · 网页会话已保存在本机",
+  "qoder.page.accounts.web.logout": "退出网页登录",
+  "qoder.page.accounts.web.logoutDone": "已清除本机的网页登录",
   "qoder.page.accounts.web.sourcePlan": "套餐额度",
   "qoder.page.accounts.web.sourceBonus": "赠送资源包",
   "qoder.page.accounts.web.sourceDedicated": "专用资源包",

@@ -218,7 +218,15 @@ export const en = {
 
   // ---- Web-session credit packs (issue #111) ----
   "qoder.page.accounts.web.loginMenu": "Sign in to Qoder web (per-pack detail)",
-  "qoder.page.accounts.web.loginToast": "Sign-in window opened. After signing in, come back and refresh to see per-pack detail.",
+  "qoder.page.accounts.web.loginToast": "Sign-in window opened. Per-pack detail is read automatically once you sign in; you can also close the window and click \"Read per-pack detail\".",
+  "qoder.page.accounts.web.read": "Signed in — read per-pack detail",
+  "qoder.page.accounts.web.readDone": "Read {n} resource packs",
+  "qoder.page.accounts.web.readFailed": "No per-pack detail yet. Make sure the sign-in window finished signing in, then retry.",
+  "qoder.page.accounts.web.readMismatch": "The sign-in window was authenticated as a different account; that session was discarded.",
+  "qoder.page.accounts.web.packsNotice": "Per-pack detail needs a one-time web sign-in (the session stays on this machine). Showing aggregate credits for now.",
+  "qoder.page.accounts.web.packsNoticeReady": "{n} packs · web session stored on this machine",
+  "qoder.page.accounts.web.logout": "Sign out of web",
+  "qoder.page.accounts.web.logoutDone": "Web session cleared from this machine",
   "qoder.page.accounts.web.sourcePlan": "Plan quota",
   "qoder.page.accounts.web.sourceBonus": "Bonus pack",
   "qoder.page.accounts.web.sourceDedicated": "Dedicated pack",

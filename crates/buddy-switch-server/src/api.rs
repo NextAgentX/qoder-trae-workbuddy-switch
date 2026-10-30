@@ -584,6 +584,10 @@ fn api_routes() -> Router {
             get(api_qoder_web_desktop_only),
         )
         .route(
+            "/api/qoder/web/session/window-cookies",
+            get(api_qoder_web_desktop_only),
+        )
+        .route(
             "/api/qoder/web/session/logout",
             post(api_qoder_web_desktop_only),
         )
