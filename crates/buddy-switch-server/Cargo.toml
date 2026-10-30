@@ -1,6 +1,6 @@
 [package]
 name = "buddy-switch-server"
-version = "2026.10.300953"
+version = "2026.10.301104"
 edition = "2021"
 description = "buddy-switch HTTP server + CLI（npm 安装形态：buddy-switch 命令启动本地 webui）"
 
