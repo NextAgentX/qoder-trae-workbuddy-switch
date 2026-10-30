@@ -1,6 +1,6 @@
 [package]
 name = "buddy-switch-vault"
-version = "2026.10.291824"
+version = "2026.10.300935"
 edition = "2021"
 description = "SQLCipher 解密通道（仅本 crate 编 SQLCipher；其余 crate 继续用标准 SQLite，避免全仓换 feature）"
 
