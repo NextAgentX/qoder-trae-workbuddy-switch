@@ -1,30 +1,24 @@
 {
-  "version": "2026.10.300953",
-  "publishedAt": "2026-10-30T09:53:00+08:00",
+  "version": "2026.10.301104",
+  "publishedAt": "2026-10-30T11:04:00+08:00",
   "sections": [
     {
       "title": "其他维护",
       "items": [
-        "release：版本号 2026.10.300953",
-        "release：版本号 2026.10.300935",
-        "gateway：rustfmt 收尾 PR #126 的两处超宽行"
+        "release：版本号 2026.10.301104"
+      ]
+    },
+    {
+      "title": "新功能",
+      "items": [
+        "gateway：模型降级链卡片支持折叠/展开"
       ]
     },
     {
       "title": "问题修复",
       "items": [
-        "ci：Linux 更新包是 `.AppImage` 本体，不是 `.AppImage.tar.gz`",
-        "qoder：保活窗口 4h→48h，并修「无过期信息永不刷新」与兜底寿命（#130）",
-        "gateway：模型在全部可用账号上冷却时回 503 而非 401（#134）",
-        "webui：用量页点击「今天」白屏（条件 hook 触发 React #300）",
-        "ci：产出 Linux updater 清单，修复 AppImage 端「检查更新」永久失败",
-        "responses：preserve input_tokens_details and cache hit stats in responses usage"
-      ]
-    },
-    {
-      "title": "文档",
-      "items": [
-        "guides：发布步骤补 Linux 的 updater 清单"
+        "trae：区分「storage.json 不存在」与「读不出」，并修正登录态目录判据",
+        "release：内置版本说明同步到 2026.10.300953（门禁转绿）"
       ]
     }
   ],
