@@ -45,6 +45,7 @@ use tauri::{
 
 use buddy_switch_core::modules::product::{require_qoder_region, resolve_scope_param};
 use buddy_switch_core::modules::qoder::region::{self, QoderRegion};
+use buddy_switch_core::modules::qoder::web_proxy;
 use buddy_switch_core::modules::qoder::web_session;
 use buddy_switch_core::modules::qoder::web_usage;
 
@@ -88,6 +89,10 @@ fn ensure_login_window<R: Runtime>(
 
     let window = WebviewWindowBuilder::new(app, LOGIN_LABEL, WebviewUrl::External(parsed))
         .title("登录 Qoder 网页端（用于读取逐包明细）")
+        // TEMP-VERIFY-111: 临时与主窗口同参（保证同一 WebView2 environment / 同一调试端口），验证完即删。
+        .additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9223",
+        )
         .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .min_inner_size(720.0, 560.0)
         .center()
@@ -607,6 +612,24 @@ pub async fn session_logout(scope: String) -> Result<Value, String> {
     // 内存里那份也要清：否则「退出登录」之后逐包还能从暂存读到（用户会认为没退掉）。
     clear_staged();
     Ok(json!({ "cleared": true }))
+}
+
+/// 读出站代理配置（两个区域各一个 URL；空 = 直连）。
+///
+/// ★ 这是**纯配置**，不是「仅桌面端可用」的东西：headless 服务端同样要取逐包
+/// （有会话文件就能取），代理通道对它是同等需要的能力。
+pub fn web_proxy_config() -> Result<Value, String> {
+    let config = web_proxy::WebProxyConfig::load();
+    serde_json::to_value(config).map_err(|error| format!("序列化代理配置失败: {error}"))
+}
+
+/// 保存出站代理配置（两个字段都先过形状校验，见 [`web_proxy::validate_url`]）。
+pub fn web_proxy_config_save(config: web_proxy::WebProxyConfig) -> Result<Value, String> {
+    config.save()?;
+    Ok(json!({
+        "ok": true,
+        "config": { "cn": config.cn, "global": config.global },
+    }))
 }
 
 /// 当前毫秒。包一层是为了测试里能替换（当前没有单元测试直接依赖它，
