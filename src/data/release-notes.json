@@ -1,11 +1,24 @@
 {
-  "version": "2026.10.301530",
-  "publishedAt": "2026-10-30T15:30:00+08:00",
+  "version": "2026.10.301545",
+  "publishedAt": "2026-10-30T15:45:00+08:00",
   "sections": [
     {
       "title": "其他维护",
       "items": [
+        "release：版本号 2026.10.301545",
         "release：版本号 2026.10.301530"
+      ]
+    },
+    {
+      "title": "问题修复",
+      "items": [
+        "ci：Node 20→22，修 check:proto 在 CI 全红（undici 8 要求 ≥22.19）",
+        "qoder：移除本地验证用的临时调试参数（不该入库）",
+        "qoder：补上漏提交的 web_proxy_config 两个实现函数（commands 引用了它们）",
+        "test：去掉对 Copy 值的 drop（clippy::drop_copy，CI 红）",
+        "prototype：修复同名函数重复声明（整份脚本不执行），并补自动切换开关",
+        "qoder：接通逐包明细的读取时机与显式读取入口（#111）",
+        "gateway：配置键集合断言同步 auto_failover（issue #129）"
       ]
     },
     {
@@ -14,17 +27,6 @@
         "积分自动刷新接线（#133）与 Qoder 逐包出站代理落地（#111 收尾）",
         "qoder：逐包取数接入按区域出站代理，补齐国际版逐包（#111 收尾）",
         "gateway：账号故障时自动切换（issue #129）"
-      ]
-    },
-    {
-      "title": "问题修复",
-      "items": [
-        "qoder：移除本地验证用的临时调试参数（不该入库）",
-        "qoder：补上漏提交的 web_proxy_config 两个实现函数（commands 引用了它们）",
-        "test：去掉对 Copy 值的 drop（clippy::drop_copy，CI 红）",
-        "prototype：修复同名函数重复声明（整份脚本不执行），并补自动切换开关",
-        "qoder：接通逐包明细的读取时机与显式读取入口（#111）",
-        "gateway：配置键集合断言同步 auto_failover（issue #129）"
       ]
     },
     {
