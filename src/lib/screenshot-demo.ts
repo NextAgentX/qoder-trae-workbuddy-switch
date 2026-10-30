@@ -737,6 +737,9 @@ function demoGatewayConfig(): GatewayConfig {
     log_bodies: false,
     per_key_rate_limit: null,
     max_context: true,
+    // ★ issue #129：演示站与真实默认一致（关）。开启态要演示的话会改变对外报错语义，
+    // 不适合作为默认截图状态。
+    auto_failover: false,
   };
 }
 
@@ -2196,6 +2199,8 @@ function demoQoderGatewayConfig(): QoderGatewayConfigRaw {
     daily_token_limit: 500_000,
     daily_credit_limit: 50,
     model_daily_token_limit: 0,
+    // ★ issue #129：与真实默认一致（关）。
+    auto_failover: false,
   };
 }
 
@@ -2717,6 +2722,8 @@ function demoTraeGatewayConfig(): TraeGatewayConfigRaw {
     // 抓取旁路默认关：演示站也不该呈现「已开启诊断抓取」的假状态。
     capture_enabled: false,
     max_mode: true,
+    // ★ issue #129：与真实默认一致（关）。
+    auto_failover: false,
   };
 }
 

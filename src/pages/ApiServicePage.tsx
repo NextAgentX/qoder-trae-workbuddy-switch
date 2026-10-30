@@ -593,6 +593,26 @@ function RegionPoolCard({ region }: { region: Region }) {
   const [saving, setSaving] = useState(false);
   const [revivingUid, setRevivingUid] = useState<string | null>(null);
   const [excludingUid, setExcludingUid] = useState<string | null>(null);
+  /* ★ issue #129：「账号故障时自动切换」是**网关级**开关（不分区域），
+     所以两张区域卡显示的是同一个值、改任一张都生效。 */
+  const config = useGatewayStore((s) => s.config);
+  const saveConfig = useGatewayStore((s) => s.saveConfig);
+  const [failoverSaving, setFailoverSaving] = useState(false);
+
+  async function onAutoFailoverChange(next: boolean) {
+    if (next === config.auto_failover) return;
+    setFailoverSaving(true);
+    try {
+      // 整份保存：只改这一个键，其余沿用当前快照（与顶层 `persist` 同口径）。
+      // 成功**不弹 toast**：开关本身已有视觉反馈，再弹一次只是噪音
+      // （且与「端口 / 监听」那条保存提示撞在一起会连闪两条）。
+      await saveConfig({ ...config, auto_failover: next });
+    } catch (e) {
+      toast.error(t("wbStats.gateway.saveFail"), { description: api.asError(e) });
+    } finally {
+      setFailoverSaving(false);
+    }
+  }
 
   /* ★ 探测收尾后主动刷一次池状态（issue #88）。
    *
@@ -724,6 +744,10 @@ function RegionPoolCard({ region }: { region: Region }) {
       revivingUid={revivingUid}
       onExclude={onExclude}
       excludingUid={excludingUid}
+      // ★ issue #129：账号故障时自动切换（网关级，两张区域卡同源）。
+      autoFailover={config.auto_failover}
+      onAutoFailoverChange={onAutoFailoverChange}
+      failoverSaving={failoverSaving}
       // WorkBuddy 池不存积分有效期 ⇒ 没有「积分过期」格（见卡片注释）。
       tiles={WB_POOL_TILES}
       autoOptions={[

@@ -347,6 +347,10 @@ export const en = {
   "shared.gateway.probe.emptyAllSkippedDesc":
     "None of these accounts have a usable credential — they may be signed out, hold an encrypted-envelope credential, or have been removed from the account store. Sign in again or import an account on the \"Accounts\" page; if there is no desktop client on this machine (Docker / headless), add an account by QR scan under \"Gateway → Account pool\"; if the \"Pinned account\" strategy is in use, make sure that account is still in the local account store.",
   "shared.gateway.pool.totalRequests": "{count} requests",
+  // issue #129: "auto switch when an account fails" toggle in the pool card toolbar.
+  "shared.gateway.pool.autoFailover": "Switch account on failure",
+  "shared.gateway.pool.autoFailoverHint":
+    "When an account fails mid-reply, the gateway turns that failure into a retryable error so the client reruns the whole step on another account — you get the full answer rewritten from the start. Cost: the partial output is discarded and the step is billed again. Off keeps the previous behaviour (upstream errors are surfaced as-is). Off by default: it changes what clients see on errors.",
   "shared.gateway.pool.tile.available": "Routable",
   // Sub-line inside the "Routable" tile: some of them are merely **at the in-flight cap**
   // (account is fine, clears by itself in seconds). See `GatewayPoolSummary.inFlightFull`

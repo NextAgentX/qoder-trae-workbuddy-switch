@@ -841,6 +841,8 @@ export interface TraeGatewayConfigRaw {
   capture_enabled: boolean;
   /** Max Mode：对「目录里 max > dev」的模型注入 is_max_mode（默认 true）。 */
   max_mode: boolean;
+  /** ★ issue #129：账号故障时自动切换（默认 `false`）。 */
+  auto_failover: boolean;
 }
 
 /** 归一化后的网关配置（前端统一用 camelCase）。 */
@@ -862,6 +864,14 @@ export interface TraeGatewayConfig {
   captureEnabled: boolean;
   /** Max Mode：按官方目录逐模型注入 `is_max_mode`（默认开启）。 */
   maxMode: boolean;
+  /**
+   * ★ issue #129：**账号故障时自动切换**（默认 `false`）。
+   *
+   * 开启后，流中途的账号级失败不再被「补终止标记」伪装成成功，而是先发一条
+   * **可重试**的错误帧（含 `HTTP 429` / `HTTP 502`）；失败账号同时写冷却、解绑粘性
+   * ⇒ 客户端整步重跑时必然落到另一个号。
+   */
+  autoFailover: boolean;
 }
 
 /** 账号池摘要（`pool` 字段）。 */

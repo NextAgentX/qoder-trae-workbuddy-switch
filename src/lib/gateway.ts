@@ -25,6 +25,8 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
   log_bodies: false,
   per_key_rate_limit: null,
   max_context: true,
+  // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
+  auto_failover: false,
 };
 
 function asString(value: unknown): string | undefined {
@@ -253,6 +255,11 @@ export function normalizeGatewayConfig(raw: unknown): GatewayConfig {
     per_key_rate_limit:
       asNumber(record.per_key_rate_limit) ?? asNumber(record.perKeyRateLimit) ?? null,
     max_context: asBoolean(record.max_context) ?? DEFAULT_GATEWAY_CONFIG.max_context,
+    // ★ issue #129：缺键 ⇒ `false`（老配置文件 / 老后端），与「默认关闭」一致。
+    auto_failover:
+      asBoolean(record.auto_failover) ??
+      asBoolean(record.autoFailover) ??
+      DEFAULT_GATEWAY_CONFIG.auto_failover,
   };
 }
 

@@ -78,6 +78,18 @@ pub struct RequestMeta {
     /// `0.0` = 上游没带 credit（不是「免费」，是「不知道」）—— 与 token 写 0 同一诚实口径。
     pub credit: f64,
     pub stream: bool,
+    /// ★ issue #129：**流中途被判定失败**时的错误摘要（`None` = 正常结束 / 老条目）。
+    ///
+    /// 为什么必须有：流式日志的 `status` 在模板里是硬编码的 `200`（上游响应头到达时
+    /// 写日志那一刻还不可能知道后面会断流）。没有这个字段，一次「流中途账号故障」
+    /// 在日志页会显示成**成功的 200 请求** —— 用户那边看起来一切正常，
+    /// 网关的日志与统计却什么也看不见（故障被隐藏了，排查时无从下手）。
+    ///
+    /// 口径与 Qoder 侧 `record_request` 的 `error: Option<String>` 同形：
+    /// 记**上游原文**（含账号名/码），**不是**对外收敛后的文案 —— 对外文案为了能被
+    /// 客户端归成可重试而刻意抹掉了真实原因（见 `crate::failover`），
+    /// 真实原因只在这里与账号池状态里。
+    pub error: Option<String>,
 }
 
 impl RequestMeta {
@@ -105,6 +117,9 @@ impl RequestMeta {
             "keyId": self.key_id,
             // ★ 归属台账（`null` = 老条目 / 无 Key）。与 `keyId` **同生同空**。
             "keyScope": self.key_scope,
+            // ★ issue #129：流中途失败摘要（`null` = 正常结束 / 老条目）。
+            //   与 `keyId` 同一纪律：**键固定存在、无值写 `null`**。
+            "error": self.error,
         })
     }
 }
@@ -130,6 +145,11 @@ pub struct StreamingLogSink {
     /// 除 token 与**总**耗时外的全部字段（流开始时即已确定，含 `latency_ms`）。
     template: RequestMeta,
     started: Instant,
+    /// ★ issue #129：流中途失败信号（`None` = 未接入 ⇒ 状态码恒取模板里的 200）。
+    ///
+    /// 必须在 `finish` 里读：`UsageTap` 在**上报之前**已把失败写进这个槽，
+    /// 所以「流中途断流」的日志能写真实状态码，而不是硬编码的 200。
+    failure: Option<Arc<crate::failover::StreamFailure>>,
 }
 
 impl StreamingLogSink {
@@ -140,7 +160,15 @@ impl StreamingLogSink {
             log,
             template,
             started,
+            failure: None,
         }
+    }
+
+    /// ★ issue #129：接入失败信号 —— 流中途被判失败时把 `status` 改成真实状态码
+    /// 并附错误摘要，而不是把这次请求记成「200 成功」。
+    pub fn with_failure(mut self, failure: Option<Arc<crate::failover::StreamFailure>>) -> Self {
+        self.failure = failure;
+        self
     }
 }
 
@@ -155,11 +183,21 @@ impl UsageSink for StreamingLogSink {
             ),
             None => (0, 0, 0.0),
         };
+        // ★ issue #129：流中途失败 ⇒ 日志写**真实**状态码 + 摘要。
+        //   不这么做的话，一次「账号在流中途挂掉」在日志页会显示成成功的 200 请求
+        //   —— 对外静默的代价绝不能是「对内也静默」。
+        let failure = self.failure.as_ref().and_then(|signal| signal.peek());
+        let (status, error) = match &failure {
+            Some(failure) => (failure.status, Some(failure.detail.clone())),
+            None => (self.template.status, None),
+        };
         self.log.record(
             RequestMeta {
                 prompt_tokens,
                 completion_tokens,
                 credit,
+                status,
+                error,
                 // ★ 只补总耗时；`latency_ms` 保留 `template` 里的 TTFB —— 覆盖它正是
                 //   2026-10-15 那次「日志数字放大 10~100 倍」的事故来源。
                 total_ms: self.started.elapsed().as_millis() as i64,
@@ -275,6 +313,8 @@ mod tests {
             completion_tokens: 2,
             credit: 0.0,
             stream: false,
+            // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+            error: None,
         };
 
         let value = meta.to_value();
@@ -317,6 +357,8 @@ mod tests {
                 // ★ issue #76：调用方 Key id 与**归属台账**（`null` = 无 Key / 老条目）。
                 "keyId",
                 "keyScope",
+                // ★ issue #129：流中途失败摘要。
+                "error",
             ]),
             "键集合变了就要同步前端 GatewayLogEntry 与 token_daily 的读法"
         );
@@ -344,6 +386,8 @@ mod tests {
             completion_tokens: 0,
             credit: 0.0,
             stream: true,
+            // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+            error: None,
         }
     }
 

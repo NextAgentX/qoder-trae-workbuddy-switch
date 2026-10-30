@@ -663,6 +663,15 @@ pub struct ResponsesSseStream<S> {
     usage: Option<Value>,
     /// 声明为 custom（freeform）的工具名：这些调用要按 `custom_tool_call` 事件输出。
     custom: std::sync::Arc<HashSet<String>>,
+    /// ★ issue #129：账号故障自动切换的失败信号（`None` = 开关关闭 / 未接入）。
+    failover: Option<ResponsesFailover>,
+}
+
+/// Responses 出口的失败信号 + 对外文案所需的上下文。
+struct ResponsesFailover {
+    signal: std::sync::Arc<crate::failover::StreamFailure>,
+    /// 命中账号的展示名（写进对外文案）。
+    account: String,
 }
 
 impl<S> ResponsesSseStream<S> {
@@ -689,7 +698,21 @@ impl<S> ResponsesSseStream<S> {
             tool_calls: Vec::new(),
             usage: None,
             custom,
+            failover: None,
         }
+    }
+
+    /// ★ issue #129：接入失败信号（`None` = 保持原行为）。
+    pub fn with_failover(
+        mut self,
+        signal: Option<std::sync::Arc<crate::failover::StreamFailure>>,
+        account: impl Into<String>,
+    ) -> Self {
+        self.failover = signal.map(|signal| ResponsesFailover {
+            signal,
+            account: account.into(),
+        });
+        self
     }
 
     /// 事件序号：官方从 0 起严格递增。
@@ -861,23 +884,24 @@ impl<S> ResponsesSseStream<S> {
         // 上游中途报错（Qoder 的 `event:error` 帧、WB 的 `{"error":{…}}` 分片）——
         // **必须转成 Responses 的 `error` 事件**：否则本层只看到「没有 choices」，
         // 静默走完 `response.completed` ⇒ 客户端拿到「200 + 空回答」，故障隐身。
+        //
+        // ★ issue #129：对外形状走 `failover::client_error`（含等价 HTTP 状态码）。
+        //   上游私有码（`6004` / `12153`）客户端一个都归不了类 ⇒ `PI_AI_ERROR`（终态），
+        //   而流中途的账号故障本可以靠「换号 + 重跑」救回来。
         if let Some(error) = chunk.get("error") {
             let message = error
                 .get("message")
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or_else(|| error.to_string());
-            // OpenAI 的 `code` 是字符串；Qoder 给的是数字状态码 ⇒ 统一成字符串。
-            let code = match error.get("code") {
-                Some(Value::String(text)) => text.clone(),
-                Some(Value::Number(number)) => number.to_string(),
-                _ => "upstream_error".to_string(),
-            };
-            self.ensure_started();
-            self.push_event(
-                "error",
-                json!({"type": "error", "code": code, "message": message}),
-            );
+            let status = match error.get("code") {
+                Some(Value::Number(number)) => number.as_u64().unwrap_or(502).min(u16::MAX as u64),
+                Some(Value::String(text)) => text.parse::<u64>().unwrap_or(502),
+                _ => 502,
+            } as u16;
+            // 把上游给的码折成内部事件，好让对外形状与其他两条协议**同一口径**。
+            let event = crate::pool::classify_event(status, &message);
+            self.fail(&event, &message);
             return;
         }
         let Some(choice) = chunk
@@ -981,6 +1005,42 @@ impl<S> ResponsesSseStream<S> {
                 }
             }
         }
+    }
+
+    /// ★ issue #129：把一次流内失败转成 Responses 的 `error` 事件并**终止**本轮。
+    ///
+    /// **不补** `response.completed`：客户端见到 `error` 即终止，再补一个「正常结束」
+    /// 会把失败重新伪装成成功（正是本 issue 要修的形态）。
+    fn fail(&mut self, event: &crate::pool::UpstreamEvent, _detail: &str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        self.ensure_started();
+        let account = self
+            .failover
+            .as_ref()
+            .map(|tail| tail.account.as_str())
+            .unwrap_or("");
+        let error = crate::failover::client_error(event, account, &self.model);
+        self.pending
+            .push_back(crate::failover::responses_error_event(&error));
+    }
+
+    /// ★ issue #129：断流收尾。返回 `true` 表示已按失败处理（发了 `error` 事件），
+    /// 调用方**不要**再 `finish()`；`false` 表示开关关闭 / 无失败记录 ⇒ 走原路径。
+    fn fail_on_break(&mut self) -> bool {
+        let Some(tail) = self.failover.as_ref() else {
+            return false;
+        };
+        if !tail.signal.is_enabled() {
+            return false;
+        }
+        let Some(failure) = tail.signal.peek() else {
+            return false;
+        };
+        self.fail(&failure.event, &failure.detail);
+        true
     }
 
     /// 收尾：关闭所有已开 item，再发 `response.completed`。
@@ -1214,6 +1274,14 @@ impl<S> ResponsesSseStream<S> {
             if let Some(rest) = trimmed.strip_prefix("data:") {
                 let payload = rest.trim();
                 if !payload.is_empty() {
+                    /* ★ issue #129：每帧先判错误信封（`{"code":6004,…}` 这种没有
+                    `error` 字段的形态，`handle_payload` 的旧分支看不见）⇒ 从前它落到
+                    「没有 choices ⇒ 丢弃」，最后 `finish()` 补 `response.completed`
+                    = 把失败伪装成正常结束。 */
+                    if let Some(found) = crate::protocol::error_sniffer::sniff_payload(payload) {
+                        self.fail(&found.event, &found.message);
+                        continue;
+                    }
                     self.handle_payload(payload);
                 }
             }
@@ -1245,19 +1313,20 @@ where
                 Poll::Ready(None) => {
                     this.finish();
                     this.finished = true;
-                    if let Some(chunk) = this.pending.pop_front() {
-                        return Poll::Ready(Some(Ok(chunk)));
-                    }
-                    return Poll::Ready(None);
+                    // 回到循环顶部逐条发完 `pending`（`finish` 会一次产出多条事件，
+                    // 只 pop 一条就把其余丢掉了）。
+                    continue;
                 }
                 Poll::Ready(Some(Err(error))) => {
                     eprintln!("[gateway] Responses 上游 SSE 流中途异常: {error:?}");
-                    this.finish();
-                    this.finished = true;
-                    if let Some(chunk) = this.pending.pop_front() {
-                        return Poll::Ready(Some(Ok(chunk)));
+                    /* ★ issue #129 §3.3：断流是**账号级失败**，不是「模型说完了」。
+                    开关开启时发 `error` 事件（可重试）而不是 `finish()` 补
+                    `response.completed`。 */
+                    if !this.fail_on_break() {
+                        this.finish();
                     }
-                    return Poll::Ready(None);
+                    this.finished = true;
+                    continue;
                 }
                 Poll::Ready(Some(Ok(chunk))) => this.ingest(&chunk),
             }
@@ -1605,6 +1674,61 @@ mod tests {
         let types = event_types(&events);
         assert_eq!(types.first().unwrap(), "response.created");
         assert_eq!(types.last().unwrap(), "response.completed");
+    }
+
+    /// ★★ issue #129：开关开启 + 上游**断流** ⇒ `error` 事件，且**不补**
+    /// `response.completed`（后者会把失败重新伪装成「正常结束」）。
+    #[tokio::test]
+    async fn broken_stream_with_failover_emits_error_instead_of_completed() {
+        let signal = crate::failover::StreamFailure::new(true);
+        signal.record(crate::pool::UpstreamEvent::Server, "上游连接中断");
+        let stream = ResponsesSseStream::new(
+            futures_util::stream::iter(vec![
+                chunk("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"),
+                Err(std::io::Error::other("connection reset")),
+            ]),
+            "m".to_string(),
+            empty_custom(),
+        )
+        .with_failover(Some(signal), "一号");
+        let events = collect_events(stream).await;
+        let error = events
+            .iter()
+            .find(|event| event["type"] == "error")
+            .expect("必须有 error 事件");
+        assert!(
+            error["message"].as_str().unwrap().contains("HTTP 502"),
+            "{error}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "失败时不得补「正常结束」：{events:?}"
+        );
+    }
+
+    /// 开关**关闭**时断流仍走原路径（补 `response.completed`，字节与改造前一致）。
+    #[tokio::test]
+    async fn broken_stream_without_failover_still_completes() {
+        let signal = crate::failover::StreamFailure::new(false);
+        let stream = ResponsesSseStream::new(
+            futures_util::stream::iter(vec![
+                chunk("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"),
+                Err(std::io::Error::other("connection reset")),
+            ]),
+            "m".to_string(),
+            empty_custom(),
+        )
+        .with_failover(Some(signal), "一号");
+        let events = collect_events(stream).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event["type"] == "response.completed"),
+            "关闭时必须保持改造前行为：{events:?}"
+        );
+        assert!(!events.iter().any(|event| event["type"] == "error"));
     }
 
     /// 上游中途报错帧 ⇒ **`error` 事件**（不能静默成「200 + 空回答」，issue #64）。

@@ -43,23 +43,28 @@ fn process_line(line: &str) -> (Vec<Bytes>, bool) {
             if queued {
                 super::risk::note_queued();
             }
-            let frame = if queued {
-                json!({
-                    "error": {
-                        "message": super::pool::queue_message(&detail),
-                        "type": "upstream_queued",
-                        "code": 429,
-                    }
-                })
-            } else {
-                json!({
-                    "error": {
-                        "message": format!("上游错误（HTTP {status}）：{detail}"),
-                        "type": "upstream_error",
-                        "code": status,
-                    }
-                })
-            };
+            /* ★ issue #129：对外形状收敛到 `failover` 的三种标准类别。
+            改造前 `type` 是自造的 `upstream_error` / `upstream_queued`，
+            `message` 直接拼上游 detail（含 `quota` 之类短语）——
+            客户端既归不了 `type`，又可能被 detail 里的配额短语抢成不可重试的 `QUOTA`。
+            真实原因（detail）仍由日志与账号池承载。 */
+            let error = super::pool::client_error_of(status, &detail);
+            let frame = json!({
+                "error": {
+                    "message": error.message,
+                    "type": error.kind,
+                    "code": error.status,
+                    // ★ issue #129：**上游原文**（客户端忽略，只给本进程的
+                    // `UsageTapStream` 记日志用）。对外文案为了能被客户端归成可重试
+                    // 而刻意抹掉了真实原因 —— 但「对外静默」绝不能变成「对内也静默」。
+                    // 带上等价状态码：日志里「HTTP 429：quota exceeded」比只有原文
+                    // 更容易与客户端的分类对上（两者都靠这个数字）。
+                    "upstream": format!("HTTP {status}：{detail}")
+                        .chars()
+                        .take(400)
+                        .collect::<String>(),
+                }
+            });
             (vec![Bytes::from(format!("data: {frame}\n\n"))], true)
         }
     }
@@ -73,6 +78,14 @@ pub struct QoderOpenAiStream<S> {
     upstream_done: bool,
     done_sent: bool,
     terminated: bool,
+    /// ★ issue #129：断流时是否补**可重试**的错误帧（开关 `auto_failover`）。
+    ///
+    /// 关闭（默认）时行为与改造前逐字一致：只补 `[DONE]`。
+    failover: bool,
+    /// 错误帧是否已发（上游显式错误帧已发过就不再补）。
+    error_frame_sent: bool,
+    /// 失败槽：断流时写一条 502，供日志 / 冷却 / 粘性解绑读取。
+    error_slot: Option<std::sync::Arc<std::sync::Mutex<Option<UpstreamError>>>>,
 }
 
 impl<S> QoderOpenAiStream<S> {
@@ -84,7 +97,23 @@ impl<S> QoderOpenAiStream<S> {
             upstream_done: false,
             done_sent: false,
             terminated: false,
+            failover: false,
+            error_frame_sent: false,
+            error_slot: None,
         }
+    }
+
+    /// ★ issue #129：接入失败信号。
+    ///
+    /// `failover = false`（默认）时**完全不影响字节**：断流照旧只补 `[DONE]`。
+    pub fn with_failover(
+        mut self,
+        failover: bool,
+        error_slot: std::sync::Arc<std::sync::Mutex<Option<UpstreamError>>>,
+    ) -> Self {
+        self.failover = failover;
+        self.error_slot = Some(error_slot);
+        self
     }
 
     fn drain_lines(&mut self) {
@@ -92,6 +121,10 @@ impl<S> QoderOpenAiStream<S> {
             let line: Vec<u8> = self.buffer.drain(..=position).collect();
             let text = String::from_utf8_lossy(&line);
             let (frames, done) = process_line(&text);
+            if done && !frames.is_empty() {
+                // `[DONE]` 时不产帧；产帧且结束 ⇒ 这一帧是**错误帧**（已对外发过）。
+                self.error_frame_sent = true;
+            }
             self.pending.extend(frames);
             if done {
                 self.upstream_done = true;
@@ -134,8 +167,35 @@ where
                     this.buffer.extend_from_slice(&chunk);
                     this.drain_lines();
                 }
-                Poll::Ready(Some(Err(_error))) => {
-                    // 中途异常：补 [DONE] 收尾（不悬挂），错误详情由请求侧日志记录。
+                Poll::Ready(Some(Err(error))) => {
+                    /* ★ issue #129 §3.3：断流**不是**「模型说完了」。
+                    开关开启时补一条可重试错误帧并写失败槽（日志/冷却/粘性解绑读它）；
+                    关闭时保持改造前行为：只补 `[DONE]`。 */
+                    if this.failover && !this.error_frame_sent {
+                        let detail = format!("上游连接中断：{error:?}");
+                        if let Some(slot) = this.error_slot.as_ref() {
+                            if let Ok(mut guard) = slot.lock() {
+                                if guard.is_none() {
+                                    *guard = Some(UpstreamError {
+                                        message: detail.chars().take(400).collect(),
+                                        code: 502,
+                                    });
+                                }
+                            }
+                        }
+                        let err = super::pool::client_error_of(502, &detail);
+                        let frame = json!({
+                            "error": {
+                                "message": err.message,
+                                "type": err.kind,
+                                "code": err.status,
+                                "upstream": detail.chars().take(400).collect::<String>(),
+                            }
+                        });
+                        this.pending
+                            .push_back(Bytes::from(format!("data: {frame}\n\n")));
+                        this.error_frame_sent = true;
+                    }
                     this.upstream_done = true;
                 }
                 Poll::Ready(None) => {
@@ -299,9 +359,13 @@ where
             continue;
         };
         if let Some(error) = chunk.get("error") {
+            /* ★ issue #129：优先取 `upstream`（上游原文 + 等价状态码）。
+            `message` 现在是对外收敛后的文案（为了能被客户端归成可重试），
+            拿它当 `upstream_error` 会把真实原因从日志里抹掉。 */
             let message = error
-                .get("message")
+                .get("upstream")
                 .and_then(Value::as_str)
+                .or_else(|| error.get("message").and_then(Value::as_str))
                 .unwrap_or("上游错误")
                 .to_string();
             // ★ 一并记下错误帧的 `code`（排队 ⇒ 429）：账本据此区分
@@ -555,9 +619,12 @@ fn tap_frame(
     if let Ok(chunk) = serde_json::from_str::<Value>(data) {
         // 错误帧（`{"error":{"message":…}}`）单独留痕：客户端已经收到它，账本也要记。
         if let Some(error) = chunk.get("error") {
+            /* ★ issue #129：**优先取 `upstream`**（上游原文）—— `message` 现在是对外
+            收敛后的文案（含 `HTTP 429`、不含真实原因），拿它写日志等于把故障原因抹掉。 */
             let message = error
-                .get("message")
+                .get("upstream")
                 .and_then(Value::as_str)
+                .or_else(|| error.get("message").and_then(Value::as_str))
                 .map(str::to_string)
                 .unwrap_or_else(|| error.to_string());
             // ★ 一并记下 `code`（排队 ⇒ 429）：账本据此区分「排队」与「上游其它错误」。
@@ -2495,27 +2562,34 @@ mod tests {
         assert!(text.contains("\"tool_calls\":["), "必须还原: {text}");
     }
 
-    /// 信封层排队（403 + `10605`/`isQueued`）⇒ 错误帧是 **429 `upstream_queued`**，
-    /// 文案必须说清「不是账号或凭据问题」（真机就是这样回来的）。
+    /// 信封层排队（403 + `10605`/`isQueued`）⇒ 错误帧是 **可重试的 429**。
+    ///
+    /// ★ issue #129：对外形状从自造的 `upstream_queued` 收敛成标准 `rate_limit_error`
+    /// + `HTTP 429` 文案 —— 客户端（`openai-completions`）**只做文本正则**，
+    /// 自造 `type` 它不认识，`403` 还会被归成 `AUTH`（终态 + 提示「密钥无效」）。
+    /// 真实原因（排队/上游原文）留在 `upstream` 字段里给日志用。
     #[tokio::test]
-    async fn queued_envelope_is_reported_as_upstream_queued() {
+    async fn queued_envelope_is_reported_as_retryable_rate_limit() {
         let body = "{\"code\":\"10605\",\"isQueued\":true,\"retryAfterSeconds\":30}";
         let frame_line = format!("data:{}\n", json!({ "body": body, "statusCodeValue": 403 }));
         let frames = vec![frame_line];
         let mut stream = QoderOpenAiStream::new(upstream_from(&frames));
         let text = collect(&mut stream).await;
-        assert!(text.contains("upstream_queued"), "{text}");
+        assert!(text.contains("rate_limit_error"), "{text}");
         assert!(text.contains("\"code\":429"), "{text}");
-        assert!(text.contains("排队"), "{text}");
-        // 真·鉴权失败不能被误判成排队（`token_invalid` 优先）。
+        assert!(text.contains("HTTP 429"), "文案必须带等价状态码: {text}");
+        // 上游原文（含排队信号）仍要留痕，否则日志里看不到真实原因。
+        assert!(text.contains("10605"), "{text}");
+        // 真·鉴权失败不能被误判成排队（`token_invalid` 优先）—— 但对外同样是 429。
         let auth = format!(
             "data:{}\n",
             json!({ "body": "{\"code\":\"TOKEN_INVALID\",\"isQueued\":true}", "statusCodeValue": 401 })
         );
         let mut stream = QoderOpenAiStream::new(upstream_from(&[auth]));
         let text = collect(&mut stream).await;
-        assert!(text.contains("upstream_error"), "{text}");
-        assert!(!text.contains("upstream_queued"), "{text}");
+        assert!(text.contains("rate_limit_error"), "{text}");
+        assert!(text.contains("HTTP 429"), "{text}");
+        assert!(!text.contains("排队"), "鉴权失败不得说成排队: {text}");
     }
 
     /// 非流式：截断回声 ⇒ `upstream_error`（调用方据此回 502），不是「200 + 空正文」。

@@ -44,6 +44,8 @@ export const DEFAULT_QODER_GATEWAY_CONFIG: QoderGatewayConfig = {
   dailyTokenLimit: 0,
   dailyCreditLimit: 0,
   modelDailyTokenLimit: 0,
+  // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
+  autoFailover: false,
 };
 
 /** 网关配置（前端形状）。 */
@@ -69,6 +71,14 @@ export interface QoderGatewayConfig {
   dailyCreditLimit: number;
   /** G4 单模型当日 token 上限（`0` = 关闭）。 */
   modelDailyTokenLimit: number;
+  /**
+   * ★ issue #129：**账号故障时自动切换**（默认 `false`）。
+   *
+   * 开启后，流中途的账号级失败不再被「补终止标记」伪装成成功，而是先发一条
+   * **可重试**的错误帧（含 `HTTP 429` / `HTTP 502`）；失败账号同时写冷却、解绑粘性
+   * ⇒ 客户端整步重跑时必然落到另一个号。
+   */
+  autoFailover: boolean;
 }
 
 /** 配置的线上形状（snake_case；写回时用）。 */
@@ -94,6 +104,8 @@ export interface QoderGatewayConfigRaw {
   daily_credit_limit: number;
   /** G4 单模型当日 token 上限（`0` = 关闭）。 */
   model_daily_token_limit: number;
+  /** ★ issue #129：账号故障时自动切换。 */
+  auto_failover: boolean;
 }
 
 /**
@@ -327,6 +339,10 @@ export function normalizeQoderGatewayConfig(raw: unknown): QoderGatewayConfig {
       asNumber(read("modelDailyTokenLimit", "model_daily_token_limit")) ??
         DEFAULT_QODER_GATEWAY_CONFIG.modelDailyTokenLimit,
     ),
+    // ★ issue #129：缺键 ⇒ `false`（老配置文件 / 老后端），与「默认关闭」一致。
+    autoFailover:
+      asBoolean(read("autoFailover", "auto_failover")) ??
+      DEFAULT_QODER_GATEWAY_CONFIG.autoFailover,
   };
 }
 
@@ -354,6 +370,7 @@ export function toQoderGatewayConfigRaw(config: QoderGatewayConfig): QoderGatewa
     daily_token_limit: config.dailyTokenLimit,
     daily_credit_limit: config.dailyCreditLimit,
     model_daily_token_limit: config.modelDailyTokenLimit,
+    auto_failover: config.autoFailover,
   };
 }
 

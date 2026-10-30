@@ -280,6 +280,12 @@ pub struct StreamOutcome {
     pub usage: TokenUsage,
     /// 是否见过结束标记。
     pub saw_done: bool,
+    /// ★ issue #129：**错误帧是否已经发出**。
+    ///
+    /// 上游显式发 `error` 事件时由 [`emit`] 置位；上游**断流**（`Err`）时没有事件可转，
+    /// 由 [`stream_convert`] 收尾时补一条标准错误帧 —— 否则「断流」与「模型正常说完」
+    /// 在客户端看来是同一个字节序列（都只有 `[DONE]`），用户只看到半句话。
+    pub error_frame_sent: bool,
 }
 
 /// 把上游响应体流式转换为 OpenAI SSE，逐块送入 `sender`。
@@ -304,9 +310,12 @@ pub async fn stream_convert(
         let chunk = match item {
             Ok(chunk) => chunk,
             Err(error) => {
-                // 上游中途断流：不是账号问题，但必须让客户端收到收尾。
+                /* 上游中途断流：不是「模型说完了」，必须让客户端收到**可重试**的错误。
+                ★ issue #129：这里记 **502** 而不是 `0` —— `(code, message)` 的 `code`
+                会进 `classify_solo`，`0` 落到 `TraeErrKind::None`（= 不冷却、对外 400），
+                断流就被记成「调用方的参数错」。502 才是它的真实语义（5xx / 熔断域）。 */
                 if outcome.error.is_none() {
-                    outcome.error = Some((0, format!("上游连接中断：{error}")));
+                    outcome.error = Some((502, format!("上游连接中断：{error}")));
                 }
                 break;
             }
@@ -349,6 +358,29 @@ pub async fn stream_convert(
         }
     }
 
+    /* ★ issue #129 §3.3：上游**断流**（`Err`）没有 `error` 事件可转 ⇒ 在这里补一条
+    标准错误帧。改造前只补 `[DONE]`，客户端拿到的是「模型说完了」，
+    既不报错也不重试 —— 用户只看到半句话；工具调用场景下还会拿半截 JSON 去执行。 */
+    if !outcome.error_frame_sent {
+        if let Some((code, message)) = outcome.error.as_ref() {
+            let error = super::pool::client_error_of(*code, message);
+            let payload = json!({
+                "error": {
+                    "message": error.message,
+                    "type": error.kind,
+                    "code": error.status,
+                }
+            });
+            if sender
+                .send(Ok(Bytes::from(format!("data: {payload}\n\n"))))
+                .await
+                .is_err()
+            {
+                return outcome;
+            }
+            outcome.error_frame_sent = true;
+        }
+    }
     if !outcome.saw_done {
         let _ = sender.send(Ok(Bytes::from(done_line().to_string()))).await;
         outcome.saw_done = true;
@@ -412,17 +444,23 @@ async fn emit(
         "error" => {
             let code = event.error_code.unwrap_or(0);
             outcome.error = Some((code, event.error_message.clone()));
+            /* ★ issue #129：对外形状走 `pool::client_error_of` —— 上游码（1005 / 4008 /
+            12153）客户端一个都归不了类，而 `HTTP <status>` 能被它的文本正则命中
+            （`429` → `RATE_LIMIT`、`5xx` → `SERVER`，两者都可重试）。
+            **上游原文只进日志**，不进对外文案（见 `failover` 模块头）。 */
+            let error = super::pool::client_error_of(code, &event.error_message);
             let payload = json!({
                 "error": {
-                    "message": event.error_message,
-                    "type": "api_error",
-                    "code": code,
+                    "message": error.message,
+                    "type": error.kind,
+                    "code": error.status,
                 }
             });
             sender
                 .send(Ok(Bytes::from(format!("data: {payload}\n\n"))))
                 .await
                 .map_err(|_| ())?;
+            outcome.error_frame_sent = true;
             sender
                 .send(Ok(Bytes::from(done_line().to_string())))
                 .await
@@ -821,9 +859,20 @@ mod tests {
             lines.push(String::from_utf8(item.unwrap().to_vec()).unwrap());
         }
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("\"code\":1005"));
+        /* ★ issue #129：对外形状**不再**透出上游码 `1005`。
+        `1005` 客户端一个正则都命中不了（归成 `PI_AI_ERROR`，终态），
+        而「套餐限额」本质是「这个号现在不行了」⇒ 收敛成可重试的 `429`。
+        上游码仍在 `outcome.error` 里（日志/账号池用它）。 */
+        assert!(lines[0].contains("\"code\":429"), "{}", lines[0]);
+        assert!(lines[0].contains("HTTP 429"), "{}", lines[0]);
+        assert!(lines[0].contains("rate_limit_error"), "{}", lines[0]);
         assert_eq!(lines[1], "data: [DONE]\n\n");
-        assert_eq!(outcome.error, Some((1005, "plan limit".to_string())));
+        assert_eq!(
+            outcome.error,
+            Some((1005, "plan limit".to_string())),
+            "上游码必须原样留在内部（日志/冷却用它，只有对外文案收敛）"
+        );
         assert!(outcome.saw_done);
+        assert!(outcome.error_frame_sent);
     }
 }

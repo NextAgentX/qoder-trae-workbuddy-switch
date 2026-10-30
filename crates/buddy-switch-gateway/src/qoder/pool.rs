@@ -22,7 +22,7 @@ use buddy_switch_core::modules::qoder::{account, region::QoderRegion};
 use crate::pool::entry::CostTier;
 use crate::pool::entry_like::PoolEntryLike;
 use crate::pool::pick::{pick_with_preference, PickPolicy};
-use crate::pool::{ProbeOutcome, RealmTag};
+use crate::pool::{ProbeOutcome, RealmTag, UpstreamEvent};
 
 /// 探测回填的**冷却下限**（毫秒）—— 与 WorkBuddy 侧 `crate::pool::MIN_PROBE_COOLDOWN_MS` **同值**。
 ///
@@ -130,6 +130,37 @@ pub(crate) fn queue_message(detail: &str) -> String {
     } else {
         format!("上游排队中（不是账号或凭据问题，稍后重试即可）：{detail}")
     }
+}
+
+/// 上游 `(status, detail)` → **对外**错误形状（issue #129）。
+///
+/// ## 为什么对外必须换一套形状
+///
+/// 客户端（DeepSeek Harness 的 `openai-completions` 适配器）**只做文本正则**：
+/// `429` / `rate limit` → `RATE_LIMIT`（可重试），`5\d\d` → `SERVER`（可重试），
+/// `401|403` → `AUTH`（**终态**）。Qoder 的排队（`10605` 裹在 403 里）与余额耗尽
+/// 原样透出时，客户端要么归成 `AUTH`（终态、还提示「密钥无效」）、要么归成
+/// `PI_AI_ERROR` —— 两条都不会重试，而它们本可以靠「换号 + 重跑」救回来。
+///
+/// 对外文案**不拼上游 detail**：detail 里常有 `quota` / `insufficient` 之类短语，
+/// 而客户端的 `QUOTA` 判定排在 `RATE_LIMIT` **之前**且不可重试
+/// （见 [`crate::failover`] 模块头）。真实原因由日志与账号池状态承载。
+pub fn client_error_of(status: u16, detail: &str) -> crate::failover::ClientError {
+    let kind = classify_http_with_detail(status, detail);
+    let event = match kind {
+        // 限流 / 排队 / 余额耗尽 / 凭据失效 ⇒ 统一 429：对客户端都是「这个号不行了」。
+        // ★ `AuthDead` 也走 429 而不是 401 —— 流中途的凭据问题可能只是这一个号过期了。
+        QoderErrKind::RateLimited
+        | QoderErrKind::Queued
+        | QoderErrKind::BalanceExhausted
+        | QoderErrKind::AuthDead => UpstreamEvent::SoftRate {
+            reset_at_ms: None,
+            model_scoped: false,
+        },
+        QoderErrKind::Transient => UpstreamEvent::Server,
+        QoderErrKind::ClientError => UpstreamEvent::Client,
+    };
+    crate::failover::client_error(&event, "", "")
 }
 
 /// 带 body 的分类：`401/403` 里若是排队信号 ⇒ [`QoderErrKind::Queued`]（不惩罚账号）。

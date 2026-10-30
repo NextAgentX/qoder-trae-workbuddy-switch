@@ -31,7 +31,7 @@ use buddy_switch_core::modules::upstream::SESSION_DEAD_MARKERS;
 use crate::pool::entry::CoolKind;
 use crate::pool::entry_like::PoolEntryLike;
 use crate::pool::pick::{pick_with_preference, PickPolicy};
-use crate::pool::PoolSummary;
+use crate::pool::{PoolSummary, UpstreamEvent};
 
 /// 上游错误的治理类别。
 ///
@@ -69,6 +69,40 @@ pub enum TraeErrKind {
     Client,
     /// 业务错误码。
     Business,
+}
+
+/// 上游 `(code, message)` → **对外**错误形状（issue #129）。
+///
+/// ## 为什么对外必须换一套形状
+///
+/// 客户端（DeepSeek Harness 的 `openai-completions` 适配器）**只做文本正则**：
+/// `429` / `rate limit` → `RATE_LIMIT`（可重试），`5\d\d` → `SERVER`（可重试），
+/// `401|403` → `AUTH`（**终态**，且 UI 渲染成「API 密钥无效」）。
+///
+/// Trae 的上游码（`1005` 套餐限额、`4008` 限流、`12153` 会话失效）一个都命中不了，
+/// 原样透出只会让客户端归成 `PI_AI_ERROR` —— 一次终态，连重试的机会都没有。
+/// 而流中途的凭据/额度问题本来可以靠「换号 + 重跑」救回来。
+///
+/// 因此这里把内部类别**收敛**成三种对外形状（口径与 WorkBuddy 侧
+/// [`crate::failover::client_error`] 一致，两处不许分家）。
+pub fn client_error_of(code: i64, message: &str) -> crate::failover::ClientError {
+    let kind = classify_solo(code, message);
+    let event = match kind {
+        // 额度/限流/会话失效/凭据被拒 ⇒ 统一 429：对客户端都是「这个号不行了，换一个」。
+        // ★ `SessionDead` 也走 429 而不是 401 —— 见 issue #129 §5.2 改动 2。
+        TraeErrKind::PlanLimit
+        | TraeErrKind::SoftRate
+        | TraeErrKind::SessionDead
+        | TraeErrKind::AuthRejected
+        // 未知业务码：换号也可能救（`should_rotate` 对它为真），给可重试更安全。
+        | TraeErrKind::Business => UpstreamEvent::SoftRate {
+            reset_at_ms: None,
+            model_scoped: false,
+        },
+        TraeErrKind::Server => UpstreamEvent::Server,
+        TraeErrKind::NotFound | TraeErrKind::Client | TraeErrKind::None => UpstreamEvent::Client,
+    };
+    crate::failover::client_error(&event, "", "")
 }
 
 impl TraeErrKind {

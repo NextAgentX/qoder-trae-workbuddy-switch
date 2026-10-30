@@ -126,6 +126,11 @@ pub struct UsageTap<S> {
     sinks: Vec<Arc<dyn UsageSink>>,
     /// 流内错误接收方（可选）：某一帧是错误信封时回调一次。
     error_sink: Option<Arc<dyn StreamErrorSink>>,
+    /// ★ issue #129：流中途失败信号（可选）。命中错误帧 / 上游断流时写一次，
+    /// 供协议出口（要不要补成功标记）与请求日志（写真实状态码）读取。
+    ///
+    /// 嗅探**只在这一处做**：三个消费者各自判一次必然漂移。
+    failure: Option<Arc<crate::failover::StreamFailure>>,
     /// 已经回调过错误（同一条流只报一次；错误帧之后通常就是断流）。
     error_reported: bool,
     buffer: Vec<u8>,
@@ -142,6 +147,7 @@ impl<S> UsageTap<S> {
             inner: Box::pin(inner),
             sinks,
             error_sink: None,
+            failure: None,
             error_reported: false,
             buffer: Vec::new(),
             latest: None,
@@ -156,6 +162,15 @@ impl<S> UsageTap<S> {
     /// 「要不要治理流内错误」成为一个显式选择。
     pub fn with_error_sink(mut self, sink: Option<Arc<dyn StreamErrorSink>>) -> Self {
         self.error_sink = sink;
+        self
+    }
+
+    /// ★ issue #129：挂**失败信号**槽（`None` = 不记录，行为与改造前逐字相同）。
+    ///
+    /// 开关关闭时调用方仍可传槽（`StreamFailure::new(false)`），此时 `record`
+    /// 内部直接丢弃 —— 关闭态连一次写锁都不做。
+    pub fn with_failure(mut self, failure: Option<Arc<crate::failover::StreamFailure>>) -> Self {
+        self.failure = failure;
         self
     }
 
@@ -191,13 +206,50 @@ impl<S> UsageTap<S> {
         if self.error_reported || self.buffer.is_empty() {
             return;
         }
-        let Some(sink) = self.error_sink.as_ref() else {
-            return;
-        };
         let text = String::from_utf8_lossy(&self.buffer).to_string();
         if let Some(found) = sniff_sse_chunk(&text) {
-            self.error_reported = true;
+            self.report_error(found);
+        }
+    }
+
+    /// 统一出口：记一次「这一帧是错误信封」。
+    ///
+    /// 两个消费者各取所需（`failure` 供出口/日志判收尾，`error_sink` 做治理），
+    /// 但**判定只做一次** —— 分开判会让「出口认为失败、日志认为成功」这种漂移成为可能。
+    fn report_error(&mut self, found: crate::protocol::error_sniffer::SniffedError) {
+        self.error_reported = true;
+        if let Some(failure) = self.failure.as_ref() {
+            failure.record(found.event.clone(), found.message.clone());
+        }
+        if let Some(sink) = self.error_sink.as_ref() {
             sink.on_error(found);
+        }
+    }
+
+    /// ★ issue #129 §3.3：上游**断流**（`Err`）也算一次账号级失败。
+    ///
+    /// 改造前这里只 `report()`：连接被 reset 这种最常见的断流既不给客户端报错、
+    /// 也不给账号写冷却 ⇒ 下一次选号那个号仍然「可用」，客户端即便重试也会再撞同一堵墙。
+    ///
+    /// 归为 `Server`（走熔断域）而不是 `SessionDead`：网络抖动不该被升级成
+    /// 「禁用账号」；只有开关开启时才上报，关闭态保持原行为。
+    fn note_upstream_break<E: std::fmt::Debug>(&mut self, error: &E) {
+        // 错误帧已经报过（帧在前、断流在后）：不要再把同一次事故记两遍。
+        if self.error_reported {
+            return;
+        }
+        let Some(failure) = self.failure.as_ref().filter(|signal| signal.is_enabled()) else {
+            return;
+        };
+        let detail = format!("上游连接中断：{error:?}");
+        failure.record(crate::pool::UpstreamEvent::Server, detail.clone());
+        self.error_reported = true;
+        if let Some(sink) = self.error_sink.as_ref() {
+            sink.on_error(crate::protocol::error_sniffer::SniffedError {
+                event: crate::pool::UpstreamEvent::Server,
+                message: detail,
+                status: 502,
+            });
         }
     }
 
@@ -207,9 +259,8 @@ impl<S> UsageTap<S> {
         // ★ 流内错误（P0-3）：同一帧缓存窗口里顺手判一次，**不改字节**。
         //   放在取 usage 之前：错误帧通常没有 usage，早点返回能让「流内失败」更快落账。
         if !self.error_reported {
-            if let (Some(sink), Some(found)) = (self.error_sink.as_ref(), sniff_sse_chunk(&text)) {
-                self.error_reported = true;
-                sink.on_error(found);
+            if let Some(found) = sniff_sse_chunk(&text) {
+                self.report_error(found);
             }
         }
         for line in text.lines() {
@@ -270,6 +321,9 @@ where
             }
             Poll::Ready(Some(Err(error))) => {
                 this.finished = true;
+                // ★ issue #129 §3.3：断流也算账号级失败（开关开启时）——
+                //   必须在 `report()` **之前**，日志 sink 要在同一次回调里读到失败。
+                this.note_upstream_break(&error);
                 this.report();
                 Poll::Ready(Some(Err(error)))
             }
@@ -424,6 +478,57 @@ mod tests {
         let calls = sink.calls.lock().expect("lock");
         assert_eq!(calls.len(), 1, "残帧里的错误必须被识别");
         assert!(calls[0].message.contains("cut off mid-stream"));
+    }
+
+    /// ★★ issue #129 §3.3：上游**断流**也必须写失败信号并上报治理。
+    ///
+    /// 改造前 `Err` 分支只 `report()`：连接被 reset 这种最常见的断流**既不报错、
+    /// 也不写冷却** ⇒ 下次选号那个号仍然「可用」，客户端即便重试也会再撞同一堵墙。
+    ///
+    /// 可证伪：删掉 `poll_next` 里的 `note_upstream_break` ⇒ 本用例两条断言全红。
+    #[tokio::test]
+    async fn upstream_break_records_a_server_failure_and_reports_it() {
+        let sink = Arc::new(RecordingErrorSink::default());
+        let signal = crate::failover::StreamFailure::new(true);
+        let stream = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(USAGE_FRAME.as_bytes())),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let mut tap = UsageTap::new(stream, Vec::new())
+            .with_error_sink(Some(sink.clone() as Arc<dyn StreamErrorSink>))
+            .with_failure(Some(signal.clone()));
+        while tap.next().await.is_some() {}
+
+        let failure = signal.peek().expect("断流必须写进失败信号");
+        assert_eq!(
+            failure.event,
+            crate::pool::UpstreamEvent::Server,
+            "断流归 Server（熔断域），不得升级成 SessionDead（会禁用账号）"
+        );
+        assert_eq!(failure.status, 502);
+        let calls = sink.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1, "断流必须上报一次治理（写冷却）");
+        assert_eq!(calls[0].status, 502);
+    }
+
+    /// ★ 开关**关闭**时断流不写信号、也不上报（关闭态行为与改造前逐字一致）。
+    #[tokio::test]
+    async fn upstream_break_is_ignored_when_failover_is_off() {
+        let sink = Arc::new(RecordingErrorSink::default());
+        let signal = crate::failover::StreamFailure::new(false);
+        let stream = futures_util::stream::iter(vec![
+            Ok(Bytes::from_static(USAGE_FRAME.as_bytes())),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let mut tap = UsageTap::new(stream, Vec::new())
+            .with_error_sink(Some(sink.clone() as Arc<dyn StreamErrorSink>))
+            .with_failure(Some(signal.clone()));
+        while tap.next().await.is_some() {}
+        assert!(signal.peek().is_none(), "关闭时不得记录");
+        assert!(
+            sink.calls.lock().expect("lock").is_empty(),
+            "关闭时不得上报"
+        );
     }
 
     fn report(credit: f64, prompt: i64, completion: i64) -> Option<UsageReport> {

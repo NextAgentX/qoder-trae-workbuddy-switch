@@ -706,6 +706,9 @@ export default function QoderApiServicePage() {
               // 排除：与 WorkBuddy 同一语义（硬约束），只是 scope 换成 `qoder:<region>`。
               onExclude={(uid, excluded) => void onExclude(uid, excluded)}
               excludingUid={excludingUid}
+              // ★ issue #129：账号故障时自动切换（网关级，与会话粘性同层）。
+              autoFailover={config.autoFailover}
+              onAutoFailoverChange={(checked) => void persist({ autoFailover: checked })}
               totalRequests={status?.totalRequests ?? null}
               tiles={QODER_POOL_TILES}
               /* 选号策略（哨兵值由后端 `pool::parse_preferred` 解释成 `PickMode`）。 */

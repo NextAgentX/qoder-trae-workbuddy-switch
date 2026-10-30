@@ -39,6 +39,8 @@ export const DEFAULT_TRAE_GATEWAY_CONFIG: TraeGatewayConfig = {
   captureEnabled: false,
   // Max Mode 默认开（与 Rust `TraeGatewayConfig::default` 同值）。
   maxMode: true,
+  // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
+  autoFailover: false,
 };
 
 function asString(value: unknown): string | undefined {
@@ -96,6 +98,10 @@ export function normalizeTraeGatewayConfig(raw: unknown): TraeGatewayConfig {
       DEFAULT_TRAE_GATEWAY_CONFIG.captureEnabled,
     maxMode:
       asBoolean(read("maxMode", "max_mode")) ?? DEFAULT_TRAE_GATEWAY_CONFIG.maxMode,
+    // ★ issue #129：缺键 ⇒ `false`（老配置文件 / 老后端），与「默认关闭」一致。
+    autoFailover:
+      asBoolean(read("autoFailover", "auto_failover")) ??
+      DEFAULT_TRAE_GATEWAY_CONFIG.autoFailover,
   };
 }
 
@@ -121,6 +127,7 @@ export function toTraeGatewayConfigRaw(config: TraeGatewayConfig): TraeGatewayCo
     // ★ 必须写回：保存是整份覆盖，缺键 = 抓取被静默关闭（见 `captureEnabled` 注释）。
     capture_enabled: config.captureEnabled,
     max_mode: config.maxMode,
+    auto_failover: config.autoFailover,
   };
 }
 

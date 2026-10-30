@@ -1640,12 +1640,19 @@ async fn settle(
             .note_success(&account.uid);
     }
 
-    // 状态码恒为 200：SSE 已经以 200 开头发出，错误只能体现在事件里。
+    /* ★ issue #129 §5.2 改动 4：流中途失败必须写**真实**状态码。
+    改造前这里恒写 200（「SSE 已经以 200 开头发出」），于是「账号在流中途挂掉」
+    在日志页显示成一次**成功**请求 —— 对外静默的代价绝不能是「对内也静默」。
+    Qoder 侧早就是按错误帧回填 429/502 的，这里对齐它。 */
+    let status = error
+        .as_ref()
+        .map(|(code, _)| super::pool::client_error_of(*code, "").status)
+        .unwrap_or(200);
     state
         .record_request(
             endpoint,
             model,
-            200,
+            status,
             &account.uid,
             latency_ms,
             stream,

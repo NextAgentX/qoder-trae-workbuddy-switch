@@ -249,6 +249,13 @@ pub struct TraeGatewayConfig {
     /// 「Max Mode 万一加价 / 拖慢，先按默认窗口用」的场景。与原型里的开关同义。
     #[serde(alias = "maxMode")]
     pub max_mode: bool,
+    /// **账号故障时自动切换**（issue #129，默认 `false`）：流中途的账号级失败不再
+    /// 被「补终止标记」伪装成成功，而是先发**可重试**错误帧（含 `HTTP <status>`），
+    /// 并给失败账号写冷却、解绑粘性 —— 客户端整步重跑时必然落到另一个号。
+    ///
+    /// 与 WorkBuddy 网关的 `GatewayConfig::auto_failover` 同名同义，便于三处对齐。
+    #[serde(alias = "autoFailover")]
+    pub auto_failover: bool,
 }
 
 /// 进程内 Trae 网关当前的 Max Mode 开关（给**命令面**等拿不到 `TraeGatewayState` 的地方用）。
@@ -272,6 +279,7 @@ impl Default for TraeGatewayConfig {
             sticky_ttl_ms: 30 * 60 * 1000,
             capture_enabled: false,
             max_mode: true,
+            auto_failover: false,
         }
     }
 }
@@ -917,6 +925,7 @@ mod tests {
             "sticky_ttl_ms",
             "capture_enabled",
             "max_mode",
+            "auto_failover",
         ]
         .into_iter()
         .collect();

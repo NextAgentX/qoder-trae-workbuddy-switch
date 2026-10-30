@@ -122,6 +122,27 @@ pub fn sniff_sse_chunk(chunk: &str) -> Option<SniffedError> {
     None
 }
 
+/// 扫描**单个 `data:` 负载**（调用方已经把 `data:` 前缀剥掉了）。
+///
+/// ## 为什么需要这个入口
+///
+/// [`sniff_sse_chunk`] 按行找 `data:` / `event:` 前缀 —— 对「整块 SSE 文本」正确，
+/// 但对已经拆好帧的调用方（`AnthropicSseStream::ingest` / `ResponsesSseStream::ingest`）
+/// 就是**恒不命中**：它们手里只有负载本身。把负载重新拼回 `data: ` 再传进去能work，
+/// 但每次多一次分配，而且「拼回去再拆」本身容易写错（漏掉前缀就静默失效，
+/// 表现为「错误帧被当成正常帧丢弃」—— 正是本 issue 要修的那种隐身故障）。
+pub fn sniff_payload(payload: &str) -> Option<SniffedError> {
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return None;
+    }
+    // 正常补全优先（有 `choices` 元素就不可能是错误信封）。
+    if has_non_empty_choices(payload) {
+        return None;
+    }
+    sniff_json_object(payload)
+}
+
 /// `choices` 数组里是否**真有元素**（有元素就不可能是错误信封）。
 fn has_non_empty_choices(text: &str) -> bool {
     // 快速否决：没有 `choices` 关键字直接返回 false，避免为每个 chunk 做 JSON 解析。
@@ -187,8 +208,37 @@ fn build(body: &str) -> SniffedError {
     }
 }
 
+/// 信封里**显式给出**的等价状态码（`{"error":{"code":429}}` / `{"code":429}`）。
+///
+/// ## 为什么必须先读它
+///
+/// 网关自己发出的错误帧（`crate::failover`）带的是**等价 HTTP 状态码**，
+/// 而 Qoder / Trae 的错误帧也把状态码放在 `code` 里。不看这个字段、只靠下面的
+/// 关键词推断，会把一个明确的 `429` 判成「未知信封 ⇒ 502」—— 客户端于是从
+/// `RATE_LIMIT`（可重试）变成 `SERVER`（也可重试，但语义错了，而且
+/// `429` 的 Retry-After 语义丢失）。
+///
+/// 只认 **100..600**：上游私有码（`6004` / `11102` / `12153`）落在这个区间之外，
+/// 必须继续走下面的关键词分支（它们各有专门的冷却口径）。
+fn explicit_status(body: &str) -> Option<u16> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let code = value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .or_else(|| value.get("code"))?;
+    let number = match code {
+        Value::Number(number) => number.as_u64()?,
+        Value::String(text) => text.trim().parse().ok()?,
+        _ => return None,
+    };
+    (100..600).contains(&number).then_some(number as u16)
+}
+
 /// 推断等价状态码（决定 `classify_event` 走哪条分支、以及对外错误码）。
 fn infer_status(body: &str) -> u16 {
+    if let Some(status) = explicit_status(body) {
+        return status;
+    }
     if body.contains("6004") || body.contains("IsModelRateLimit") {
         // 模型级限流：必须给 429，否则 `classify_event` 落不到 `SoftRate` 分支。
         429

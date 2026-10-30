@@ -206,6 +206,8 @@ pub async fn messages_for_region(
                     completion_tokens: 0,
                     credit: 0.0,
                     stream: true,
+                    // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+                    error: None,
                 }
                 .to_value(),
             );
@@ -234,6 +236,8 @@ pub async fn messages_for_region(
                     completion_tokens: 0,
                     credit: 0.0,
                     stream: wants_stream,
+                    // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+                    error: None,
                 }
                 .to_value(),
             );
@@ -253,6 +257,16 @@ pub async fn messages_for_region(
                 .unwrap_or_else(|| model.clone());
             // ★ 上游**响应头**已到 ⇒ 此刻的耗时就是 `latencyMs`（TTFB）；总耗时是 `totalMs`。
             let header_at_ms = started.elapsed().as_millis() as i64;
+            // ★ issue #129：流中途失败的三个消费者（协议出口 / 请求日志 / 粘性解绑）
+            //   共用同一个信号槽。开关从**本轮**配置快照读（热生效）。
+            let auto_failover = state.config_snapshot().await.auto_failover;
+            let failure = crate::failover::StreamFailure::new(auto_failover);
+            // 粘性键用**客户端请求的模型**（与 `relay` 内部推导同一口径）。
+            let sticky_key = relay::sticky_key_for(
+                region,
+                &model,
+                relay::conversation_id_of(&parsed).as_deref(),
+            );
             let mut resp = if wants_stream {
                 // ★ 流式请求的日志**推迟到流结束**才写（见 `StreamingLogSink`）：
                 //   写日志时用量还没到达，此前只能写死 0（实测本机 200/200 条全 0）。
@@ -264,7 +278,8 @@ pub async fn messages_for_region(
                         key_scope: key.as_deref().map(|actor| actor.scope),
                         method: "POST",
                         region,
-                        account,
+                        // 留给 `with_failover` 的对外文案（下面还要读一次）。
+                        account: account.clone(),
                         account_uid: uid.clone(),
                         model: model.clone(),
                         status: 200,
@@ -276,22 +291,37 @@ pub async fn messages_for_region(
                         completion_tokens: 0,
                         credit: 0.0,
                         stream: true,
+                        // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+                        error: None,
                     },
                     started,
                     &uid,
                     &model,
                     // ★ issue #76：按密钥的 token 记账（流结束才写）。
                     key.as_deref(),
+                    // ★ issue #129：日志据此写真实状态码（不是恒 200）。
+                    Some(failure.clone()),
                 );
-                sse_response(AnthropicSseStream::new(
-                    crate::protocol::usage_tap::UsageTap::new(
-                        relay::prefix_stream(prefix, response),
-                        sinks,
+                sse_response(
+                    AnthropicSseStream::new(
+                        crate::protocol::usage_tap::UsageTap::new(
+                            relay::prefix_stream(prefix, response),
+                            sinks,
+                        )
+                        // ★ 流内信封错误：与 chat 路由同一判据，只是错误体形状不同。
+                        .with_error_sink(relay::envelope_error_sink(
+                            &state,
+                            &uid,
+                            &model,
+                            sticky_key.as_deref(),
+                        ))
+                        // ★ issue #129：同一份嗅探结果也写进失败槽（出口/日志读它）。
+                        .with_failure(Some(failure.clone())),
+                        model.clone(),
                     )
-                    // ★ 流内信封错误：与 chat 路由同一判据，只是错误体形状不同。
-                    .with_error_sink(relay::envelope_error_sink(&state, &uid, &model)),
-                    model,
-                ))
+                    // ★ issue #129：开关开启时，收尾发 `event: error` 而不是 `message_stop`。
+                    .with_failover(Some(failure), &account),
+                )
             } else {
                 let text = relay::body_text_with_prefix(prefix, response).await;
                 // ★ 200 信封错误（P0-3）：与 chat 路由同一判据、同一治理副作用，
@@ -316,6 +346,8 @@ pub async fn messages_for_region(
                             completion_tokens: 0,
                             credit: 0.0,
                             stream: false,
+                            // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+                            error: None,
                         }
                         .to_value(),
                     );
@@ -366,6 +398,8 @@ pub async fn messages_for_region(
                         completion_tokens,
                         credit,
                         stream: false,
+                        // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
+                        error: None,
                     }
                     .to_value(),
                 );

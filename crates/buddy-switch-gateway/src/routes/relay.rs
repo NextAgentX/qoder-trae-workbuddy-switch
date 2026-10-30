@@ -1438,6 +1438,12 @@ pub struct EnvelopeErrorSink {
     state: GatewayState,
     uid: String,
     model: String,
+    /// 会话粘性键（`None` = 客户端没给会话 id ⇒ 本来就没绑定）。
+    ///
+    /// ★ issue #129 §5.2 改动 3：首帧前的两条失败路径早已解绑粘性，首帧后的
+    /// sink 路径**漏了这一步** ⇒ 客户端重跑时粘性会把它拉回同一个号，
+    /// 开关看起来「没生效」（其实换号逻辑从没被执行）。
+    sticky_key: Option<String>,
 }
 
 impl crate::protocol::usage_tap::StreamErrorSink for EnvelopeErrorSink {
@@ -1445,8 +1451,19 @@ impl crate::protocol::usage_tap::StreamErrorSink for EnvelopeErrorSink {
         let state = self.state.clone();
         let uid = self.uid.clone();
         let model = self.model.clone();
+        let sticky_key = self.sticky_key.clone();
         tokio::spawn(async move {
+            // ① 冷却 / 熔断 / 模型闸门（既有唯一路径）。
             note_envelope_failure(&state, &uid, &model, &error.event).await;
+            // ② 粘性解绑：这个号已经失败过，下一轮必须换。
+            if let Some(key) = sticky_key.as_deref() {
+                state.sticky.write().await.unbind(key);
+            }
+            // ③ 管理面「最近一次失败」：流中途失败不经过 `relay()` 的唯一失败出口，
+            //    不写这里的话账号池卡片能看到冷却、而「最近一次失败」却还停在上一次。
+            state
+                .note_last_error(format!("账号「{uid}」流内失败：{}", error.message))
+                .await;
         });
     }
 }
@@ -1456,6 +1473,8 @@ pub fn envelope_error_sink(
     state: &GatewayState,
     uid: &str,
     model: &str,
+    // ★ issue #129：首帧后失败同样要解绑粘性（见 `EnvelopeErrorSink::sticky_key`）。
+    sticky_key: Option<&str>,
 ) -> Option<std::sync::Arc<dyn crate::protocol::usage_tap::StreamErrorSink>> {
     if uid.is_empty() {
         return None;
@@ -1464,6 +1483,7 @@ pub fn envelope_error_sink(
         state: state.clone(),
         uid: uid.to_string(),
         model: model.to_string(),
+        sticky_key: sticky_key.map(str::to_string),
     }))
 }
 
@@ -1622,12 +1642,28 @@ fn allowed_uids_for(policy: &crate::apikey::KeyPolicy, region: Region) -> Option
 /// 区域与模型都进键：跨区域的账号库本就分家；同一会话切模型时应允许落到各自最合适的账号
 /// （否则「模型级限流只封锁该模型」的优势会被粘性抵消）。
 fn sticky_key_of(request: &RelayRequest) -> Option<String> {
-    request
-        .conversation_id
-        .as_deref()
+    sticky_key_for(
+        request.region,
+        &request.model,
+        request.conversation_id.as_deref(),
+    )
+}
+
+/// [`sticky_key_of`] 的**路由层可用**版本（issue #129）。
+///
+/// 流中途失败的治理（解绑粘性）发生在 `StreamErrorSink` 里 —— 那是个后台任务，
+/// 拿不到 `RelayRequest`。三条路由本来就有 `(region, model, conversation_id)`，
+/// 直接用同一份推导即可；**不得**在别处另写一套拼键规则（键一不一致，
+/// 解绑就静默失效，表现为「重试还是撞同一个号」）。
+pub fn sticky_key_for(
+    region: Region,
+    model: &str,
+    conversation_id: Option<&str>,
+) -> Option<String> {
+    conversation_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| sticky::sticky_key(request.region.as_str(), &request.model, value))
+        .map(|value| sticky::sticky_key(region.as_str(), model, value))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2076,13 +2112,14 @@ pub fn stream_sinks(
     // ★ issue #76：调用方的 `KeyActor`（`None` = 无 Key 的调用 ⇒ 不记按密钥用量）。
     //   用 actor 而不是具体 Key 类型：统一网关的 Key 是第四套台账，也能带进来。
     key: Option<&crate::apikey::KeyActor>,
+    // ★ issue #129：流中途失败信号（日志据此写真实状态码而非恒 200）。
+    failure: Option<std::sync::Arc<crate::failover::StreamFailure>>,
 ) -> Vec<std::sync::Arc<dyn crate::protocol::usage_tap::UsageSink>> {
     let mut sinks: Vec<std::sync::Arc<dyn crate::protocol::usage_tap::UsageSink>> =
-        vec![std::sync::Arc::new(crate::logging::StreamingLogSink::new(
-            state.log.clone(),
-            meta,
-            started,
-        ))];
+        vec![std::sync::Arc::new(
+            crate::logging::StreamingLogSink::new(state.log.clone(), meta, started)
+                .with_failure(failure),
+        )];
     if let Some(ledger) = pool_usage_sink(state, uid, model) {
         sinks.push(ledger);
     }

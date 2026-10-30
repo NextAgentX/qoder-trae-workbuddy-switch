@@ -62,6 +62,20 @@ pub struct GatewayConfig {
     /// 单轮请求的最大换号次数（默认 3）。
     #[serde(alias = "maxRotate")]
     pub max_rotate: usize,
+    /// **账号故障时自动切换**（issue #129，默认 `false`）。
+    ///
+    /// 开启后，流中途的账号级失败不再被「补终止标记」伪装成成功，而是先发一条
+    /// **可重试**的错误帧（`429` / `502`，见 [`crate::failover`]），让客户端整步重跑；
+    /// 失败的账号同时写冷却、解绑粘性 ⇒ 重试必然落到另一个号。
+    ///
+    /// 默认关闭是刻意的：它改变对外字节语义（从「假成功」变成「显式错误」），
+    /// 不能让升级悄悄改变既有表现；也让「不勾选 = 回归基线」成为天然的回归测试。
+    ///
+    /// ★ 放在 config **顶层**而不是 `PoolConfig` 里：`PoolConfig` 是**启动期固化**的
+    /// （`Pool::new` 克隆一次、运行期无 setter），而本开关必须热生效 ⇒ 每轮从
+    /// `config_snapshot()` 读，与 `max_rotate` 同一处。
+    #[serde(alias = "autoFailover")]
+    pub auto_failover: bool,
     /// 是否启用出站指纹脱敏（默认 true）。
     #[serde(alias = "sanitizeFingerprints")]
     pub sanitize_fingerprints: bool,
@@ -113,6 +127,7 @@ impl Default for GatewayConfig {
             log_bodies: false,
             per_key_rate_limit: None,
             max_rotate: 3,
+            auto_failover: false,
             sanitize_fingerprints: true,
             prompt_mode: "passthrough".to_string(),
             prompt_file: None,
@@ -641,6 +656,7 @@ mod tests {
             "log_bodies",
             "per_key_rate_limit",
             "max_rotate",
+            "auto_failover",
             "sanitize_fingerprints",
             "prompt_mode",
             "prompt_file",

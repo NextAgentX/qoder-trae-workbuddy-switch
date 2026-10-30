@@ -1,10 +1,12 @@
-import { Loader2 } from "lucide-react";
+import { Info, Loader2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { POOL_STATUS_LABELS } from "@/lib/gateway";
 import { useT } from "@/lib/i18n";
 import type { GatewayPoolAccount, GatewayPoolSummary } from "@/lib/types";
@@ -258,6 +260,9 @@ export function AccountPoolCard({
   revivingUid = null,
   onExclude,
   excludingUid = null,
+  autoFailover,
+  onAutoFailoverChange,
+  failoverSaving = false,
   className,
 }: {
   pool: GatewayPoolSummary | null;
@@ -292,6 +297,17 @@ export function AccountPoolCard({
   onExclude?: (uid: string, excluded: boolean) => void;
   /** 正在切换排除状态的 uid。 */
   excludingUid?: string | null;
+  /**
+   * ★ issue #129：**账号故障时自动切换**的当前值。
+   *
+   * 三平台各有一份同名字段（`auto_failover`）。不传 = 该调用点未接线 ⇒ **不渲染**开关
+   * （宁可少一个控件，也不要摆一个点了不生效的假开关）。
+   */
+  autoFailover?: boolean;
+  /** 切换出口；与 `autoFailover` **同生同空**。 */
+  onAutoFailoverChange?: (value: boolean) => void;
+  /** 开关保存中（禁用，避免连点产生两次整份写入）。 */
+  failoverSaving?: boolean;
   className?: string;
 }) {
   const t = useT();
@@ -344,6 +360,44 @@ export function AccountPoolCard({
           </SelectContent>
         </Select>
         <div className="grow" />
+        {/* ★ issue #129：账号故障时自动切换。
+            放在工具条而不是另开一张卡：它是**选号行为**的一个开关，与「指定账号」
+            同层；摆到别处会让用户以为是全局设置（改了影响所有平台）。 */}
+        {onAutoFailoverChange ? (
+          <div className="flex items-center gap-2">
+            <Switch
+              id="gateway-auto-failover"
+              checked={autoFailover ?? false}
+              onCheckedChange={onAutoFailoverChange}
+              disabled={saving || failoverSaving}
+              aria-label={t("shared.gateway.pool.autoFailover")}
+            />
+            <label
+              htmlFor="gateway-auto-failover"
+              className="cursor-pointer text-xs text-muted-foreground"
+            >
+              {t("shared.gateway.pool.autoFailover")}
+            </label>
+            {/* ⓘ 只是解释，不是必需信息 ⇒ 收进浮层，工具条保持一行。
+                给 `aria-label` 让键盘 / 读屏用户也能拿到说明。 */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="text-muted-foreground/70 transition-colors hover:text-foreground"
+                    aria-label={t("shared.gateway.pool.autoFailoverHint")}
+                  >
+                    <Info className="size-3.5" aria-hidden />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-80 text-xs leading-relaxed">
+                  {t("shared.gateway.pool.autoFailoverHint")}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+        ) : null}
         {totalRequests !== null && (
           <span className="text-xs text-muted-foreground">
             {t("shared.gateway.pool.totalRequests", { count: formatCount(totalRequests) })}

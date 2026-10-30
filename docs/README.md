@@ -26,6 +26,7 @@
 | 服务器上没有客户端，怎么登录 / 能不能开网关 | [`specs/CLIENTLESS-AUTH-PLAN.md`](specs/CLIENTLESS-AUTH-PLAN.md) |
 | 把 Codex / Claude Code / 其它客户端接到网关 | [`guides/GATEWAY-CLIENT-INTEGRATION.md`](guides/GATEWAY-CLIENT-INTEGRATION.md) |
 | 改网关（路由 / 换号 / 错误信封 / 命名空间） | [`specs/UNIFIED-GATEWAY-ARCH.md`](specs/UNIFIED-GATEWAY-ARCH.md) + [`specs/P11-ARCH.md`](specs/P11-ARCH.md) + [`specs/P12-ARCH.md`](specs/P12-ARCH.md) |
+| 账号在回复中途挂掉 / 想「静默换号」（issue #129） | [`specs/ACCOUNT-FAILOVER.md`](specs/ACCOUNT-FAILOVER.md)（对外错误形状契约 + 关闭态不变量 + 五条治理链路） |
 | 改前端某个页面 | [`specs/PLAN.md`](specs/PLAN.md) 对应 §3.x + 该期 `P*-ARCH.md` |
 | 给密钥设 token 配额 / 限制可访问账号（issue #76） | [`specs/KEY-PERMISSION-UI-DESIGN.md`](specs/KEY-PERMISSION-UI-DESIGN.md)（**已实现**：四条产品线的台账 / 命令 / 前端表 / 中继全部接通）+ [`prototype/key-permission-design.html`](prototype/key-permission-design.html)（可点设计稿） |
 | 侧栏太占地方 / 想只看图标（折叠） | [`specs/SIDEBAR-COLLAPSE-DESIGN.md`](specs/SIDEBAR-COLLAPSE-DESIGN.md)（已落地）+ [`prototype/verify-sidebar-collapse.cjs`](prototype/verify-sidebar-collapse.cjs)（行为校验） |

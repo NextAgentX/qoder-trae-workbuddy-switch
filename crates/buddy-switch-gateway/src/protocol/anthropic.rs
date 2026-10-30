@@ -428,6 +428,18 @@ pub struct AnthropicSseStream<S> {
     output_tokens: u64,
     stop_reason: String,
     pending: VecDeque<Bytes>,
+    /// ★ issue #129：账号故障自动切换的失败信号（`None` = 开关关闭 / 未接入）。
+    ///
+    /// 与 `SsePassthrough` 同构：收尾时读到「这次其实是失败」就发 `event: error`
+    /// 而不是补 `message_stop` —— 后者会让客户端把半句话当成「模型说完了」。
+    failover: Option<AnthropicFailover>,
+}
+
+/// Anthropic 出口的失败信号 + 对外文案所需的上下文。
+struct AnthropicFailover {
+    signal: std::sync::Arc<crate::failover::StreamFailure>,
+    /// 命中账号的展示名（写进对外文案）。
+    account: String,
 }
 
 impl<S> AnthropicSseStream<S> {
@@ -448,7 +460,21 @@ impl<S> AnthropicSseStream<S> {
             output_tokens: 0,
             stop_reason: "end_turn".to_string(),
             pending: VecDeque::new(),
+            failover: None,
         }
+    }
+
+    /// ★ issue #129：接入失败信号（`None` = 保持原行为）。
+    pub fn with_failover(
+        mut self,
+        signal: Option<std::sync::Arc<crate::failover::StreamFailure>>,
+        account: impl Into<String>,
+    ) -> Self {
+        self.failover = signal.map(|signal| AnthropicFailover {
+            signal,
+            account: account.into(),
+        });
+        self
     }
 
     fn emit(&mut self, event: &str, data: Value) {
@@ -495,10 +521,41 @@ impl<S> AnthropicSseStream<S> {
                 self.finalize();
                 return;
             }
+            /* ★ issue #129：先把**每一帧**判一遍错误信封（`{"code":6004,…}` 这种没有
+            `error` 字段的上游私有形态，`handle_delta` 的旧分支看不见它）⇒ 从前它落到
+            「没有 choices ⇒ 丢弃」，最后被 `finalize()` 补成 `message_stop` =
+            **把失败伪装成正常结束**。判定收在 `error_sniffer` 一处，三种形状共用。 */
+            if let Some(found) = crate::protocol::error_sniffer::sniff_payload(payload) {
+                self.fail(&found);
+                return;
+            }
             if let Ok(value) = serde_json::from_str::<Value>(payload) {
                 self.handle_delta(&value);
             }
         }
+    }
+
+    /// ★ issue #129：把一次流内失败转成 Anthropic 的 `error` 事件并**终止**本轮。
+    ///
+    /// 对外形状走 [`crate::failover::client_error`]（含等价 HTTP 状态码、无配额短语）——
+    /// 上游原文里的 `6004` / `12153` 客户端一个都归不了类（`PI_AI_ERROR`，终态）。
+    ///
+    /// **不补** `message_delta` / `message_stop`：Anthropic 客户端见到 `error` 即终止，
+    /// 再补一个「正常结束」会把这次失败重新伪装成成功。
+    fn fail(&mut self, found: &crate::protocol::error_sniffer::SniffedError) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let account = self
+            .failover
+            .as_ref()
+            .map(|tail| tail.account.clone())
+            .unwrap_or_default();
+        self.ensure_started();
+        let error = crate::failover::client_error(&found.event, &account, &self.model);
+        self.pending
+            .push_back(crate::failover::anthropic_error_event(&error));
     }
 
     fn handle_delta(&mut self, value: &Value) {
@@ -660,6 +717,38 @@ impl<S> AnthropicSseStream<S> {
         }
     }
 
+    /// ★ issue #129：断流收尾。返回 `true` 表示已按失败处理（发了 `error` 事件），
+    /// 调用方**不要**再 `finalize()`；`false` 表示开关关闭 / 无失败记录 ⇒ 走原路径。
+    ///
+    /// 失败记录由 `UsageTap` 写在**同一路流**里（它更靠近上游，`Err` 时先写后 report），
+    /// 这里只读 —— 嗅探只有一处，判定就不会漂移。
+    fn fail_on_break(&mut self) -> bool {
+        // 先取出需要的值，释放对 `self.failover` 的借用（下面要 `&mut self`）。
+        let (enabled, account, failure) = match self.failover.as_ref() {
+            Some(tail) => (
+                tail.signal.is_enabled(),
+                tail.account.clone(),
+                tail.signal.peek(),
+            ),
+            None => return false,
+        };
+        if !enabled {
+            return false;
+        }
+        let Some(failure) = failure else {
+            return false;
+        };
+        if self.finished {
+            return true;
+        }
+        self.finished = true;
+        self.ensure_started();
+        let error = crate::failover::client_error(&failure.event, &account, &self.model);
+        self.pending
+            .push_back(crate::failover::anthropic_error_event(&error));
+        true
+    }
+
     fn finalize(&mut self) {
         if self.finished {
             return;
@@ -716,7 +805,12 @@ where
                 Poll::Ready(None) => this.finalize(),
                 Poll::Ready(Some(Err(error))) => {
                     eprintln!("[gateway] Anthropic 上游流中途异常: {error:?}");
-                    this.finalize();
+                    /* ★ issue #129 §3.3：断流是**账号级失败**，不是「模型说完了」。
+                    开关开启时发 `event: error`（可重试）而不是 `finalize()` 补
+                    `message_stop` —— 后者会让客户端把半句话当成完整回答。 */
+                    if !this.fail_on_break() {
+                        this.finalize();
+                    }
                 }
                 Poll::Ready(Some(Ok(chunk))) => this.ingest(&chunk),
             }
@@ -734,6 +828,77 @@ mod tests {
             .iter()
             .map(|chunk| String::from_utf8_lossy(chunk).to_string())
             .collect()
+    }
+
+    /// ★★ issue #129：开关**关闭**时，上游断流仍然补 `message_stop`（改造前行为）。
+    ///
+    /// 「默认关闭 = 回归基线」必须可证伪：多一条 `event: error` 就说明门控失效。
+    #[tokio::test]
+    async fn broken_stream_without_failover_still_finalizes() {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            )),
+            Err(std::io::Error::other("connection reset")),
+        ];
+        let signal = crate::failover::StreamFailure::new(false);
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string())
+            .with_failover(Some(signal), "一号");
+        let events: Vec<Bytes> = stream.map(|item| item.unwrap()).collect().await;
+        let text = collect_text(&events);
+        assert!(text.contains("message_stop"), "{text}");
+        assert!(
+            !text.contains("event: error"),
+            "关闭时不得发错误事件：{text}"
+        );
+    }
+
+    /// ★★ issue #129：开关**开启** + 上游断流 ⇒ 发 `event: error` 且**不补**
+    /// `message_delta` / `message_stop`（后者会把失败重新伪装成「正常结束」）。
+    #[tokio::test]
+    async fn broken_stream_with_failover_emits_error_instead_of_message_stop() {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+            )),
+            Err(std::io::Error::other("connection reset")),
+        ];
+        let signal = crate::failover::StreamFailure::new(true);
+        signal.record(crate::pool::UpstreamEvent::Server, "上游连接中断");
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string())
+            .with_failover(Some(signal), "一号");
+        let events: Vec<Bytes> = stream.map(|item| item.unwrap()).collect().await;
+        let text = collect_text(&events);
+        assert!(text.contains("event: error"), "{text}");
+        assert!(text.contains("HTTP 502"), "文案必须带等价状态码：{text}");
+        assert!(
+            !text.contains("message_stop"),
+            "失败时不得补「正常结束」：{text}"
+        );
+    }
+
+    /// ★ issue #129：流内**私有信封**（`{"code":6004}`，没有 `error` 字段）也必须被识别。
+    ///
+    /// 改造前它落到「没有 choices ⇒ 丢弃」，最后被 `finalize()` 补成 `message_stop`
+    /// —— 客户端拿到「200 + 空回答」，故障隐身。
+    #[tokio::test]
+    async fn private_envelope_frame_fails_the_turn() {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"code\":6004,\"msg\":\"rate limited\"}\n\n",
+            )),
+        ];
+        let signal = crate::failover::StreamFailure::new(true);
+        let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string())
+            .with_failover(Some(signal), "一号");
+        let events: Vec<Bytes> = stream.map(|item| item.unwrap()).collect().await;
+        let text = collect_text(&events);
+        assert!(text.contains("event: error"), "{text}");
+        assert!(text.contains("HTTP 429"), "6004 对外是 429：{text}");
+        assert!(!text.contains("message_stop"), "{text}");
     }
 
     /// ★ 默认入口**丢弃**图片（Trae / WB 上游是否吃多模态 parts 未实测），
@@ -1050,7 +1215,13 @@ mod tests {
         let text = collect_text(&events);
         assert!(text.contains("event: error"), "必须发 error 事件: {text}");
         assert!(text.contains("\"type\":\"error\""), "{text}");
-        assert!(text.contains("工具调用被截断"), "{text}");
+        /* ★ issue #129：对外文案**不再**拼上游原文（`工具调用被截断`）。
+        对外只留等价状态码（客户端靠它归类），原文进日志/账号池。 */
+        assert!(text.contains("HTTP 502"), "必须带等价状态码: {text}");
+        assert!(
+            !text.contains("工具调用被截断"),
+            "上游原文不得进对外文案: {text}"
+        );
         assert!(
             !text.contains("message_stop"),
             "错误后不得再补 message_stop（否则客户端把失败当完成）: {text}"

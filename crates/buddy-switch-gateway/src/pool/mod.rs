@@ -1605,8 +1605,17 @@ impl Pool {
 
         match event {
             UpstreamEvent::HardCredit => {
+                /* ★★ issue #129 §5.3：这里返回的是「**是否禁用了账号**」，
+                而余额不足**只是冷却到次日 04:00**（`cooldown_until_tomorrow_4am`
+                不置 `disabled`）。旧实现返回 `true` ⇒ `relay_once` 的
+                `if disabled { break; }` 在 402 上**立即终止换号**，与
+                `should_rotate` 把 `HardCredit` 明确列为「换号能救」自相矛盾：
+                池里明明有别的健康号，请求却直接失败。
+
+                Qoder 侧对 402 是明确换号的（`qoder::pool::should_rotate` 只排除
+                `ClientError`）—— 说明「402 不换号」从来不是设计意图。 */
                 entry.cooldown_until_tomorrow_4am(now_ms, HARD_CREDIT_COOLDOWN_REASON);
-                true
+                false
             }
             UpstreamEvent::SoftRate {
                 reset_at_ms,
@@ -3034,14 +3043,30 @@ mod tests {
         assert!(!pool.acquire("ghost"));
     }
 
+    /// ★★ issue #129 §5.3：余额不足（402）**只是冷却**，返回值必须是 `false`。
+    ///
+    /// 返回值的语义是「**是否禁用了账号**」，而 `relay_once` 拿它当
+    /// `if disabled { break; }` 的判据。旧实现返回 `true` ⇒ 402 上**立即终止换号**，
+    /// 与 `should_rotate` 把 `HardCredit` 列为「换号能救」自相矛盾：
+    /// 池里明明有别的健康号，请求却直接失败（用户看到的正是「有号却不通」）。
+    ///
+    /// 可证伪：把返回值改回 `true` ⇒ 本用例红。
     #[test]
-    fn apply_error_hard_credit_cools_until_next_4am() {
+    fn apply_error_hard_credit_cools_until_next_4am_and_does_not_disable() {
         let mut pool = Pool::new(PoolConfig::default());
         pool.upsert("u1", None, "");
-        pool.apply_upstream_error("u1", "m", &UpstreamEvent::HardCredit, NOW);
+        let disabled = pool.apply_upstream_error("u1", "m", &UpstreamEvent::HardCredit, NOW);
+        assert!(
+            !disabled,
+            "余额不足不得返回「已禁用」——否则换号循环会在 402 上直接 break"
+        );
         let entry = pool.get("u1").unwrap();
         assert_eq!(entry.cool_kind, Some(CoolKind::Hard));
         assert_eq!(entry.until_ms, crate::timeutil::next_day_4am(NOW));
+        assert!(
+            !entry.disabled,
+            "冷却 ≠ 禁用：账号仍可人工恢复 / 次日自动恢复"
+        );
     }
 
     #[test]

@@ -151,6 +151,13 @@ pub struct QoderGatewayConfig {
     /// **G4 单模型当日 token 上限**（`0` = 关闭）。用于「贵的模型单独限额」。
     #[serde(default, alias = "modelDailyTokenLimit")]
     pub model_daily_token_limit: i64,
+    /// **账号故障时自动切换**（issue #129，默认 `false`）：流中途的账号级失败不再
+    /// 被「补终止标记」伪装成成功，而是先发**可重试**错误帧（含 `HTTP <status>`），
+    /// 并给失败账号写冷却 —— 客户端整步重跑时必然落到另一个号。
+    ///
+    /// 与 WB / Trae 两条产品线的同名字段逐字对齐。
+    #[serde(alias = "autoFailover")]
+    pub auto_failover: bool,
 }
 
 impl Default for QoderGatewayConfig {
@@ -177,6 +184,7 @@ impl Default for QoderGatewayConfig {
             daily_token_limit: 0,
             daily_credit_limit: 0.0,
             model_daily_token_limit: 0,
+            auto_failover: false,
         }
     }
 }

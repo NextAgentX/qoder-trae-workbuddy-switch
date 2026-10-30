@@ -715,6 +715,8 @@ pub async fn chat_for_region_once(
                         responses_custom.clone(),
                         inflight,
                         key.clone(),
+                        // ★ issue #129：首帧后失败也要解绑粘性（否则重跑仍撞同一个号）。
+                        sticky_key.clone(),
                     )
                     .await
                 } else {
@@ -990,15 +992,21 @@ async fn stream_relay(
     inflight: super::pool::InflightGuard,
     // ★ issue #76：本密钥（流结束时按 token 记账）。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
+    // ★ issue #129：会话粘性键（流中途失败时解绑 —— 否则重跑仍撞同一个号）。
+    sticky_key: Option<String>,
 ) -> Response {
     let upstream = response.bytes_stream();
     let stream_model = model.to_string();
     let usage_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<Value>));
     // 上游错误帧留痕：流式账本在流结束才落，没有它就只能记成「200 + 0 token」。
     let error_slot = std::sync::Arc::new(std::sync::Mutex::new(None::<sse::UpstreamError>));
+    // ★ issue #129：断流是否补可重试错误帧（开关从**本轮**配置快照读，热生效）。
+    let auto_failover = state.config_snapshot().await.auto_failover;
     let state_for_task = state.clone();
     let uid = uid.to_string();
     let model_for_task = model.to_string();
+    // ★ issue #129：粘性键要进 `tokio::spawn`（'static）⇒ clone 一份。
+    let sticky_for_task = sticky_key;
     // ★ issue #76：Key 要进 `tokio::spawn`（'static）⇒ clone 一份 Arc。
     let key_for_task = key.clone();
 
@@ -1016,7 +1024,9 @@ async fn stream_relay(
     let tapped = sse::UsageTapStream::new(
         sse::DsmlGuardStream::new(
             sse::LeakGuardStream::new(
-                sse::QoderOpenAiStream::new(upstream),
+                // ★ issue #129：开关开启时，断流补一条可重试错误帧（关闭 = 原行为）。
+                sse::QoderOpenAiStream::new(upstream)
+                    .with_failover(auto_failover, error_slot.clone()),
                 allowed_tools_shared.clone(),
             ),
             allowed_tools_shared,
@@ -1085,6 +1095,22 @@ async fn stream_relay(
             );
         }
         let upstream_error = error_slot.lock().ok().and_then(|guard| guard.clone());
+        /* ★★ issue #129 §5.2 改动 3/4：流内错误**必须**写冷却并解绑粘性。
+        改造前这里只把错误写进日志（`error_slot` → `record_request`），账号在池里
+        始终干净 ⇒ 下一次选号仍然挑它、客户端重试再撞同一堵墙，表现为
+        「日志里全是 429，池卡全绿」。 */
+        if let Some(detail) = &upstream_error {
+            let kind = super::pool::classify_http_with_detail(detail.code, &detail.message);
+            {
+                let mut pools = state_for_task.pools.lock().await;
+                if let Some(pool) = pools.get_mut(&region) {
+                    pool.apply_error(&uid, kind, &detail.message, &model_for_task);
+                }
+            }
+            if let Some(key) = sticky_for_task.as_deref() {
+                state_for_task.sticky.lock().await.unbind(key);
+            }
+        }
         let (status, error) = match &upstream_error {
             Some(detail) => (
                 if detail.code == 429 { 429u16 } else { 502u16 },

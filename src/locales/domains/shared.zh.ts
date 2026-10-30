@@ -386,6 +386,10 @@ export const zh = {
   "shared.gateway.probe.emptyAllSkippedDesc":
     "这些账号都没有可用凭据——可能没登录、凭据是加密信封、或已被移出账号库。请到「账号」页重新登录或导入账号；若本机没有对应桌面客户端（Docker / headless），请在「网关 → 账号池」用扫码方式添加；若用的是「指定账号」策略，请确认该账号仍在本机账号库中。",
   "shared.gateway.pool.totalRequests": "累计请求 {count}",
+  // ★ issue #129：账号池顶部「账号故障时自动切换」开关。
+  "shared.gateway.pool.autoFailover": "账号故障时自动切换",
+  "shared.gateway.pool.autoFailoverHint":
+    "开启后，一个账号在回复中途挂掉时，网关会把这次失败变成「可重试错误」，客户端自动换号重跑整个步骤，你看到的是从头完整重写的回复。代价：这一次回答的已输出部分作废、会再消耗一次额度。关闭时保持原有行为（上游报错按原样透出）。默认关闭：它改变对外报错方式，属于行为变更。",
   "shared.gateway.pool.tile.available": "可路由",
   // 「可路由」格里的小字注：其中几个只是**并发占满**（账号正常、几秒自愈）。
   // 不做第七格的理由见 `GatewayPoolSummary.inFlightFull` 的注释 —— 瞬时态与故障态不能并排。

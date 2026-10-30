@@ -25,6 +25,8 @@ pub mod credits_refresh;
 /// 模型禁用偏好（P11）：两个出口（`/v1/models` + 调用）共用的唯一判断点。
 pub mod disabled_models;
 pub mod error;
+/// 账号故障自动切换（issue #129）：流中途失败 → 客户端可重试错误的**唯一**形状出口。
+pub mod failover;
 pub mod key_usage;
 pub mod logging;
 /// 模型能力声明（图片输入，issue #101）：三条产品线出口 ① 与管理面共用的唯一解析点。

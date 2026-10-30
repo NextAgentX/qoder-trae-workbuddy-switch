@@ -780,6 +780,9 @@ export default function TraeApiServicePage() {
               // 排除：scope 按**变体**分家（`trae:trae_work` / `trae:trae_cn` / …）。
               onExclude={(uid, excluded) => void onExclude(uid, excluded)}
               excludingUid={excludingUid}
+              // ★ issue #129：账号故障时自动切换（网关级，与会话粘性同层）。
+              autoFailover={config.autoFailover}
+              onAutoFailoverChange={(checked) => void persist({ autoFailover: checked })}
               totalRequests={status?.totalRequests ?? null}
               /* 选号策略（与 WorkBuddy 同一张卡、同一套哨兵值）。
                  值经后端 `pool::parse_preferred` 解释成 `PickMode` —— 见该函数的文档：
