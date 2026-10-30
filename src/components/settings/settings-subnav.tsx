@@ -41,6 +41,7 @@ export type SettingsSubnavId =
   | "gateway"
   | "schedule"
   | "client"
+  | "network"
   | "cli"
   | "diagnostics"
   | "logs"
@@ -56,6 +57,9 @@ export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
   { id: "gateway", labelKey: "settings.subnav.gateway" },
   { id: "schedule", labelKey: "settings.subnav.schedule" },
   { id: "client", labelKey: "settings.subnav.client" },
+  /* issue #111 收尾：Qoder 逐包取数的出站代理（按区域）。目前只有 Qoder 有内容，
+     WB / Trae 设置页仍按自己的 id 收窄，不会渲染这一项。 */
+  { id: "network", labelKey: "settings.subnav.network" },
   /* issue #109：CodeBuddy CLI 的**接入方式**（二选一）。放这里而不是账号卡：
      它是全局一次性配置（CLI 的凭据只有一份 `~/.codebuddy/settings.json`），
      而账号卡上的 `cliControl` 是「按账号切默认账号」，另一层次。

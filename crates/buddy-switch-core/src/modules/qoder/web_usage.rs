@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use super::api;
 use super::region::{self, QoderRegion};
+use super::web_proxy;
 
 /// 网页端逐资源包明细（`/api/v2/me/usages/big_model_credits`）。
 ///
@@ -160,7 +161,9 @@ pub async fn fetch_credit_packs_raw(
         ));
     }
     let spec = region::realm_spec(region);
-    let client = api::shared_client().map_err(WebUsageError::other)?;
+    // ★ 出站代理（issue #111 收尾）：国际版网页端接口按 IP 判地区，国内直连会被拦；
+    //    这里按区域读 `qoder/proxy.json`，留空 = 直连（共享客户端）。
+    let client = web_proxy::client_for(region).map_err(WebUsageError::other)?;
     let response = client
         .get(credits_url(region))
         .timeout(std::time::Duration::from_secs(20))

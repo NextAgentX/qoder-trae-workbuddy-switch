@@ -261,6 +261,7 @@ export const en = {
   "wbSettings.cli.loadFailed": "Could not read CLI status",
   "settings.subnav.diagnostics": "Permissions & diagnostics",
   "settings.subnav.logs": "Logs",
+  "settings.subnav.network": "Network",
   "settings.subnav.backup": "Backup & restore",
 
   // ---- Gateway workspace subnav (PLAN §3.9: 6 items, shared by both product lines) ----

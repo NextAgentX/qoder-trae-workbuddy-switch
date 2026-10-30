@@ -40,6 +40,7 @@ import type {
   AgentHookStatus,
   CheckinStatusEntry,
   QoderGatewayQuotaView,
+  QoderWebProxyConfig,
   QoderWebWindowCookies,
 } from "./api";
 import type { QoderGatewayConfigRaw } from "./qoder-gateway";
@@ -3661,6 +3662,12 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     /* 登录窗 Cookie 探针（只读、不打上游）：演示站没有登录窗 ⇒ 如实回「没开」。
        ⚠️ 不要在这里假装 `windowOpen: true` + 有 cookie：那会让演示端的登录轮询
        永远「发现变化」并去调 probe，而 probe 在演示面里是动作（不可用）。 */
+    /* 逐包出站代理配置（只读）：演示站没有代理需求，如实回「直连」。 */
+    case "qoder_web_proxy_get":
+      return {
+        cn: "",
+        global: "",
+      } satisfies QoderWebProxyConfig;
     case "qoder_web_window_cookies":
       return {
         windowOpen: false,

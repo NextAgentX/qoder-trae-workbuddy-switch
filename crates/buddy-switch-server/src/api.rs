@@ -591,6 +591,13 @@ fn api_routes() -> Router {
             "/api/qoder/web/session/logout",
             post(api_qoder_web_desktop_only),
         )
+        // ---- Qoder 逐包出站代理（issue #111 收尾）----
+        // ★ 这是**纯配置**，不是「仅桌面端可用」：headless 服务端只要有会话文件同样要取
+        //   逐包，代理通道（国际版按 IP 判地区）对它是同等需要的能力 ⇒ 真实读写。
+        .route(
+            "/api/qoder/web/proxy",
+            get(api_qoder_web_proxy_get).post(api_qoder_web_proxy_set),
+        )
         // ---- Qoder API 网关（管理面；网关本体走独立端口 57895，**不** merge 进本 Router）----
         // ⚠️ 一个监听、两个区域：区域由请求所用 API Key 的归属决定（`QoderKeyRegion`），
         //   状态 / 模型两条按 `scope` 看对应的那本账号库（fail-closed）。
@@ -5059,6 +5066,34 @@ async fn api_companion_set_visible() -> Response {
         "桌面悬浮窗仅在桌面端可用".to_string(),
         StatusCode::BAD_REQUEST,
     )
+}
+
+/// GET /api/qoder/web/proxy —— 读逐包出站代理配置（两个区域各一个 URL；空 = 直连）。
+async fn api_qoder_web_proxy_get() -> Response {
+    match serde_json::to_value(buddy_switch_core::modules::qoder::web_proxy::WebProxyConfig::load())
+    {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// POST /api/qoder/web/proxy —— 保存逐包出站代理配置（两个字段都先过形状校验）。
+async fn api_qoder_web_proxy_set(Json(body): Json<Value>) -> Response {
+    let submitted = body.get("config").cloned().unwrap_or(body);
+    let config: buddy_switch_core::modules::qoder::web_proxy::WebProxyConfig =
+        match serde_json::from_value(submitted) {
+            Ok(config) => config,
+            Err(error) => {
+                return json_err(
+                    format!("代理配置格式错误: {error}"),
+                    StatusCode::BAD_REQUEST,
+                )
+            }
+        };
+    if let Err(error) = config.save() {
+        return json_err(error, StatusCode::BAD_REQUEST);
+    }
+    json_ok(json!({ "ok": true, "config": config }))
 }
 
 /// POST /api/qoder/web/{login-open,login-close,credit-packs/probe} —— Qoder 网页端逐包链路。

@@ -57,6 +57,7 @@ pub mod switch;
 pub mod token;
 pub mod trash;
 pub mod usage;
+pub mod web_proxy;
 pub mod web_session;
 pub mod web_usage;
 

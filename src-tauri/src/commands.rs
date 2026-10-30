@@ -5429,6 +5429,20 @@ pub async fn qoder_web_session_logout(scope: String) -> Result<Value, String> {
     crate::qoder_web::session_logout(scope).await
 }
 
+/// GET /api/qoder/web/proxy —— 读出站代理配置（逐包取数用；空 = 直连）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_proxy_get() -> Result<Value, String> {
+    crate::qoder_web::web_proxy_config()
+}
+
+/// POST /api/qoder/web/proxy —— 保存出站代理配置（两个字段都先过形状校验）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_proxy_set(config: Value) -> Result<Value, String> {
+    let parsed: buddy_switch_core::modules::qoder::web_proxy::WebProxyConfig =
+        serde_json::from_value(config).map_err(|error| format!("代理配置格式错误: {error}"))?;
+    crate::qoder_web::web_proxy_config_save(parsed)
+}
+
 /// POST /api/qoder/pro-pack/claim —— 领取 Pro 升级包（幂等；已领过 `already=true`）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_pro_pack_claim(scope: String, uid: String) -> Result<Value, String> {

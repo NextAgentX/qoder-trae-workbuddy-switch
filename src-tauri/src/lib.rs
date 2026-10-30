@@ -802,6 +802,8 @@ pub fn run() {
             commands::qoder_web_credit_packs,
             commands::qoder_web_session_status,
             commands::qoder_web_window_cookies,
+            commands::qoder_web_proxy_get,
+            commands::qoder_web_proxy_set,
             commands::qoder_web_session_logout,
             commands::trae_merge_legacy_regions,
             commands::trae_save_login,

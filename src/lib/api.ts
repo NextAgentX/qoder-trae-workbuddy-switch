@@ -250,6 +250,8 @@ const DEMO_READ_COMMANDS = new Set([
   //    零副作用、不打上游；不登记的话演示模式下前端轮询会抛「缺少只读数据」。
   "qoder_credits", "qoder_web_credit_packs", "qoder_web_session_status",
   "qoder_web_window_cookies",
+  // ⚠️ `qoder_web_proxy_set` 是写操作，**不进**这里（保存失败走页面错误提示）。
+  "qoder_web_proxy_get",
   // issue #47：逐账号「今日签到状态」（**只读**）。
   "qoder_checkin_status_map",
   "get_qoder_gateway_config", "qoder_gateway_status", "get_qoder_gateway_models",
@@ -639,6 +641,8 @@ const ROUTES: Record<string, Route> = {
   qoder_web_session_status: { method: "GET", path: "/api/qoder/web/session/status" },
   qoder_web_window_cookies: { method: "GET", path: "/api/qoder/web/session/window-cookies" },
   qoder_web_session_logout: { method: "POST", path: "/api/qoder/web/session/logout" },
+  qoder_web_proxy_get: { method: "GET", path: "/api/qoder/web/proxy" },
+  qoder_web_proxy_set: { method: "POST", path: "/api/qoder/web/proxy" },
   // Qoder API 网关管理面（网关本体走独立端口 57895，见 src/pages/QoderApiServicePage）。
   // ⚠️ **一个监听、两个区域**：状态 / 清单两条按 `scope` 看对应的那本账号库（fail-closed）；
   //   配置与监听是否起来是两区域共用的事实（故 config 不带 scope）。
@@ -3941,6 +3945,26 @@ export function qoderWebSessionStatus(
   uid: string,
 ): Promise<QoderWebSessionStatus> {
   return call<QoderWebSessionStatus>("qoder_web_session_status", { scope, uid });
+}
+
+/** 逐包取数的出站代理配置（两个区域各一个 URL；空 = 直连）。 */
+export interface QoderWebProxyConfig {
+  /** 国内版。缺省直连，一般不用填。 */
+  cn: string;
+  /** 国际版。国内网络直连会被上游按 IP 拦下 ⇒ 通常要填。 */
+  global: string;
+}
+
+/** 读逐包出站代理配置（只读）。 */
+export function qoderWebProxyGet(): Promise<QoderWebProxyConfig> {
+  return call<QoderWebProxyConfig>("qoder_web_proxy_get", {});
+}
+
+/** 保存逐包出站代理配置（两个 URL 都先过后端形状校验）。 */
+export function qoderWebProxySet(
+  config: QoderWebProxyConfig,
+): Promise<{ ok: boolean; config: QoderWebProxyConfig }> {
+  return call("qoder_web_proxy_set", { config });
 }
 
 /**

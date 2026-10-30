@@ -336,6 +336,17 @@ export const zh = {
 
   // ---- 设置 ----
   "qoder.page.settings.title": "设置",
+  // ---- 设置 · 网络（逐包出站代理，issue #111 收尾）----
+  "qoder.page.settings.proxy.group": "逐包取数出站代理",
+  "qoder.page.settings.proxy.cn": "国内版代理",
+  "qoder.page.settings.proxy.cnHint": "国内版直连可用，一般留空。",
+  "qoder.page.settings.proxy.global": "国际版代理",
+  "qoder.page.settings.proxy.globalHint": "国际版接口按 IP 判地区，国内网络直连会被拦，通常需要填代理。",
+  "qoder.page.settings.proxy.note": "只作用于逐包明细的取数请求（http:// 或 socks5://）。登录窗走系统代理，不受此项影响；改完点保存立即生效。",
+  "qoder.page.settings.proxy.save": "保存代理设置",
+  "qoder.page.settings.proxy.saving": "保存中…",
+  "qoder.page.settings.proxy.saved": "代理设置已保存",
+  "qoder.page.settings.proxy.saveFailed": "代理设置保存失败",
   "qoder.page.settings.section.client": "客户端检测",
   "qoder.page.settings.client.description": "本机两处官方凭据存储的探测结果（只读，不落库）。",
   "qoder.page.settings.client.error": "探测失败：{error}",
