@@ -5406,6 +5406,17 @@ pub async fn qoder_web_session_status(scope: String, uid: String) -> Result<Valu
     crate::qoder_web::session_status(scope, uid).await
 }
 
+/// GET /api/qoder/web/session/window-cookies —— 登录窗里现有的 Cookie **名称与条数**（只读、不打上游）。
+///
+/// 前端轮询它来发现「用户已经在窗口里登录完了」（`fingerprint` 变化）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn qoder_web_window_cookies(
+    app: tauri::AppHandle,
+    scope: String,
+) -> Result<Value, String> {
+    crate::qoder_web::window_cookies(&app, scope).await
+}
+
 /// GET /api/qoder/web/credit-packs —— 读**已缓存**会话取逐包明细（渲染用，不弹窗）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_web_credit_packs(scope: String, uid: String) -> Result<Value, String> {

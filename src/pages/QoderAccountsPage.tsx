@@ -734,11 +734,89 @@ export default function QoderAccountsPage() {
   }
 
   /**
+   * 探一次逐包接口：**认领**登录窗里的会话（带 uid 归属校验），成功即刷新该账号逐包。
+   *
+   * 返回 `true` = 真拿到了明细（调用方据此停止轮询 / 不再提示）。
+   *
+   * ★ 与 `loadPacks` 的区别：`loadPacks` 只读「已认领的会话」（渲染路径），本函数才是
+   * 「把刚登录的会话认领下来」的那一步（#111 复核 §2.1：probe 此前**无任何调用方**，
+   * 于是缓存永远为空 —— 刷新一百次也还是「未登录」）。
+   */
+  async function probeAndLoad(account: QoderAccountView): Promise<boolean> {
+    const uid = account.uid;
+    setPacksLoading((prev) => ({ ...prev, [uid]: true }));
+    try {
+      const probe = await api.qoderWebCreditPacksProbe(scope, uid);
+      if (!probe.hasSession) return false;
+      if (probe.uidMatches === false) {
+        // 归属不符：后端已丢弃该会话，界面必须说清楚「不是这个账号」，不能当成没登录。
+        toast.error(t("qoder.page.accounts.web.readMismatch"));
+        await loadPacks(uid, true);
+        return false;
+      }
+      await loadPacks(uid, true);
+      toast.success(t("qoder.page.accounts.web.readDone", { n: String(probe.packs?.length ?? 0) }));
+      return true;
+    } catch {
+      /* 上游拒绝 / 网络失败：让浮层与抽屉按结构化原因给下一步，这里不重复报错。 */
+      await loadPacks(uid, true);
+      return false;
+    } finally {
+      setPacksLoading((prev) => {
+        const next = { ...prev };
+        delete next[uid];
+        return next;
+      });
+    }
+  }
+
+  /**
+   * 「我已登录，读取逐包明细」（#111 复核 P0-2）。
+   *
+   * 为什么必须有这个显式入口：登录是在**另一个窗口**里完成的，用户很自然会「登录完直接
+   * 关窗」。自动轮询能覆盖大部分情况，但关窗那一刻的时序不保证；给一个用户能自己按的
+   * 按钮，比让用户猜「是不是还要再等」强。
+   */
+  async function readPacks(account: QoderAccountView) {
+    const ok = await probeAndLoad(account);
+    if (!ok) toast.error(t("qoder.page.accounts.web.readFailed"));
+  }
+
+  /**
+   * 「退出网页登录」（清除本机会话缓存）。
+   *
+   * ★ 为什么必须有：会话一旦落盘，用户从界面没有任何办法清掉它（#111 复核 §2.6）。
+   * 一份等价于完整身份凭据的 Cookie 不能只靠「删文件」才能退出。
+   */
+  async function logoutWebSession() {
+    try {
+      await api.qoderWebSessionLogout(scope);
+      setWebPacks({});
+      packsFetchedAt.current = {};
+      toast.success(t("qoder.page.accounts.web.logoutDone"));
+      const uid = detail?.uid;
+      if (uid) await loadPacks(uid, true);
+    } catch (e) {
+      toast.error(api.asError(e));
+    }
+  }
+
+  /**
    * 「登录 Qoder 网页端」（issue #111）：开一个独立窗口让用户登录一次。
    *
    * 为什么需要这一步：逐包明细只存在于网页端私有接口，只认浏览器会话 Cookie，
    * 而本仓 Qoder 的设备码登录**从不产生网页会话**。登录态落在本地缓存后，
    * 以后取逐包就不必再登录（见 `web_session`）。
+   *
+   * ## 两段式轮询（别改成每 2 秒直接 probe）
+   *
+   * ① 每 2 秒问一次「登录窗里的 cookie 集合变了吗」——`qoderWebWindowCookies` 是**本地**
+   *    命令（不打上游），变了就说明用户刚完成登录；
+   * ② 变了才调**一次** `probe`（真打上游 + 落盘）。
+   *
+   * 为什么不直接轮询 probe：probe 一旦拿到非空 Cookie 就会真打上游，未登录状态下的匿名
+   * Cookie 换来 401，而 401 会立刻清缓存 —— 每 3 秒一次等于打出一串注定失败的请求，
+   * 还每次把刚写的缓存抹掉（#111 复核 §5 P0 的 ⚠️）。
    */
   async function openWebLogin(account: QoderAccountView) {
     try {
@@ -748,20 +826,30 @@ export default function QoderAccountsPage() {
       toast.error(api.asError(e));
       return;
     }
-    /* 登录是**在另一个窗口**里完成的 ⇒ 主窗口拿不到「登录成功」事件。
-       轮询会话状态（本地命令，不打上游），一检测到就立刻刷新该账号的逐包。
-       最多等 2 分钟（40 × 3s）：再长说明用户没打算现在登录，没必要一直转。 */
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      try {
-        const status = await api.qoderWebSessionStatus(scope, account.uid);
-        if (status.hasSession) {
-          await loadPacks(account.uid, true);
-          return;
-        }
-      } catch {
-        /* 单次查询失败不终止轮询（窗口可能正处在导航中）。 */
+    /* 基线指纹：开窗那一刻的 cookie 集合。之后「与它不同」= 登录态变了。 */
+    const baseline = await api.qoderWebWindowCookies(scope).catch(() => null);
+    let seen = baseline?.fingerprint ?? "";
+    let probes = 0;
+    /* 最多等 2 分钟（60 × 2s）：再长说明用户没打算现在登录，没必要一直转。 */
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const current = await api.qoderWebWindowCookies(scope).catch(() => null);
+      if (!current) continue; // 单次失败不终止（窗口可能正处在导航中）
+      if (!current.windowOpen) {
+        /* 窗口被关了 —— 「登录完直接关窗」是最常见的操作序列。
+           关窗前后端已兜底收割（`install_close_harvest`），此时 `pending` 为真才值得
+           探一次；否则说明用户根本没登录，别白发一次注定 401 的请求。 */
+        const status = await api.qoderWebSessionStatus(scope, account.uid).catch(() => null);
+        if (status?.pending) await probeAndLoad(account);
+        return;
       }
+      if (!current.fingerprint || current.fingerprint === seen) continue;
+      seen = current.fingerprint;
+      probes += 1;
+      if (await probeAndLoad(account)) return;
+      /* 指纹变了但没认领成功（未登录的匿名 cookie / 别人的会话）：最多试 3 次，
+         避免用户在这个窗口里反复登录时把上游打成筛子。 */
+      if (probes >= 3) return;
     }
   }
 
@@ -1011,6 +1099,37 @@ export default function QoderAccountsPage() {
       },
     ];
   }, [detail, credits, t, webPacks]);
+
+  /**
+   * 抽屉里积分包区块下方的说明与动作（#111 复核 §2.6 / 验收 #16）。
+   *
+   * 三态：
+   * - 拿到逐包 ⇒ 「N 个包 · 会话已存本机」+「退出网页登录」（否则用户没有清除凭据的入口）；
+   * - 没拿到（桌面端）⇒ 「需要登录一次」+「读取逐包明细」（不留白，也不只说一句「没有数据」）；
+   * - headless ⇒ 不渲染：浮层已说明「当前形态看不到」，这里再摆一个必然失败的按钮更糟。
+   */
+  const detailPacksNotice = useMemo(() => {
+    if (!detail) return null;
+    const web = webPacks[detail.uid];
+    if (web?.available) {
+      return {
+        text: t("qoder.page.accounts.web.packsNoticeReady", { n: String(web.packs.length) }),
+        actionLabel: t("qoder.page.accounts.web.logout"),
+        onAction: () => void logoutWebSession(),
+        busy: false,
+      };
+    }
+    if (api.isWebui()) return null;
+    return {
+      text: t("qoder.page.accounts.web.packsNotice"),
+      actionLabel: t("qoder.page.accounts.web.read"),
+      onAction: () => void readPacks(detail),
+      busy: !!packsLoading[detail.uid],
+    };
+    // `logoutWebSession` / `readPacks` 每次渲染都是新函数，进依赖会让 memo 恒失效；
+    // 两者只读当前闭包里的 scope / detail，随 `detail` / `webPacks` 一起变即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail, webPacks, packsLoading, t]);
 
   /** 打开抽屉时取一次逐包（TTL 内不重复请求）。 */
   useEffect(() => {
@@ -1418,6 +1537,7 @@ export default function QoderAccountsPage() {
                 setExportOpen(true);
               }}
               onWebLogin={(target) => void openWebLogin(target)}
+              onReadPacks={(target) => void readPacks(target)}
               packs={webPacks[account.uid]}
               packsLoading={!!packsLoading[account.uid]}
               onRequestPacks={(target) => void loadPacks(target.uid)}
@@ -1595,6 +1715,7 @@ export default function QoderAccountsPage() {
         avatarSeed={detail ? qoderAccountName(detail) : ""}
         sections={detail ? [{ key: "account", title: t("qoder.page.accounts.drawer.info"), rows: detailRows }] : []}
         packs={detailPacks}
+        packsNotice={detailPacksNotice}
         stats={detailStats}
         refreshingKinds={detail ? refreshPartBusy.kindsOf(detail.uid) : []}
         onRefreshPart={detail ? (kind) => void onRefreshPart(detail, kind) : undefined}
