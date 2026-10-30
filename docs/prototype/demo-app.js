@@ -56,12 +56,14 @@ const state = {
   gwSub: "overview",
   gwApi: "openai",      // 快速接入的协议 Tab：openai / anthropic
   gwScanning: false,    // 模型清单「识别中」（§3.17）
-  /* 模型降级链（P13）：`fbDraft` = 抽屉里正在编辑的草稿；`fbEvents` = 流水是否展开。
+  /* 模型降级链（P13）：`fbDraft` = 抽屉里正在编辑的草稿；`fbEvents` = 流水是否展开；
+     `fbOpen` = 卡片是否展开（默认收起，与「限流探测」卡同形态）。
      ★ 草稿与已存配置**分开**：抽屉里改了没保存就关掉，不能污染配置。
      ★ 重开抽屉时必须**保留**已有草稿（切触发条件 / 换备选都要重开刷新），
        从配置重建会把用户刚做的改动冲掉 —— 见 `openFbDrawer` 的 `same` 判断。 */
   fbDraft: null,
   fbEvents: false,
+  fbOpen: false,
   /* Trae 上下文策略（Max Mode）：always = 支持表内模型始终注入 is_max_mode；off = 回到上游默认窗口。
      Max Mode 是**请求级开关**，不是模型 —— 所以清单里一个模型只有一条记录，没有 `-max` 影子 id。 */
   maxMode: "always",
@@ -2307,6 +2309,7 @@ function fallbackCard(g) {
     <div class="grow"></div>
     <span class="tiny muted">同作用域 · 最多 2 跳</span>
     <button class="btn sm ghost" data-act="fb-events">${state.fbEvents ? "收起流水" : "降级流水"}</button>
+    <button class="btn sm ghost" data-act="fb-toggle-open" aria-expanded="${state.fbOpen}">${state.fbOpen ? "收起" : "展开"}</button>
   </div>`;
 
   /* 恒定明示：这两句必须一直在，不能塞进 tooltip ——
@@ -2364,14 +2367,18 @@ function fallbackCard(g) {
 
   const events = state.fbEvents ? fbEventsHtml(fb) : "";
 
-  return `<section class="card" style="margin-bottom:16px">
-    ${head}${notice}${bar}
+  /* 折叠只收配置区：标题 / 徽标 / 恒定明示留在卡头 ——「会不会偷偷换模型」是这张卡的
+     身份，不能随配置一起折掉（与「限流探测」卡同口径）。 */
+  const body = state.fbOpen ? `${bar}
     ${fb.chains.length ? `<div class="fb-list">${rows}</div>
       <p class="tiny muted" style="margin:0;padding:10px 16px 12px;line-height:1.7">
         状态点读的是<b>实时</b>闸门与冷却（与账号池同源），不是配置快照。降级成功后主模型的闸门<b>不解除</b> ——
         它确实失败了；闸门到期后请求自然回到主模型，无需「回切」开关。
       </p>` : empty}
-    ${events}
+    ${events}` : "";
+
+  return `<section class="card" style="margin-bottom:16px">
+    ${head}${notice}${body}
   </section>`;
 }
 
@@ -6638,7 +6645,8 @@ document.addEventListener("click", (e) => {
         fb.enabled ? "主模型明确失败时会按链改用备选" : "配置保留，但一次都不会触发");
       break;
     }
-    case "fb-events": stop(); state.fbEvents = !state.fbEvents; renderContent(); break;
+    case "fb-events": stop(); state.fbOpen = true; state.fbEvents = !state.fbEvents; renderContent(); break;
+    case "fb-toggle-open": stop(); state.fbOpen = !state.fbOpen; renderContent(); break;
     case "fb-new": stop(); openFbDrawer(null); break;
     case "fb-edit": stop(); openFbDrawer(a1); break;
     case "fb-chain-toggle": {

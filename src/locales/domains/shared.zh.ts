@@ -189,6 +189,8 @@ export const zh = {
   "shared.gateway.fallback.stats": "近 {days} 天：降级 {total} 次（成功 {ok} · 失败 {fail}）",
   "shared.gateway.fallback.events": "降级流水",
   "shared.gateway.fallback.eventsHide": "收起流水",
+  "shared.gateway.fallback.expand": "展开",
+  "shared.gateway.fallback.collapse": "收起",
   "shared.gateway.fallback.event.time": "时间",
   "shared.gateway.fallback.event.path": "实际路径",
   "shared.gateway.fallback.event.reason": "触发原因",

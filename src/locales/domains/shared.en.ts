@@ -155,6 +155,8 @@ export const en = {
   "shared.gateway.fallback.stats": "Last {days} days: {total} fallbacks ({ok} succeeded · {fail} failed)",
   "shared.gateway.fallback.events": "Fallback log",
   "shared.gateway.fallback.eventsHide": "Hide log",
+  "shared.gateway.fallback.expand": "Expand",
+  "shared.gateway.fallback.collapse": "Collapse",
   "shared.gateway.fallback.event.time": "Time",
   "shared.gateway.fallback.event.path": "Actual path",
   "shared.gateway.fallback.event.reason": "Trigger",
