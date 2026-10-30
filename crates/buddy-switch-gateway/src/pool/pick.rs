@@ -426,6 +426,77 @@ pub(crate) fn in_flight_full<E: PoolEntryLike>(
     limit > 0 && entry.in_flight_now(now_ms) >= limit
 }
 
+/// 选号失败时的判据：**是不是「该模型在全部可试账号上都被限流」**（issue #134）。
+///
+/// 返回 `Some((最晚解冻时刻, 参与判定的账号数))`，当且仅当：
+///
+/// 1. 至少有一个账号**除了该模型的冷却之外**完全可试（未 tried / 域匹配 / 未被排除 /
+///    在名单内 / 账号级健康 / 未在途占满）；
+/// 2. 这些账号**全部**在 `model` 上有未到期的冷却。
+///
+/// ## 为什么需要它
+///
+/// `#125` 把闸门的开闸判据改成「窗口内**去重账号数** ≥ `gate_threshold`（默认 2）」
+/// —— 正确的方向，但留下一个边界：**池里只有 1 个账号时闸门永远不开**（去重上限就是 1）。
+/// 于是模型限流时走的是「选号失败」这条兜底，而兜底只有 `pool_busy`(503) 与
+/// `no_credential`(401) 两个出口，前者判据（可用号全在途满）不成立 ⇒ **401**。
+/// 客户端把 401 归为 AUTH、不可重试 ⇒ 整轮会话终止，正是 #106 修掉的那个症状又回来了。
+///
+/// 判据不能只看 `PoolSummary::model_cooling == available`：那个计数是「有**任意**模型
+/// 冷却的账号数」，与本次请求的模型无关（一个号被 A 模型罚、请求 B 模型时它也算进去）。
+/// 必须**逐账号问该模型的截止时刻**，所以这里重走一遍选号判据。
+///
+/// ## 为什么「在途占满」要否决
+///
+/// 在途满的号并没有被该模型限流，它只是**忙**。把它算进「全部冷却」会说谎
+/// （用户看到「该模型在 3 个账号上都被限流」，其实其中 1 个只是排队）——
+/// 那种情形维持原来的 401/PoolBusy 判定，别在这里扩语义。
+pub fn model_cooling_until<E: PoolEntryLike>(
+    entries: &BTreeMap<String, E>,
+    policy: &PickPolicy,
+    now_ms: i64,
+    input: &PickInput<'_>,
+) -> Option<(i64, usize)> {
+    if input.model.is_empty() {
+        return None;
+    }
+    let mut cooled = 0usize;
+    let mut latest = 0i64;
+    for entry in entries.values() {
+        if input.tried.contains(entry.uid()) {
+            continue;
+        }
+        if input
+            .realm
+            .map(|wanted| entry.realm() == Some(wanted))
+            .unwrap_or(true)
+            == false
+        {
+            continue;
+        }
+        if input.excluded.contains(entry.uid()) {
+            continue;
+        }
+        if let Some(allowed) = input.allowed {
+            if !allowed.contains(entry.uid()) {
+                continue;
+            }
+        }
+        // 「除了该模型的冷却之外」是否可试：账号级健康 + 未在途占满。
+        if !entry.account_healthy(now_ms) || in_flight_full(entry, policy, now_ms) {
+            continue;
+        }
+        let until = entry.model_cool_expiry_ms(input.model);
+        if until <= now_ms {
+            // 有一个号其实能服务这个模型 ⇒ 不是「整体被限流」。
+            return None;
+        }
+        cooled += 1;
+        latest = latest.max(until);
+    }
+    (cooled > 0).then_some((latest, cooled))
+}
+
 /// 从池中选出一个账号；返回被选中账号的 uid。
 ///
 /// 输入全部收在 [`PickInput`] 里（域 / 模型 / 已试 / 排除 / 策略 / 种子）。
@@ -1939,6 +2010,126 @@ mod tests {
             )
             .as_deref(),
             Some("recovered")
+        );
+    }
+
+    /// ★ issue #134 的判据本身：**该模型**在全部可试账号上都冷却才算成立。
+    ///
+    /// 变异：把实现改成读 `PoolSummary::model_cooling`（有**任意**模型冷却的账号数）
+    /// ⇒ `..._ignores_other_models` 红（A 模型冷却、请求 B 模型时会误报 503）。
+    fn cooling_entry(uid: &str, model: &str, until_ms: i64) -> PoolEntry {
+        let mut entry = base_entry(uid);
+        entry.model_cooldowns.insert(
+            model.to_string(),
+            ModelCooldown {
+                until_ms,
+                reset_at_ms: 0,
+                upstream_reset_at_ms: 0,
+                reason: String::new(),
+                hits: 0,
+                from_upstream: true,
+                verify_fails: 0,
+            },
+        );
+        entry
+    }
+
+    fn cooling_input<'a>(
+        model: &'a str,
+        tried: &'a HashSet<String>,
+        excluded: &'a HashSet<String>,
+    ) -> PickInput<'a> {
+        PickInput {
+            realm: None,
+            model,
+            tried,
+            excluded,
+            allowed: None,
+            mode: PickMode::MaxCredits,
+            seed: 0,
+        }
+    }
+
+    #[test]
+    fn model_cooling_until_reports_every_cooled_account() {
+        let policy = policy();
+        let entries = pool_of(vec![
+            cooling_entry("a", "m1", NOW + 60_000),
+            cooling_entry("b", "m1", NOW + 120_000),
+        ]);
+        let (tried, excluded) = (HashSet::new(), HashSet::new());
+        let input = cooling_input("m1", &tried, &excluded);
+        assert_eq!(
+            model_cooling_until(&entries, &policy, NOW, &input),
+            Some((NOW + 120_000, 2)),
+            "最晚截止 + 账号数都要给对（前者进 Retry-After，后者进文案）"
+        );
+    }
+
+    #[test]
+    fn model_cooling_until_returns_none_when_one_account_is_free() {
+        let policy = policy();
+        let entries = pool_of(vec![
+            cooling_entry("a", "m1", NOW + 60_000),
+            base_entry("b"),
+        ]);
+        let (tried, excluded) = (HashSet::new(), HashSet::new());
+        let input = cooling_input("m1", &tried, &excluded);
+        assert_eq!(
+            model_cooling_until(&entries, &policy, NOW, &input),
+            None,
+            "还有号能用 ⇒ 不是「整体限流」，不能报 503"
+        );
+    }
+
+    /// ★ 这条钉住「不能用 `summary.model_cooling == available` 当判据」：
+    /// 账号被 **A** 模型罚了，请求 **B** 模型时必须照常选号（这里断言判据不成立）。
+    #[test]
+    fn model_cooling_until_ignores_other_models() {
+        let policy = policy();
+        let entries = pool_of(vec![
+            cooling_entry("a", "m1", NOW + 60_000),
+            cooling_entry("b", "m1", NOW + 60_000),
+        ]);
+        let (tried, excluded) = (HashSet::new(), HashSet::new());
+        let input = cooling_input("m2", &tried, &excluded);
+        assert_eq!(
+            model_cooling_until(&entries, &policy, NOW, &input),
+            None,
+            "冷却的是 m1，请求的是 m2 ⇒ 与本次请求无关，不许报 503"
+        );
+    }
+
+    #[test]
+    fn model_cooling_until_skips_excluded_and_tried_accounts() {
+        let policy = policy();
+        let entries = pool_of(vec![
+            cooling_entry("a", "m1", NOW + 60_000),
+            // 唯一「没冷却」的号被排除 / 已试 ⇒ 不参与判定，判据仍成立。
+            base_entry("b"),
+        ]);
+        let mut excluded = HashSet::new();
+        excluded.insert("b".to_string());
+        let tried = HashSet::new();
+        let input = cooling_input("m1", &tried, &excluded);
+        assert_eq!(
+            model_cooling_until(&entries, &policy, NOW, &input),
+            Some((NOW + 60_000, 1)),
+            "被排除的号不算「可用账号」—— 否则永远报 401"
+        );
+
+        let entries2 = pool_of(vec![
+            cooling_entry("a", "m1", NOW + 60_000),
+            base_entry("b"),
+        ]);
+        let mut tried = HashSet::new();
+        tried.insert("b".to_string());
+        let excluded2 = HashSet::new();
+        let input2 = cooling_input("m1", &tried, &excluded2);
+        assert_eq!(
+            model_cooling_until(&entries2, &policy, NOW, &input2),
+            Some((NOW + 60_000, 1)),
+            "本轮已试过的号同样不算"
         );
     }
 }

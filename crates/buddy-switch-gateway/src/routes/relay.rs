@@ -1021,6 +1021,8 @@ async fn relay_once(
                         model: block.model,
                         remain_secs,
                         failures: block.failures,
+                        // 闸门路径：成因是「窗口内失败次数够了」，不是「没号可换」。
+                        cooled_accounts: 0,
                         attempts: attempts.clone(),
                     },
                     account: String::new(),
@@ -1329,7 +1331,7 @@ async fn relay_once(
         //   **不可能有用**的事（报障人：切换过多个账号、桌面端和 Buddy Switch 都试过）。
         //   池快照就在手边，把事实摆出来即可。
         None => {
-            let (summary, scoped) = {
+            let (summary, scoped, model_cooling) = {
                 let pool = state.pool.read().await;
                 let summary = pool.summary(now_ms, Some(realm));
                 // ★ issue #76：白名单生效时再取一份**名单口径**快照（同一个读锁，
@@ -1337,12 +1339,41 @@ async fn relay_once(
                 let scoped = allowed
                     .as_ref()
                     .map(|uids| pool.summary_of(uids, now_ms, Some(realm)));
-                (summary, scoped)
+                // ★★ issue #134：`summary.model_cooling` 是「有**任意**模型冷却的账号数」，
+                //   与本次请求的模型无关 ⇒ 不能拿它判「这个模型整体被限流」。
+                //   必须逐账号问该模型的截止时刻（与选号同一套硬约束），见
+                //   `pool::pick::model_cooling_until`。
+                //
+                //   为什么这条判据必须存在：`#125` 把闸门开闸判据改成「去重账号数 ≥ 2」
+                //   ⇒ **单账号池里闸门永远不会开**，模型限流于是落回这里的兜底，
+                //   而兜底只有 `pool_busy`(503) / `no_credential`(401)，前者判据不成立
+                //   ⇒ 401 ⇒ 客户端判 AUTH、整轮终止（正是 #106 修掉的那个症状）。
+                let model_cooling = pool.model_cooling_until(
+                    now_ms,
+                    Some(realm),
+                    &request.model,
+                    &tried,
+                    allowed.as_ref(),
+                );
+                (summary, scoped, model_cooling)
             };
-            RelayFailure {
+            let error = match model_cooling {
+                // 该模型在**全部**可试账号上都在冷却 ⇒ 与闸门暂停同语义（503 + Retry-After）。
+                Some((until_ms, accounts)) => GatewayError::ModelGatePaused {
+                    model: request.model.clone(),
+                    remain_secs: (until_ms.saturating_sub(now_ms).max(0) as u64)
+                        .div_ceil(1000)
+                        .max(1),
+                    failures: 0,
+                    cooled_accounts: accounts,
+                    attempts: attempts.clone(),
+                },
                 // ★ 不要再写死 `NoCredential`：全部健康只是在途占满时那是 401 误报，
                 //   会让客户端去重建登录态（见 `pool_unavailable_error`）。
-                error: pool_unavailable_error(request.region, &summary, scoped.as_ref()),
+                None => pool_unavailable_error(request.region, &summary, scoped.as_ref()),
+            };
+            RelayFailure {
+                error,
                 account: String::new(),
                 uid: String::new(),
                 upstream_message: String::new(),

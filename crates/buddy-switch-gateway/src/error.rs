@@ -92,7 +92,17 @@ pub enum GatewayError {
         /// 距解冻的剩余秒数（向上取整，至少 1）。
         remain_secs: u64,
         /// 触发暂停时**窗口内**累计的失败次数（不是账号数，见 [`crate::pool::gate`]）。
+        ///
+        /// ★ 只在闸门路径有意义；`cooled_accounts > 0` 那条路径恒为 `0`。
         failures: usize,
+        /// ★ issue #134：**该模型在全部可用账号上都处于模型级冷却**时的账号数
+        /// （`0` = 不是这条路径，是闸门暂停）。
+        ///
+        /// 两条路径共用这个错误类型是因为对外语义完全相同（「上游此刻对该模型整体限流、
+        /// 稍后自愈、与凭据无关」⇒ 503 + `Retry-After`），但**成因与文案不同**：
+        /// 闸门靠「窗口内失败次数/去重账号数」开闸，这条靠「没有别的号可换」——
+        /// 单账号池里闸门永远不会开（去重上限就是 1），只能靠它兜住。
+        cooled_accounts: usize,
         /// 本轮换号轨迹。闸门短路时它只有一条（`uid` 为空），但那一条恰好是
         /// 全链路诊断价值最高的信息 —— 不能丢（issue #106 §2.4）。
         attempts: Vec<UpstreamAttempt>,
@@ -367,9 +377,18 @@ impl GatewayError {
                 model,
                 remain_secs,
                 failures,
+                cooled_accounts,
                 ..
             } => {
-                if *remain_secs == 0 {
+                if *cooled_accounts > 0 {
+                    // ★ issue #134：不是闸门开的，是**这个模型在所有可用账号上都在冷却**。
+                    //   说成「窗口内已失败 N 次」会是假话（这里根本没有闸门）。
+                    format!(
+                        "模型「{model}」此刻在全部 {cooled_accounts} 个可用账号上都处于限流冷却：约 {remain_secs} 秒后自动重试。\
+                         这是上游对该模型的限流，**与你的凭据无关** —— 换号、重新登录都不会解除。\
+                         可以换个模型继续，或稍等再试"
+                    )
+                } else if *remain_secs == 0 {
                     // ★ 安全审计 P1-3：这一段改造前写的是「名额已被**其它请求**占用：
                     //   稍等**一两秒**重试即可」。在「持票者自锁」的年代两句都是假的
                     //   （占用的就是它自己；真实等待是 `PROBE_LEASE_MS` = 120s）。
@@ -1012,6 +1031,7 @@ mod tests {
             model: "glm-5.2".to_string(),
             remain_secs: 8,
             failures: 2,
+            cooled_accounts: 0,
             attempts: vec![UpstreamAttempt {
                 account: String::new(),
                 uid: String::new(),
@@ -1044,6 +1064,7 @@ mod tests {
             model: "m".to_string(),
             remain_secs: 0,
             failures: 0,
+            cooled_accounts: 0,
             attempts: Vec::new(),
         };
         assert_eq!(taken.status(), 503);

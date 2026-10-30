@@ -234,3 +234,117 @@ async fn abandoned_probe_is_returned_when_the_request_has_no_model_verdict() {
     drop(pool);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// ★★ issue #134：**单账号池**里模型限流必须回 503，不能回 401。
+///
+/// # 为什么这条和上面那条是两个用例
+///
+/// 上一条走的是**闸门**（窗口内失败次数/去重账号数达标 ⇒ `Paused` ⇒ 503）。
+/// `#125` 把开闸判据改成「窗口内**去重账号数** ≥ `gate_threshold`（默认 2）」后，
+/// **只有 1 个账号的池里闸门永远不会开**（去重上限就是 1）⇒ 模型限流时走的是
+/// 「选号失败」这条兜底，而兜底只有 `pool_busy`(503) / `no_credential`(401)，
+/// 前者判据（可用号全在途满）不成立 ⇒ **401** ⇒ 客户端判 AUTH、整轮终止
+/// （`#106` 修掉的那个症状又回来了）。
+///
+/// 判据必须是「**该模型**在全部可试账号上都冷却」，不能用
+/// `PoolSummary::model_cooling == available`：后者数的是「有**任意**模型冷却的账号」，
+/// 与本次请求的模型无关。
+///
+/// 变异验证：
+/// - 删掉 `relay.rs` 兜底分支里的 `model_cooling` 判据 ⇒ 本用例红（401 / `no_credential`）；
+/// - 把判据换成 `summary.model_cooling == summary.available` ⇒ 本用例仍绿（单账号时两者
+///   恰好都等于 1），但「A 模型冷却、请求 B 模型」会误报 503 —— 那条由
+///   `pool::pick::tests::model_cooling_until_ignores_other_models` 钉住。
+#[tokio::test]
+async fn single_account_model_cooldown_returns_503_instead_of_401() {
+    use buddy_switch_gateway::pool::{RealmTag, UpstreamEvent};
+
+    let _guard = guard();
+    let home = isolated_home("single-cooled");
+    let state = GatewayState::new(GatewayConfig::default());
+    let (_record, key) = state.keys.create("e2e-single".into(), Region::Cn);
+    let app = router(state.clone());
+
+    let model = "glm-5.3";
+    let now_ms = buddy_switch_gateway::timeutil::now_ms();
+
+    // 池里**只有 1 个**账号。域必须与请求一致（`Region::Cn` ⇒ `RealmTag::Cn`），
+    // 否则选号会先把它按域过滤掉，测到的就不是「模型冷却」这条路径了。
+    {
+        let mut pool = state.pool.write().await;
+        pool.upsert("u1", Some(RealmTag::Cn), "single");
+        // 上游 6004（模型级限流）⇒ 只冷这个模型，账号本身仍然健康。
+        pool.apply_upstream_error(
+            "u1",
+            model,
+            &UpstreamEvent::SoftRate {
+                reset_at_ms: Some(now_ms + 600_000),
+                model_scoped: true,
+            },
+            now_ms,
+        );
+    }
+
+    // 前提自检①：闸门**没开**。这正是 #134 的成因 —— 若闸门开了，本用例测的就是
+    // 上一条那条路径（503 来自闸门），断言会假绿。
+    {
+        let mut pool = state.pool.write().await;
+        assert!(
+            pool.admit_model(model, now_ms, "probe-gate").is_none(),
+            "单账号池不该开闸（去重账号数上限 1 < gate_threshold 2）"
+        );
+    }
+
+    // 前提自检②：这个号确实还在池里、且只是被该模型卡住（账号级健康）。
+    {
+        let pool = state.pool.read().await;
+        let summary = pool.summary(now_ms, Some(RealmTag::Cn));
+        assert_eq!(summary.total, 1, "池里应当恰好 1 个账号");
+        assert_eq!(summary.available, 1, "账号本身可用（只是该模型在冷却）");
+        assert_eq!(summary.model_cooling, 1, "该模型级冷却必须被数出来");
+    }
+
+    let response = app
+        .clone()
+        .oneshot(chat_request(&key, model))
+        .await
+        .expect("请求应完成");
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("读响应体"),
+    )
+    .expect("响应体是 JSON");
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "该模型在全部可用账号上冷却 ⇒ 必须是可重试的 503，不是 401。body={body}"
+    );
+    assert!(
+        retry_after.is_some(),
+        "503 必须带 Retry-After（剩余时长由池里的冷却截止算出，不是猜的）"
+    );
+    assert_eq!(
+        body["error"]["type"], "model_gate_paused",
+        "错误类型必须与闸门暂停同源（客户端按 SERVER 重试）：{body}"
+    );
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("1 个可用账号"),
+        "文案必须说清「几个号都卡在这个模型上」（不是「窗口内失败 N 次」）：{message}"
+    );
+    assert!(
+        message.contains("与你的凭据无关"),
+        "必须明确否定「凭据坏了」这个误判：{message}"
+    );
+
+    drop(state);
+    let _ = std::fs::remove_dir_all(&home);
+}

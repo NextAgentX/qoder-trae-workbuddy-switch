@@ -35,9 +35,9 @@ pub use entry::{CoolKind, CostTier, ModelCooldown, ModelCost, PoolEntry};
 pub use entry_like::PoolEntryLike;
 pub use gate::{GateBlock, GatePhase, ModelGate, ModelGates};
 pub use pick::{
-    no_exclusions, parse_preferred, pick, pick_with_preference, weight_of, weight_of_model,
-    PickInput, PickMode, PickPolicy, PREFERRED_AUTO, PREFERRED_MAX_CREDITS, PREFERRED_RANDOM,
-    SHORTLIST_SIZE,
+    model_cooling_until, no_exclusions, parse_preferred, pick, pick_with_preference, weight_of,
+    weight_of_model, PickInput, PickMode, PickPolicy, PREFERRED_AUTO, PREFERRED_MAX_CREDITS,
+    PREFERRED_RANDOM, SHORTLIST_SIZE,
 };
 
 /// 池内账号的归属域标记（与 core 的 `Region` 解耦，避免循环依赖）。
@@ -1413,6 +1413,35 @@ impl Pool {
             self.claim_verify_ticket(uid, model, now_ms, owner);
         }
         picked
+    }
+
+    /// 选号失败时的判据：**该模型是否在全部可试账号上都被限流**（issue #134）。
+    ///
+    /// 返回 `Some((最晚解冻时刻, 账号数))`；`None` = 不成立（有号其实能用，或压根没号）。
+    ///
+    /// 语义与判据细节见 [`pick::model_cooling_until`]。这里只负责把池状态拼成
+    /// [`PickInput`]：`excluded` 与 `allowed` 两条硬约束必须与选号**同源**，
+    /// 否则会出现「选号跳过了某个号、判据却把它算进来」⇒ 该报 503 的时候报 401。
+    pub fn model_cooling_until(
+        &self,
+        now_ms: i64,
+        realm: Option<RealmTag>,
+        model: &str,
+        tried: &HashSet<String>,
+        allowed: Option<&HashSet<String>>,
+    ) -> Option<(i64, usize)> {
+        let excluded = self.excluded_keys();
+        let input = PickInput {
+            realm,
+            model,
+            tried,
+            excluded: &excluded,
+            allowed,
+            // 只做判定，不选号：策略与种子不参与。
+            mode: PickMode::MaxCredits,
+            seed: 0,
+        };
+        pick::model_cooling_until(&self.entries, &self.policy(), now_ms, &input)
     }
 
     /// **人工解除禁用**（清禁用 + 清冷却域，**保留熔断历史**）。

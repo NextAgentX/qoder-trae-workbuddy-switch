@@ -1019,6 +1019,7 @@ mod tests {
             model: "a".into(),
             remain_secs: 42,
             failures: 3,
+            cooled_accounts: 0,
             attempts: Vec::new(),
         };
         assert_eq!(trigger_for(&err, None), Some(Trigger::Gate));
