@@ -38,10 +38,11 @@ jobs:
       # 于是本地能过、CI 才炸的「幽灵失败」和本地复现不了的通过都会出现。
       - run: npm ci
 
-      # `npm run build` = tsc --noEmit + 6 个契约检查（check:api / check:docker /
-      # check:store-selectors / check:scope / check:npm-platforms / check:agent-sources）
-      # + vite build。⚠️ 不要拆成 `tsc` + `vite build` 两条：那 6 个检查会静默消失，
-      # 而它们才是这仓真正的「架构契约」门禁（API 契约、store 选择器、scope 注册表…）。
+      # `npm run build` = tsc --noEmit + 7 个契约检查（check:api / check:docker /
+      # check:store-selectors / check:hooks / check:scope / check:npm-platforms /
+      # check:agent-sources）+ vite build。⚠️ 不要拆成 `tsc` + `vite build` 两条：
+      # 那 7 个检查会静默消失，而它们才是这仓真正的「架构契约」门禁
+      # （API 契约、store 选择器、hook 顺序、scope 注册表…）。
       - name: Build (tsc + contract checks + vite)
         run: npm run build
 

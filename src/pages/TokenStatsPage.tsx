@@ -263,6 +263,17 @@ function TrendView({
 
   const coverage = useMemo(() => dimCoverage(dim, viewWindow), [dim, viewWindow]);
   const heatmapHasData = useMemo(() => matrix.cells.some((row) => row.some((value) => value > 0)), [matrix]);
+  /* ★ 累计曲线必须在本函数**所有** hook 之后才能算 —— 但它自己就是 hook，
+     所以只能放在早退**之前**。放在 `if (filtered) return` 之后会让 hook 数量随
+     `filtered` 变化：点击「今天」从「有数据」切到「本窗口无数据」时 React 抛
+     #300（Rendered more hooks than during the previous render），整页白屏（issue #131）。 */
+  const cumulative = useMemo(() => {
+    let running = 0;
+    return columns.map((column) => {
+      running += column.total;
+      return { label: column.label, value: running };
+    });
+  }, [columns]);
 
   if (filtered) {
     return (
@@ -321,14 +332,6 @@ function TrendView({
       hint: t("wbStats.usage.trend.requestsHint"),
     },
   ];
-
-  const cumulative = useMemo(() => {
-    let running = 0;
-    return columns.map((column) => {
-      running += column.total;
-      return { label: column.label, value: running };
-    });
-  }, [columns]);
 
   return (
     <div className="min-w-0 space-y-6">
