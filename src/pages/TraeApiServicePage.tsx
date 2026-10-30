@@ -749,7 +749,7 @@ export default function TraeApiServicePage() {
               <ModelFallbackCard
                 region={traeRegionOf(variant)}
                 scope={scopeOf("trae", traeRegionOf(variant))}
-                modelOptions={probeModels.map((model) => model.name)}
+                modelOptions={probeModels}
                 className="mb-6"
               />
               <TraeModelList

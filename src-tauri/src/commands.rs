@@ -3213,7 +3213,8 @@ pub async fn save_model_fallback(scope: String, config: Value) -> Result<Value, 
 
     // 规范化：**在写盘之前**把脏值挡掉（丢掉空 from、剔除与主模型同名的 target、
     // 去重后截断到上限）。逻辑在 gateway crate 里，与 WebUI 那条路**共用同一份**。
-    let normalized = buddy_switch_gateway::model_fallback::normalize(parsed);
+    // 传 `scope`：「同名即自环」只在同作用域成立（跨区域同名是另一个上游）。
+    let normalized = buddy_switch_gateway::model_fallback::normalize(scope, parsed);
 
     let store = buddy_switch_gateway::model_fallback::shared();
     {

@@ -3741,7 +3741,7 @@ async fn api_save_gateway_model_fallback(Json(body): Json<Value>) -> Response {
                 return json_err(format!("降级链格式错误: {error}"), StatusCode::BAD_REQUEST)
             }
         };
-    let normalized = buddy_switch_gateway::model_fallback::normalize(parsed);
+    let normalized = buddy_switch_gateway::model_fallback::normalize(scope, parsed);
     let store = buddy_switch_gateway::model_fallback::shared();
     {
         let mut guard = store.write().await;

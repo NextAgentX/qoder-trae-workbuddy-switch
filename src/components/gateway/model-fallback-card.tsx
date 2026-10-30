@@ -39,7 +39,7 @@ import type {
   Region,
 } from "@/lib/types";
 
-import { ModelFallbackSheet } from "./model-fallback-sheet";
+import { ModelFallbackSheet, type ModelOption } from "./model-fallback-sheet";
 
 /** 状态 → 圆点底色。`gated` 是**黄**（暂时不可用），`disabled` 是**灰**（要人去改）。 */
 const DOT_CLASS: Record<FallbackTargetState, string> = {
@@ -81,12 +81,12 @@ interface Props {
    */
   scope?: Scope;
   /**
-   * 可选模型名清单。
+   * 可选模型清单（`id` 是值、`name` 只做展示）。
    *
    * Trae 的清单来自客户端 `vscdb` 缓存、Qoder 的来自上游实时拉取，
    * **都不在 gateway store 里** ⇒ 由页面注入。缺省时退回 WB 的 catalog。
    */
-  modelOptions?: string[];
+  modelOptions?: ModelOption[];
   className?: string;
 }
 

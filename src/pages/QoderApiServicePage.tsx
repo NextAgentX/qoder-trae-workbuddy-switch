@@ -667,7 +667,7 @@ export default function QoderApiServicePage() {
               <ModelFallbackCard
                 region={region}
                 scope={scopeOf("qoder", region)}
-                modelOptions={probeModels.map((model) => model.name)}
+                modelOptions={probeModels}
                 className="mb-6"
               />
               <QoderModelList

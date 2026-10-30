@@ -174,6 +174,32 @@ impl FallbackTarget {
     }
 }
 
+/// 模型标识的**规范化键**：忽略大小写，并忽略 `-_.:/` 与空白。
+///
+/// `DeepSeek-V4.1-Flash` 与 `deepseek-v4.1-flash` 归一到同一个键。
+pub fn norm_model(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | '.' | '/' | ':' | ' '))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 两个模型标识是否指**同一个模型**（宽松比较）。
+///
+/// ## 为什么需要它
+///
+/// 同一个模型有两种写法：`/v1/models` 交给客户端、客户端请求里带的是 **id**
+/// （`deepseek-v4.1-flash`），而目录里另有一份给人看的 **name**
+/// （`DeepSeek-V4.1-Flash`）。管理面历史版本把 name 写进了降级链，于是入站 id
+/// 永远命中不了那条链 —— 配置看着在、一次都不降级，且**没有任何报错**。
+///
+/// 归一后两种写法相等，而 `-sg` 这类**真后缀**仍然区分
+/// （`deepseekv41flashsg` ≠ `deepseekv41flash`）。
+pub fn same_model(a: &str, b: &str) -> bool {
+    norm_model(a) == norm_model(b)
+}
+
 impl Serialize for FallbackTarget {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // 同作用域的目标序列化成**裸字符串**（保持旧配置可读、可手写）。
@@ -251,7 +277,7 @@ impl FallbackChain {
             if name.is_empty() {
                 continue;
             }
-            let key = (target.scope.clone(), name.to_ascii_lowercase());
+            let key = (target.scope.clone(), norm_model(name));
             if !seen.insert(key) {
                 continue;
             }
@@ -336,7 +362,7 @@ pub fn plan_for(fb: &ModelFallback, scope: Scope, model: &str) -> Vec<FallbackTa
     let Some(chain) = scoped
         .chains
         .iter()
-        .find(|(from, _)| from.eq_ignore_ascii_case(model.trim()))
+        .find(|(from, _)| same_model(from, model))
         .map(|(_, chain)| chain)
     else {
         return plan;
@@ -351,13 +377,13 @@ pub fn plan_for(fb: &ModelFallback, scope: Scope, model: &str) -> Vec<FallbackTa
         }
         // 目标与主模型同名**且同作用域** ⇒ 不自环。
         // ★ 跨作用域的同名模型**不是**自环：`wb-cn:glm` → `trae-cn:glm` 是两个不同的上游。
-        if !target.crosses_scope(scope) && target.model.eq_ignore_ascii_case(model.trim()) {
+        if !target.crosses_scope(scope) && same_model(&target.model, model) {
             continue;
         }
         // 同一请求内每个 (作用域, 模型) 只试一次：链里写重了也只保留一份。
         if plan.iter().any(|seen| {
             seen.scope_or(scope) == target.scope_or(scope)
-                && seen.model.eq_ignore_ascii_case(&target.model)
+                && same_model(&seen.model, &target.model)
         }) {
             continue;
         }
@@ -418,7 +444,7 @@ pub fn chain_of(fb: &ModelFallback, scope: Scope, model: &str) -> Option<Fallbac
     scoped
         .chains
         .iter()
-        .find(|(from, _)| from.eq_ignore_ascii_case(model.trim()))
+        .find(|(from, _)| same_model(from, model))
         .map(|(_, chain)| chain.clone())
         .filter(|chain| chain.enabled)
 }
@@ -616,7 +642,7 @@ pub fn build_view(
         let upstream = snapshot
             .models
             .iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(model))
+            .find(|entry| same_model(&entry.name, model) || same_model(&entry.id, model))
             .map(|entry| entry.supports_images);
         crate::model_capability::resolve_effective(scope, model, upstream).map(|cap| cap.supports)
     };
@@ -639,7 +665,7 @@ pub fn build_view(
                         let gate = if target_scope == scope {
                             gates
                                 .iter()
-                                .find(|(name, _)| name.eq_ignore_ascii_case(&model))
+                                .find(|(name, _)| same_model(name, &model))
                         } else {
                             None
                         };
@@ -693,7 +719,15 @@ pub fn build_view(
 /// 做三件事：丢掉空 `from`、剔除与主模型同名的 target、去重后截断到 [`MAX_TARGETS`]。
 /// 在**写盘之前**挡掉脏值，而不是等中继读到再兜底 —— 后者会让卡片上出现
 /// 「一条指向自己的链」这种没人能解释的东西。
-pub fn normalize(input: ScopeFallback) -> ScopeFallback {
+///
+/// ## 为什么必须收 `scope`
+///
+/// 「与主模型同名」的判据只在**同作用域**成立（与 [`plan_for`] 同一条规则）：
+/// `wb-cn:Deepseek-V4.1-Flash` → `wb-global:Deepseek-V4.1-Flash` 是两个不同上游。
+/// 不带 `scope` 时这条自环判断会把**跨区域的同名备选整条删掉**（用户选了国际版主模型 +
+/// 国内版备选，保存后备选消失），而 `plan_for` 那边却认为它是合法的一跳 —— 配置在
+/// 写盘那一刻就被吃掉，属于**不可逆的静默丢失**。
+pub fn normalize(scope: Scope, input: ScopeFallback) -> ScopeFallback {
     let mut normalized = input;
     normalized.chains.retain(|from, _| !from.trim().is_empty());
     for (from, chain) in normalized.chains.iter_mut() {
@@ -701,10 +735,14 @@ pub fn normalize(input: ScopeFallback) -> ScopeFallback {
         let mut seen: BTreeSet<(Option<String>, String)> = BTreeSet::new();
         chain.targets.retain(|target| {
             let name = target.model.trim();
-            if name.is_empty() || name.eq_ignore_ascii_case(from.trim()) {
+            if name.is_empty() {
                 return false;
             }
-            seen.insert((target.scope.clone(), name.to_ascii_lowercase()))
+            // ★ 只有同作用域的同名模型才是自环（口径与 `plan_for` 一致）。
+            if !target.crosses_scope(scope) && same_model(name, from) {
+                return false;
+            }
+            seen.insert((target.scope.clone(), norm_model(name)))
         });
         chain.targets.truncate(MAX_TARGETS);
     }
@@ -756,7 +794,7 @@ pub fn preview_payload(
         }
         let gate = gates
             .iter()
-            .find(|(model, _)| model.eq_ignore_ascii_case(name));
+            .find(|(model, _)| same_model(model, name));
         let (action, gated_for_secs) = if crate::disabled_models::is_disabled(disabled, scope, name)
         {
             ("skip_disabled", None)
@@ -1050,9 +1088,76 @@ mod tests {
         assert_eq!(names(&plan_for(&fb, Scope::WbCn, "a")), vec!["a"]);
     }
 
+    /// ★ 入站请求带的是 `/v1/models` 的 **id**，链键可能是历史遗留的**展示名**。
+    ///
+    /// 两者必须匹配 —— 否则「配置看着在、一次都不降级」，而且**没有任何报错**：
+    /// `chain_of` 找不到链就返回只含主模型的 plan，调用方按原路径走，看上去一切正常。
+    /// 线上证据：网关日志里 200 条请求全是 `deepseek-v4.1-flash`，而配置的链键是
+    /// `DeepSeek-V4.1-Flash` —— 差一个大小写与连字符，链从未命中过。
     #[test]
-    fn view_marks_gated_and_disabled_targets() {
+    fn chain_matches_request_id_against_display_name_key() {
         let mut scoped = ScopeFallback {
+            enabled: true,
+            ..Default::default()
+        };
+        scoped.chains.insert(
+            "DeepSeek-V4.1-Flash".into(),
+            chain(&["GLM-5.3-Flash"], &[Trigger::Gate]),
+        );
+        let fb = store(Scope::WbCn, scoped);
+
+        assert_eq!(
+            names(&plan_for(&fb, Scope::WbCn, "deepseek-v4.1-flash")),
+            vec!["deepseek-v4.1-flash", "GLM-5.3-Flash"],
+            "展示名作键的旧配置必须能命中 id 请求"
+        );
+
+        // `-sg` 是**真后缀**（另一个上游、另一个倍率），不能被归一掉。
+        assert!(!same_model("deepseek-v4.1-flash-sg", "deepseek-v4.1-flash"));
+        assert!(same_model("DeepSeek-V4.1-Flash", "deepseek-v4.1-flash"));
+    }
+
+    /// 跨作用域的同名备选**不许**被当成自环删掉（写盘前的那道坎）。
+    ///
+    /// 线上事故形态：主模型「国际版 DeepSeek-V4.1-Flash」+ 备选「国内版 DeepSeek-V4.1-Flash」，
+    /// 两个作用域的展示名一致（大小写都可能只差一个字母）⇒ 保存后备选整条消失，
+    /// 用户以为没保存成功。判据与 `plan_for` 必须一致：只看**同作用域**的自环。
+    #[test]
+    fn normalize_keeps_cross_scope_target_with_same_model_name() {
+        let mut scoped = ScopeFallback {
+            enabled: true,
+            ..Default::default()
+        };
+        scoped.chains.insert(
+            "Deepseek-V4.1-Flash".into(),
+            FallbackChain {
+                targets: vec![
+                    // 同作用域同名 ⇒ 自环，必须删。
+                    FallbackTarget::same_scope("Deepseek-V4.1-Flash"),
+                    // 跨作用域同名 ⇒ 另一个上游，必须留。
+                    FallbackTarget {
+                        scope: Some(Scope::WbCn.as_str().to_string()),
+                        model: "Deepseek-V4.1-Flash".into(),
+                    },
+                ],
+                triggers: [Trigger::Gate].into_iter().collect(),
+                enabled: true,
+            },
+        );
+
+        let normalized = normalize(Scope::WbGlobal, scoped);
+        let targets = &normalized.chains["Deepseek-V4.1-Flash"].targets;
+        assert_eq!(
+            targets.len(),
+            1,
+            "跨作用域同名备选被误删了：{targets:?}"
+        );
+        assert_eq!(targets[0].scope.as_deref(), Some("wb-cn"));
+        assert_eq!(targets[0].model, "Deepseek-V4.1-Flash");
+    }
+
+    #[test]
+    fn view_marks_gated_and_disabled_targets() {        let mut scoped = ScopeFallback {
             enabled: true,
             ..Default::default()
         };

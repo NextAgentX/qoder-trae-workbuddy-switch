@@ -38,9 +38,16 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { getGatewayModels, previewModelFallback } from "@/lib/api";
+import {
+  getGatewayModels,
+  getQoderGatewayModels,
+  getTraeGatewayModels,
+  previewModelFallback,
+} from "@/lib/api";
 import { useT } from "@/lib/i18n";
+import { normalizeQoderGatewayCatalog } from "@/lib/qoder-gateway";
 import { SCOPES, type Scope } from "@/lib/scope";
+import { normalizeTraeGatewayModels } from "@/lib/trae-gateway";
 import { cn } from "@/lib/utils";
 import { useGatewayStore } from "@/stores/gateway";
 import type {
@@ -78,11 +85,29 @@ interface Draft {
   triggers: FallbackTrigger[];
 }
 
+/**
+ * 下拉里的一个模型。
+ *
+ * ★ `id` 是**值**：`/v1/models` 交给客户端、客户端请求里带的就是它
+ * （`deepseek-v4.1-flash`）。`name` 只用于展示（`Deepseek-V4.1-Flash`）。
+ * 用展示名当值会让「跨区域同名」与「同区域同名不同 id」（`-sg`）彻底无法表达，
+ * 也会让降级链永远命中不了入站请求 —— 两者是两种写法，不是两个模型。
+ */
+export interface ModelOption {
+  id: string;
+  name: string;
+}
+
+/** 与后端 `model_fallback::norm_model` 同口径：忽略大小写与 `-_.:/`、空白。 */
+function normModel(value: string): string {
+  return value.replace(/[-_.:/ ]/g, "").toLowerCase();
+}
+
 interface Props {
   scope: Scope;
   region: Region;
-  /** 页面注入的模型名清单（Trae / Qoder 的清单不在 gateway store 里）。 */
-  modelOptions?: string[];
+  /** 页面注入的模型清单（Trae / Qoder 的清单不在 gateway store 里）。 */
+  modelOptions?: ModelOption[];
   view: ModelFallbackView;
   /** `undefined` = 关闭；`null` = 新建；`string` = 编辑该主模型。 */
   editing: string | null | undefined;
@@ -107,18 +132,22 @@ export function ModelFallbackSheet({
 
   const open = editing !== undefined;
 
-  /* 可选模型：已禁用的不出现（与 `disabled_models` 同源），并按名字去重 ——
-     跨区目录里同名模型有两条记录，下拉里出现两个一样的选项会让人以为是两回事。
-     WB 侧「在清单里即可用」（`CatalogModel` 没有 `available` 字段，见其注释）。 */
+  /* 可选模型：已禁用的不出现（禁用集合存的是**模型 id**，与 `/v1/models` 同源），
+     并按 id 去重。同一区域里「同展示名、不同 id」（如 `deepseek-v4.1-flash-sg`）必须
+     都能选到 —— 那正是它过去在列表里消失的原因。 */
   /**
    * 跨作用域目标的模型清单（按 scope 缓存）。
    *
-   * 只对**同平台的另一区域**拉取（`wb-global`）：那三条 `get*GatewayModels` 里只有
-   * WB 的返回结构是已知的。跨平台（`trae-cn` / `qoder-cn`）不拉 —— 那两条的清单
-   * 由各自页面持有、结构也不同，这里让用户手填模型 id 更诚实（填错会得到目标平台
-   * 自己的 404，比一个空白下拉好）。
+   * 能拉到就**给下拉**（比让用户手打 id 靠谱），拉不到才回落手填 ——
+   * 手填本身没错，错的是不给列表也不说为什么。
    */
-  const [scopeModels, setScopeModels] = useState<Record<string, string[]>>({});
+  const [scopeModels, setScopeModels] = useState<Record<string, ModelOption[]>>({});
+  /**
+   * 目标平台给出的原因（Qoder 缺账号 / 拉取失败时才非空）。
+   *
+   * 空清单**必须解释**：不解释就是一个没有任何选项的弹层，用户只能猜「是不是坏了」。
+   */
+  const [scopeNotes, setScopeNotes] = useState<Record<string, string | null>>({});
 
   useEffect(() => {
     if (!draft) return;
@@ -129,31 +158,66 @@ export function ModelFallbackSheet({
     );
     for (const candidate of wanted) {
       if (scopeModels[candidate]) continue;
-      if (!candidate.startsWith("wb-")) continue;
-      void getGatewayModels(candidate.endsWith("global") ? "global" : "cn")
-        .then((snapshot: { models: { name: string }[] }) =>
-          setScopeModels((prev) => ({
-            ...prev,
-            [candidate]: snapshot.models.map((model) => model.name),
-          })),
-        )
+      const platform = candidate.split("-")[0];
+      const region = candidate.endsWith("global") ? "global" : "cn";
+      const load: Promise<{ models: ModelOption[]; note: string | null }> =
+        platform === "wb"
+          ? getGatewayModels(region).then((snapshot) => ({
+              models: snapshot.models.map((model) => ({ id: model.id, name: model.name })),
+              note: null,
+            }))
+          : platform === "qoder"
+            ? getQoderGatewayModels(candidate as Scope).then((raw) => {
+                const catalog = normalizeQoderGatewayCatalog(raw);
+                return {
+                  models: catalog.rows.map((row) => ({ id: row.id, name: row.name })),
+                  note: catalog.note,
+                };
+              })
+            : platform === "trae"
+              ? getTraeGatewayModels(region).then((raw) => ({
+                  models: normalizeTraeGatewayModels(raw),
+                  note: null,
+                }))
+              : Promise.resolve({ models: [], note: null });
+      void load
+        .then(({ models, note }) => {
+          setScopeModels((prev) => ({ ...prev, [candidate]: models }));
+          setScopeNotes((prev) => ({ ...prev, [candidate]: note }));
+        })
         .catch(() => {
           /* 拉不到就让用户手填，不阻塞配置 */
+          setScopeModels((prev) => ({ ...prev, [candidate]: [] }));
         });
     }
   }, [draft, scope, scopeModels]);
 
+  /** 列表本身（已按 id 去重、已过禁用过滤）。 */
   const options = useMemo(() => {
     // 页面注入了清单（Trae / Qoder）就用它：那两条平台的模型不在 gateway store 里。
-    // 注入的清单**同样要过禁用过滤** —— 否则下拉里会出现一个「选了立刻被拒」的模型。
-    const source: string[] = modelOptions ?? (catalog?.models ?? []).map((model) => model.name);
-    const seen = new Map<string, string>();
-    for (const name of source) {
-      if (disabledSet?.has(name)) continue;
-      if (!seen.has(name)) seen.set(name, name);
+    const source: ModelOption[] =
+      modelOptions ?? (catalog?.models ?? []).map((model) => ({ id: model.id, name: model.name }));
+    const seen = new Set<string>();
+    const out: ModelOption[] = [];
+    for (const option of source) {
+      const id = option.id?.trim();
+      if (!id || seen.has(id)) continue;
+      // ★ 禁用集合存的是 id（与 `/v1/models` 的出口同一份），拿 name 去查永远不命中。
+      if (disabledSet?.has(id)) continue;
+      seen.add(id);
+      out.push({ id, name: option.name?.trim() || id });
     }
-    return [...seen.keys()];
+    return out;
   }, [modelOptions, catalog, disabledSet]);
+
+  /**
+   * 展示文案：**同名不同 id 时必须把 id 带出来**，否则用户看到两个一模一样的选项。
+   * （`deepseek-v4.1-flash` 与 `deepseek-v4.1-flash-sg` 的展示名完全相同。）
+   */
+  function labelOf(option: ModelOption, list: ModelOption[] = options): string {
+    const duplicated = list.filter((other) => other.name === option.name).length > 1;
+    return duplicated ? `${option.name}（${option.id}）` : option.name;
+  }
 
   // 打开时初始化草稿（每次切换目标都重建，抽屉是「一次性表单」而非长驻编辑器）。
   useEffect(() => {
@@ -226,9 +290,14 @@ export function ModelFallbackSheet({
       });
       return;
     }
-    /* ★ 整作用域覆盖：必须把其它链原样带上，否则保存一条会删掉别的。 */
+    /* ★ 整作用域覆盖：必须把其它链原样带上，否则保存一条会删掉别的。
+       正在编辑的那条由下面按**归一后的键**重写，这里跳过 —— 旧配置的链键是展示名
+       （`DeepSeek-V4.1-Flash`），入站请求带的是 id，保存一次就该迁成 id，而不是留下两份。 */
+    const fromId =
+      options.find((option) => normModel(option.id) === normModel(draft.from))?.id ?? draft.from;
     const chains: ScopeFallbackConfig["chains"] = {};
     for (const chain of view.chains) {
+      if (chain.from === editing) continue;
       chains[chain.from] = {
         targets: chain.targets.map((target) => ({
           scope: target.scope === scope ? null : target.scope,
@@ -238,7 +307,7 @@ export function ModelFallbackSheet({
         enabled: chain.enabled,
       };
     }
-    chains[draft.from] = { targets, triggers: draft.triggers, enabled: true };
+    chains[fromId] = { targets, triggers: draft.triggers, enabled: true };
     setSaving(true);
     try {
       await saveFallback(scope, { enabled: view.enabled, chains });
@@ -289,9 +358,13 @@ export function ModelFallbackSheet({
                     <SelectValue placeholder="—" />
                   </SelectTrigger>
                   <SelectContent>
-                    {options.map((name) => (
-                      <SelectItem key={name} value={name} className="font-mono text-[12px]">
-                        {name}
+                    {options.map((option) => (
+                      <SelectItem
+                        key={option.id}
+                        value={option.id}
+                        className="font-mono text-[12px]"
+                      >
+                        {labelOf(option)}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -314,6 +387,10 @@ export function ModelFallbackSheet({
               <div className="space-y-1.5">
                 {Array.from({ length: view.max_targets }, (_, index) => {
                   const target = draft.targets[index] ?? { scope: null, model: "" };
+                  const crossScope = Boolean(target.scope && target.scope !== scope);
+                  const list = crossScope ? (scopeModels[target.scope as string] ?? []) : options;
+                  // 目标平台清单拉不到（Trae 的清单不在这里解析 / Qoder 没账号）⇒ 回落手填。
+                  const manual = crossScope && list.length === 0;
                   return (
                   <div key={index} className="flex items-center gap-1.5">
                     <span className="w-3.5 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
@@ -358,26 +435,34 @@ export function ModelFallbackSheet({
                         })}
                       </SelectContent>
                     </Select>
-                    {/* 跨平台（目标平台不是 WB）时手填模型 id：
-                        那两条平台的清单由各自页面持有、结构也不同，这里不猜 ——
-                        填错会得到目标平台自己的 404，比一个空白下拉更可解释。 */}
-                    {target.scope && target.scope !== scope && !target.scope.startsWith("wb-") ? (
-                      <Input
-                        value={target.model}
-                        onChange={(event) =>
-                          setDraft((prev) => {
-                            if (!prev) return prev;
-                            const targets = [...prev.targets];
-                            targets[index] = {
-                              ...rowAt(targets, index),
-                              model: event.target.value,
-                            };
-                            return { ...prev, targets };
-                          })
-                        }
-                        placeholder={t("shared.gateway.fallback.field.crossModelPlaceholder")}
-                        className="min-w-0 flex-1 font-mono text-[12px]"
-                      />
+                    {/* 跨平台目标：能拉到目标平台的清单就给下拉（Qoder 的目录带凭据现拉），
+                        拉不到才回落手填 —— 那时 placeholder 会告诉用户要填目标平台的模型 id。 */}
+                    {manual ? (
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <Input
+                          value={target.model}
+                          onChange={(event) =>
+                            setDraft((prev) => {
+                              if (!prev) return prev;
+                              const targets = [...prev.targets];
+                              targets[index] = {
+                                ...rowAt(targets, index),
+                                model: event.target.value,
+                              };
+                              return { ...prev, targets };
+                            })
+                          }
+                          placeholder={t("shared.gateway.fallback.field.crossModelPlaceholder")}
+                          className="w-full font-mono text-[12px]"
+                        />
+                        {/* 目标平台自己给出的原因（Qoder 缺账号 / 拉取失败）：
+                            空清单不给解释，用户只能当成「坏了」。 */}
+                        {scopeNotes[target.scope as string] ? (
+                          <p className="text-[11px] leading-snug text-muted-foreground">
+                            {scopeNotes[target.scope as string]}
+                          </p>
+                        ) : null}
+                      </div>
                     ) : (
                     <Select
                       value={target.model}
@@ -394,23 +479,23 @@ export function ModelFallbackSheet({
                         <SelectValue placeholder="—" />
                       </SelectTrigger>
                       <SelectContent>
-                        {(target.scope && target.scope !== scope
-                          ? (scopeModels[target.scope] ?? [])
-                          : options
-                        )
-                          .filter((name) => name !== draft.from)
-                          .map((name) => (
-                            <SelectItem key={name} value={name} className="font-mono text-[12px]">
-                              {name}
+                        {list
+                          /* 自环只在**同作用域**成立（口径与后端 `normalize` / `plan_for` 一致）：
+                             跨作用域的同名模型是另一个上游，不能从下拉里藏掉 ——
+                             否则「主模型国际版 + 备选国内版同名」永远配不出来。 */
+                          .filter((option) => crossScope || normModel(option.id) !== normModel(draft.from))
+                          .map((option) => (
+                            <SelectItem
+                              key={option.id}
+                              value={option.id}
+                              className="font-mono text-[12px]"
+                            >
+                              {labelOf(option, list)}
                             </SelectItem>
                           ))}
-                        {/* 跨作用域时，已存的目标模型可能不在当前 options 里 ——
+                        {/* 已存的目标可能不在当前清单里（目录变了 / 手工改过配置）——
                             补一条，否则下拉显示空白、用户以为没配。 */}
-                        {target.model &&
-                        !(target.scope && target.scope !== scope
-                          ? (scopeModels[target.scope] ?? [])
-                          : options
-                        ).includes(target.model) ? (
+                        {target.model && !list.some((option) => option.id === target.model) ? (
                           <SelectItem value={target.model} className="font-mono text-[12px]">
                             {target.model}
                           </SelectItem>
