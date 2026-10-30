@@ -1069,7 +1069,14 @@ async fn stream_chat(
                     }
                 });
                 return if is_anthropic_endpoint(endpoint) {
-                    anthropic_sse_response(rx, model)
+                    // ★ issue #139：`message_start` 要当场给 `input_tokens`，而上游的
+                    //   真实值到末帧才来 ⇒ 用请求体估一个占位值（0 = 客户端把上下文
+                    //   占用画成 0%，用户看不出何时该 compact）。只有 Anthropic 端点
+                    //   需要，其它协议不必付这一次 JSON 解析。
+                    let estimated = serde_json::from_slice::<serde_json::Value>(body)
+                        .map(|value| anthropic::estimate_input_tokens(&value))
+                        .unwrap_or(0);
+                    anthropic_sse_response(rx, model, estimated)
                 } else if is_responses_endpoint(endpoint) {
                     // Responses 事件流：内层是同一条 OpenAI SSE，逐事件重编。
                     responses_sse_response(rx, model, responses_custom.clone())
@@ -1876,6 +1883,8 @@ fn sse_response(rx: mpsc::Receiver<Result<Bytes, std::io::Error>>) -> Response {
 fn anthropic_sse_response(
     rx: mpsc::Receiver<Result<Bytes, std::io::Error>>,
     model: &str,
+    // ★ issue #139：`message_start` 的输入 token 估算（0 = 不估，行为与改造前一致）。
+    estimated_input: u64,
 ) -> Response {
     let inner = Box::pin(sse::stream_from_receiver(rx));
     Response::builder()
@@ -1883,10 +1892,10 @@ fn anthropic_sse_response(
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header("X-Accel-Buffering", "no")
-        .body(Body::from_stream(anthropic::AnthropicSseStream::new(
-            inner,
-            model.to_string(),
-        )))
+        .body(Body::from_stream(
+            anthropic::AnthropicSseStream::new(inner, model.to_string())
+                .with_estimated_input(estimated_input),
+        ))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 

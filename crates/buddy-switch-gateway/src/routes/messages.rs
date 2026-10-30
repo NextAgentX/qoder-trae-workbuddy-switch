@@ -319,6 +319,12 @@ pub async fn messages_for_region(
                         .with_failure(Some(failure.clone())),
                         model.clone(),
                     )
+                    // ★ issue #139：`message_start` 必须当场给 `input_tokens`，而上游
+                    //   的真实 `prompt_tokens` 要到末帧 —— 先用请求侧估算占位，
+                    //   否则客户端（dsh / Claude Code）的「上下文占用」恒为 0%。
+                    .with_estimated_input(crate::protocol::anthropic::estimate_input_tokens(
+                        &parsed,
+                    ))
                     // ★ issue #129：开关开启时，收尾发 `event: error` 而不是 `message_stop`。
                     .with_failover(Some(failure), &account),
                 )

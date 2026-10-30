@@ -799,6 +799,30 @@ is_content_blocked(...) || (status == 400 && sanitized && is_channel_invalid(...
   「不勾选 = 回归基线」也顺带成了天然的回归测试（关闭态 7 条不变量各有单测，
   见 [`ACCOUNT-FAILOVER.md`](ACCOUNT-FAILOVER.md) §5/§7）。
 
+### D53 Anthropic 出口的 `input_tokens` = **估算占位 + 末帧校正**，不写 0 —— ✅ **已落地（2026-10-30，issue #139）**
+
+**结论**：`/v1/messages` 的 `message_start.usage.input_tokens` 用**请求体估算值**
+（`protocol::anthropic::estimate_input_tokens`），`message_delta.usage` 用上游真实
+`prompt_tokens` 覆盖；WB / Trae / Qoder 三条产品线的 Anthropic 出口全部接线。
+另外 `handle_delta` 把 `capture_usage` 提到 `ensure_started` **之前** —— 上游若在首帧
+就报用量，`message_start` 直接是真实值，估算不生效。
+
+**理由**：Anthropic 协议要求 `message_start` **当场**给 `usage.input_tokens`，而上游
+（OpenAI 兼容）只在**流末**报 `prompt_tokens` —— 时序上不可能同时满足。
+
+- **不写 0 的代价**（即改造前的行为）：客户端（dsh / Claude Code）拿 `input_tokens`
+  当上下文长度 ⇒ 占用率恒为 **0%**，用户看不出何时该 compact（#139 的全部体感）；
+  `message_delta` 只给 `output_tokens` 时，连「本轮消耗」也只剩输出侧。
+- **不引 tokenizer 的代价**：CJK 1 token/字、其余 3 字符/token 的估算误差约 ±15%。
+  它只服务「要不要压缩」这个判断，**不是计费口径** —— 计费仍走上游 `usage`
+  （`UsageTap` 那条路完全没动），所以估歪了不会算错钱。
+- **不推迟 `message_start` 的理由**：那等于把整条流缓存到末帧，流式就没了；
+  首帧带 usage 的情形已由上面的顺序调整免费覆盖。
+- **为什么同时补 `cache_read_input_tokens`**：客户端把「缓存读取」单列一行，缺字段
+  与「确实没命中」长得一模一样（都是 0）；四种上游写法
+  （`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` /
+  `cache_read_input_tokens` / `cached_tokens`）收在 `cached_tokens_of` 一处。
+
 ---
 
 一句话总结这 28 条的内在一致性：
