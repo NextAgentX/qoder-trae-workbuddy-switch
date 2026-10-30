@@ -89,10 +89,6 @@ fn ensure_login_window<R: Runtime>(
 
     let window = WebviewWindowBuilder::new(app, LOGIN_LABEL, WebviewUrl::External(parsed))
         .title("登录 Qoder 网页端（用于读取逐包明细）")
-        // TEMP-VERIFY-111: 临时与主窗口同参（保证同一 WebView2 environment / 同一调试端口），验证完即删。
-        .additional_browser_args(
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=9223",
-        )
         .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .min_inner_size(720.0, 560.0)
         .center()
