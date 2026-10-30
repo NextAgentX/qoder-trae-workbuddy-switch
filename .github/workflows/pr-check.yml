@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       # 用 `npm ci` 不用 `npm install`：PR 校验的前提是**锁文件与本次变更一致**。
@@ -75,7 +75,7 @@ jobs:
       # 不加 `needs: frontend` + 产物传递，是为了保住两个 job 的并行（见文件头 concurrency 说明）。
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Build webui assets (RustEmbed 需要 dist/)
@@ -300,7 +300,7 @@ jobs:
       # 就会检查目录存在，缺了会报十几条「方法不存在」的假象。
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Build webui assets (RustEmbed needs dist/)

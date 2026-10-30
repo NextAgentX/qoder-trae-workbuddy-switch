@@ -27,6 +27,24 @@ const { readdirSync } = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
+/* ★ 前置：Node 版本。`jsdom 30` 依赖 `undici 8`，后者 `engines` 要求 **Node ≥ 22.19** ——
+   版本不够时 12 个套件会同时崩在 `undici/lib/interceptor/decompress.js`（`reading 'bind'`），
+   看起来像「断言全错」，实际是运行时太老。这里提前用一句话说清，别再让人去翻栈。 */
+const NODE_MIN = [22, 19, 0];
+const current = process.versions.node.split(".").map((part) => Number(part));
+const tooOld =
+  current[0] < NODE_MIN[0] ||
+  (current[0] === NODE_MIN[0] &&
+    (current[1] < NODE_MIN[1] ||
+      (current[1] === NODE_MIN[1] && current[2] < NODE_MIN[2])));
+if (tooOld) {
+  console.error(
+    `[check-proto] Node ${process.versions.node} 太旧：jsdom 30 → undici 8 要求 Node ≥ ${NODE_MIN.join(".")}。\n` +
+      `              升级本机 Node（或 CI 的 node-version）后重跑；这是运行时问题，不是断言失败。`,
+  );
+  process.exit(1);
+}
+
 const DIR = path.join(__dirname, "..", "docs", "prototype");
 const filter = process.argv.slice(2).filter((arg) => !arg.startsWith("-"))[0] || "";
 

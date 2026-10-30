@@ -97,7 +97,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       # 版本号写进 Cargo / package.json 等载体，**必须在 docker build 之前** ——
       # 二进制里的版本是编译期确定的，镜像跑起来再改已经晚了。
