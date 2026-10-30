@@ -49,6 +49,12 @@ mv dist dist.old.$$ && npm run build:fast
 签名密钥（自动更新用）存放于 `~/.buddy-switch/buddy-switch-updater.key`，构建脚本通过
 `TAURI_SIGNING_PRIVATE_KEY` 注入。发布新版本时：
 
+0. ★ **打 tag 之前**先 `sh scripts/stamp-version.sh --tag v<版本>` **再** `npm run notes:json`，
+   把 `src/data/release-notes.json` 一起提交。
+   为什么顺序不能反：内置说明里的版本号是**离线时的兜底文案**（在线时读 Release 资产里的
+   `release-notes.json`），它比应用版本旧就会在断网时显示上一版内容 —— `pr-check` 有一条
+   门禁专门钉这件事（「打包内置的版本说明必须与当前版本一致」）。
+   本次 v2026.10.300953 就是先 tag 后补，导致该门禁在 main 的 push 上红了一次。
 1. `npm run build:app:release` 生成 `.app.tar.gz` + `.sig`（Windows NSIS 构建会额外生成当前版本的 `*_x64-setup.exe` + `.exe.sig`）。CI 会先清掉 `target/**/release/bundle`，避免 cargo cache 把旧安装包带进 Release。
 2. macOS：`UPDATE_OS=macos UPDATE_ARCH=aarch64 sh scripts/gen-update-json.sh` 生成 `latest-macos-aarch64.json`；Intel 用 `UPDATE_ARCH=x86_64`
 3. Windows：`UPDATE_OS=windows UPDATE_ARCH=x86_64 sh scripts/gen-update-json.sh` 生成 `latest-windows-x86_64.json`
