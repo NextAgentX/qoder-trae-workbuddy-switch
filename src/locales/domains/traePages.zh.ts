@@ -95,6 +95,9 @@ export const zh = {
   //    `dataDirLabel` …）已随那条细说明**一并删除**（用户要求去掉，原型骨架里也没有它）。
   //    这里只保留仍被 `EmptyTraeCard` 引用的键。
   "trae.page.accounts.dataDirMissing": "（尚未生成，请先启动一次 Trae 并登录）",
+  // ★ issue #136：目录在、storage.json 不在。与上一句是**两种不同状态**：
+  //   上一句是「连目录都没有」，本句是「目录有了但客户端从没写出设备凭证」。
+  "trae.page.accounts.storageJsonMissing": "（目录存在，但 storage.json 还没生成 —— 客户端从未完成首次登录）",
 
   // ---- 账号工具栏 ----
   "trae.page.accounts.sectionTitle": "账号",

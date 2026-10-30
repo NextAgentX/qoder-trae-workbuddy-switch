@@ -84,6 +84,8 @@ export const en = {
   // (the user asked to remove it, and the prototype's skeleton has no such row).
   // Only the key still referenced by `EmptyTraeCard` remains.
   "trae.page.accounts.dataDirMissing": "(Not created yet — start Trae once and sign in first)",
+  // issue #136: directory exists but storage.json does not — a different state from the line above.
+  "trae.page.accounts.storageJsonMissing": "(Directory exists, but storage.json was never written — the client has not completed its first sign-in)",
 
   // ---- Accounts toolbar ----
   "trae.page.accounts.sectionTitle": "Accounts",

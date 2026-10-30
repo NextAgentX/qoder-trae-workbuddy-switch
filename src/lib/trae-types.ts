@@ -320,6 +320,15 @@ export interface TraeProgramStatus {
   dataDir: string | null;
   dataDirExists: boolean;
   /**
+   * 该目录里**是否真的存在** `storage.json`（后端 `platform::storage_json_present`，issue #136）。
+   *
+   * 与 {@link dataDirExists} 是**两个问题**：目录在，文件不一定在。
+   * 真机现场：`%APPDATA%\Trae CN` 有 Cache / Local Storage（客户端跑过），
+   * 但 `User\globalStorage\storage.json` 从未生成 —— 此时 `dataDirExists = true`
+   * 而本字段为 `false`，界面**不得**再说「已探测的登录态目录」。
+   */
+  storageJsonExists: boolean;
+  /**
    * **写侧** userData 目录（后端 `platform::detect_data_dir_for`：候选表里**首个存在**的）。
    *
    * 与 {@link TraeProgramStatus.dataDir} 语义不同且**真机上不同值**：那是「客户端最近在用
@@ -370,6 +379,13 @@ export interface TraeVariantStatus {
   /** 主程序「最近被用过」的目录（见 {@link TraeProgramStatus.dataDir} 的告诫）。 */
   dataDir: string | null;
   dataDirExists: boolean;
+  /**
+   * 该目录里是否真的有 `storage.json`（与 {@link TraeProgramStatus.storageJsonExists} 同源）。
+   *
+   * 账号页空态用它区分「已探测的登录态目录」与「预期位置」——
+   * 用 `dataDirExists` 判会把一个**空壳目录**说成「登录态在这儿」。
+   */
+  storageJsonExists: boolean;
   /** 主程序的**写侧**目录 —— 「客户端环境」行要核对「登录态在哪」时用它。 */
   writeDataDir: string | null;
   writeDataDirExists: boolean;

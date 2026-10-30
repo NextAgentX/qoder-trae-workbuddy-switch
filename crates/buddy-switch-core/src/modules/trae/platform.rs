@@ -411,6 +411,13 @@ fn region_status(region: super::region::TraeRegion) -> Value {
                 "path": path,
                 "dataDir": data_dir,
                 "dataDirExists": data_dir.as_deref().map(|p| std::path::Path::new(p).is_dir()).unwrap_or(false),
+                // ★ 登录态**真的在不在**（issue #136）：`dataDirExists` 只回答「目录在不在」。
+                //   两者必须分开下发 —— 前端拿 `dataDirExists` 去写「已探测的登录态目录」，
+                //   在「目录是空壳」的机器上会把用户引向「文件在、只是读不出」的错方向。
+                "storageJsonExists": data_dir
+                    .as_deref()
+                    .map(|p| storage_json_present(std::path::Path::new(p)))
+                    .unwrap_or(false),
                 // 写侧目录（见上面 `write_data_dir` 的注释）。前端「客户端环境」行必须用它：
                 // 那一行的用途是让用户核对「切换器正在操作哪个目录、登录态在哪」。
                 "writeDataDir": write_data_dir,
@@ -455,6 +462,8 @@ fn region_status(region: super::region::TraeRegion) -> Value {
         "path": field("path"),
         "dataDir": field("dataDir"),
         "dataDirExists": field("dataDirExists"),
+        // 登录态文件是否真的存在（与主程序的 `storageJsonExists` 同源，见程序位里那条注释）。
+        "storageJsonExists": field("storageJsonExists"),
         // 写侧目录（与主程序的 `writeDataDir` 同源）。
         // ⚠️ 与 `dataDir` **不是同一个问题**：前者是「切换器在操作哪个」，
         // 后者是「客户端最近在用哪个」。两者在本机不同值，别互相顶替。
@@ -1172,6 +1181,79 @@ fn data_dir_names_by_activity() -> Vec<&'static str> {
     scored.into_iter().map(|(name, _)| name).collect()
 }
 
+/// userData 目录里 `storage.json` 的**唯一**拼法（设备凭证 / 登录态都在这个文件里）。
+///
+/// 抽成函数是为了让「活跃度判据」「登录态存在性判据」「读取路径」共用同一份拼装 ——
+/// 三处各写一遍，改一处就会让「目录算活跃」与「说它有登录态」指向不同的文件。
+///
+/// 逐段 `join` 而**不是**一次 `join("User/globalStorage/storage.json")`：后者在 Windows 上
+/// 会拼出 `…\Trae CN/User/globalStorage/storage.json` 这种混合分隔符，虽然能打开，
+/// 但错误文案要把它原样显示给用户，混合分隔符会让人怀疑「路径是不是拼错了」。
+pub fn storage_json_path(dir: &Path) -> PathBuf {
+    dir.join("User").join("globalStorage").join("storage.json")
+}
+
+/// 该 userData 目录里是否**真的存在** `storage.json`。
+///
+/// ## 为什么必须与 `is_dir()` 分开（issue #136）
+///
+/// 目录存在 ≠ 登录态存在。真机报障现场：`%APPDATA%\Trae CN` 目录存在（客户端启动过、
+/// 写过 Cache / Local Storage），但 `User\globalStorage\storage.json` 从未生成 ——
+/// 此时 `dataDirExists = true`，界面就把**一个没有凭据的目录**说成「已探测的登录态目录」，
+/// 后端则在读文件那一步抛 `os error 2`，文案还劝用户「关闭客户端后重试」。
+/// 用户照着做了十几轮，问题与他的动作完全无关。
+///
+/// 判据用 `is_file()` 而不是 `exists()`：同名目录也能让 `exists()` 为真，
+/// 而那同样读不出内容。
+pub fn storage_json_present(dir: &Path) -> bool {
+    storage_json_path(dir).is_file()
+}
+
+/// 本机**其它** Trae userData 目录里是否有一份 `storage.json`（「你可能装的是另一条线」的线索）。
+///
+/// ## 为什么需要它（issue #136）
+///
+/// 用户报障「网页版登录、客户端登录都捕捉不到凭证」。真机上常见的两种成因**看起来
+/// 一模一样**（本变体目录缺 `storage.json`）：
+///
+/// 1. 这条产品线的客户端确实没启动过；
+/// 2. 用户装的是**另一条**产品线的客户端（国内 `Trae CN` / 国际 `Trae` 是两个独立客户端、
+///    两套 userData），而界面停在了错的区域页上。
+///
+/// 第 2 种光靠「请启动一次客户端」永远好不了 —— 用户明明启动过、也登录过。
+/// 本函数把「别处有凭据」这条事实取出来，让文案能直接指向真正的出路
+/// （切区域 / 装那条线），而不是让用户反复重启。
+///
+/// ## ★ 必须用 `all_known_specs()`，不能用 [`data_dir_names`]
+///
+/// [`data_dir_names`] 是**收敛后**的摊平表（只剩 `Trae CN` / `Trae` 两个合并客户端），
+/// 而用户机器上**已退役客户端的 userData 目录依然在磁盘上**（卸载客户端不删 userData）。
+/// 只扫收敛表就会漏掉「凭据在 `TRAE SOLO CN` 里」这种最常见的情形 —— 那正好是
+/// 「我明明登录过」的用户。`all_known_specs()` 含全部 6 个程序位的目录名，才是完整口径。
+///
+/// 返回**目录路径**（不含文件名），取规格表顺序里第一个命中的；都没有则 `None`。
+/// 只读探测，不创建任何目录。
+pub fn other_line_storage_hint(variant: super::variant::TraeVariant) -> Option<String> {
+    let base = data_dir_base()?;
+    let own = data_dir_names_for(variant);
+    let mut seen: Vec<&str> = Vec::new();
+    for spec in super::variant::all_known_specs() {
+        for name in spec.data_dir_names {
+            // 排除本变体自己的目录（那是「本该有却没有」的那个），并按名去重
+            // （合并版与遗留 TraeCode 的候选名逐字相同，扫两遍没有信息增益）。
+            if own.iter().any(|mine| mine == name) || seen.contains(name) {
+                continue;
+            }
+            seen.push(name);
+            let dir = base.join(name);
+            if storage_json_present(&dir) {
+                return Some(dir.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
+}
+
 /// userData 目录的「最近活跃时间」。
 ///
 /// **刻意不直接用目录自身的 mtime**：Electron 的 userData 目录只在增删顶层条目时
@@ -1180,8 +1262,8 @@ fn data_dir_names_by_activity() -> Vec<&'static str> {
 /// 都拿不到则返回 `None`（该候选按「从未使用」处理）。
 fn data_dir_activity(dir: &Path) -> Option<SystemTime> {
     // 每次启动或登录都会被写到的文件，跨渠道/版本都比较稳定。
+    // `storage.json` 单独走 [`storage_json_path`]（唯一拼法），其余在这里。
     const MARKERS: &[&str] = &[
-        "User/globalStorage/storage.json",
         "aha/TinyStorage",
         "Local Storage",
         "Network/Cookies",
@@ -1190,7 +1272,9 @@ fn data_dir_activity(dir: &Path) -> Option<SystemTime> {
 
     MARKERS
         .iter()
-        .filter_map(|marker| std::fs::metadata(dir.join(marker)).ok())
+        .map(|marker| dir.join(marker))
+        .chain(std::iter::once(storage_json_path(dir)))
+        .filter_map(|path| std::fs::metadata(path).ok())
         .filter_map(|meta| meta.modified().ok())
         .max()
         .or_else(|| {

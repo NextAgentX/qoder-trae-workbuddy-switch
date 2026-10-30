@@ -156,6 +156,12 @@ impl TcMode {
 pub enum IcubeError {
     /// 该变体没有存在的 userData 目录（客户端没装或从未启动过）。
     DataDirMissing,
+    /// userData 目录存在，但里面**没有** `storage.json`（issue #136）。
+    ///
+    /// 与 [`IcubeError::StorageUnreadable`] 刻意分开：前者是「文件根本不存在」，
+    /// 后者是「文件在、读不出来（权限 / 被独占 / 内容坏）」。两者的下一步**完全不同** ——
+    /// 把前者说成后者会让用户去「关闭客户端后重试」，而他重试一百次也不会生成文件。
+    StorageMissing(String),
     /// `storage.json` 读不出或不是合法 JSON。
     StorageUnreadable(String),
     /// `storage.json` 里没有目标键。
@@ -182,6 +188,7 @@ impl IcubeError {
     pub fn kind(&self) -> &'static str {
         match self {
             IcubeError::DataDirMissing => "dataDirMissing",
+            IcubeError::StorageMissing(_) => "storageMissing",
             IcubeError::StorageUnreadable(_) => "storageUnreadable",
             IcubeError::KeyMissing => "keyMissing",
             IcubeError::DecryptFailed(_) => "decryptFailed",
@@ -212,6 +219,29 @@ impl IcubeError {
                 // 文案与判据全在 [`platform::data_dir_missing_reason`] 一处
                 // （它与「启动客户端」按钮同源），这里**不要**再自己拼一遍。
                 platform::data_dir_missing_reason(variant)
+            }
+            IcubeError::StorageMissing(path) => {
+                // ★ 文案必须给**能解决问题的动作**（issue #136 用户报障原文：
+                //   「反反复复试了多种情况，网页版登录、客户端登录，一直捕捉不到凭证」）。
+                //
+                //   旧文案把「文件不存在」也归进「无法读取…若客户端正在运行请关闭后重试」，
+                //   于是用户的每一次重试都打在同一件与故障无关的事情上。
+                //   这里改成三件事说清：① 目录在、文件没有；② 谁才会写出它；
+                //   ③ 若本机另一条产品线有凭据，直接点明「你可能停错了产品线」。
+                let mut text = format!(
+                    "【{line}】的数据目录里还没有 storage.json（{path}）—— \
+                     目录存在，但客户端从未把设备凭证写进去。\
+                     下一步：启动一次【{line}】客户端并完成登录，等它写完再点「重新发起登录」。"
+                );
+                if let Some(other) = platform::other_line_storage_hint(variant) {
+                    // 这条线索的价值在于：用户明明「登录过」，只是登在**另一条产品线**上。
+                    // 不说这句，他只会继续重启当前这条。
+                    text.push_str(&format!(
+                        "另外，本机在 {other} 里发现了一份 storage.json：\
+                         如果你平时用的是那条产品线，请在页面顶部切换到它再登录。"
+                    ));
+                }
+                text
             }
             IcubeError::StorageUnreadable(detail) => format!(
                 "【{line}】的 storage.json 无法读取（{detail}）；\
@@ -623,7 +653,9 @@ struct StorageSnapshot {
 /// 读侧（[`load_storage_from_dir`]）与**写前留档**（`profile::backup_storage_before_write`）
 /// 共用它 —— 两处各拼一次路径，迟早出现「读的是 A 文件、备份的是 B 文件」这种只在真机暴露的分叉。
 pub(crate) fn storage_path_in_dir(dir: &std::path::Path) -> std::path::PathBuf {
-    dir.join("User").join("globalStorage").join("storage.json")
+    // 唯一拼法在 `platform::storage_json_path`：三处（活跃度、存在性、读取）共用一份，
+    // 否则改一处就会让「目录算活跃」与「说它有登录态」指向不同的文件。
+    platform::storage_json_path(dir)
 }
 
 /// 读取**该变体**的 storage.json（目录由 [`platform::select_data_dir_for`] 限定）。
@@ -651,8 +683,13 @@ fn load_storage_from_dir(
         .unwrap_or_default()
         .to_string();
     let path = storage_path_in_dir(dir);
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| IcubeError::StorageUnreadable(format!("{}: {e}", path.display())))?;
+    let raw = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+        // ★ 「文件不存在」与「读不出来」必须分开（issue #136）：
+        //   前者的下一步是「让客户端把它写出来」，后者才是「关掉占用它的进程」。
+        //   旧代码把两者都塞进 `StorageUnreadable`，文案因此恒定地劝用户去关客户端。
+        std::io::ErrorKind::NotFound => IcubeError::StorageMissing(path.display().to_string()),
+        _ => IcubeError::StorageUnreadable(format!("{}: {e}", path.display())),
+    })?;
     let value: Value = serde_json::from_str(&raw)
         .map_err(|e| IcubeError::StorageUnreadable(format!("{}: {e}", path.display())))?;
     let object = value
@@ -1850,6 +1887,10 @@ mod tests {
         let cases = [
             (IcubeError::DataDirMissing, "dataDirMissing"),
             (
+                IcubeError::StorageMissing("C:/x/storage.json".into()),
+                "storageMissing",
+            ),
+            (
                 IcubeError::StorageUnreadable("x".into()),
                 "storageUnreadable",
             ),
@@ -1996,6 +2037,92 @@ mod tests {
         let error = device_secret_by_device_id(variant, "99998888777766665")
             .expect_err("没有任何 icube-dc 条目时必须报缺失");
         assert_eq!(error.kind(), "deviceIdentityMissing");
+    }
+
+    /// ★ issue #136：目录在、`storage.json` 不在 —— 必须报 `storageMissing`，
+    /// 且文案要指向「让客户端把文件写出来」，**不得**再劝用户「关闭客户端后重试」。
+    ///
+    /// ## 为什么这条非钉不可
+    ///
+    /// 用户报障原文：「反反复复试了多种情况，网页版登录、客户端登录，一直捕捉不到凭证」。
+    /// 旧实现把 `NotFound` 也归进 `StorageUnreadable`，文案恒定地说
+    /// 「若客户端正在运行，请关闭后重试」—— 用户照做了十几轮，
+    /// 而那件事**与故障毫无关系**：文件根本没生成，关一百次客户端也不会出现。
+    #[cfg(windows)]
+    #[test]
+    fn storage_missing_is_not_reported_as_unreadable() {
+        let env = TempEnv::empty();
+        let variant = TraeVariant::TraeMerged;
+        // 只建目录：模拟「客户端启动过、写过 Cache / Local Storage，但从未写出设备凭证」。
+        for name in platform::data_dir_names_for(variant) {
+            std::fs::create_dir_all(env.appdata().join(name)).expect("空壳目录应能创建");
+        }
+        // 前置：确实是「目录在、文件不在」—— 否则本用例证明不了任何事。
+        assert!(
+            platform::data_dir_names_for(variant)
+                .iter()
+                .any(|name| env.appdata().join(name).is_dir()),
+            "前置：目录必须存在（否则走的是 DataDirMissing）"
+        );
+        assert!(
+            !platform::data_dir_names_for(variant)
+                .iter()
+                .any(|name| platform::storage_json_present(&env.appdata().join(name))),
+            "前置：候选目录里都不该有 storage.json"
+        );
+
+        let error = device_identity_for(variant).expect_err("没有 storage.json 必须报错");
+        assert_eq!(
+            error.kind(),
+            "storageMissing",
+            "「文件不存在」必须是独立类型，不能被归成 storageUnreadable"
+        );
+
+        let message = error.user_message(variant);
+        assert!(message.contains("还没有 storage.json"), "{message}");
+        assert!(
+            message.contains("启动一次"),
+            "文案必须给出能解决问题的动作：{message}"
+        );
+        assert!(
+            !message.contains("关闭后重试"),
+            "不得再劝用户关客户端 —— 文件没生成，关多少次都不会出现：{message}"
+        );
+    }
+
+    /// ★ issue #136：本变体目录缺 `storage.json`，但**另一条产品线**里有 ——
+    /// 文案必须点名那个目录，否则「我明明登录过」的用户只会继续重启当前这条线。
+    ///
+    /// 用已退役的 `TRAE SOLO CN` 当「另一条线」：卸载客户端**不会**删 userData，
+    /// 所以这种残留目录在真机上很常见，而它不在收敛后的跨变体候选表里 ——
+    /// 这正好钉住「必须用 `all_known_specs()` 扫，不能用 `data_dir_names()`」。
+    #[cfg(windows)]
+    #[test]
+    fn storage_missing_points_at_the_other_line_that_has_a_credential() {
+        let env = TempEnv::empty();
+        let variant = TraeVariant::TraeMerged;
+        for name in platform::data_dir_names_for(variant) {
+            std::fs::create_dir_all(env.appdata().join(name)).expect("空壳目录应能创建");
+        }
+        let other = env
+            .appdata()
+            .join("TRAE SOLO CN")
+            .join("User")
+            .join("globalStorage");
+        std::fs::create_dir_all(&other).expect("另一条线的目录应能创建");
+        std::fs::write(other.join("storage.json"), b"{}").expect("占位文件应能写入");
+
+        let hint =
+            platform::other_line_storage_hint(variant).expect("应发现另一条线里的 storage.json");
+        assert!(hint.contains("TRAE SOLO CN"), "{hint}");
+
+        let message = device_identity_for(variant)
+            .expect_err("本变体目录没有 storage.json，必须报错")
+            .user_message(variant);
+        assert!(
+            message.contains("TRAE SOLO CN"),
+            "文案应点名另一条线，用户才知道该切到哪：{message}"
+        );
     }
 
     /// ★【T13-2 核心】`login_state_dir_for` 必须返回**装着登录态**的那个候选目录，

@@ -30,6 +30,10 @@ function programStub(
     path: null,
     dataDir: null,
     dataDirExists: false,
+    // 登录态文件是否存在（见 `TraeProgramStatus.storageJsonExists`）：
+    // 后端不可用时一律按「不存在」——**不要**跟着 `dataDirExists` 置 true，
+    // 那会把「什么都没探测到」说成「登录态在这儿」。
+    storageJsonExists: false,
     // 写侧目录（见 `TraeProgramStatus.writeDataDir`）：后端不可用时与 `dataDir` 同样置空。
     writeDataDir: null,
     writeDataDirExists: false,
@@ -71,6 +75,8 @@ export const TRAE_VARIANT_FALLBACK: TraeVariantStatus[] = [
     path: null,
     dataDir: null,
     dataDirExists: false,
+    // 登录态文件是否存在（见 `TraeVariantStatus.storageJsonExists`）：后端不可用时按「不存在」。
+    storageJsonExists: false,
     // 写侧目录（见 `TraeProgramStatus.writeDataDir`）：后端不可用时与 `dataDir` 同样置空。
     writeDataDir: null,
     writeDataDirExists: false,
@@ -93,6 +99,8 @@ export const TRAE_VARIANT_FALLBACK: TraeVariantStatus[] = [
     path: null,
     dataDir: null,
     dataDirExists: false,
+    // 登录态文件是否存在（见 `TraeVariantStatus.storageJsonExists`）：后端不可用时按「不存在」。
+    storageJsonExists: false,
     // 写侧目录（见 `TraeProgramStatus.writeDataDir`）：后端不可用时与 `dataDir` 同样置空。
     writeDataDir: null,
     writeDataDirExists: false,
