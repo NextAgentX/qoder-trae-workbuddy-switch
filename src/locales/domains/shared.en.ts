@@ -660,6 +660,9 @@ export const en = {
   "shared.refreshPart.checkin": "Check-in status refreshed",
   "shared.refreshPart.credential": "Credential status refreshed",
   "shared.refreshPart.fail": "Refresh failed",
+  // Credit auto-refresh cadence and "last refreshed" (shared by all three credit views, issue #133).
+  "shared.credit.autoEvery": "Auto-refreshes every {n} min",
+  "shared.credit.lastRefresh": "Last refreshed {time}",
   "shared.stat.credits": "Credits",
   "shared.stat.tokens": "Today's tokens",
   "shared.stat.checkin": "Check-in",

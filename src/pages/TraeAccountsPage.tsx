@@ -111,6 +111,7 @@ import type {
 import { cn } from "@/lib/utils";
 import { scopeOf } from "@/lib/scope";
 import { useCachedResource } from "@/lib/use-cached-resource";
+import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 import { showUndoToast } from "@/lib/undo-toast";
 import { useTraeVariant } from "@/lib/use-trae-variant";
@@ -241,7 +242,19 @@ export default function TraeAccountsPage() {
     loading,
     error,
     refresh: loadAll,
+    revalidate: revalidateSnapshot,
+    at: snapshotAt,
   } = useCachedResource<AccountsSnapshot>(`trae:accounts:${variant}`, loadSnapshot);
+
+  /**
+   * ★ 卡片上的积分每 10 分钟自动刷新（issue #133）。
+   *
+   * 后端的 `TRAE_CREDITS_REFRESH_INTERVAL_MS` 循环把新读数写进账号库，但**界面不会自己知道** ——
+   * 快照缓存只在挂载 / 变更操作后重取，所以用户看到的余额可以停十几分钟。
+   * 这里用 `revalidate`（不强发、同键在飞复用）：它才是「轮询心跳」，`refresh` 会把页面
+   * 变成「每次心跳都强制重取」，两个入口同时挂载时请求数翻倍。
+   */
+  useAutoRefreshWhenVisible(snapshotAt, revalidateSnapshot);
 
   /**
    * 签到跳过策略存在设置里，与设置页**共用同一把键** `trae:settings`：

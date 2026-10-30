@@ -43,6 +43,9 @@ import { CreditGapNote, CreditLedgerTable, LEDGER_CLIENT_COLOR, LEDGER_GATEWAY_C
 import type { UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
 import { balanceCaption, singleSideCaption } from "@/lib/chart-caption";
+import { formatDate } from "@/lib/format";
+import { CREDIT_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
+import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
 import { displayText } from "@/lib/display-text";
 import { useT } from "@/lib/i18n";
 import type {
@@ -73,8 +76,11 @@ import {
 } from "@/lib/usage-ledger";
 import { useAccountsStore } from "@/stores/accounts";
 
-/** 会话级缓存：切走再切回不重取。 */
-const statisticsCache: Partial<Record<RegionFilter, CreditStatistics>> = {};
+/** 会话级缓存：切走再切回不重取。`at` = 这份数据被拿到的时刻（「上次刷新」提示的唯一来源）。 */
+const statisticsCache: Partial<Record<RegionFilter, { data: CreditStatistics; at: number }>> = {};
+
+/** 文案里的「每 N 分钟」从间隔常量推导 —— 常量改了文案不会说谎。 */
+const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000);
 
 /** 资源包名回落链 —— **必须**过 `displayText`（对象当 React 子节点 ⇒ 白屏，issue #2）。 */
 function resourceName(resource: CreditResource): string | null {
@@ -99,9 +105,18 @@ export default function CreditStatsPage({
   const t = useT();
   const [scopeRegion] = useScope("workbuddy");
   const region: RegionFilter = combineAll ? "all" : scopeRegion;
-  const [stats, setStats] = useState<CreditStatistics | null>(() => statisticsCache[region] ?? null);
+  const [stats, setStats] = useState<CreditStatistics | null>(() => statisticsCache[region]?.data ?? null);
   const [loading, setLoading] = useState(() => !statisticsCache[region]);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 「上次刷新」的墙钟（issue #133）。
+   *
+   * 语义是**事实**而不是状态：只显示「这份数字是什么时候取的」，不据此派生「新鲜 / 过期」，
+   * 也不参与任何口径判断。缓存命中时沿用缓存自己的时刻，不刷新成 `Date.now()`。
+   */
+  const [lastRefreshAt, setLastRefreshAt] = useState<number | null>(
+    () => statisticsCache[region]?.at ?? null,
+  );
   /* 三处「刷新积分」出口（错误重试 / 空态 / 顶部条）共用同一个 `load(region, true)`。 */
   const { busy, run } = useRefreshAction();
 
@@ -117,25 +132,31 @@ export default function CreditStatsPage({
   );
 
   const load = useCallback(
-    async (target: RegionFilter, refresh = false) => {
+    async (target: RegionFilter, refresh = false, silent = false) => {
       if (!refresh && statisticsCache[target]) {
-        setStats(statisticsCache[target]!);
+        const cached = statisticsCache[target]!;
+        setStats(cached.data);
+        setLastRefreshAt(cached.at);
         setLoading(false);
         setError(null);
         return;
       }
-      setLoading(true);
+      /* 静默（自动刷新）不点亮 `loading`：那会让顶部按钮转圈、空态闪骨架 ——
+         用户没点任何东西，界面不该看起来像在等人操作。 */
+      if (!silent) setLoading(true);
       setError(null);
       try {
         // 资源包（到期分布数据源）来自 store；统计来自后端。
         await fetchAllRegions();
         const next = await api.getCreditStatistics(refresh, target);
-        statisticsCache[target] = next;
+        const at = Date.now();
+        statisticsCache[target] = { data: next, at };
         setStats(next);
+        setLastRefreshAt(at);
       } catch (cause) {
         setError(api.asError(cause));
       } finally {
-        setLoading(false);
+        if (!silent) setLoading(false);
       }
     },
     [fetchAllRegions],
@@ -144,6 +165,16 @@ export default function CreditStatsPage({
   useEffect(() => {
     void load(region);
   }, [load, region]);
+
+  /**
+   * ★ 自动刷新（issue #133）：每 {@link CREDIT_REFRESH_INTERVAL_MS} 重取一轮，切后台即停。
+   *
+   * 间隔与账号卡的自动刷新**共用同一个常量** —— 两处各写一个数字，必然有一天两边不一致，
+   * 于是卡片上的余额和这一页的统计会在同一时刻互相矛盾。
+   * 静默刷新失败时保留上一次数据并显示错误条（`error`），不把整页清空。
+   */
+  const autoRefresh = useCallback(() => load(region, true, true), [load, region]);
+  useAutoRefreshWhenVisible(lastRefreshAt ?? 0, autoRefresh);
 
   /* 请求口径的两份素材（与余额口径**并行**取；任一失败只让该来源缺席，
      不阻塞余额那一半 —— 余额是权威口径，不能因为附加维度取不到就整页报错）。 */
@@ -327,6 +358,16 @@ export default function CreditStatsPage({
           {/* 积分页顶部条（原型 `creditsHeadBar`）：说明 + 「刷新积分」入口。 */}
           <div className="flex min-w-0 flex-wrap items-center gap-3">
             <span className="text-xs text-muted-foreground">{t("wbStats.credit.headBarHint")}</span>
+            <span className="text-xs text-muted-foreground">
+              {t("shared.credit.autoEvery", { n: REFRESH_INTERVAL_MINUTES })}
+            </span>
+            {/* 「上次刷新」是**事实**（这份数字何时取的）：用绝对时刻而不是「x 分钟前」——
+                相对时间不会自己走，停在那里会一直说「刚刚」。 */}
+            {lastRefreshAt !== null && (
+              <span className="text-xs tabular-nums text-muted-foreground">
+                {t("shared.credit.lastRefresh", { time: formatDate(lastRefreshAt) })}
+              </span>
+            )}
             <div className="grow" />
             <Button
               size="sm"

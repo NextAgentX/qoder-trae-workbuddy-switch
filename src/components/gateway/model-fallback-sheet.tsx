@@ -163,19 +163,23 @@ export function ModelFallbackSheet({
       return;
     }
     const existing = editing ? view.chains.find((chain) => chain.from === editing) : null;
-    setDraft(
-      existing
-        ? {
-            from: existing.from,
-            targets: existing.targets.map((target) => ({
-              // 同作用域存 `null`（配置里最简形态）；跨作用域才带 scope。
-              scope: target.scope === scope ? null : target.scope,
-              model: target.model,
-            })),
-            triggers: [...existing.triggers],
-          }
-        : { from: "", targets: [], triggers: [...view.baseline] },
-    );
+    /* ★ 草稿必须**补齐到 `max_targets` 行**：UI 恒画满 `max_targets` 行（空格也要能选），
+       而 `draft.targets` 只装已有目标 ⇒ 不补齐时点空行的下拉会读到 `targets[i].scope`，
+       `undefined.scope` 直接抛 TypeError（整个抽屉白屏）。 */
+    const rows: FallbackTargetInput[] = existing
+      ? existing.targets.map((target) => ({
+          // 同作用域存 `null`（配置里最简形态）；跨作用域才带 scope。
+          scope: target.scope === scope ? null : target.scope,
+          model: target.model,
+        }))
+      : [];
+    setDraft({
+      from: existing?.from ?? "",
+      targets: Array.from({ length: view.max_targets }, (_, index) =>
+        rows[index] ? { ...rows[index] } : { scope: null, model: "" },
+      ),
+      triggers: existing ? [...existing.triggers] : [...view.baseline],
+    });
   }, [open, editing, view]);
 
   // 预演：后端纯计算，零副作用（不写、不领探针票、不发上游）。
@@ -251,6 +255,10 @@ export function ModelFallbackSheet({
 
   const isNew = editing === null;
 
+  /** 取第 `index` 行；草稿已补齐到 `max_targets`，这里兜住「长度被外部改动」的意外。 */
+  const rowAt = (rows: FallbackTargetInput[], index: number): FallbackTargetInput =>
+    rows[index] ?? { scope: null, model: "" };
+
   return (
     <Sheet open={open} onOpenChange={(next) => (!next ? onClose() : undefined)}>
       <SheetContent side="right" showCloseButton={false} className="flex w-full flex-col sm:max-w-md">
@@ -320,13 +328,14 @@ export function ModelFallbackSheet({
                         setDraft((prev) => {
                           if (!prev) return prev;
                           const targets = [...prev.targets];
+                          const current = rowAt(targets, index);
                           const next = value === SELF_SCOPE ? null : value;
-                          const changed = next !== (targets[index].scope ?? null);
+                          const changed = next !== (current.scope ?? null);
                           targets[index] = {
-                            ...targets[index],
+                            ...current,
                             scope: next,
                             // 换作用域后原模型名可能不在目标清单里，清空避免误存。
-                            model: changed ? "" : targets[index].model,
+                            model: changed ? "" : current.model,
                           };
                           return { ...prev, targets };
                         })
@@ -359,7 +368,10 @@ export function ModelFallbackSheet({
                           setDraft((prev) => {
                             if (!prev) return prev;
                             const targets = [...prev.targets];
-                            targets[index] = { ...targets[index], model: event.target.value };
+                            targets[index] = {
+                              ...rowAt(targets, index),
+                              model: event.target.value,
+                            };
                             return { ...prev, targets };
                           })
                         }
@@ -373,7 +385,7 @@ export function ModelFallbackSheet({
                         setDraft((prev) => {
                           if (!prev) return prev;
                           const targets = [...prev.targets];
-                          targets[index] = { ...targets[index], model: value };
+                          targets[index] = { ...rowAt(targets, index), model: value };
                           return { ...prev, targets };
                         })
                       }

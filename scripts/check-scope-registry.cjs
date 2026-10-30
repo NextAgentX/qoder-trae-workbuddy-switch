@@ -4661,17 +4661,19 @@ const APP_SETTINGS_SNAPSHOT = "src/lib/app-settings-snapshot.ts";
 const BACKUP_LOCALE_ZH = "src/locales/domains/backup.zh.ts";
 const BACKUP_LOCALE_EN = "src/locales/domains/backup.en.ts";
 
-check("★ P7 设置 10 项子导航：10 项齐备，最后一项是「备份与恢复」，且含 CodeBuddy CLI", () => {
+check("★ P7 设置 11 项子导航：11 项齐备，最后一项是「备份与恢复」，且含 CodeBuddy CLI", () => {
   const code = readCode(BACKUP_SUBNAV);
   const m = code.match(/SETTINGS_SUBNAV[\s\S]*?=\s*\[([\s\S]*?)\];/);
   if (!m) throw new Error("找不到 `SETTINGS_SUBNAV` 表");
   const ids = [...m[1].matchAll(/id:\s*"([a-z]+)"/g)].map((x) => x[1]);
   /* ★ 项数**故意写死**：子导航是设置页唯一导航，多一项少一项都要有意识。
      issue #109 加「CodeBuddy CLI」（`cli`）时就是靠这条提醒改这里的。
-     ⚠️ `cli` 是 WorkBuddy 侧独有 —— Trae / Qoder 设置页用 `items` 收窄排除它，
-     所以「表里有 10 项」不等于「每个平台都显示 10 项」。 */
-  if (ids.length !== 10) throw new Error(`子导航应 10 项，实际 ${ids.length}：${ids.join(",")}`);
+     issue #111 收尾加「网络」（`network`，Qoder 逐包出站代理）时同理。
+     ⚠️ `cli` 是 WorkBuddy 侧独有、`network` 目前只有 Qoder 侧有内容 —— 各设置页用
+     `items` 收窄排除，所以「表里有 11 项」不等于「每个平台都显示 11 项」。 */
+  if (ids.length !== 11) throw new Error(`子导航应 11 项，实际 ${ids.length}：${ids.join(",")}`);
   if (!ids.includes("cli")) throw new Error("缺 cli（CodeBuddy CLI 接入方式，issue #109）");
+  if (!ids.includes("network")) throw new Error("缺 network（逐包出站代理，issue #111）");
   if (ids[ids.length - 1] !== "backup") {
     throw new Error(`最后一项应为 backup（备份与恢复），实际 ${ids[ids.length - 1]}`);
   }

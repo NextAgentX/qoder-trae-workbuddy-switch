@@ -34,12 +34,18 @@ import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
 import type { UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
 import { formatCredits } from "@/components/usage/format";
+import { formatDate } from "@/lib/format";
+import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
+import { CREDIT_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useT } from "@/lib/i18n";
 import { platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf } from "@/lib/scope";
 import { useLocation } from "react-router-dom";
 import { useScope } from "@/lib/use-scope";
 import { useRefreshAction } from "@/lib/use-refresh-action";
+
+/** 文案里的「每 N 分钟」从间隔常量推导（与账号卡、WB / Trae 积分页同一个来源）。 */
+const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000);
 
 /**
  * 余额视图。
@@ -56,12 +62,15 @@ export default function QoderCreditsPage(_props: UsageViewProps) {
 
   const [data, setData] = useState<api.QoderCreditsView | null>(null);
   const [error, setError] = useState("");
+  /** 「上次刷新」的墙钟（issue #133）：只表达「这份余额是什么时候读到的」，不派生状态。 */
+  const [lastRefreshAt, setLastRefreshAt] = useState(0);
   const { busy, run } = useRefreshAction();
 
   const load = useCallback(async () => {
     setError("");
     try {
       setData(await api.qoderCredits(scope));
+      setLastRefreshAt(Date.now());
     } catch (e) {
       setError(api.asError(e));
     }
@@ -70,6 +79,9 @@ export default function QoderCreditsPage(_props: UsageViewProps) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** ★ 每 10 分钟自动重读一轮（issue #133）：`qoderCredits` 本身就是逐账号取上游，读到的即当下余额。 */
+  useAutoRefreshWhenVisible(lastRefreshAt, load);
 
   const tiles = useMemo<StatTile[]>(() => {
     if (!data) return [];
@@ -133,6 +145,15 @@ export default function QoderCreditsPage(_props: UsageViewProps) {
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
+      <div className="flex min-w-0 flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+        <span>{t("shared.credit.autoEvery", { n: REFRESH_INTERVAL_MINUTES })}</span>
+        {lastRefreshAt > 0 && (
+          <span className="tabular-nums">
+            {t("shared.credit.lastRefresh", { time: formatDate(lastRefreshAt) })}
+          </span>
+        )}
+      </div>
+
       <StatTiles tiles={tiles} />
 
       <ChartFrame

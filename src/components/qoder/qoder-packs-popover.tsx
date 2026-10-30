@@ -37,6 +37,13 @@ export interface QoderPacksPopoverProps {
   onRequest?: () => void;
   /** 打开登录窗（仅桌面端传）。 */
   onWebLogin?: () => void;
+  /**
+   * 「我已登录，读取逐包明细」——**显式读取入口**（#111 复核 P0-2）。
+   *
+   * 为什么不能只有「登录」这一个动作：登录发生在另一个窗口，用户登录完直接关窗是
+   * 最常见的序列；关窗后仍要有一条用户自己能走的路，而不是干等轮询或反复刷新。
+   */
+  onReadPacks?: () => void;
   /** 紧凑触发器（表格里用）。 */
   compact?: boolean;
 }
@@ -85,6 +92,7 @@ export function QoderPacksPopover({
   loading = false,
   onRequest,
   onWebLogin,
+  onReadPacks,
   compact = false,
 }: QoderPacksPopoverProps) {
   const t = useT();
@@ -221,11 +229,31 @@ export function QoderPacksPopover({
                 </p>
               </div>
             </div>
-            {desktop && view.needLogin && onWebLogin ? (
-              <Button size="sm" variant="outline" className="h-7 w-full gap-1.5" onClick={onWebLogin}>
-                <Globe className="size-3.5" />
-                {t("qoder.page.accounts.web.loginMenu")}
-              </Button>
+            {desktop && view.needLogin ? (
+              <div className="space-y-1">
+                {onWebLogin ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 w-full gap-1.5"
+                    onClick={onWebLogin}
+                  >
+                    <Globe className="size-3.5" />
+                    {t("qoder.page.accounts.web.loginMenu")}
+                  </Button>
+                ) : null}
+                {/* ★ 显式读取入口：用户已登录（或刚关掉登录窗）时不必再开一次窗。 */}
+                {onReadPacks ? (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={onReadPacks}
+                    className="w-full rounded-md py-0.5 text-center text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
+                  >
+                    {t("qoder.page.accounts.web.read")}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         )}

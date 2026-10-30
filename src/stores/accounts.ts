@@ -80,7 +80,14 @@ interface AccountsState {
   creditMap: Record<string, CreditExpiry>;
   creditLoadingMap: Record<string, boolean>;
   refreshingCredits: boolean;
-  lastCreditRefreshAt: number;
+  /**
+   * 各 region「上一次积分取数完成」的墙钟（`0` = 本次会话还没取过）。
+   *
+   * ★ 必须**按 region 分开记**（issue #133）：自动刷新要判断「这一区是否已经过期」，
+   * 共用一份时间会让刚切过去的另一个区被判成新鲜而跳过刷新。
+   * 它只服务自动刷新与「上次刷新」提示，**不参与**任何数据口径判断。
+   */
+  creditRefreshedAt: Record<Region, number>;
   // —— 国际版 ——
   global: RegionSlice;
 
@@ -123,7 +130,7 @@ async function loadRegion(region: Region): Promise<void> {
 
 export const useAccountsStore = create<AccountsState>((set, get) => ({
   ...emptySlice(),
-  lastCreditRefreshAt: 0,
+  creditRefreshedAt: { cn: 0, global: 0 },
   global: emptySlice(),
 
   async fetchAll() {
@@ -242,8 +249,8 @@ async function loadCredits(accountIds: string[], force: boolean, silent: boolean
     });
   });
 
-  // 仅 CN 维护全局「最近刷新时间」，供既有自动刷新钩子使用。
-  if (region === "cn") {
-    useAccountsStore.setState({ lastCreditRefreshAt: Date.now() });
-  }
+  // 「上一次取数时间」按 region 记（自动刷新判过期 + 界面「上次刷新」提示共用这一份）。
+  useAccountsStore.setState((s) => ({
+    creditRefreshedAt: { ...s.creditRefreshedAt, [region]: Date.now() },
+  }));
 }

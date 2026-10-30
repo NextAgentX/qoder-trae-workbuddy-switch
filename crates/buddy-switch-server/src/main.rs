@@ -136,8 +136,9 @@ const POOL_PERSIST_INTERVAL_MS: u64 = 30_000;
 
 /// Trae 积分刷新周期（毫秒）。
 ///
-/// 与 WorkBuddy 余额刷新的缺省间隔（30 分钟）保持一致：同一管理面不该有两种节奏。
-const TRAE_CREDITS_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1000;
+/// 10 分钟（issue #133）：界面侧积分视图 / 账号卡按同一间隔自动重读，上下游同节奏。
+/// ⚠️ 与桌面宿主 `src-tauri/src/lib.rs` 的同名常量**必须同值**。
+const TRAE_CREDITS_REFRESH_INTERVAL_MS: u64 = 10 * 60 * 1000;
 
 /// 定时备份的检查周期（毫秒）。
 ///

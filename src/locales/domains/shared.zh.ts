@@ -722,6 +722,9 @@ export const zh = {
   "shared.refreshPart.checkin": "签到状态已刷新",
   "shared.refreshPart.credential": "凭据状态已刷新",
   "shared.refreshPart.fail": "刷新失败",
+  // 积分的自动刷新节拍与「上次刷新」（三平台积分视图共用，issue #133）。
+  "shared.credit.autoEvery": "每 {n} 分钟自动刷新",
+  "shared.credit.lastRefresh": "上次刷新 {time}",
   // 详情抽屉顶部的四个指标块（文本在页面侧格式化，这里只提供标签与固定短语）。
   "shared.stat.credits": "积分",
   "shared.stat.tokens": "今日 Token",

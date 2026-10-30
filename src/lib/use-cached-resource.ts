@@ -33,6 +33,13 @@ export interface CachedResource<T> {
   pending: boolean;
   /** 已经格式化过的错误文案（用 `api.asError`，与页面改造前的 `setError` 同源）。 */
   error: string | null;
+  /**
+   * 最后一次**成功**取到值（或重新校验成功）的时刻（ms）；`0` = 从未成功过。
+   *
+   * 供「上次刷新」提示（issue #133）与自动刷新判「是否已过期」使用 —— 它是**数据的事实**，
+   * 不要用定时器自己的时间冒充。
+   */
+  at: number;
   /** 强制取一次新值并等待完成。**变更操作之后必须调用它**，否则界面停在变更前。 */
   refresh: () => Promise<void>;
   /**
@@ -118,6 +125,7 @@ export function useCachedResource<T>(
     loading: key !== null && data === undefined && entry?.error == null,
     pending: entry?.pending === true,
     error: entry?.error == null ? null : asError(entry.error),
+    at: entry?.at ?? 0,
     refresh,
     revalidate,
     patch,

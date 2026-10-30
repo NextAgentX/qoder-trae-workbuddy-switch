@@ -246,7 +246,12 @@ const DEMO_READ_COMMANDS = new Set([
   //（保存配置 / 建 Key / 吊销 / 恢复 / 删除 / 清日志）。
   "get_qoder_accounts", "get_qoder_local_sources", "qoder_program_status", "qoder_usage",
   // issue #111 · 逐包链路（三条都只读；演示站要有数据，否则卡片指标行与浮层无法截图）。
+  // ⚠️ `qoder_web_window_cookies` 也登记：它只回「登录窗里有哪些 cookie（名称/条数/指纹）」，
+  //    零副作用、不打上游；不登记的话演示模式下前端轮询会抛「缺少只读数据」。
   "qoder_credits", "qoder_web_credit_packs", "qoder_web_session_status",
+  "qoder_web_window_cookies",
+  // ⚠️ `qoder_web_proxy_set` 是写操作，**不进**这里（保存失败走页面错误提示）。
+  "qoder_web_proxy_get",
   // issue #47：逐账号「今日签到状态」（**只读**）。
   "qoder_checkin_status_map",
   "get_qoder_gateway_config", "qoder_gateway_status", "get_qoder_gateway_models",
@@ -634,7 +639,10 @@ const ROUTES: Record<string, Route> = {
   qoder_web_credit_packs_probe: { method: "POST", path: "/api/qoder/web/credit-packs/probe" },
   qoder_web_credit_packs: { method: "GET", path: "/api/qoder/web/credit-packs" },
   qoder_web_session_status: { method: "GET", path: "/api/qoder/web/session/status" },
+  qoder_web_window_cookies: { method: "GET", path: "/api/qoder/web/session/window-cookies" },
   qoder_web_session_logout: { method: "POST", path: "/api/qoder/web/session/logout" },
+  qoder_web_proxy_get: { method: "GET", path: "/api/qoder/web/proxy" },
+  qoder_web_proxy_set: { method: "POST", path: "/api/qoder/web/proxy" },
   // Qoder API 网关管理面（网关本体走独立端口 57895，见 src/pages/QoderApiServicePage）。
   // ⚠️ **一个监听、两个区域**：状态 / 清单两条按 `scope` 看对应的那本账号库（fail-closed）；
   //   配置与监听是否起来是两区域共用的事实（故 config 不带 scope）。
@@ -3805,12 +3813,12 @@ export function qoderProPackClaim(
 // npm CLI / 裸二进制）调用会得到结构化的「仅桌面端可用」错误 —— 那**不是**「该账号
 // 没有资源包」，两者不得混为一谈。
 
-/** 逐包探针结果（阶段零-2 取证用；`raw` 是上游原始响应，不含 Cookie）。 */
+/** 逐包探针结果（认领会话 + 取一次明细；`raw` 是上游原始响应，不含 Cookie）。 */
 export interface QoderWebCreditProbe {
-  /** 是否拿到了会话（`window` 现读或 `stored` 缓存）。 */
+  /** 是否拿到了会话（`window` 现读 / `staged` 关窗前暂存 / `stored` 缓存）。 */
   hasSession: boolean;
-  /** 会话来源：登录窗现读 / 本地缓存 / 无。 */
-  source?: "window" | "stored" | "none";
+  /** 会话来源：登录窗现读 / 关窗前暂存 / 本地缓存 / 无。 */
+  source?: "window" | "staged" | "stored" | "none";
   cookieCount: number;
   /** 只给名称，**不含值**（Cookie 等价于完整身份凭据）。 */
   cookieNames: string[];
@@ -3851,10 +3859,33 @@ export interface QoderWebSessionStatus {
   hasSession: boolean;
   /** 有缓存但已过期或换过账号 ⇒ 该引导重新登录，而非当作「已登录」。 */
   expired: boolean;
-  source: "window" | "stored" | "none";
+  /**
+   * 有会话但**还没被 uid 认领**（关窗前刚收割到）。
+   *
+   * ★ 这是「登录完关窗、还没探过一次」这个真实时刻的状态：此时 `hasSession` 仍是 false，
+   * 但用户已经登录了 —— 界面必须给「读取逐包」而不是再说一次「去登录」。
+   */
+  pending?: boolean;
+  source: "window" | "staged" | "stored" | "none";
   cookieNames: string[];
   savedAtMs: number;
   verifiedAtMs: number;
+}
+
+/**
+ * 登录窗里现有的 Cookie（**只有名称 / 条数 / 指纹，没有值**）。
+ *
+ * 用途：前端轮询它来判断「用户是否已经在窗口里登录完」。为什么不轮询 probe ——
+ * probe 一旦拿到非空 Cookie 就会真打上游，未登录时的匿名 Cookie 换来 401，
+ * 401 又会清缓存，40 次轮询就是一串注定失败的请求 + 反复抹掉刚写的缓存。
+ */
+export interface QoderWebWindowCookies {
+  /** 登录窗当前是否开着。 */
+  windowOpen: boolean;
+  cookieCount: number;
+  cookieNames: string[];
+  /** 集合指纹（不可逆）；空串 = 窗口没开 / 还没读到。变了即「登录态可能变了」。 */
+  fingerprint: string;
 }
 
 /** 一个 Qoder 资源包（积分包）。字段名与上游 snake_case 逐字对应。 */
@@ -3914,6 +3945,37 @@ export function qoderWebSessionStatus(
   uid: string,
 ): Promise<QoderWebSessionStatus> {
   return call<QoderWebSessionStatus>("qoder_web_session_status", { scope, uid });
+}
+
+/** 逐包取数的出站代理配置（两个区域各一个 URL；空 = 直连）。 */
+export interface QoderWebProxyConfig {
+  /** 国内版。缺省直连，一般不用填。 */
+  cn: string;
+  /** 国际版。国内网络直连会被上游按 IP 拦下 ⇒ 通常要填。 */
+  global: string;
+}
+
+/** 读逐包出站代理配置（只读）。 */
+export function qoderWebProxyGet(): Promise<QoderWebProxyConfig> {
+  return call<QoderWebProxyConfig>("qoder_web_proxy_get", {});
+}
+
+/** 保存逐包出站代理配置（两个 URL 都先过后端形状校验）。 */
+export function qoderWebProxySet(
+  config: QoderWebProxyConfig,
+): Promise<{ ok: boolean; config: QoderWebProxyConfig }> {
+  return call("qoder_web_proxy_set", { config });
+}
+
+/**
+ * 读登录窗里现有的 Cookie **名称与条数**（只读、不打上游）。
+ *
+ * 登录窗开着时轮询它：`fingerprint` 变化 ⇒ 用户在窗口里登录完了 ⇒ 再调一次
+ * {@link qoderWebCreditPacksProbe} 认领会话。副作用：后端会顺手把这份 Cookie
+ * 暂存在内存里，于是渲染路径（{@link qoderWebCreditPacks}）立刻就能用上它。
+ */
+export function qoderWebWindowCookies(scope: Scope): Promise<QoderWebWindowCookies> {
+  return call<QoderWebWindowCookies>("qoder_web_window_cookies", { scope });
 }
 
 /** 清除本地网页会话（「退出网页登录」；幂等）。 */
