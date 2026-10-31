@@ -4173,6 +4173,40 @@ mod tests {
         );
     }
 
+    /// 累积 `tried` 逐个跳过候选 —— `select_account` 据此剔除无凭据的池条目。
+    ///
+    /// 账号删除后池条目仍在，选中它取不到凭据；调用方把它记入 `skipped` 后重选，
+    /// 因此需要保证累积 `tried` 能穷尽候选，而不是反复返回同一个。
+    #[test]
+    fn pick_account_skips_each_tried_uid_until_exhausted() {
+        let mut pool = Pool::new(PoolConfig::default());
+        for uid in ["a", "b", "c"] {
+            pool.upsert(uid, Some(RealmTag::Cn), "");
+        }
+
+        let mut skipped: HashSet<String> = HashSet::new();
+        let mut order = Vec::new();
+        loop {
+            let Some(picked) = pool.pick_account(
+                NOW,
+                Some(RealmTag::Cn),
+                "",
+                &skipped,
+                PickMode::Weighted,
+                skipped.len() as u64,
+                None,
+                None,
+                "test",
+            ) else {
+                break;
+            };
+            assert!(skipped.insert(picked.clone()), "不得重复返回同一 uid");
+            order.push(picked);
+        }
+
+        assert_eq!(order.len(), 3, "三个候选应被穷尽：{order:?}");
+    }
+
     #[test]
     fn credits_refresh_interval_normalizes_non_positive_to_default() {
         assert_eq!(
