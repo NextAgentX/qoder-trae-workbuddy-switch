@@ -1699,38 +1699,38 @@ async fn select_account(
         _ => (PickMode::Weighted, sticky_uid),
     };
 
-    let (picked_uid, pool_empty) = {
-        let mut pool = state.pool.write().await;
-        if pool.is_empty() {
-            (None, true)
-        } else {
-            let seed = (now_ms as u64)
-                .wrapping_mul(31)
-                .wrapping_add(attempt as u64)
-                .wrapping_add(0x9E37_79B9_7F4A_7C15);
-            // 偏好不可用时由 `pick_with_preference` 自行回落到自动择优；
-            // 排除项由池自己持有（`sync_exclusions`），无需在这里传。
-            (
+    // 账号删除后池条目仍在（`sync_accounts` 增量 upsert），而 `find_account_for`
+    // 只查账号库 ⇒ 选中它取不到凭据。逐个验证，无凭据的记入 `skipped` 后重选。
+    let mut skipped: HashSet<String> = tried.clone();
+    let pool_empty = state.pool.read().await.is_empty();
+    if !pool_empty {
+        loop {
+            let picked_uid = {
+                let mut pool = state.pool.write().await;
+                let seed = (now_ms as u64)
+                    .wrapping_mul(31)
+                    .wrapping_add(attempt as u64)
+                    .wrapping_add(skipped.len() as u64)
+                    .wrapping_add(0x9E37_79B9_7F4A_7C15);
+                // 偏好不可用时由 `pick_with_preference` 自行回落到自动择优；
+                // 排除项由池自己持有（`sync_exclusions`），无需在这里传。
                 pool.pick_account(
                     now_ms,
                     Some(realm),
                     model,
-                    tried,
+                    &skipped,
                     mode,
                     seed,
                     preferred,
                     allowed,
                     owner,
-                ),
-                false,
-            )
-        }
-    };
-
-    if let Some(uid) = picked_uid {
-        // 池里存在但账号库已删除 → 该 uid 无凭据可用，落回策略选择。
-        if let Some(account_value) = account::find_account_for(region, &uid) {
-            return Some(account_value);
+                )
+            };
+            let Some(uid) = picked_uid else { break };
+            if let Some(account_value) = account::find_account_for(region, &uid) {
+                return Some(account_value);
+            }
+            skipped.insert(uid);
         }
     }
 
