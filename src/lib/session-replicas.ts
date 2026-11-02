@@ -80,6 +80,13 @@ export interface SessionGroupView {
   status: SessionGroupStatus;
   /** 共同旧版的**条数**（所有副本两两公共前缀的**最小值**）；`unknown` 时为 `null`。 */
   commonPrefix: number | null;
+  /**
+   * ★ issue #141：`commonPrefix` 是**精确值**（`true`）还是**下界**（`false`）。
+   *
+   * 逐行 hash 只覆盖前 512 行 ⇒ 长会话在窗口之外分叉时，后端只能保证「至少 512 行相同」。
+   * `false` ⇒ 界面说「至少 N 条」，**不许**说「N 条」（拿窗口上限冒充真值）。
+   */
+  commonPrefixExact: boolean;
   /** 各组员相对共同旧版的**新增条数**（`sessionId → delta`）；`unknown` 时为空。 */
   deltas: Map<string, number>;
   /** 行数最多的副本的条数（`latestLineCount`）；`unknown` 时为 `null`。 */
@@ -119,11 +126,12 @@ export interface SessionBaselineView {
 /** 一组「内容结论」的**诚实空值**（缺字段 / 脏值 / 旧后端 ⇒ 落这里，**不臆造**）。 */
 function unknownContent(): Pick<
   SessionGroupView,
-  "status" | "commonPrefix" | "deltas" | "latestLineCount" | "sinceBaseline"
+  "status" | "commonPrefix" | "commonPrefixExact" | "deltas" | "latestLineCount" | "sinceBaseline"
 > {
   return {
     status: "unknown",
     commonPrefix: null,
+    commonPrefixExact: false,
     deltas: new Map<string, number>(),
     latestLineCount: null,
     sinceBaseline: new Map<string, number | null>(),
@@ -144,7 +152,7 @@ const CONTENT_STATUSES: readonly SessionGroupStatus[] = ["latest", "behind", "di
  */
 function contentOf(
   content: SessionReplicaContent | null | undefined,
-): Pick<SessionGroupView, "status" | "commonPrefix" | "deltas" | "latestLineCount" | "sinceBaseline"> {
+): Pick<SessionGroupView, "status" | "commonPrefix" | "commonPrefixExact" | "deltas" | "latestLineCount" | "sinceBaseline"> {
   if (!content) return unknownContent();
   const status = CONTENT_STATUSES.includes(content.status) ? content.status : "unknown";
   const deltas = new Map<string, number>();
@@ -158,6 +166,9 @@ function contentOf(
   return {
     status,
     commonPrefix: typeof content.commonPrefix === "number" ? content.commonPrefix : null,
+    // 缺字段（旧后端）⇒ 按**精确**处理：那时后端本来就只有「未截断才给值」的语义，
+    // 显式 false 才会让界面改口说「至少」。
+    commonPrefixExact: content.commonPrefixExact !== false,
     deltas,
     latestLineCount:
       typeof content.latestLineCount === "number" ? content.latestLineCount : null,

@@ -483,6 +483,26 @@ pub const PREFIX_HASH_LIMIT: usize = 512;
 pub struct SessionFingerprint {
     pub line_count: usize,
     pub prefix_hashes: Vec<u64>,
+    /// **整份正文**的累计摘要（逐行 FNV，行间续入 `\n`；与 `prefix_hashes` 同一套归一化）。
+    ///
+    /// ## 为什么必须有它（issue #141）
+    ///
+    /// `prefix_hashes` 只覆盖**前 [`PREFIX_HASH_LIMIT`] 行**，而判据曾经写成
+    /// 「公共前缀 < 最短副本行数 ⇒ `diverge`」⇒ 任何 **> 512 行**的组，公共前缀的
+    /// **上限**就是 512，`common < min_lines` **恒为真** ⇒ 逐字节相同的长会话也被报成
+    /// 「有分歧」（且 `behind` 对长会话永不可达，「处理分歧」走全量比对又认为本来就一致
+    /// ⇒ 点完什么都不发生，用户看到的是死循环）。
+    ///
+    /// 整份摘要给出一个**窗口之外**的判据：行数相同 + 摘要相同 ⇒ 内容相同（`latest`），
+    /// 不必把窗口放大到全文（那会让响应体与落盘缓存随会话长度线性膨胀）。
+    /// 行数不同时仍需验证「短的是不是长的前缀」，见 [`prefix_digest_of_file`]。
+    ///
+    /// ⚠️ **代价**：算它要把**每一行**都过一遍 FNV（原先只 hash 前 512 行）。冷缓存那一次
+    /// 会多出约 66 GB 的纯 CPU 哈希（真机账本口径），相对 7 分钟的 IO 约一成；而结果随
+    /// `(size, mtime)` 落盘复用 ⇒ 同一份文件只付一次。**不要**为了省这点 CPU 把它改成
+    /// 「只对长会话算」：那会让 `full_hash` 的含义随文件长度变化，判据更难推理。
+    #[serde(skip)]
+    pub full_hash: u64,
 }
 
 /// 读一个会话的**内容指纹**；jsonl 不存在 / 不可读时返回 `None`（**fail-closed**）。
@@ -518,12 +538,17 @@ pub fn fingerprint_of_file(path: &Path, cid: &str) -> Option<SessionFingerprint>
 /// 4 是「能把 NVMe 队列喂饱、又不至于让机械盘彻底抖动」的稳妥值。
 const FINGERPRINT_READ_THREADS: usize = 4;
 
-/// 缓存条目的本体：指纹 + **失效判据**（大小 / mtime）。
+/// 缓存条目的本体：指纹 + **失效判据**（大小 / mtime）+ 一个**前缀探针**。
 #[derive(Clone)]
 struct CachedFingerprint {
     size: u64,
     mtime_ms: i64,
     fingerprint: SessionFingerprint,
+    /// 探针：`(前 N 行的累计摘要)`，N 由**搭档副本的行数**决定。
+    ///
+    /// 只留**一个**槽位而不是一张表：同一份文件在一组里通常只被同一个搭档追问，
+    /// 而每多留一个槽位就要为 25k 个条目各付 16 字节。换搭档 ⇒ 覆盖重算（读一次）。
+    probe: Option<(usize, u64)>,
 }
 
 /// ★ 指纹缓存（键 = `region ␟ cid`）—— **进程内 + 落盘**两级。
@@ -570,7 +595,10 @@ const FINGERPRINT_CACHE_FILE: &str = "session-fingerprints.bin";
 
 /// 落盘格式的魔数 + 版本。**改格式必须换它** —— 否则老文件会被按新布局解读，
 /// 读出满屏垃圾读数（比缓存失效坏得多，因为它是**静默的错**）。
-const FINGERPRINT_CACHE_MAGIC: &[u8; 8] = b"BSFPC002";
+///
+/// 版本史：`BSFPC001` 初版 → `BSFPC002` 加 `lineCount` → `BSFPC003` 加
+/// `full_hash`（整份摘要）与探针位（issue #141 的前缀验证）。
+const FINGERPRINT_CACHE_MAGIC: &[u8; 8] = b"BSFPC003";
 
 /// 条目数上限：超过就不落盘（内存缓存照常工作）。
 ///
@@ -654,10 +682,28 @@ impl FingerprintStore {
                 size,
                 mtime_ms,
                 fingerprint,
+                probe: None,
             },
         );
         self.dirty = true;
         self.fresh_reads += 1;
+    }
+
+    /// 取**已记录的前缀探针**（`offset` = 需要的行数）：命中且行数相同 ⇒ 直接给摘要。
+    fn probe(&self, key: &str, offset: usize) -> Option<u64> {
+        match self.entries.get(key)?.probe {
+            Some((cached_offset, digest)) if cached_offset == offset => Some(digest),
+            _ => None,
+        }
+    }
+
+    /// 记下**刚算出来**的前缀探针（随条目一起落盘 ⇒ 下次开页零 IO）。
+    fn record_probe(&mut self, key: &str, offset: usize, digest: u64) {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return;
+        };
+        entry.probe = Some((offset, digest));
+        self.dirty = true;
     }
 
     /// 从磁盘载入（**fail-safe**：文件缺失 / 魔数不符 / 中途损坏都退化成空表）。
@@ -705,6 +751,13 @@ impl FingerprintStore {
                 };
                 prefix_hashes.push(hash);
             }
+            let (Some(full_hash), Some(probe_offset), Some(probe_digest)) = (
+                read_u64(body, &mut cursor),
+                read_u64(body, &mut cursor),
+                read_u64(body, &mut cursor),
+            ) else {
+                return store;
+            };
             store.entries.insert(
                 key,
                 CachedFingerprint {
@@ -713,7 +766,10 @@ impl FingerprintStore {
                     fingerprint: SessionFingerprint {
                         line_count: line_count as usize,
                         prefix_hashes,
+                        full_hash,
                     },
+                    // `offset == 0` 是「没有探针」的哨兵（行数 0 的探针没有意义）。
+                    probe: (probe_offset > 0).then_some((probe_offset as usize, probe_digest)),
                 },
             );
         }
@@ -768,6 +824,10 @@ impl FingerprintStore {
             for hash in hashes {
                 bytes.extend_from_slice(&hash.to_le_bytes());
             }
+            bytes.extend_from_slice(&entry.fingerprint.full_hash.to_le_bytes());
+            let (probe_offset, probe_digest) = entry.probe.unwrap_or((0, 0));
+            bytes.extend_from_slice(&(probe_offset as u64).to_le_bytes());
+            bytes.extend_from_slice(&probe_digest.to_le_bytes());
         }
         if crate::modules::config::atomic_write_bytes(path, &bytes).is_err() {
             // 写失败**不清 dirty**：下次还有机会重写（否则一次瞬时失败就永久停写）。
@@ -909,26 +969,72 @@ fn fingerprints_for_members(
 pub fn fingerprint_of_text(text: &str, cid: &str) -> SessionFingerprint {
     let mut line_count = 0usize;
     let mut prefix_hashes: Vec<u64> = Vec::new();
+    let mut full_hash = FNV_OFFSET_BASIS;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         line_count += 1;
+        // ★ 先 trim 再归一化：占位符不含空白 ⇒ 与「先整串 replace 再 trim」等价。
+        let normalized = normalized_line(line, cid);
         if prefix_hashes.len() < PREFIX_HASH_LIMIT {
-            // ★ 先 trim 再归一化：占位符不含空白 ⇒ 与「先整串 replace 再 trim」等价。
-            let hash = if cid.is_empty() || !line.contains(cid) {
-                hash_line(line)
-            } else {
-                hash_line(&line.replace(cid, SESSION_ID_PLACEHOLDER))
-            };
-            prefix_hashes.push(hash);
+            prefix_hashes.push(hash_line(&normalized));
         }
+        // ★ 整份摘要与逐行 hash **同一套归一化**（否则两个副本的 `full_hash` 永远不等）。
+        full_hash = fnv_step(full_hash, &normalized);
     }
     SessionFingerprint {
         line_count,
         prefix_hashes,
+        full_hash,
     }
+}
+
+/// 一行正文的**归一化**形态（把本会话自己的 cid 换成占位符）。
+///
+/// 逐行按需替换：整串 `replace` 会为每个会话多分配一份与正文等大的字符串
+/// （真机均值 2.85 MB × 25k 副本 ≈ 70 GB 的纯拷贝）。
+fn normalized_line<'a>(line: &'a str, cid: &str) -> std::borrow::Cow<'a, str> {
+    if cid.is_empty() || !line.contains(cid) {
+        std::borrow::Cow::Borrowed(line)
+    } else {
+        std::borrow::Cow::Owned(line.replace(cid, SESSION_ID_PLACEHOLDER))
+    }
+}
+
+/// 只读**前 `upto` 行**算累计摘要（与 [`SessionFingerprint::full_hash`] 同口径）。
+///
+/// ## 用途（issue #141）
+///
+/// 判「短副本是不是长副本的**前缀**」（即 `behind`）需要长副本**前 N 行**的摘要，
+/// 而指纹里只存了整份摘要与前 512 行的逐行 hash。这里**只读到第 N 行就停**
+/// （不是读全文），并允许调用方把它记进 [`FingerprintStore`] 的探针位 —— 于是同一对
+/// 文件第二次开页**零 IO**。
+///
+/// ⚠️ 行数不足 `upto` ⇒ `None`：那说明文件比指纹记录的短（正在被改写 / 已被截断），
+/// 此时**不给结论**（宁可 `unknown`，也不把「读不到」当成「前缀相同」）。
+fn prefix_digest_of_file(path: &Path, cid: &str, upto: usize) -> Option<u64> {
+    use std::io::BufRead as _;
+    if upto == 0 {
+        return Some(FNV_OFFSET_BASIS);
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut state = FNV_OFFSET_BASIS;
+    let mut seen = 0usize;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        seen += 1;
+        state = fnv_step(state, &normalized_line(line, cid));
+        if seen >= upto {
+            return Some(state);
+        }
+    }
+    None
 }
 
 /// FNV-1a 64 的初始值与乘数（**不引第三方依赖**：本 crate 的依赖面刻意保持小）。
@@ -946,6 +1052,15 @@ fn fnv1a(bytes: &[u8], mut state: u64) -> u64 {
         state = state.wrapping_mul(FNV_PRIME);
     }
     state
+}
+
+/// 把**一行**续进累计摘要：先并入行字节，再并入 `\n`（行分隔也参与 hash ⇒
+/// 「同样的字节被切成不同行」不会撞成同一个摘要）。
+///
+/// ⚠️ 必须是**可增量**的：`prefix_digest_of_file` 要能算出「前 N 行」的摘要并与
+/// 整份摘要比较，靠的就是同一套逐步累积。
+fn fnv_step(state: u64, line: &str) -> u64 {
+    fnv1a(b"\n", fnv1a(line.as_bytes(), state))
 }
 
 /// 稳定 hash（FNV-1a 64）—— **不引第三方依赖**（本 crate 只有 `serde_json`）。
@@ -3219,10 +3334,28 @@ pub fn list_replica_groups_for(region: Region) -> Value {
         }
         let baseline = newest_baseline(&entry.baselines);
         let mut json = entry.json.clone();
+        // ★ issue #141：超窗口组的前缀验证。**只有**「最短副本 > 512 行且行数不等」时才会
+        //   真的读盘，且只读到第 N 行就停（不是读全文）；算出来的摘要记进探针位随缓存落盘
+        //   ⇒ 同一对文件下次开页**零 IO**（`FingerprintStore` 的「命中不读盘」不被破坏）。
+        let mut probe = |index: usize, offset: usize| -> Option<u64> {
+            let fingerprint = fingerprints.get(index)?.as_ref()?;
+            if offset >= fingerprint.line_count {
+                return Some(fingerprint.full_hash);
+            }
+            let (_uid, cid) = entry.members.get(index)?;
+            let path = projects.get(cid)?;
+            let key = fingerprint_key(region, cid);
+            if let Some(digest) = store.probe(&key, offset) {
+                return Some(digest);
+            }
+            let digest = prefix_digest_of_file(path, cid, offset)?;
+            store.record_probe(&key, offset, digest);
+            Some(digest)
+        };
         if let Some(object) = json.as_object_mut() {
             object.insert(
                 "content".to_string(),
-                derive_content_status(&entry.members, &fingerprints, baseline),
+                derive_content_status(&entry.members, &fingerprints, baseline, &mut probe),
             );
         }
         groups.push(json);
@@ -3535,17 +3668,36 @@ pub const STATUS_UNKNOWN: &str = "unknown";
 ///
 /// ## 判据（与前端逐字对齐，改一处必须同步另一处）
 ///
-/// - `latest`：行数全相同且公共前缀 = 行数；
-/// - `behind`：行数不等，但公共前缀**覆盖到最短副本** ⇒ 只是有人多写了，无分叉；
-/// - `diverge`：公共前缀 < 最短副本行数 ⇒ 双方在共同旧版之后各自改过；
-/// - `unknown`：**有副本取不到指纹**（jsonl 缺失 / 正在写入）⇒ 诚实标注，**不臆造**。
+/// - `latest`：行数全相同且内容相同（公共前缀 = 行数；超窗口时用整份摘要）；
+/// - `behind`：行数不等，但**最短副本是其余成员的前缀** ⇒ 只是有人多写了，无分叉；
+/// - `diverge`：在共同旧版之后各自改过（窗口内即分叉，或前缀关系不成立）；
+/// - `unknown`：**有副本取不到指纹**，或**超窗口且无法验证前缀关系**
+///   ⇒ 诚实标注，**不臆造**。
+///
+/// ## ★ issue #141：窗口被截断时**不许**拿 512 当全文
+///
+/// `prefix_hashes` 最多 [`PREFIX_HASH_LIMIT`] 项，而旧判据是「公共前缀 < 最短副本行数
+/// ⇒ `diverge`」⇒ 只要组内最短副本 **> 512 行**，`common ≤ 512 < min_lines` **恒为真**
+/// ⇒ 逐字节相同的长会话也报「有分歧」。连带三个后果：`behind` 对长会话**永不可达**
+/// （「安全同步（只追加）」按钮再也不出现）、用户被引向**覆盖式**统一（会丢目标侧新行）、
+/// `deltas` 虚增（800 行的会话被算成「落后 288 条」）。
+///
+/// 现在的处置分三档（只在**窗口被截断**时才多走两步）：
+///
+/// 1. 行数全相同 ⇒ 比 `full_hash`：全等 ⇒ `latest`，否则 `diverge`（**精确**，零额外 IO）；
+/// 2. 行数不等 ⇒ 逐成员验证「它是不是**最长副本**的前缀」：取最长副本**前 N 行**的累计
+///    摘要（`probe`，N = 该成员行数）与它的 `full_hash` 比。全过 ⇒ `behind`；
+///    有一条不过 ⇒ `diverge`；取不到摘要 ⇒ `unknown`（**不把读不到当成相同**）；
+/// 3. `commonPrefix` 在「超窗口 + 有分叉」时只是**下界**（≥512）⇒ 用
+///    `commonPrefixExact: false` 标出来，界面据此说「至少 N 条」而不是「N 条」。
 ///
 /// ⚠️ **不得**用 `updatedAt` 派生本状态（`P8-ARCH.md` §1.2「时间新 ≠ 内容新」）。
-/// 本函数**根本不接触**会话行 —— 输入只有指纹与基线。
+/// 本函数**根本不接触**会话行 —— 输入只有指纹、基线与一个按需取摘要的 `probe`。
 fn derive_content_status(
     members: &[(String, String)],
     fingerprints: &[Option<SessionFingerprint>],
     baseline: Option<&GroupBaseline>,
+    probe: &mut dyn FnMut(usize, usize) -> Option<u64>,
 ) -> Value {
     if members.len() < 2 {
         return unknown_content_status();
@@ -3577,12 +3729,75 @@ fn derive_content_status(
     let counts: Vec<usize> = list.iter().map(|f| f.line_count).collect();
     let min_lines = counts.iter().copied().min().unwrap_or(0);
     let max_lines = counts.iter().copied().max().unwrap_or(0);
-    let status = if common < min_lines {
+
+    // ★ 窗口真的被截断了？「最短的前缀窗口用满了」**且**「还有窗口之外的行」。
+    //   两者缺一都不算截断：例如 512 行的会话，窗口恰好覆盖全文。
+    let truncated = shortest_prefix == PREFIX_HASH_LIMIT && min_lines > PREFIX_HASH_LIMIT;
+
+    let mut exact = true;
+    let status: &str = if common < shortest_prefix {
+        // 窗口内就已经分叉 ⇒ 与窗口大小无关的**确定**结论。
         STATUS_DIVERGE
+    } else if !truncated {
+        // 公共前缀覆盖到了最短副本（窗口没被用满）⇒ 旧判据在这里本来就是精确的。
+        if max_lines == min_lines {
+            STATUS_LATEST
+        } else {
+            STATUS_BEHIND
+        }
     } else if max_lines == min_lines {
-        STATUS_LATEST
+        // 截断 + 行数相同：窗口之外只可能「全同」或「有改写」，整份摘要一次判定。
+        if list.iter().all(|f| f.full_hash == list[0].full_hash) {
+            common = min_lines;
+            STATUS_LATEST
+        } else {
+            // 有改写 ⇒ 公共前缀至少 512，但**具体多少**不知道 ⇒ 下界。
+            exact = false;
+            STATUS_DIVERGE
+        }
     } else {
-        STATUS_BEHIND
+        // 截断 + 行数不等：验证「每个成员都是最长副本的前缀」。
+        let longest = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, lines)| **lines)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let mut verdict = Some(true);
+        for (index, fingerprint) in list.iter().enumerate() {
+            if index == longest {
+                continue;
+            }
+            let digest = if fingerprint.line_count == list[longest].line_count {
+                // 同长 ⇒ 前缀即全文。
+                Some(list[longest].full_hash)
+            } else {
+                probe(longest, fingerprint.line_count)
+            };
+            match digest {
+                Some(digest) if digest == fingerprint.full_hash => {}
+                Some(_) => {
+                    verdict = Some(false);
+                    break;
+                }
+                None => {
+                    verdict = None;
+                    break;
+                }
+            }
+        }
+        match verdict {
+            // 全体都是最长副本的前缀 ⇒ 最短那份的**全文**就是全组公共前缀。
+            Some(true) => {
+                common = min_lines;
+                STATUS_BEHIND
+            }
+            Some(false) => {
+                exact = false;
+                STATUS_DIVERGE
+            }
+            None => return unknown_content_status(),
+        }
     };
 
     // 增量按 **cid** 聚合（同 cid 出现在不同账号 ⇒ 读数相同；与前端 `Map` 口径一致）。
@@ -3617,6 +3832,8 @@ fn derive_content_status(
     json!({
         "status": status,
         "commonPrefix": common,
+        // ★ `false` ⇒ 上面的数只是**下界**（窗口被截断且确有分叉）。
+        "commonPrefixExact": exact,
         "deltas": deltas,
         "latestLineCount": max_lines,
         "sinceBaseline": since_baseline,
@@ -3628,6 +3845,7 @@ fn unknown_content_status() -> Value {
     json!({
         "status": STATUS_UNKNOWN,
         "commonPrefix": Value::Null,
+        "commonPrefixExact": false,
         "deltas": BTreeMap::<String, usize>::new(),
         "latestLineCount": Value::Null,
         "sinceBaseline": BTreeMap::<String, Option<usize>>::new(),
@@ -5618,9 +5836,15 @@ mod fingerprint_tests {
     use super::*;
 
     fn fp(line_count: usize, prefix_hashes: Vec<u64>) -> SessionFingerprint {
+        // 整份摘要由逐行 hash **确定性**折出来：内容不同 ⇒ `full_hash` 不同（与本文件的
+        // 真实口径无关，测试只关心「相等 / 不相等」这一层语义）。
+        let full_hash = prefix_hashes.iter().fold(FNV_OFFSET_BASIS, |state, hash| {
+            fnv_step(state, &hash.to_string())
+        });
         SessionFingerprint {
             line_count,
             prefix_hashes,
+            full_hash,
         }
     }
 
@@ -6663,14 +6887,17 @@ mod content_status_tests {
         let a = SessionFingerprint {
             line_count: 9,
             prefix_hashes: vec![1, 2, 3, 4, 5],
+            full_hash: 0,
         };
         let b = SessionFingerprint {
             line_count: 7,
             prefix_hashes: vec![1, 2, 3, 4, 6],
+            full_hash: 0,
         };
         let c = SessionFingerprint {
             line_count: 6,
             prefix_hashes: vec![1, 2, 9, 9, 9],
+            full_hash: 0,
         };
         let fps = vec![Some(a.clone()), Some(b.clone()), Some(c.clone())];
 
@@ -6688,7 +6915,7 @@ mod content_status_tests {
             .iter()
             .map(|cid| ("uid".to_string(), cid.to_string()))
             .collect();
-        let status = derive_content_status(&members, &fps, None);
+        let status = derive_content_status(&members, &fps, None, &mut |_, _| None);
         assert_eq!(
             status["commonPrefix"],
             json!(2),
@@ -6707,9 +6934,10 @@ mod content_status_tests {
         let full = SessionFingerprint {
             line_count: 5,
             prefix_hashes: vec![1, 2, 3, 4, 5],
+            full_hash: 0,
         };
         let same = vec![Some(full.clone()), Some(full)];
-        let equal = derive_content_status(&members[..2], &same, None);
+        let equal = derive_content_status(&members[..2], &same, None, &mut |_, _| None);
         assert_eq!(equal["status"], json!(STATUS_LATEST));
         assert_eq!(equal["commonPrefix"], json!(5));
         assert_eq!(equal["latestLineCount"], json!(5));
@@ -6718,9 +6946,10 @@ mod content_status_tests {
             Some(SessionFingerprint {
                 line_count: 3,
                 prefix_hashes: vec![1, 2, 3],
+                full_hash: 0,
             }),
         ];
-        let behind = derive_content_status(&members[..2], &prefix_only, None);
+        let behind = derive_content_status(&members[..2], &prefix_only, None, &mut |_, _| None);
         assert_eq!(behind["status"], json!(STATUS_BEHIND));
         assert_eq!(
             behind["commonPrefix"],
@@ -6731,7 +6960,7 @@ mod content_status_tests {
         // 缺一个指纹 ⇒ 整体 unknown（**不臆造**）。
         let missing = vec![Some(a), None];
         assert_eq!(
-            derive_content_status(&members[..2], &missing, None)["status"],
+            derive_content_status(&members[..2], &missing, None, &mut |_, _| None)["status"],
             json!(STATUS_UNKNOWN)
         );
     }
@@ -6790,7 +7019,7 @@ mod content_status_tests {
             ("uid-b".to_string(), "cid-a-copy".to_string()),
         ];
         let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &members);
-        let status = derive_content_status(&members, &fingerprints, None);
+        let status = derive_content_status(&members, &fingerprints, None, &mut |_, _| None);
         assert_eq!(
             status["status"],
             json!(STATUS_LATEST),
@@ -6802,7 +7031,7 @@ mod content_status_tests {
         let mut three = members.clone();
         three.push(("uid-c".to_string(), "cid-c".to_string()));
         let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &three);
-        let status = derive_content_status(&three, &fingerprints, None);
+        let status = derive_content_status(&three, &fingerprints, None, &mut |_, _| None);
         assert_eq!(status["status"], json!(STATUS_BEHIND));
         assert_eq!(status["latestLineCount"], json!(14));
         assert_eq!(status["deltas"]["cid-c"], json!(2));
@@ -6816,9 +7045,229 @@ mod content_status_tests {
         let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &ghost);
         assert!(fingerprints[1].is_none());
         assert_eq!(
-            derive_content_status(&ghost, &fingerprints, None)["status"],
+            derive_content_status(&ghost, &fingerprints, None, &mut |_, _| None)["status"],
             json!(STATUS_UNKNOWN)
         );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    // ------------------------------------------------------- issue #141：超窗口的长会话
+
+    /// 写一份会话正文，并允许改写**指定行**（用来造「窗口之外才分叉」的现场）。
+    fn write_jsonl_with(
+        projects: &Path,
+        workspace: &str,
+        cid: &str,
+        lines: usize,
+        rewrite: impl Fn(usize, String) -> String,
+    ) {
+        let mut body = String::new();
+        for index in 0..lines {
+            let line = format!("{{\"type\":\"message\",\"sessionId\":\"{cid}\",\"n\":{index}}}");
+            body.push_str(&rewrite(index, line));
+            body.push('\n');
+        }
+        let dir = projects.join(workspace);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{cid}.jsonl")), body).unwrap();
+    }
+
+    /// 生产同款探针（缓存 → 只读到第 N 行 → 回填缓存）。
+    fn probe_for<'a>(
+        store: &'a mut FingerprintStore,
+        index: &'a HashMap<String, PathBuf>,
+        members: &'a [(String, String)],
+        fingerprints: &'a [Option<SessionFingerprint>],
+    ) -> impl FnMut(usize, usize) -> Option<u64> + 'a {
+        move |position: usize, offset: usize| {
+            let fingerprint = fingerprints.get(position)?.as_ref()?;
+            if offset >= fingerprint.line_count {
+                return Some(fingerprint.full_hash);
+            }
+            let (_uid, cid) = members.get(position)?;
+            let path = index.get(cid)?;
+            let key = fingerprint_key(Region::Cn, cid);
+            if let Some(digest) = store.probe(&key, offset) {
+                return Some(digest);
+            }
+            let digest = prefix_digest_of_file(path, cid, offset)?;
+            store.record_probe(&key, offset, digest);
+            Some(digest)
+        }
+    }
+
+    /// ★ issue #141 的核心回归：**逐字节相同的长会话不许被判成「有分歧」**。
+    ///
+    /// 620 行 > [`PREFIX_HASH_LIMIT`] ⇒ 旧判据 `common(512) < min_lines(620)` **恒为真**，
+    /// 会无条件报 `diverge`（用户点「处理分歧」又什么都不发生 —— 全量比对认为本来就一致）。
+    ///
+    /// 可证伪：把 `truncated` 分支里的 `full_hash` 比较删掉 / 恒为 `false` ⇒ 本条红。
+    #[test]
+    fn long_identical_copies_are_not_reported_as_divergent() {
+        let (home, projects) = temp_projects("long-identical");
+        write_jsonl(&projects, "ws-a", "cid-a", 620);
+        write_jsonl(&projects, "ws-b", "cid-a-copy", 620);
+        let index = build_projects_index_in(&projects);
+        let mut store = FingerprintStore::default();
+        let members = vec![
+            ("uid-a".to_string(), "cid-a".to_string()),
+            ("uid-b".to_string(), "cid-a-copy".to_string()),
+        ];
+        let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &members);
+        // 行数相同 ⇒ 不该碰探针（零额外 IO）。
+        let mut probe = |_: usize, _: usize| -> Option<u64> { panic!("行数相同不该读盘") };
+        let status = derive_content_status(&members, &fingerprints, None, &mut probe);
+        assert_eq!(
+            status["status"],
+            json!(STATUS_LATEST),
+            "两份 620 行、内容逐字节相同（只换了 id）⇒ 必须「已一致」"
+        );
+        assert_eq!(status["commonPrefix"], json!(620));
+        assert_eq!(status["commonPrefixExact"], json!(true));
+        assert_eq!(status["deltas"]["cid-a"], json!(0));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// ★ 超窗口的「只追加」必须仍判 `behind`（旧判据下 `behind` 对长会话**永不可达**）。
+    ///
+    /// 同时钉住探针：620 行那份是 660 行那份的**真前缀** ⇒ 公共前缀 = 620（不是 512）。
+    #[test]
+    fn long_copy_that_only_grew_is_behind_with_exact_prefix() {
+        let (home, projects) = temp_projects("long-behind");
+        write_jsonl(&projects, "ws-a", "cid-a", 620);
+        write_jsonl(&projects, "ws-b", "cid-b", 660);
+        let index = build_projects_index_in(&projects);
+        let mut store = FingerprintStore::default();
+        let members = vec![
+            ("uid-a".to_string(), "cid-a".to_string()),
+            ("uid-b".to_string(), "cid-b".to_string()),
+        ];
+        let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &members);
+        let status = derive_content_status(
+            &members,
+            &fingerprints,
+            None,
+            &mut probe_for(&mut store, &index, &members, &fingerprints),
+        );
+        assert_eq!(
+            status["status"],
+            json!(STATUS_BEHIND),
+            "短的那份是长的真前缀 ⇒ 只追加即可，不是分歧"
+        );
+        assert_eq!(
+            status["commonPrefix"],
+            json!(620),
+            "公共前缀必须给出**真值**（不是窗口上限 512）"
+        );
+        assert_eq!(status["commonPrefixExact"], json!(true));
+        assert_eq!(status["deltas"]["cid-a"], json!(0));
+        assert_eq!(status["deltas"]["cid-b"], json!(40));
+        // ★ 探针已记进缓存 ⇒ 第二次开页零 IO（`list_replica_groups_for` 的承诺）。
+        let key = fingerprint_key(Region::Cn, "cid-b");
+        assert!(
+            store.probe(&key, 620).is_some(),
+            "验证过的前缀摘要必须留在缓存里（否则每次开页都要重读）"
+        );
+        // ★ 而且必须**随缓存落盘**：不落盘的话，「重启后第一次开页」仍然要重读长文件，
+        //   「命中零 IO」这条承诺就是空话。
+        let cache = home.join("cache.bin");
+        assert!(store.save_if_worthwhile(&cache), "有新条目 ⇒ 必须落盘");
+        let reloaded = FingerprintStore::load_from(&cache);
+        assert_eq!(
+            reloaded.probe(&key, 620),
+            store.probe(&key, 620),
+            "探针没有往返 ⇒ 落盘格式漏了这一节"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// ★ 超窗口的**真分歧**：行数相同但正文在窗口之外改过 ⇒ `diverge`，且公共前缀只是下界。
+    #[test]
+    fn long_copies_with_rewritten_tail_are_divergent() {
+        let (home, projects) = temp_projects("long-diverge-same");
+        write_jsonl(&projects, "ws-a", "cid-a", 620);
+        // 第 600 行（窗口之外）换掉一个字符 ⇒ 前 512 行仍然全同。
+        write_jsonl_with(&projects, "ws-b", "cid-b", 620, |index, line| {
+            if index == 600 {
+                line.replace("\"n\":600", "\"n\":600,\"edited\":true")
+            } else {
+                line
+            }
+        });
+        let index = build_projects_index_in(&projects);
+        let mut store = FingerprintStore::default();
+        let members = vec![
+            ("uid-a".to_string(), "cid-a".to_string()),
+            ("uid-b".to_string(), "cid-b".to_string()),
+        ];
+        let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &members);
+        let status = derive_content_status(
+            &members,
+            &fingerprints,
+            None,
+            &mut probe_for(&mut store, &index, &members, &fingerprints),
+        );
+        assert_eq!(status["status"], json!(STATUS_DIVERGE));
+        assert_eq!(
+            status["commonPrefixExact"],
+            json!(false),
+            "窗口之外改过 ⇒ 512 只是**下界**，界面不许说「共同旧版 512 条」"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// ★ 超窗口 + 行数不等 + 窗口之外改过 ⇒ 前缀关系不成立 ⇒ `diverge`（不是 `behind`）。
+    ///
+    /// 这一条挡的是「为了修 #141 就把长会话一律当 `behind`」的偷懒修法 ——
+    /// 那会让「只追加」把分叉行覆盖成一段混合历史。
+    #[test]
+    fn long_copy_with_divergent_middle_is_not_behind() {
+        let (home, projects) = temp_projects("long-diverge-diff");
+        write_jsonl(&projects, "ws-a", "cid-a", 620);
+        write_jsonl_with(&projects, "ws-b", "cid-b", 660, |index, line| {
+            if index == 590 {
+                line.replace("\"n\":590", "\"n\":590,\"edited\":true")
+            } else {
+                line
+            }
+        });
+        let index = build_projects_index_in(&projects);
+        let mut store = FingerprintStore::default();
+        let members = vec![
+            ("uid-a".to_string(), "cid-a".to_string()),
+            ("uid-b".to_string(), "cid-b".to_string()),
+        ];
+        let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &members);
+        let status = derive_content_status(
+            &members,
+            &fingerprints,
+            None,
+            &mut probe_for(&mut store, &index, &members, &fingerprints),
+        );
+        assert_eq!(
+            status["status"],
+            json!(STATUS_DIVERGE),
+            "短的那份不是长的前缀 ⇒ 只能走覆盖式统一"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// ★ 取不到前缀摘要 ⇒ `unknown`（**不把「读不到」当成「相同」**）。
+    #[test]
+    fn long_group_without_probe_stays_unknown() {
+        let (home, projects) = temp_projects("long-unknown");
+        write_jsonl(&projects, "ws-a", "cid-a", 620);
+        write_jsonl(&projects, "ws-b", "cid-b", 660);
+        let index = build_projects_index_in(&projects);
+        let mut store = FingerprintStore::default();
+        let members = vec![
+            ("uid-a".to_string(), "cid-a".to_string()),
+            ("uid-b".to_string(), "cid-b".to_string()),
+        ];
+        let fingerprints = fingerprints_for_members(&mut store, Region::Cn, &index, &members);
+        let status = derive_content_status(&members, &fingerprints, None, &mut |_, _| None);
+        assert_eq!(status["status"], json!(STATUS_UNKNOWN));
+        assert_eq!(status["commonPrefix"], Value::Null);
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -6841,6 +7290,7 @@ mod content_status_tests {
             SessionFingerprint {
                 line_count: 7,
                 prefix_hashes: vec![10, 20, 30],
+                full_hash: 0,
             },
         );
         assert!(store.save_if_worthwhile(&cache), "有改动就必须落盘");
@@ -6858,6 +7308,10 @@ mod content_status_tests {
         assert_eq!(entry.mtime_ms, 1_700_000_000_123);
         assert_eq!(entry.fingerprint.line_count, 7);
         assert_eq!(entry.fingerprint.prefix_hashes, vec![10, 20, 30]);
+        assert_eq!(
+            entry.fingerprint.full_hash, 0,
+            "整份摘要必须一起往返（#141 的超窗口判定全靠它）"
+        );
         assert!(
             !reloaded.dirty,
             "载入不算改动（否则每次开页都会白写一份 106 MB）"
@@ -6948,6 +7402,7 @@ mod content_status_tests {
             SessionFingerprint {
                 line_count: 2,
                 prefix_hashes: vec![1, 2],
+                full_hash: 0,
             },
         );
         assert!(store.save_if_worthwhile(&cache));
@@ -7004,6 +7459,7 @@ mod content_status_tests {
             SessionFingerprint {
                 line_count: 3,
                 prefix_hashes: vec![1],
+                full_hash: 0,
             },
         );
         assert!(
@@ -7034,6 +7490,7 @@ mod content_status_tests {
                 SessionFingerprint {
                     line_count: 1,
                     prefix_hashes: vec![index as u64],
+                    full_hash: 0,
                 },
             );
         }
@@ -7051,6 +7508,7 @@ mod content_status_tests {
                 SessionFingerprint {
                     line_count: 3,
                     prefix_hashes: vec![2],
+                    full_hash: 0,
                 },
             );
         }
@@ -7082,6 +7540,7 @@ mod content_status_tests {
                 SessionFingerprint {
                     line_count: 1,
                     prefix_hashes: vec![7],
+                    full_hash: 0,
                 },
             );
         }
@@ -7125,17 +7584,20 @@ mod content_status_tests {
             Some(SessionFingerprint {
                 line_count: 5,
                 prefix_hashes: vec![1, 2, 3, 4, 5],
+                full_hash: 0,
             }),
             Some(SessionFingerprint {
                 line_count: 3,
                 prefix_hashes: vec![1, 2, 3],
+                full_hash: 0,
             }),
             Some(SessionFingerprint {
                 line_count: 3,
                 prefix_hashes: vec![1, 2, 3],
+                full_hash: 0,
             }),
         ];
-        let status = derive_content_status(&members, &good, Some(&baseline));
+        let status = derive_content_status(&members, &good, Some(&baseline), &mut |_, _| None);
         assert_eq!(status["sinceBaseline"]["cid-a"], json!(2));
         assert_eq!(status["sinceBaseline"]["cid-b"], json!(0));
         // 基线是**成对**的：与它无关的成员**不在表里**（不是 0）。
@@ -7146,17 +7608,20 @@ mod content_status_tests {
             Some(SessionFingerprint {
                 line_count: 5,
                 prefix_hashes: vec![1, 2, 9, 4, 5],
+                full_hash: 0,
             }),
             Some(SessionFingerprint {
                 line_count: 3,
                 prefix_hashes: vec![1, 2, 3],
+                full_hash: 0,
             }),
             Some(SessionFingerprint {
                 line_count: 3,
                 prefix_hashes: vec![1, 2, 3],
+                full_hash: 0,
             }),
         ];
-        let status = derive_content_status(&members, &rewritten, Some(&baseline));
+        let status = derive_content_status(&members, &rewritten, Some(&baseline), &mut |_, _| None);
         assert!(status["sinceBaseline"]["cid-a"].is_null());
     }
 }

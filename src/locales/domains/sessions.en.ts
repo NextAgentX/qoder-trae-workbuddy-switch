@@ -33,6 +33,7 @@ export const en = {
   "sessions.replica.status.diverge": "Diverged",
   "sessions.replica.status.unknown": "Status unknown",
   "sessions.replica.commonPrefix": "{count} messages in common",
+  "sessions.replica.commonPrefixAtLeast": "at least {count} messages in common (beyond compare window)",
   "sessions.replica.delta": "+{count}",
   "sessions.replica.baseline": "{count} messages at last match",
   "sessions.replica.baselineDelta": "+{count} since last match",
