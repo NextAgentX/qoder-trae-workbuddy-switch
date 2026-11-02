@@ -1532,14 +1532,49 @@ pub fn delete_slot_for(variant: TraeVariant, slot: &str) -> Result<(), String> {
 /// 且能区分「装了但从未启动」与「真的没装」。这里再写一句，迟早出现
 /// 「一处说没装、另一处说没启动」的自相矛盾。
 fn missing_snapshot_reason(variant: TraeVariant, target: &str, can_save: bool) -> String {
-    if can_save {
+    let base = if can_save {
         format!("账号 {target} 的登录态快照不存在，请先保存该账号的登录态")
     } else {
         format!(
             "账号 {target} 的登录态快照不存在，且现在也无法保存 —— {}",
             platform::data_dir_missing_reason(variant)
         )
+    };
+    // ★ issue #152：把「快照**实际**在哪一格」直接写进文案。
+    //
+    // 报告原文（macOS 国内版）：「说什么登陆态快照不存在，请先保存该账号的登陆态」——
+    // 而用户早就存过。这类现场靠猜是猜不出来的：快照可能在**历史池**（合并前存的，
+    // 见 [`super::snapshot_migrate`]）、也可能属于**另一个区域**（国内版账号被建到国际版）。
+    // 把磁盘上的真实位置报出来，下一次报告就能一次定死，而不是再来一轮问答。
+    let elsewhere = snapshot_locations_for(target);
+    if elsewhere.is_empty() {
+        return base;
     }
+    format!(
+        "{base}（该账号的快照实际在：{} —— 可能属于另一条产品线/另一个区域，切到对应区域再试）",
+        elsewhere
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、")
+    )
+}
+
+/// 这个账号的快照**实际**躺在哪些池里（跨区域、含历史池）—— **只用于诊断文案**。
+///
+/// 返回空 ≠ 错误：那正是「真的没存过」的形态。判据只看目录是否存在，
+/// 不读任何文件、不改任何东西。
+fn snapshot_locations_for(user_id: &str) -> Vec<PathBuf> {
+    use crate::modules::trae::region::TraeRegion;
+    let mut out: Vec<PathBuf> = Vec::new();
+    for region in [TraeRegion::Cn, TraeRegion::Global] {
+        for dir in paths::profile_dirs_for_region(region, user_id) {
+            if dir.is_dir() && !out.contains(&dir) {
+                out.push(dir);
+            }
+        }
+    }
+    out
 }
 
 /// 切换失败后的**回滚**：把 `last` 槽（切换前的现场）恢复回客户端，并把客户端拉回来。
@@ -1661,20 +1696,51 @@ where
     //    客户端读到缺 `iCubeServerData` 的 `cloudide` 后**把整份登录态判为无效并清掉**
     //    ⇒ 用户的两个客户端双双变成未登录。实测取证与结论见
     //    `docs/history/trae-login-materialize-probe-2026-09-29.md`。
-    let target_slot = match paths::profile_dir_for(variant, &target) {
-        Some(dir) if dir.is_dir() => dir,
-        _ => {
-            let can_save = snapshot_data_dir_for(variant)
-                .filter(|dir| dir.is_dir())
-                .is_some();
-            let message = missing_snapshot_reason(variant, &target, can_save);
+    // ★ issue #152：目标槽位不在**合并池**时，先补搬一次历史池再判。
+    //
+    // 合并前存的快照躺在 `profiles` / `profiles_trae_cn` / `profiles_global*` 里；
+    // 页面加载时会搬一次（`carry_merged_snapshots`），但「切号」可能发生在搬完之前，
+    // 也可能那次搬运里有失败项。不补搬的后果就是 #152 的原话：**用户早就存过**，
+    // 却被告知「请先保存该账号的登录态」（与 issue #28 完全同款的症状）。
+    //
+    // 补搬是幂等、只增不改、只复制的（`snapshot_migrate` 的三条硬约束），
+    // 而且只在这条**失败路径**上执行 ⇒ 正常切换的耗时与行为都不变。
+    let mut target_slot = paths::profile_dir_for(variant, &target).filter(|dir| dir.is_dir());
+    if target_slot.is_none() {
+        let carried = super::snapshot_migrate::carry_merged_snapshots();
+        if carried.carries.iter().any(|entry| entry.slot == target) {
             emit(
                 &mut outcome,
-                SwitchStep::new("fatal", "fail", message.clone()),
+                SwitchStep::new(
+                    "migrate",
+                    "ok",
+                    format!("已从历史快照池补搬账号 {target} 的登录态"),
+                ),
             );
-            outcome.error = Some(message);
-            return outcome;
         }
+        if !carried.errors.is_empty() {
+            emit(
+                &mut outcome,
+                SwitchStep::new(
+                    "migrate",
+                    "skip",
+                    format!("历史快照搬运有失败项：{}", carried.errors.join("；")),
+                ),
+            );
+        }
+        target_slot = paths::profile_dir_for(variant, &target).filter(|dir| dir.is_dir());
+    }
+    let Some(target_slot) = target_slot else {
+        let can_save = snapshot_data_dir_for(variant)
+            .filter(|dir| dir.is_dir())
+            .is_some();
+        let message = missing_snapshot_reason(variant, &target, can_save);
+        emit(
+            &mut outcome,
+            SwitchStep::new("fatal", "fail", message.clone()),
+        );
+        outcome.error = Some(message);
+        return outcome;
     };
     let _ = target_slot;
     emit(
@@ -3163,6 +3229,15 @@ mod tests {
 
     #[test]
     fn switch_reports_missing_snapshot_as_fatal() {
+        // ★ 预检查现在会在「槽位缺失」时**补搬一次历史池**（issue #152）⇒ 必须隔离 home，
+        //   否则单测会读/写用户真实的 `~/.buddy-switch/trae`（测试纪律：无参全局路径函数）。
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-switch-missing-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&home).expect("临时 home 应能创建");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
         let options = SwitchOptions {
             user_id: "definitely_no_such_account_slot".into(),
             launch: true,
@@ -3299,6 +3374,62 @@ mod tests {
     ///
     /// 判据 `can_save` 是显式入参，因此**两支都能在本机被跑到**（不受本机装没装影响），
     /// 不会退化成「只有一支恒真的空护栏」。
+    /// ★ issue #152：快照躺在**历史池**里时，失败文案必须指出它**实际在哪**。
+    ///
+    /// 报告原文（macOS 国内版）：「说什么登陆态快照不存在，请先保存该账号的登陆态」——
+    /// 用户早就存过，只是存在合并前的池子里。文案不给位置，下一轮只能继续猜。
+    #[test]
+    fn missing_snapshot_reason_points_at_where_the_snapshot_actually_is() {
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-missing-hint-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&home).expect("临时 home 应能创建");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        // 历史池（合并前 CN TraeWork 的目录名）里有一份该账号的快照。
+        let legacy = paths::trae_dir().join("profiles").join("u-legacy");
+        std::fs::create_dir_all(&legacy).unwrap();
+
+        let message = missing_snapshot_reason(TraeVariant::default(), "u-legacy", true);
+        assert!(message.contains("u-legacy"), "{message}");
+        assert!(
+            message.contains(&legacy.display().to_string()),
+            "必须把快照**实际**的路径报出来（否则用户/维护者只能继续猜）: {message}"
+        );
+        assert!(
+            message.contains("另一条产品线") || message.contains("另一个区域"),
+            "要点明「可能是区域/产品线不对」这条最可能的原因: {message}"
+        );
+
+        // 真的没存过 ⇒ 不加尾巴（不许编一个位置出来）。
+        let none = missing_snapshot_reason(TraeVariant::default(), "u-never-saved", true);
+        assert!(!none.contains("实际在"), "{none}");
+    }
+
+    /// 快照位置查询必须**跨区域**看：国内版账号被建到国际版上是最常见的误配。
+    #[test]
+    fn snapshot_locations_look_across_regions() {
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-missing-regions-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&home).expect("临时 home 应能创建");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        let cn = paths::profiles_dir_for(TraeVariant::default()).join("u-both");
+        std::fs::create_dir_all(&cn).unwrap();
+        let global = paths::trae_dir()
+            .join("profiles_global_trae_merged")
+            .join("u-both");
+        std::fs::create_dir_all(&global).unwrap();
+
+        let found = snapshot_locations_for("u-both");
+        assert!(found.contains(&cn), "{found:?}");
+        assert!(found.contains(&global), "跨区域也要报出来: {found:?}");
+        assert!(snapshot_locations_for("u-nowhere").is_empty());
+    }
+
     #[test]
     fn missing_snapshot_reason_distinguishes_cannot_save_from_not_saved() {
         // 第二支会经 `platform::data_dir_missing_reason` → `detect_install_for` → `settings::load()`

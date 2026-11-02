@@ -556,6 +556,16 @@ export interface SessionReplicaBaseline {
 export interface SessionReplicaContent {
   status: "latest" | "behind" | "diverge" | "unknown";
   commonPrefix: number | null;
+  /**
+   * ★ issue #141：`commonPrefix` 是**精确值**还是**下界**。
+   *
+   * 逐行 hash 只覆盖前 512 行（`PREFIX_HASH_LIMIT`）⇒ 长会话在窗口之外分叉时，
+   * 后端只能保证「至少 512 行相同」，**具体多少不知道**。此时为 `false`，界面必须说
+   * 「至少 N 条」——说成「N 条」就是拿窗口上限冒充真值。
+   *
+   * 旧后端没有这个字段 ⇒ 前端按 `false` 处理（保守）。
+   */
+  commonPrefixExact?: boolean;
   deltas: Record<string, number>;
   latestLineCount: number | null;
   sinceBaseline: Record<string, number | null>;

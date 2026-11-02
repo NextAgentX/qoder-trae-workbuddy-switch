@@ -45,6 +45,7 @@ export const zh = {
   "sessions.replica.status.diverge": "有分歧",
   "sessions.replica.status.unknown": "状态未知",
   "sessions.replica.commonPrefix": "共同旧版 {count} 条",
+  "sessions.replica.commonPrefixAtLeast": "共同旧版至少 {count} 条（超出比对窗口）",
   "sessions.replica.delta": "+{count} 条",
   "sessions.replica.baseline": "上次一致 {count} 条",
   "sessions.replica.baselineDelta": "自上次一致 +{count} 条",

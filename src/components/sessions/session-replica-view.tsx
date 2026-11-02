@@ -200,7 +200,11 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
           <div>
             <div className="flex flex-col gap-0.5 rounded-[10px] border-l-[3px] bg-muted px-3 py-2.5">
               <b className="text-[12.5px] font-semibold">
-                {t("sessions.replica.commonPrefix", { count: group.commonPrefix })}
+                {/* ★ issue #141：窗口被截断且确有分叉时，后端只给**下界**（≥512）——
+                    说成「共同旧版 512 条」就是拿窗口上限冒充真值。 */}
+                {group.commonPrefixExact
+                  ? t("sessions.replica.commonPrefix", { count: group.commonPrefix })
+                  : t("sessions.replica.commonPrefixAtLeast", { count: group.commonPrefix })}
               </b>
             </div>
             <div className="mt-2.5 flex flex-col gap-2 border-l-2 border-dashed pl-3.5">

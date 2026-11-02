@@ -298,9 +298,12 @@ fn read_desktop_credential(region: QoderRegion) -> Result<Option<RawAccount>, Re
         LINUX_SECRET_TOOL_NAMES,
     )
     .map_err(|error| {
+        // ★ issue #153：带上**密文形态**（「格式变了」与「密钥不配套」是两种成因）。
         unreadable(format!(
-            "{} 无法解密：{error}（若刚升级过客户端，先在客户端里重新登录一次再试）",
-            path.display()
+            "{} 无法解密（密文 {}）：{error}（若刚升级过客户端，先在客户端里重新登录一次再试{}）",
+            path.display(),
+            crate::modules::vscode_cn_inject::describe_ciphertext(&blob),
+            crate::modules::vscode_cn_inject::STALE_KEY_HINT
         ))
     })?;
     let text = String::from_utf8_lossy(&plaintext);

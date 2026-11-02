@@ -304,6 +304,47 @@ fn detect_prefix(encrypted: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// 「密钥与密文不配套」时的**平台专属**建议（issue #153）。
+///
+/// macOS 上这套密文的密钥来自钥匙串里的 `<App> Safe Storage` 条目；应用重装 / 换签名 /
+/// 覆盖安装后，系统会认为是**另一个程序**，旧条目仍在但已与当前密文不配套
+/// （现象：读取成功、解密失败）。Windows 走 DPAPI，没有这条对应关系 ⇒ 空串。
+#[cfg(target_os = "macos")]
+pub(crate) const STALE_KEY_HINT: &str =
+    "；若密文前缀是 v10 却反复失败，说明钥匙串里那条同名 *Safe Storage* 条目已陈旧 —— \
+     在「钥匙串访问」里删除它，再重开客户端登录一次";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const STALE_KEY_HINT: &str = "";
+
+/// 密文的**形态描述**（只看前 3 字节与长度）—— 失败文案用。
+///
+/// ## 为什么要把这个报出来（issue #153）
+///
+/// 「无法解密」有两种完全不同的成因，下一步动作也不同：
+///
+/// | 现象 | 事实 | 该做什么 |
+/// |:--|:--|:--|
+/// | 前缀不是 `v10` / `v11` | 客户端换了存储格式，或这个文件根本不是 safeStorage 密文 | 先让客户端重新登录重写一次；仍不行则是格式变更 |
+/// | 前缀是 `v10` 却解不开 | **密钥与密文不配套** —— 多半是钥匙串里同名条目陈旧（重装 / 换过客户端） | 删掉那条 `* Safe Storage*` 条目，重开客户端登录一次 |
+///
+/// 不带这个信息时，上面两种成因在用户报告里**长得一模一样**（都只是「无法解密」）。
+pub(crate) fn describe_ciphertext(encrypted: &[u8]) -> String {
+    if encrypted.is_empty() {
+        return "空密文".to_string();
+    }
+    if encrypted.starts_with(V10_PREFIX) {
+        return "v10".to_string();
+    }
+    if encrypted.starts_with(V11_PREFIX) {
+        return "v11".to_string();
+    }
+    format!(
+        "未知前缀 {:?}（共 {} 字节）",
+        &encrypted[..encrypted.len().min(3)],
+        encrypted.len()
+    )
+}
+
 #[cfg(not(target_os = "windows"))]
 fn pbkdf2_sha1_key(password: &str, iterations: u32) -> [u8; 16] {
     let mut key = [0u8; 16];
@@ -1077,6 +1118,19 @@ pub fn inject_secret_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ issue #153：「无法解密」必须能自证是**哪种**成因 —— 格式变了，还是密钥不配套。
+    ///
+    /// 可证伪：把 `describe_ciphertext` 改成恒返回 "v10" ⇒ 后两条断言红。
+    #[test]
+    fn describe_ciphertext_names_the_shape_of_the_blob() {
+        assert_eq!(describe_ciphertext(b"v10\x01\x02"), "v10");
+        assert_eq!(describe_ciphertext(b"v11\x01\x02"), "v11");
+        assert_eq!(describe_ciphertext(b""), "空密文");
+        let unknown = describe_ciphertext(br#"{"a":1}"#);
+        assert!(unknown.contains("未知前缀"), "{unknown}");
+        assert!(unknown.contains("字节"), "{unknown}");
+    }
 
     #[test]
     fn secret_key_matches_verified_format() {

@@ -311,9 +311,13 @@ where
     let existing = std::fs::read(&auth_path)
         .map_err(|error| format!("读取 {} 失败：{error}", auth_path.display()))?;
     let plaintext = decode(&existing).map_err(|error| {
+        // ★ issue #153：把**密文形态**带进报错 —— 「格式变了」与「密钥不配套」是两种成因，
+        //   不带这一句时两者在用户报告里长得一模一样（都只是「无法解密」）。
         format!(
-            "无法解密现有登录态 {}：{error}（若刚升级过客户端，请先在客户端里重新登录一次再试）",
-            auth_path.display()
+            "无法解密现有登录态 {}（密文 {}）：{error}（若刚升级过客户端，请先在客户端里重新登录一次再试{}）",
+            auth_path.display(),
+            crate::modules::vscode_cn_inject::describe_ciphertext(&existing),
+            crate::modules::vscode_cn_inject::STALE_KEY_HINT
         )
     })?;
     let mut json: Value = serde_json::from_slice(&plaintext).map_err(|error| {
