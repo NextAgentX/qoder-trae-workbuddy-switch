@@ -391,11 +391,19 @@ pub fn parse_credit_packages(packs: &[Value], now_ts: i64) -> Vec<CreditPackage>
             && expire_at
                 .map(|expire| expire - now_ts <= EXPIRING_SOON_SECS)
                 .unwrap_or(false);
-        let package_name = base
-            .and_then(|info| {
-                info.get("package_name")
-                    .or_else(|| info.get("name"))
-                    .and_then(Value::as_str)
+        // ★ issue #143：包名在 **pack 顶层**（`group_name` / `display_desc`），不在
+        //   `entitlement_base_info` 里 —— 旧实现只读后者，线上命中率恒 0，
+        //   于是所有包都显示成「未命名包」。`entitlement_base_info.package_name`
+        //   保留为最后的兼容回退（旧版本 / 旧缓存可能真有这个形状）。
+        let package_name = ["group_name", "display_desc"]
+            .iter()
+            .find_map(|key| pack.get(*key).and_then(Value::as_str))
+            .or_else(|| {
+                base.and_then(|info| {
+                    info.get("package_name")
+                        .or_else(|| info.get("name"))
+                        .and_then(Value::as_str)
+                })
             })
             .map(str::to_string)
             .filter(|text| !text.trim().is_empty());
@@ -1238,20 +1246,22 @@ mod tests {
     fn parse_credit_packages_extracts_per_package_details() {
         let now = 1_000_000_i64;
         let packs = vec![
+            // 线上真实形状：包名在 **pack 顶层**（`group_name` / `display_desc`），
+            // `entitlement_base_info` 里只有 `quota` / 时间字段（issue #143）。
             serde_json::json!({
                 "entitlement_base_info": {
-                    "package_name": "月卡",
-                    "package_code": "month",
+                    "entitlement_id": "ent-1",
                     "quota": { "credits_limit": 100.0 }
                 },
+                "group_name": "月卡",
+                "display_desc": "月度积分包",
                 "usage": { "credits_amount": 30.0 },
                 "expire_time": now + 3 * 24 * 3600,
             }),
             serde_json::json!({
-                "entitlement_base_info": {
-                    "name": "年卡",
-                    "quota": { "credits_limit": 500.0 }
-                },
+                "entitlement_base_info": { "quota": { "credits_limit": 500.0 } },
+                // 只有 display_desc 时也要能取到名字（回退顺序 group_name → display_desc）。
+                "display_desc": "年卡",
                 "usage": { "credits_amount": 600.0 },
                 "expire_time": now - 10,
             }),
@@ -1261,8 +1271,11 @@ mod tests {
         let packages = parse_credit_packages(&packs, now);
         assert_eq!(packages.len(), 2, "无额度上限的包应被跳过");
 
-        assert_eq!(packages[0].package_name.as_deref(), Some("月卡"));
-        assert_eq!(packages[0].package_code.as_deref(), Some("month"));
+        assert_eq!(
+            packages[0].package_name.as_deref(),
+            Some("月卡"),
+            "包名必须从 pack 顶层取（取 entitlement_base_info 会恒为 None）"
+        );
         assert_eq!(packages[0].total, 100.0);
         assert_eq!(packages[0].remaining, 70.0);
         assert_eq!(packages[0].used, 30.0);
@@ -1270,6 +1283,11 @@ mod tests {
         assert!(!packages[0].expired);
 
         // 已用超过额度 → remaining 下限 0；已过期 → expired 且不再 expiringSoon。
+        assert_eq!(
+            packages[1].package_name.as_deref(),
+            Some("年卡"),
+            "group_name 缺失时应回退 display_desc"
+        );
         assert_eq!(packages[1].remaining, 0.0);
         assert!(packages[1].expired);
         assert!(!packages[1].expiring_soon);

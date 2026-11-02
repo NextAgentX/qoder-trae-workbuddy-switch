@@ -377,13 +377,18 @@ export function TraeAccountCard({
    * 排序：**未过期**按到期时刻升序（`null` 视为永久 ⇒ 排最后），**已过期**整体排到末尾
    * —— 用户看这一列是为了决定「先用哪个」，把已浪费的排在前面会抢走注意力
    * （与 `credit-priority` 的分档同一条道理）。
+   *
+   * ★ issue #143：**已用完的包（`remaining <= 0`）不列**。徽章金额只统计还有余额的包，
+   * 列表却列全部，会让同一枚徽章的两半互相矛盾（「剩 0/100」的行摆在「临期 X 积分」旁边）。
    */
-  const packsSorted = [...(account.creditPackages ?? [])].sort((left, right) => {
-    if (left.expired !== right.expired) return left.expired ? 1 : -1;
-    const leftExpiry = left.expireAt ?? Number.POSITIVE_INFINITY;
-    const rightExpiry = right.expireAt ?? Number.POSITIVE_INFINITY;
-    return leftExpiry - rightExpiry;
-  });
+  const packsSorted = (account.creditPackages ?? [])
+    .filter((pkg) => pkg.remaining > 0)
+    .sort((left, right) => {
+      if (left.expired !== right.expired) return left.expired ? 1 : -1;
+      const leftExpiry = left.expireAt ?? Number.POSITIVE_INFINITY;
+      const rightExpiry = right.expireAt ?? Number.POSITIVE_INFINITY;
+      return leftExpiry - rightExpiry;
+    });
 
   /** 逐包浮层内容：名称 · 剩余/总额 · 到期。标题钉在浮层顶部，列表限高可滚。 */
   const packsTipBody = (rows: readonly TraeCreditPackage[], title: string) => (
@@ -590,9 +595,11 @@ export function TraeAccountCard({
      `display:flex; gap:14px; font-size:11.5px; color:var(--muted-fg)`，**不换行**、无下边距。
      Trae 没有「今日 Token」数据源 ⇒ 第二格用真实有的「到期」，**不摆一个永远「—」的假指标**。
      第三格与原型一致：**无标签的相对时间**（`2 分钟前`），绝对时刻挂 `title`。 */
-  /* 积分总量 = 各包 `total` 之和（原型 `.acct-metrics` 是 `积分 X/Y`）。取不到包 ⇒ 不写「/Y」。 */
+  /* 积分总量 = 各包 `total` 之和（原型 `.acct-metrics` 是 `积分 X/Y`）。取不到包 ⇒ 不写「/Y」。
+     ★ issue #143：**已过期的包不计入分母** —— 分母的语义是「可用总额」，
+       把已经作废的额度算进去会让 `X/Y` 长期看着用不完。 */
   const creditTotal = (() => {
-    const pkgs = account.creditPackages ?? [];
+    const pkgs = (account.creditPackages ?? []).filter((pkg) => !pkg.expired);
     if (pkgs.length === 0) return null;
     const sum = pkgs.reduce((acc, pkg) => acc + pkg.total, 0);
     return sum > 0 ? sum : null;
@@ -605,33 +612,16 @@ export function TraeAccountCard({
   const lastUpdatedRelative = formatRelativeTime(updatedSeconds === null ? null : updatedSeconds * 1000, t);
   const metricsRow = (
     <div className="flex min-w-0 gap-[14px] text-[11.5px] text-muted-foreground">
-      {packsSorted.length > 0 ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="cursor-default">
-              {t("trae.comp.card.metric.credits")}{" "}
-              <b className="font-semibold tabular-nums text-foreground">
-                {formatCredits(account.remainingCredits)}
-              </b>
-              {creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
-            {packsTipBody(
-              packsSorted,
-              t("trae.comp.card.packs.title", { n: packsSorted.length }),
-            )}
-          </TooltipContent>
-        </Tooltip>
-      ) : (
-        <span>
-          {t("trae.comp.card.metric.credits")}{" "}
-          <b className="font-semibold tabular-nums text-foreground">
-            {formatCredits(account.remainingCredits)}
-          </b>
-          {creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
-        </span>
-      )}
+      {/* ★ issue #143：这里是**纯文本**，不挂浮层 —— 没有可交互暗示的元素承载明细，
+          用户不会想到去悬浮。逐包明细挂在有视觉形状的「临期」徽章上（见 `expiringChip`），
+          与 WorkBuddy 卡同一处理。 */}
+      <span>
+        {t("trae.comp.card.metric.credits")}{" "}
+        <b className="font-semibold tabular-nums text-foreground">
+          {formatCredits(account.remainingCredits)}
+        </b>
+        {creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
+      </span>
       <span>
         {t("trae.comp.card.metric.expiry")}{" "}
         <b className="font-semibold tabular-nums text-foreground">

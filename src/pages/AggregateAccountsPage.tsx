@@ -1315,6 +1315,12 @@ export default function AggregateAccountsPage() {
         detailAccount.platform === "qoder"
           ? qoderPackMap[`${detailAccount.scope}:${detailAccount.data.uid}`]
           : undefined,
+      /* ★ issue #144：逐包明细同样要按 uid 从信号层合并 —— 抽屉此前读的是未合并的
+         `account.data`，而账号视图根本不含 `creditPackages` ⇒ Trae 的资源包区块恒为空。 */
+      traePacks:
+        detailAccount.platform === "trae"
+          ? (signals?.traeCredits.get(detailAccount.data.userId) ?? null)
+          : undefined,
     };
   }, [
     creditOf,

@@ -32,6 +32,7 @@
 import type { CreditExpiry } from "@/lib/types";
 import type { QoderProgramStatus, QoderWebCreditPacks } from "@/lib/api";
 import type { TraeProgram } from "@/components/trae-account-card";
+import type { TraeCreditPackage } from "@/lib/trae-types";
 import type {
   DetailPack,
   DetailProgramBadge,
@@ -80,6 +81,14 @@ export interface AggregateDetailContext {
    * 此时抽屉不渲染资源包区块（不是渲染空包）。
    */
   qoderPacks?: QoderWebCreditPacks | null;
+  /**
+   * Trae 的逐包明细（issue #144）。
+   *
+   * 账号视图（`TraeAccount`）只带聚合积分，逐包在 `get_trae_credits` 的
+   * `packages[uid]` 里 —— 卡片已合并过（`AggregateAccountsPage` 渲染时），
+   * 但抽屉拿的是**未合并的** `account.data`，于是 Trae 的明细区块恒为空。
+   */
+  traePacks?: TraeCreditPackage[] | null;
 }
 
 const dash = "—";
@@ -348,13 +357,33 @@ export function aggregateDetailPacks(
     expiryText: input.expireAt ? formatAbsoluteTime(input.expireAt) : dash,
     expired: input.expired,
     expiringSoon: input.expiringSoon,
-    ratio: input.total > 0 ? Math.max(0, Math.min(1, input.remaining / input.total)) : 0,
+    // ★ issue #144：`ratio` 的契约是 **0..100**（`account-detail-drawer.tsx` 直接拼 `%`），
+    //   这里此前给的是 0..1，进度条宽度只有正确值的 1/100（剩 70/100 显示成 0.7%）。
+    ratio:
+      input.total > 0
+        ? Math.max(0, Math.min(100, (input.remaining / input.total) * 100))
+        : 0,
   });
+
+  /** 明细排序（issue #144）：未过期按到期升序（`null` = 永久 ⇒ 垫后），已过期整体垫底。 */
+  const byExpiry = (
+    left: { expired: boolean; expireAt: number | null },
+    right: { expired: boolean; expireAt: number | null },
+  ) => {
+    if (left.expired !== right.expired) return left.expired ? 1 : -1;
+    return (
+      (left.expireAt ?? Number.POSITIVE_INFINITY) -
+      (right.expireAt ?? Number.POSITIVE_INFINITY)
+    );
+  };
 
   if (account.platform === "workbuddy") {
     const resources = ctx.credit?.ok ? (ctx.credit.resources ?? []) : [];
-    return resources
-      .filter((item) => item.total > 0 || item.remaining > 0)
+    return [...resources]
+      // ★ issue #144：已用完的包不进明细（`total > 0 || remaining > 0` 会放行「剩 0/100」），
+      //   并按到期时间升序 —— 与账号页抽屉同一口径。
+      .filter((item) => item.remaining > 0)
+      .sort(byExpiry)
       .map((item, index) =>
         toPack({
           key: `${item.packageCode ?? "pack"}-${index}`,
@@ -370,7 +399,14 @@ export function aggregateDetailPacks(
   }
 
   if (account.platform === "trae") {
-    return (account.data.creditPackages ?? []).map((item, index) =>
+    // ★ issue #144：优先用页面合并进来的逐包（`signals.traeCredits`），
+    //   账号视图本身不含 `creditPackages` ⇒ 只读后者会让区块恒为空。
+    const packs = ctx.traePacks ?? account.data.creditPackages ?? [];
+    return [...packs]
+      // ★ issue #144：与卡片同一口径 —— 已用完的包不列，按到期升序。
+      .filter((item) => item.remaining > 0)
+      .sort(byExpiry)
+      .map((item, index) =>
       toPack({
         key: `${item.packageCode ?? "pack"}-${index}`,
         name: displayText(item.packageName) || t("aggregate.detail.packFallbackName"),
@@ -392,8 +428,15 @@ export function aggregateDetailPacks(
     if (!packs?.available) return [];
     return packs.packs
       /* 零额度条目（真机上 `plan_quota` 那条 `limit_value = 0`）不进列表：
-         它的「0 / 0」会被读成「用完了」，而它本来就不计量。 */
-      .filter((pack) => pack.limit > 0 || pack.remaining > 0)
+         它的「0 / 0」会被读成「用完了」，而它本来就不计量。
+         ★ issue #144：已用完的包（`limit > 0 && remaining == 0`）同样不列。 */
+      .filter((pack) => pack.limit > 0 && pack.remaining > 0)
+      .sort((left, right) =>
+        byExpiry(
+          { expired: left.expiresAtMs !== undefined && left.expiresAtMs <= Date.now(), expireAt: left.expiresAtMs ?? null },
+          { expired: right.expiresAtMs !== undefined && right.expiresAtMs <= Date.now(), expireAt: right.expiresAtMs ?? null },
+        ),
+      )
       .map((pack, index) => {
         const expired = pack.expiresAtMs !== undefined ? pack.expiresAtMs <= Date.now() : false;
         const expiringSoon =
