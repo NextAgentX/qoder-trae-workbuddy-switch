@@ -88,6 +88,7 @@ export const en = {
   "shared.gateway.models.imageNo": "Not supported",
   "shared.gateway.models.imageUndeclared": "Not declared",
   "shared.gateway.models.imageSourceUpstream": "Declared image-capable by the upstream catalog",
+  "shared.gateway.models.imageSourceKnown": "Declared by the gateway built-in table (upstream has no capability field)",
   "shared.gateway.models.imageSourceOverride": "Manually set on this page (overrides upstream)",
   "shared.gateway.models.imageUndeclaredHint":
     "The upstream catalog does not say whether this model accepts images. Clients default to \"not supported\" and drop images before the request reaches the gateway — mark it here if you know better.",

@@ -62,6 +62,11 @@ pub enum ImageCapSource {
     Upstream,
     /// 用户在「模型」页手动指定（上游没声明、或声明错了）。
     Override,
+    /// **内置表**声明（上游没这个字段，但该模型已确认能吃图 —— issue #142）。
+    ///
+    /// 与 `Upstream` 分开是为了**不撒谎**：界面上「来自上游」和「网关内置表说的」
+    /// 是两件事，前者权威、后者可被用户覆盖。
+    Known,
 }
 
 impl ImageCapSource {
@@ -69,6 +74,7 @@ impl ImageCapSource {
         match self {
             Self::Upstream => "upstream",
             Self::Override => "override",
+            Self::Known => "known",
         }
     }
 }
@@ -234,10 +240,13 @@ pub fn resolve_effective(
             source: ImageCapSource::Override,
         });
     }
-    upstream.map(|supports| ImageCapability {
-        supports,
-        source: ImageCapSource::Upstream,
-    })
+    upstream
+        .map(|supports| ImageCapability {
+            supports,
+            source: ImageCapSource::Upstream,
+        })
+        // ★ issue #142：上游**不声明**时用内置表兜底（只放已确认能吃图的模型）。
+        .or_else(|| known_multimodal_capability(model_id))
 }
 
 /// 写入一条覆盖并**落盘**（`supports = None` ⇒ 删键 = 跟随上游）；返回是否发生了变化。
@@ -274,10 +283,51 @@ pub fn resolve(
             source: ImageCapSource::Override,
         });
     }
-    upstream.map(|supports| ImageCapability {
-        supports,
-        source: ImageCapSource::Upstream,
+    upstream
+        .map(|supports| ImageCapability {
+            supports,
+            source: ImageCapSource::Upstream,
+        })
+        .or_else(|| known_multimodal_capability(model_id))
+}
+
+/// 内置表里**已确认能吃图**的模型（上游不声明时的兜底）。
+///
+/// ## 为什么必须有（issue #142）
+///
+/// Trae / Qoder 的模型清单**没有能力字段** ⇒ 调用方传 `upstream = None` ⇒ 按三态规则
+/// 「不下发」⇒ 客户端据此隐藏图片上传入口。于是 `deepseek-v4.1-flash` 明明能吃图，
+/// 用户在 Trae / Qoder 里却连上传按钮都看不到。
+///
+/// 这跟「上游说不支持」是两件事：我们只是**没有信息**。对**确认过**的模型给一个静态声明，
+/// 比让客户端一律回落到「不支持」更接近事实。
+///
+/// ## 纪律（照 `docs/specs/DECISIONS.md` 的「不编事实」）
+///
+/// - **只放确认过的模型**；不确定就继续 `None` —— 宁可少声明，不可编能力。
+/// - 只声明 `true`：内置表**永远不说 false**（说 false 会把用户的上传入口关掉，
+///   而「没实测到」不等于「不支持」）。
+/// - 用户覆盖仍然优先（`resolve` 的第一支），所以表写错了用户能自己改回来。
+fn known_multimodal_capability(model_id: &str) -> Option<ImageCapability> {
+    if !is_known_multimodal(model_id) {
+        return None;
+    }
+    Some(ImageCapability {
+        supports: true,
+        source: ImageCapSource::Known,
     })
+}
+
+/// 模型 id 是否在内置的多模态表里。
+///
+/// 归一化：去掉 `provider/` 前缀、转小写后**子串**匹配 —— 同一模型在三条产品线上的
+/// id 带不同前缀/后缀（`deepseek-v4.1-flash` / `deepseek/deepseek-v4.1-flash` /
+/// `deepseek-v4.1-flash-thinking`），逐字比对必然漏。
+fn is_known_multimodal(model_id: &str) -> bool {
+    const KNOWN: &[&str] = &["deepseek-v4.1-flash"];
+    let lowered = model_id.trim().to_ascii_lowercase();
+    let bare = lowered.rsplit('/').next().unwrap_or(&lowered);
+    KNOWN.iter().any(|known| bare.contains(known))
 }
 
 /// 把能力写进一条模型条目（**三个出口 + 两个管理面视图的唯一写入点**）。
@@ -343,6 +393,39 @@ mod tests {
         let mut store = ImageCaps::default();
         store.set(scope, id, Some(value));
         store
+    }
+
+    /// ★ issue #142：上游**不声明**（Trae / Qoder 的常态）时，内置表要给出 `true`。
+    ///
+    /// 可证伪：把 `resolve` 的 `.or_else(|| known_multimodal_capability(…))` 删掉
+    /// ⇒ 第一条断言红（Trae / Qoder 的 `deepseek-v4.1-flash` 又变回「未声明」，
+    /// 客户端隐藏上传入口）。
+    #[test]
+    fn known_multimodal_fills_the_gap_when_upstream_is_silent() {
+        let store = ImageCaps::default();
+        let known = resolve(&store, Scope::WbCn, "deepseek-v4.1-flash", None)
+            .expect("内置表必须认这个模型");
+        assert!(known.supports);
+        assert_eq!(
+            known.source,
+            ImageCapSource::Known,
+            "来源必须是「内置表」，不能冒充上游声明"
+        );
+        assert_eq!(ImageCapSource::Known.as_str(), "known");
+
+        // 三条产品线的 id 写法不同：带前缀 / 带后缀都要认。
+        assert!(is_known_multimodal("deepseek/deepseek-v4.1-flash"));
+        assert!(is_known_multimodal("deepseek-v4.1-flash-thinking"));
+        assert!(!is_known_multimodal("deepseek-v4.1"));
+
+        // 上游**明确**说不支持 ⇒ 以上游为准（内置表不覆盖上游）。
+        let upstream_no =
+            resolve(&store, Scope::WbCn, "deepseek-v4.1-flash", Some(false)).expect("上游声明优先");
+        assert!(!upstream_no.supports);
+        assert_eq!(upstream_no.source, ImageCapSource::Upstream);
+
+        // 表外模型 ⇒ 仍然 `None`（不许凭空断言）。
+        assert!(resolve(&store, Scope::WbCn, "some-text-only-model", None).is_none());
     }
 
     /// ★ 三态：上游没说 ≠ 不支持 —— `None` 必须**不下发** `supports_images`。

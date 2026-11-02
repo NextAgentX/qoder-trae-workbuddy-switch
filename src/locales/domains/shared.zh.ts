@@ -130,6 +130,7 @@ export const zh = {
   "shared.gateway.models.imageNo": "不支持",
   "shared.gateway.models.imageUndeclared": "未声明",
   "shared.gateway.models.imageSourceUpstream": "上游目录声明支持图片输入",
+  "shared.gateway.models.imageSourceKnown": "网关内置表声明（上游没有能力字段，可手动改）",
   "shared.gateway.models.imageSourceOverride": "你在本页手动指定（覆盖上游声明）",
   "shared.gateway.models.imageUndeclaredHint":
     "上游清单没有声明这个模型能否读图。客户端连上来时默认按「不支持」处理（图片会被它自己挡掉，请求根本不到网关），需要时可在此手动标记。",
