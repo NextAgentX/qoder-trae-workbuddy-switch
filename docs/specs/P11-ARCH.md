@@ -769,13 +769,35 @@ model "wb-cn:deepseek-v4.1-flash" does not declare image input
 ⇒ 上游没说时**不下发字段**。把「没说」压成 `false`，等于网关替 Trae / Qoder 的
 全部模型凭空造一句「不支持图片」（§3.4 规则 1「无数据不渲染」的同一取向）。
 
+#### 9.3.1 内置表（issue #142）
+
+Trae / Qoder 的清单**根本没有**能力字段 ⇒ 按三态规则「不下发」⇒ 客户端隐藏上传入口，
+`deepseek-v4.1-flash` 明明能吃图也发不出去。对**已确认**的模型给一个静态声明，
+比让客户端一律回落到「不支持」更接近事实。解析顺序（唯一入口
+`model_capability::resolve` / `resolve_effective`）：
+
+| 顺序 | 来源 | `image_input_source` |
+|:--|:--|:--|
+| 1 | 用户覆盖（「模型」页手标） | `override` |
+| 2 | 上游目录声明 | `upstream` |
+| 3 | 网关**内置表**（只放确认过的模型） | `known` |
+| 4 | 都没有 | 字段缺失（`null`） |
+
+纪律：
+
+- 内置表**只会说 `true`** —— 说 `false` 会把用户的上传入口关掉，而「没实测到」≠「不支持」；
+- 只放**确认过**的模型，不确定就继续 `None`（宁可少声明，不可编能力）；
+- 用户覆盖仍然优先 ⇒ 表写错了用户能自己改回来；界面把 `known` 与 `upstream` **分开显示**，
+  不把「我们说的」冒充「上游说的」。
+
 ### 9.4 字段
 
 - `supports_images`：本仓私有字段（**老客户端只认这个**）；
 - `architecture.input_modalities` / `architecture.modality` / `architecture.output_modalities`：
   OpenRouter 兼容形状 —— 主流客户端（LobeChat / Cherry Studio 等）读的是它，
   不读我们的私有字段。**两套都写**，能自动识别的客户端才多；
-- `image_input_source`：`upstream` / `override` / `null`，界面用它区分「上游说的」与「你标的」。
+- `image_input_source`：`upstream` / `known` / `override` / `null`，界面用它区分
+  「上游说的」「网关内置表说的」与「你标的」。
 
 ### 9.5 覆盖存储
 

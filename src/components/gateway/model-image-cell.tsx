@@ -53,7 +53,9 @@ export function ImageCapCell({ cap, busy = false, onSet }: ImageCapCellProps) {
       ? t("shared.gateway.models.imageSourceOverride")
       : cap.source === "upstream"
         ? t("shared.gateway.models.imageSourceUpstream")
-        : t("shared.gateway.models.imageUndeclaredHint");
+        : cap.source === "known"
+          ? t("shared.gateway.models.imageSourceKnown")
+          : t("shared.gateway.models.imageUndeclaredHint");
 
   // 下一个值：`未声明` / `不支持` ⇒ 标记为支持；`支持` ⇒ 标记为不支持。
   const next = cap.supports !== true;

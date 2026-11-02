@@ -2005,7 +2005,7 @@ export interface CatalogModel {
    */
   supports_images?: boolean | null;
   /** 能力的来源：`upstream`（上游目录）/ `override`（本页手动指定）/ `null`（未声明）。 */
-  image_input_source?: "upstream" | "override" | null;
+  image_input_source?: "upstream" | "override" | "known" | null;
   /** 积分倍率**原文**（`x0.79` / `x0.34 credits` 三种写法并存）。 */
   credits?: string | null;
   /** 积分倍率数字（后端已归一）；`null` = 上游没给。渲染一律用这个，别自己剥 `x`。 */
