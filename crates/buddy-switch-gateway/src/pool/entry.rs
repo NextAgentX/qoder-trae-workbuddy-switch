@@ -135,6 +135,25 @@ pub struct PoolEntry {
     pub realm: Option<crate::pool::RealmTag>,
     /// 昵称（仅展示）。
     pub nickname: String,
+    /// 账号库**此刻是否还有**这个 uid 的凭据（2026-11-02 新增）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// [`Pool::sync_accounts`] 是**增量 upsert**：账号删到回收站后池条目仍保留
+    /// （不丢冷却 / 熔断 / 禁用等治理历史）。于是池里会出现「账号库已经没有的 uid」，
+    /// 而 `select_account` 拿它查凭据必然查不到 —— 修复前一条脏条目就能让整区请求
+    /// 失败（对外 401 `no_credential`），文案还会自相矛盾地说「0 个已禁用、0 个冷却中、
+    /// 0 个余额为 0」。`PoolSummary` 也只数池内条目，因此连数字都无法解释那次失败。
+    ///
+    /// 现在由 `sync_accounts` 每次对齐时维护本标记，**选号 / 池摘要 / 状态列表一律按它
+    /// 过滤** —— 「池里有几条」与「账号库有几个号」不再是两个数。
+    ///
+    /// ★ **不持久化**（`PersistedEntry` 里没有这个字段）：重启后一律视为存在，等下一次
+    /// `sync_accounts` 纠正。反过来（默认「不存在」）会让「池文件还在、账号库一时读不到」
+    /// 变成全池不可选 —— 那是比脏条目更坏的故障。
+    ///
+    /// [`Pool::sync_accounts`]: crate::pool::Pool::sync_accounts
+    pub present_in_store: bool,
 
     /// 可用积分总量。
     pub credits: i64,
@@ -247,6 +266,9 @@ impl PoolEntry {
             uid: uid.into(),
             realm: None,
             nickname: String::new(),
+            // 新建即视为「账号库里有」：`upsert` 只会被 `sync_accounts`（拿着账号库快照）
+            // 或测试调用，默认 false 会让任何没经过 sync 的路径静默变成不可选。
+            present_in_store: true,
             credits: 0,
             credits_expiring: 0,
             credits_refreshed_ms: 0,
@@ -957,6 +979,11 @@ pub fn soft_backoff_duration(base_ms: i64, streak: i32, max_ms: i64) -> i64 {
 impl crate::pool::entry_like::PoolEntryLike for PoolEntry {
     fn uid(&self) -> &str {
         &self.uid
+    }
+
+    /// 覆写成**真实值**：账号库已没有的条目不该被选中（见字段文档）。
+    fn present_in_store(&self) -> bool {
+        self.present_in_store
     }
 
     fn credits(&self) -> i64 {

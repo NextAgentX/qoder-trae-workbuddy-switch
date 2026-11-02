@@ -1700,7 +1700,10 @@ async fn select_account(
     };
 
     // 账号删除后池条目仍在（`sync_accounts` 增量 upsert），而 `find_account_for`
-    // 只查账号库 ⇒ 选中它取不到凭据。逐个验证，无凭据的记入 `skipped` 后重选。
+    // 只查账号库 ⇒ 选中它取不到凭据。**主防线**是池内的 `present_in_store` 标记
+    // （`sync_accounts` 维护、`pick` 直接跳过，见 `PoolEntry::present_in_store`）；
+    // 这里的逐个验证是**兜底**：同步与取凭据之间仍可能有一条被删掉的号，
+    // 无凭据的记入 `skipped` 后重选，绝不让一条脏数据拖死整轮。
     let mut skipped: HashSet<String> = tried.clone();
     let pool_empty = state.pool.read().await.is_empty();
     if !pool_empty {
@@ -1772,8 +1775,9 @@ async fn select_account(
 
 /// 池快照 → `no_credential` 的具体原因（**唯一判据**）。
 ///
-/// `total == 0` ⇒ 该区域在池里一条都没有：账号库为空，或库里的账号都没有 `uid`
-/// 而被 `sync_accounts` 跳过。否则是「有号，但一个都不可用」—— 这两种处境的可行动
+/// `total == 0` ⇒ 该区域在账号库里一个号都没有（空库，或库里的账号都没有 `uid` 而被
+/// `sync_accounts` 跳过，或池里只剩「账号已删除」的残留条目 —— 它们不计入 `total`，
+/// 见 `PoolEntry::present_in_store`）。否则是「有号，但一个都不可用」—— 这两种处境的可行动
 /// 指引完全不同（见 [`NoCredentialCause`]）。
 ///
 /// 刻意用 `total` 而不是「`available == 0`」：后者只说「不可用」，前者才能区分

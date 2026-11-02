@@ -270,6 +270,11 @@ async fn single_account_model_cooldown_returns_503_instead_of_401() {
 
     // 池里**只有 1 个**账号。域必须与请求一致（`Region::Cn` ⇒ `RealmTag::Cn`），
     // 否则选号会先把它按域过滤掉，测到的就不是「模型冷却」这条路径了。
+    //
+    // ★ 这个号**不在账号库里**（本用例不写 store）⇒ 选号必然选不出（2026-11-02 起
+    //   连 `pick` 的兜底都会跳过它，见 `pick::entry_usable`），于是走到
+    //   `last == None` 的那一档 —— 正是 #134 要守的接线：那里的答案必须是
+    //   「模型在全部账号上冷却 ⇒ 503」，不能是 401（客户端 401 ⇒ AUTH ⇒ 整轮终止）。
     {
         let mut pool = state.pool.write().await;
         pool.upsert("u1", Some(RealmTag::Cn), "single");

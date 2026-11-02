@@ -355,7 +355,13 @@ fn entry_usable<E: PoolEntryLike>(
     now_ms: i64,
     model: &str,
 ) -> bool {
-    entry.healthy_for_request(now_ms, model) && !in_flight_full(entry, policy, now_ms)
+    // ★ 账号库里已经没有的条目**不可选**（2026-11-02）：拿它去取凭据只会失败，
+    //   而失败会被记成「这个号不行」—— 一条删除残留就能把整轮重试预算耗光，
+    //   对外表现为整区 401 `no_credential`。判据放在**唯一入口**这里，自动覆盖
+    //   加权 / 抽签 / 积分择优 / 顺序 / 偏好 / 粘性。
+    entry.present_in_store()
+        && entry.healthy_for_request(now_ms, model)
+        && !in_flight_full(entry, policy, now_ms)
 }
 
 /// 白名单判定（`None` = 全部账号 ⇒ 放行）。
@@ -451,6 +457,14 @@ pub(crate) fn in_flight_full<E: PoolEntryLike>(
 /// 在途满的号并没有被该模型限流，它只是**忙**。把它算进「全部冷却」会说谎
 /// （用户看到「该模型在 3 个账号上都被限流」，其实其中 1 个只是排队）——
 /// 那种情形维持原来的 401/PoolBusy 判定，别在这里扩语义。
+///
+/// ## 为什么**不**在这里过滤 `present_in_store = false` 的条目（2026-11-02）
+///
+/// 这条判据回答的是「选不出号，是因为这个模型整体被限流，还是因为根本没号可用」。
+/// 池里「账号库里已没有」的残留条目**本身就是一种「选不出号」的成因**（#149），
+/// 而它对外的两种答案里 503 明显更安全：客户端契约是「401/403 ⇒ AUTH ⇒ 整轮终止」，
+/// 回 401 会让一次「账号被删」被翻译成「你的密钥失效」（#134 的原始症状）。
+/// ⇒ 残留条目不进**选号**（`entry_usable` 已拦），但在这里仍参与判断。
 pub fn model_cooling_until<E: PoolEntryLike>(
     entries: &BTreeMap<String, E>,
     policy: &PickPolicy,
@@ -803,6 +817,8 @@ fn pick_earliest_expiry<E: PoolEntryLike>(
         .filter(|entry| {
             if input.tried.contains(entry.uid())
                 || entry.is_disabled()
+                // 账号库里已没有 ⇒ 兜底也别挑它（与 `entry_usable` 同判据）。
+                || !entry.present_in_store()
                 || input.excluded.contains(entry.uid())
                 || !in_allowed(input, entry.uid())
             {
