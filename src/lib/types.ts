@@ -349,6 +349,13 @@ export interface Session {
   hasHistory: boolean;
   /** WorkBuddy playground（侧栏「任务」）；缺省视为空间会话。 */
   isPlayground?: boolean;
+  /**
+   * ★ issue #147：该会话是**某次复制的产物**（复制账本里有它的血缘）。
+   *
+   * 只在「db 读不到、退回 jsonl 反扫」时由后端给出（`degraded` 同源）。这类条目
+   * 默认**不勾选**：再复制一代只会让 `projects/` 下的 jsonl 数量翻倍。
+   */
+  isCopy?: boolean;
 }
 
 /**

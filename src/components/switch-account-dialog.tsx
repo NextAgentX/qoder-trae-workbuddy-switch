@@ -253,9 +253,17 @@ export function SwitchAccountDialog({
         const tree = buildSessionTree(res.sessions, t);
         setExpanded(new Set(tree.flatMap((node) => [node.key, ...node.dirs.map((dir) => dir.key)])));
         // 「复制会话常开」：默认全选，用户仍可逐条取消。
+        // ★ issue #147：**副本默认不选** —— 它们是上一次复制的产物，再复制一代只会让
+        //   `projects/` 下的 jsonl 翻倍（后端也会按账本血缘跳过，但界面不该先替用户勾上）。
         if (defaultsRef.current.selectAll) {
           defaultsRef.current.selectAll = false;
-          setSelected(new Set(res.sessions.map((session) => session.id)));
+          setSelected(
+            new Set(
+              res.sessions
+                .filter((session) => !session.isCopy)
+                .map((session) => session.id),
+            ),
+          );
         }
       })
       .catch((e) => {

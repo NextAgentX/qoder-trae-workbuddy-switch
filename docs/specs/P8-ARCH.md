@@ -89,9 +89,14 @@
 
 ```
 buddy-switch-copy-ledger.json      // 位于「目标 region」的会话数据目录（session.rs:928-935）
-{ "source_uid␟target_uid␟source_cid": "new_cid", ... }        // 同 region
-{ "source_region␟source_uid␟target_uid␟source_cid": "new_cid" } // 跨 region（前缀，session.rs:958-971）
+{ "source_uid␟target_uid␟source_cid": { "new": "<new_cid>", "originUid": "<uid>", "originCid": "<cid>" }, ... }  // 同 region
+{ "source_region␟source_uid␟target_uid␟source_cid": { …同上… } }                                              // 跨 region（前缀，session.rs:958-971）
 ```
+
+> ★ issue #147（2026-11-02）：值从裸字符串 `"<new_cid>"` 升级为**带血缘的对象**。
+> `originUid` / `originCid` 指向**最初那次复制的源会话**，因此账本能回答
+> 「这个 cid 是哪个原始会话的副本」，并在「副本被当成源再复制」时直接跳过。
+> 旧格式（裸字符串）仍可读 —— 升级前的账本不作废，否则所有会话会被重新复制一遍。
 
 - 它在**每次成功复制**时写入（`record_copy_ledger`，`session.rs:1069`）；命中且副本存活时跳过重复复制（`ledger_hit_for`，`session.rs:1025`）。
 - **它就是「副本边」的原始数据**：`source_cid`（在 `source_uid` 账号里）→ `new_cid`（在 `target_uid` 账号里）。
@@ -99,7 +104,7 @@ buddy-switch-copy-ledger.json      // 位于「目标 region」的会话数据�
 **★ 三条必须承认的局限（写进文案 / 类型）**：
 
 1. **只覆盖「经本应用复制过」的会话** —— 用户在 WorkBuddy 里手动复制、或别处复制的，**不在账本里**。
-2. **无内容信息** —— 值是 `new_cid`，**没有**消息计数 / base / 时间 ⇒ **推不出「落后 / 分叉」**。
+2. **无内容信息** —— 值里只有 `new` / `originUid` / `originCid`，**没有**消息计数 / base / 时间 ⇒ **推不出「落后 / 分叉」**。
 3. **按 region 分文件** —— 一份 region 的账本只含「目标在该 region」的边；跨 region 边带源 region 前缀。**✅ #2 已决策（lead 拍板）：本期只读当前 region**（与 P10/P11 同口径）；**跨 region 的边本期不引入**（语义不清）。
 
 ⇒ **设计决策（✅ #1 已决策 · lead 拍板 2026-10-04：接受 ledger 为正式关联源）**：把 ledger **作为只读关联源暴露**，并附**五条防耦合硬约束**：

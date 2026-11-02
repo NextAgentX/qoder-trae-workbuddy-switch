@@ -25,9 +25,9 @@
 //!      ⚠️ 档位号 **N 会随客户端升级往上搬**（实测 v2 → v3 → v4），由
 //!      [`edge_sync_db_path_for`] 动态发现，**不要写死**。
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// 源会话行：(列名, 列值)。两处「读源会话行」共用同一份返回形状，
 /// 抽成别名避免同一条深嵌套签名在 impl 里写两遍（clippy::type_complexity）。
@@ -1641,6 +1641,10 @@ fn scan_sessions_from_jsonl_for(region: Region) -> Vec<Value> {
     if !projects.is_dir() {
         return Vec::new();
     }
+    // ★ issue #147：反扫列表必须能标出「这条其实是副本」—— 否则用户会把上一代副本
+    //   当成源会话再勾选一遍（前端据此默认不勾选）。
+    let ledger = load_copy_ledger_at(&copy_ledger_path_for(region));
+    let (copy_origins, _) = build_origin_indexes(&ledger);
     let mut sessions: Vec<(i64, Value)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&projects) else {
         return Vec::new();
@@ -1648,14 +1652,14 @@ fn scan_sessions_from_jsonl_for(region: Region) -> Vec<Value> {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() {
-            push_jsonl_session(&path, &mut sessions);
+            push_jsonl_session(&path, &copy_origins, &mut sessions);
             continue;
         }
         let Ok(children) = std::fs::read_dir(&path) else {
             continue;
         };
         for child in children.flatten() {
-            push_jsonl_session(&child.path(), &mut sessions);
+            push_jsonl_session(&child.path(), &copy_origins, &mut sessions);
         }
     }
     sessions.sort_by_key(|s| std::cmp::Reverse(s.0));
@@ -1663,7 +1667,14 @@ fn scan_sessions_from_jsonl_for(region: Region) -> Vec<Value> {
 }
 
 /// 把单个路径收成一条会话记录；不是 `.jsonl` 文件 / 读不出元数据时跳过（**绝不报错**）。
-fn push_jsonl_session(path: &Path, out: &mut Vec<(i64, Value)>) {
+///
+/// `copy_origins` 是账本血缘索引：命中即说明该 cid 是某次复制生成的副本，
+/// 条目上打 `isCopy: true`（issue #147）。
+fn push_jsonl_session(
+    path: &Path,
+    copy_origins: &HashMap<String, (String, String)>,
+    out: &mut Vec<(i64, Value)>,
+) {
     if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
         return;
     }
@@ -1706,6 +1717,8 @@ fn push_jsonl_session(path: &Path, out: &mut Vec<(i64, Value)>) {
             "hasHistory": true,
             "isPlayground": false,
             "degraded": true,
+            // ★ issue #147：副本标记 —— 前端据此默认不勾选，避免「副本的副本」。
+            "isCopy": copy_origins.contains_key(cid),
         }),
     ));
 }
@@ -1881,9 +1894,10 @@ pub fn copy_session_to_user_for(
 /// 报告里的 `skipped` 条目逐字一致（同一条管线的两个出口）。
 ///
 /// **降级**：源 sessions 表不可读时，从 jsonl 第一行推断 cwd 做 Claw 检查；
-/// 目标 sessions 表不可写时，jsonl 仍能复制但索引行留空（返回 `warning`）。
-/// 这样即便 workbuddy.db 损坏 / 索引缺失，至少 jsonl 正文能落到目标账号，
-/// WorkBuddy AI 重启后建索引即可看到。
+/// 源行缺失（全新账号 / 仅 jsonl 存在）时**合成最小索引行**（issue #146）。
+/// 目标 sessions 表不可写时，jsonl 仍能复制，但报告 `sessionRowWritten: false` +
+/// `sessionRowError` + 批次 `failed: true` —— **不得**承诺「重启后客户端会重建索引」：
+/// 客户端只认 `sessions` 表，不会从 jsonl 反推。
 ///
 /// 单发入口：内部走与批量复制**同一条**三段管线（见模块文档），
 /// 再把唯一一个会话的结局还原成旧签名的 `Result`（Claw 拒绝 → `Err`）。
@@ -1962,6 +1976,10 @@ struct CopyBatch {
     projects_index: Option<HashMap<String, PathBuf>>,
     /// 复制账本（整批一次读入内存；`dirty` 控制末尾落盘）。
     ledger: serde_json::Map<String, Value>,
+    /// 副本 id → 血缘 `(origin_uid, origin_cid)`（issue #147；加载时构建、登记时增量更新）。
+    copy_origins: HashMap<String, (String, String)>,
+    /// `(origin_cid, target_uid)`：该原始会话是否已复制给目标账号（跨代去重）。
+    origin_copied: HashSet<(String, String)>,
     ledger_path: PathBuf,
     ledger_dirty: bool,
     /// **整批一次**的库备份（懒触发：第一个真正复制的会话之前）。
@@ -1999,6 +2017,8 @@ impl CopyBatch {
         // 账本整批一次读入（旧实现每个会话都读一遍、写完再读一遍）。
         let ledger_path = copy_ledger_path_for(target_region);
         let ledger = load_copy_ledger_at(&ledger_path);
+        // ★ issue #147：血缘索引同一次加载时构建，复制前的「副本识别」靠它。
+        let (copy_origins, origin_copied) = build_origin_indexes(&ledger);
         // 基线表同样整批一次读入（与账本**同 region 目录**，见 `session_baseline_path_for`）。
         let baselines_path = session_baseline_path_for(target_region);
         let baselines = load_session_baselines_at(&baselines_path);
@@ -2013,6 +2033,8 @@ impl CopyBatch {
             dst_columns: None,
             projects_index: None,
             ledger,
+            copy_origins,
+            origin_copied,
             ledger_path,
             ledger_dirty: false,
             backup_attempted: false,
@@ -2086,27 +2108,35 @@ impl CopyBatch {
 
     /// 账本命中**且副本仍存活** → 既有副本 id（语义与旧 `ledger_hit_for` 一致）。
     fn ledger_hit(&mut self, cid: &str) -> Option<String> {
-        let new_cid = self
-            .ledger
-            .get(&copy_ledger_key_for(
-                self.source_region,
-                self.target_region,
-                &self.source_uid,
-                &self.target_uid,
-                cid,
-            ))?
-            .as_str()?
-            .trim()
-            .to_string();
-        if new_cid.is_empty() {
-            return None;
-        }
+        let key = copy_ledger_key_for(
+            self.source_region,
+            self.target_region,
+            &self.source_uid,
+            &self.target_uid,
+            cid,
+        );
+        let new_cid = ledger_new_of(self.ledger.get(&key)?)?;
         let target_uid = self.target_uid.clone();
         self.session_exists(&new_cid, &target_uid)
             .then_some(new_cid)
     }
 
+    /// 该 cid 本身是副本时返回它的血缘 `(origin_uid, origin_cid)`（issue #147）。
+    fn copy_origin(&self, cid: &str) -> Option<(String, String)> {
+        self.copy_origins.get(cid).cloned()
+    }
+
+    /// 该原始会话是否**已经复制给当前目标账号**（issue #147 的跨代去重判据）。
+    fn origin_already_copied(&self, origin_cid: &str) -> bool {
+        self.origin_copied
+            .contains(&(origin_cid.to_string(), self.target_uid.clone()))
+    }
+
     /// 登记一次复制（先进内存；落盘见 [`Self::flush_ledger`]）。
+    ///
+    /// ★ issue #147：值里带**血缘**。源会话本身是副本时沿用它的 origin，否则
+    /// origin 就是「源账号 + 源 cid」。没有血缘时账本只能回答「谁复制过谁」，
+    /// 无法回答「这个 cid 是不是副本」⇒ 副本会被当成源会话再复制一代（雪崩）。
     fn ledger_record(&mut self, source_cid: &str, new_cid: &str) {
         let key = copy_ledger_key_for(
             self.source_region,
@@ -2115,7 +2145,20 @@ impl CopyBatch {
             &self.target_uid,
             source_cid,
         );
-        self.ledger.insert(key, Value::String(new_cid.to_string()));
+        let origin = self
+            .copy_origins
+            .get(source_cid)
+            .cloned()
+            .unwrap_or_else(|| (self.source_uid.clone(), source_cid.to_string()));
+        let value = json!({
+            "new": new_cid,
+            "originUid": origin.0,
+            "originCid": origin.1,
+        });
+        self.ledger.insert(key, value);
+        self.origin_copied
+            .insert((origin.1.clone(), self.target_uid.clone()));
+        self.copy_origins.insert(new_cid.to_string(), origin);
         self.ledger_dirty = true;
     }
 
@@ -2260,6 +2303,26 @@ fn run_copy_batch(
     let mut skipped: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
     for cid in session_ids {
+        // ⓪ 副本识别（issue #147）：源会话本身是某次复制的产物 ⇒ 按血缘去重。
+        //    没有这一步，B 的副本会在下一次切换时被当成「源会话」再复制一代，
+        //    每切一次账号副本就翻一倍（现场实测 18 个真实会话堆成 300+ 个 jsonl）。
+        if let Some((origin_uid, origin_cid)) = batch.copy_origin(cid) {
+            let reason = if origin_uid == target_uid {
+                Some("该会话是副本，原始会话属于目标账号")
+            } else if batch.origin_already_copied(&origin_cid) {
+                Some("该会话是副本，原始会话已复制到目标账号")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                skipped.push(json!({
+                    "id": cid,
+                    "deduplicated": true,
+                    "reason": reason,
+                }));
+                continue;
+            }
+        }
         // ① 账本去重（内存账本 + 副本存活判定）
         if let Some(existing) = batch.ledger_hit(cid) {
             skipped.push(dedup_report(cid, &existing));
@@ -2359,12 +2422,20 @@ fn run_copy_batch(
         // 备份整批只做一次：在**第一个**真正复制的会话之前拍快照。
         let backup = batch.ensure_backup();
         let columns = batch.dst_columns();
-        let session_row_written = match (&plan.row, batch.dst_conn()) {
+        // ★ issue #146：源行缺失（全新账号 / 仅 jsonl 存在）时**合成**最小索引行。
+        //   跳过写库 = 目标账号在客户端里永远「暂无任务」，且下次切换会把刚复制出的
+        //   副本当成源会话再复制一遍（雪崩，见 #147）。
+        let session_row = match (plan.row.as_ref(), batch.dst_conn()) {
             (Some((cols, vals)), Some(dst)) => {
                 insert_session_row(dst, &columns, cols, vals, &plan.new_cid, &target_uid)
             }
-            _ => false,
+            (None, Some(dst)) => {
+                let (cols, vals) = synthesize_session_row(&columns, plan);
+                insert_session_row(dst, &columns, &cols, &vals, &plan.new_cid, &target_uid)
+            }
+            (_, None) => Err("目标库不可用（workbuddy.db 不存在）".to_string()),
         };
+        let session_row_written = session_row.is_ok();
         let mapping_written = match batch.edge_conn() {
             Some(edge) => insert_edge_sync_mapping_conn(edge, &plan.new_cid, &target_uid),
             None => false,
@@ -2385,9 +2456,14 @@ fn run_copy_batch(
             Some(error) => Some(format!(
                 "复制前备份失败（{error}）；本次复制没有可回滚的备份点，请手动备份后重试"
             )),
-            None if jsonl_ok && !session_row_written => Some(
-                "目标账号的会话索引不可写；已复制正文，请重启 WorkBuddy 让其重建索引".to_string(),
-            ),
+            None if jsonl_ok && !session_row_written => Some(format!(
+                "会话索引未写入（{}）；目标账号在客户端里看不到该会话",
+                session_row
+                    .as_ref()
+                    .err()
+                    .map(String::as_str)
+                    .unwrap_or("原因未知")
+            )),
             None if jsonl_ok && !mapping_written => {
                 Some("云端映射注册失败；新会话暂时无法在 WorkBuddy 中显示云端历史".to_string())
             }
@@ -2405,6 +2481,11 @@ fn run_copy_batch(
         });
         if let Some(warning) = warning {
             report["warning"] = json!(warning);
+        }
+        // ★ issue #146：失败原因必须可诊断，不能只留一句泛化的 warning。
+        if let Err(error) = &session_row {
+            report["sessionRowError"] = json!(error);
+            report["failed"] = json!(true);
         }
         copied.push(report);
     }
@@ -2435,6 +2516,14 @@ fn run_copy_batch(
     }
     if !errors.is_empty() {
         report["errors"] = json!(errors);
+    }
+    // ★ issue #146：索引行写失败时整批标记 failed —— 「报告成功但目标账号看不到」
+    //   是本次事故最坏的一面，不能再让调用方从 `copied` 计数里猜。
+    if copied
+        .iter()
+        .any(|item| item.get("sessionRowError").is_some())
+    {
+        report["failed"] = json!(true);
     }
     report
 }
@@ -2511,13 +2600,74 @@ fn read_session_row(
     Ok(Some((cols, vals)))
 }
 
+/// 源会话行缺失时合成的最小索引行（issue #146）。
+///
+/// ## 为什么不能「跳过写库」
+///
+/// 全新账号在 `sessions` 表里 0 行 ⇒ 会话列表退回 jsonl 反扫（`degraded: true`），
+/// 这些 cid 在库里**属于别的账号或根本不存在** ⇒ [`read_session_row`] 必然返回 `None`。
+/// 旧实现在这里直接不写索引行，只留一条「请重启 WorkBuddy 让其重建索引」的 warning ——
+/// 而客户端**不会**从 jsonl 重建索引，于是目标账号永远显示「暂无任务」，
+/// 且下次切换会把刚复制出的副本当成源会话再复制一遍（雪崩，见 #147）。
+///
+/// 合成行只填客户端要求的非空列（`id` / `user_id` / `cwd` / `status` / `transport` /
+/// 两个时间戳）；`id` 与 `user_id` 由 [`insert_session_row`] 统一覆盖，这里给占位值。
+/// 目标库缺的列直接不出现，其余列交给库默认值 —— 真失败由写后回读报错，不再静默。
+fn synthesize_session_row(dst_cols: &[String], plan: &CopyPlan) -> SessionRow {
+    let meta = plan.jsonl_src.as_deref().and_then(read_jsonl_meta);
+    let cwd = meta
+        .as_ref()
+        .map(|meta| meta.cwd.clone())
+        .unwrap_or_default();
+    // 标题与侧栏同口径：jsonl 里的（customTitle > aiTitle）优先，退回 phase 0 算出的展示名。
+    let title = meta
+        .as_ref()
+        .map(|meta| meta.title.clone())
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| plan.title.clone());
+    let now = now_ms();
+    let candidates: Vec<(&str, rusqlite::types::Value)> = vec![
+        ("id", rusqlite::types::Value::Text(String::new())),
+        ("user_id", rusqlite::types::Value::Text(String::new())),
+        ("cwd", rusqlite::types::Value::Text(cwd)),
+        ("title", rusqlite::types::Value::Text(title)),
+        (
+            "status",
+            rusqlite::types::Value::Text("completed".to_string()),
+        ),
+        (
+            "transport",
+            rusqlite::types::Value::Text("local".to_string()),
+        ),
+        ("created_at", rusqlite::types::Value::Integer(now)),
+        ("updated_at", rusqlite::types::Value::Integer(now)),
+    ];
+    let mut cols = Vec::with_capacity(candidates.len());
+    let mut vals = Vec::with_capacity(candidates.len());
+    for (col, value) in candidates {
+        if !dst_cols.iter().any(|existing| existing == col) {
+            continue;
+        }
+        cols.push(col.to_string());
+        vals.push(value);
+    }
+    (cols, vals)
+}
+
 /// 把**已读出的源行**写入目标库（动态列，覆盖 id/user_id/时间戳）。
 ///
 /// 源与目标可以是两个版本的 db。目标库缺某一列时**丢弃该列**而不是整条失败 ——
 /// 两版 schema 高度同源但允许有差异，丢弃比让整次复制失败更接近用户预期。
 ///
-/// 返回 `true` = 写入了 sessions 索引行；`false` = 软失败（目标库 / 表不可用、
-/// 列被丢空、执行失败）—— 调用方据此决定是否提示用户「重启 WorkBuddy 重建索引」。
+/// ## 返回值语义（issue #146）
+///
+/// `Ok(())` = 目标库**回读确认**该行存在且 `user_id` 就是目标账号；
+/// `Err(原因)` = 没写成 / 写歪了。旧实现返回 `bool` 并把 `rusqlite::Error` 整个丢掉，
+/// 调用方无法区分「表不存在」「NOT NULL 违约」「归属被改」—— 于是只能笼统地报
+/// 「索引不可写，请重启客户端」，把可诊断的失败变成了玄学。
+///
+/// ★ 必须回读：`execute` 成功只代表语句没报错，触发器 / 约束 / 主键冲突都可能让行
+/// 落到别处或根本不存在，而「报告成功但目标账号看不到」正是本次事故的根因。
 /// Claw 拒绝发生在**读行**阶段（[`read_session_row`]），与本函数无关。
 fn insert_session_row(
     dst: &Connection,
@@ -2526,9 +2676,9 @@ fn insert_session_row(
     vals: &[rusqlite::types::Value],
     new_cid: &str,
     target_uid: &str,
-) -> bool {
+) -> Result<(), String> {
     if !table_exists(dst, "sessions") {
-        return false;
+        return Err("目标库没有 sessions 表".to_string());
     }
     let mut insert_cols: Vec<&str> = Vec::with_capacity(cols.len());
     let mut insert_vals: Vec<rusqlite::types::Value> = Vec::with_capacity(vals.len());
@@ -2547,7 +2697,7 @@ fn insert_session_row(
         insert_vals.push(v);
     }
     if insert_cols.is_empty() {
-        return false;
+        return Err("目标库 sessions 表没有可写列".to_string());
     }
 
     let placeholders = insert_cols
@@ -2558,9 +2708,23 @@ fn insert_session_row(
     let colnames = insert_cols.join(", ");
     let sql = format!("INSERT OR REPLACE INTO sessions ({colnames}) VALUES ({placeholders})");
     let params: Vec<&rusqlite::types::Value> = insert_vals.iter().collect();
-    // 执行失败也降级为软失败：jsonl 已复制，至少正文能落到目标账号。
     dst.execute(&sql, rusqlite::params_from_iter(params))
-        .is_ok()
+        .map_err(|e| format!("写入会话索引失败：{e}"))?;
+
+    // ★ 写后回读：确认这一行真的属于目标账号（issue #146 的验收口径）。
+    let owner = dst
+        .query_row(
+            "SELECT user_id FROM sessions WHERE id = ?1",
+            rusqlite::params![new_cid],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| format!("回读会话索引失败：{e}"))?;
+    match owner.flatten() {
+        Some(uid) if uid == target_uid => Ok(()),
+        Some(uid) => Err(format!("会话索引归属不是目标账号（{uid}）")),
+        None => Err("会话索引写入后回读不到该行".to_string()),
+    }
 }
 
 /// 按**路径**的插入入口（`#[cfg(test)]`：只服务单测）。
@@ -2593,9 +2757,7 @@ fn insert_session_copy(
         return Ok(false);
     };
     let dst_cols = table_columns(&dst, "sessions");
-    Ok(insert_session_row(
-        &dst, &dst_cols, &cols, &vals, new_cid, target_uid,
-    ))
+    insert_session_row(&dst, &dst_cols, &cols, &vals, new_cid, target_uid).map(|()| true)
 }
 
 /// 把新会话注册进 edge_sync_mapping（云端归属关键）。失败不致命，返回 False。
@@ -2800,6 +2962,70 @@ fn copy_ledger_key_for(
     } else {
         format!("{}{LEDGER_SEP}{base}", source_region.as_str())
     }
+}
+
+/// 账本值里的字段名（issue #147：值从裸 `new_cid` 升级为带血缘的对象）。
+///
+/// 旧值是字符串 `"<new_cid>"`，新值是
+/// `{"new": "<new_cid>", "originUid": "<原始账号>", "originCid": "<原始会话>"}`。
+/// 两种都要能读 —— 用户升级前的账本不能作废（否则所有会话被重新复制一遍）。
+const LEDGER_NEW: &str = "new";
+const LEDGER_ORIGIN_UID: &str = "originUid";
+const LEDGER_ORIGIN_CID: &str = "originCid";
+
+/// 从账本值取副本 id：兼容旧格式（裸字符串）与新格式（对象）。
+fn ledger_new_of(value: &Value) -> Option<String> {
+    let new = match value {
+        Value::String(text) => Some(text.as_str()),
+        Value::Object(map) => map.get(LEDGER_NEW).and_then(Value::as_str),
+        _ => None,
+    }?;
+    let trimmed = new.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// 从账本值取血缘 `(origin_uid, origin_cid)`；旧格式（无血缘）返回 `None`。
+fn ledger_origin_of(value: &Value) -> Option<(String, String)> {
+    let map = value.as_object()?;
+    let uid = map.get(LEDGER_ORIGIN_UID)?.as_str()?.trim();
+    let cid = map.get(LEDGER_ORIGIN_CID)?.as_str()?.trim();
+    (!uid.is_empty() && !cid.is_empty()).then(|| (uid.to_string(), cid.to_string()))
+}
+
+/// 从账本键里取 `target_uid`（键形如 `[region␟]source␟target␟cid`）。
+fn ledger_key_target(key: &str) -> Option<String> {
+    let parts: Vec<&str> = key.split(LEDGER_SEP).collect();
+    match parts.as_slice() {
+        [_, target, _] => Some((*target).to_string()),
+        [_, _, target, _] => Some((*target).to_string()),
+        _ => None,
+    }
+}
+
+/// 从账本构建两个血缘索引（issue #147）。
+///
+/// - `copy_origins`：副本 id → `(origin_uid, origin_cid)` —— 回答「这个 cid 是哪个原始会话的副本」；
+/// - `origin_copied`：`(origin_cid, target_uid)` —— 回答「该原始会话是否已复制给目标账号」。
+///
+/// 旧格式条目（值是裸字符串）没有血缘 ⇒ 只能当「它不是副本」，两个索引里都不出现。
+fn build_origin_indexes(
+    ledger: &serde_json::Map<String, Value>,
+) -> (HashMap<String, (String, String)>, HashSet<(String, String)>) {
+    let mut copy_origins = HashMap::new();
+    let mut origin_copied = HashSet::new();
+    for (key, value) in ledger {
+        let Some(new_cid) = ledger_new_of(value) else {
+            continue;
+        };
+        let Some(origin) = ledger_origin_of(value) else {
+            continue;
+        };
+        if let Some(target) = ledger_key_target(key) {
+            origin_copied.insert((origin.1.clone(), target));
+        }
+        copy_origins.insert(new_cid, origin);
+    }
+    (copy_origins, origin_copied)
 }
 
 /// 读取复制账本；文件缺失 / 损坏 / 结构不符时返回空表（视为无登记）。
@@ -3082,18 +3308,19 @@ fn replica_group_members_from_ledger(
         else {
             continue;
         };
-        // 值为空串的登记视作无登记（与 `CopyBatch::ledger_hit` 的判据一致）。
-        let Some(new_cid) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+        // 值为空串 / 空对象的登记视作无登记（与 `CopyBatch::ledger_hit` 的判据一致）。
+        // ★ issue #147：值可能是 `{new, originUid, originCid}` 对象，统一走 `ledger_new_of`。
+        let Some(new_cid) = ledger_new_of(value) else {
             continue;
         };
         let source_key = replica_vertex_key(&source_uid, &source_cid);
-        let target_key = replica_vertex_key(&target_uid, new_cid);
+        let target_key = replica_vertex_key(&target_uid, &new_cid);
         label
             .entry(source_key.clone())
             .or_insert((source_uid, source_cid));
         label
             .entry(target_key.clone())
-            .or_insert((target_uid, new_cid.to_string()));
+            .or_insert((target_uid, new_cid.clone()));
         adjacency
             .entry(source_key.clone())
             .or_default()
@@ -4973,8 +5200,10 @@ mod tests {
 
     /// 复制降级：源 jsonl 存在但 workbuddy.db 缺失 → 仍复制正文，索引行写不进时给 warning。
     ///
-    /// 这对应「目标账号 db 也坏了」的最坏情形：至少 jsonl 正文能落到目标账号，
-    /// 用户重启 WorkBuddy 重建索引后即可见。绝不能因为它「报错」就阻断整次复制。
+    /// 这对应「目标账号 db 也坏了」的最坏情形：jsonl 正文仍落到目标账号，但**索引行写不了**。
+    /// ★ 这里断言的是「报告必须说实话」（`sessionRowWritten: false` + 可诊断的
+    /// `sessionRowError` + 批次 `failed`），**不是**「重启客户端会自动重建索引」——
+    /// 那条旧承诺从未成立，客户端不会从 jsonl 反推索引（issue #146）。
     #[test]
     fn copy_session_degrades_when_db_missing() {
         let home = make_temp_home("copy-degraded");
@@ -5008,7 +5237,16 @@ mod tests {
         );
         assert!(
             result.get("warning").is_some(),
-            "应给出降级 warning，提示用户重启 WorkBuddy 重建索引"
+            "应给出降级 warning（索引未写入），但**不得**承诺重启后客户端会重建索引"
+        );
+        assert!(
+            result.get("sessionRowError").is_some(),
+            "失败原因必须可诊断，不能只留一句泛化 warning"
+        );
+        assert_eq!(
+            result.get("failed").and_then(Value::as_bool),
+            Some(true),
+            "索引行写失败时整批必须标记 failed"
         );
         assert_eq!(
             result.get("deduplicated").and_then(Value::as_bool),
@@ -5022,6 +5260,68 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().to_string())
             .any(|name| name.ends_with(".jsonl") && name != "cid-S.jsonl");
         assert!(copied, "应生成新 cid 的 jsonl 副本");
+        cleanup_temp_home(&home);
+    }
+
+    /// ★ issue #146 回归：源账号在 `sessions` 表里没有该 cid 的行（全新账号 / 列表来自
+    /// jsonl 反扫），复制必须**合成**索引行 —— 只复制正文会让目标账号永远「暂无任务」。
+    #[test]
+    fn copy_synthesizes_index_row_when_source_row_missing() {
+        let home = make_temp_home("copy-synth-row");
+        let _g = crate::modules::config::HomeOverrideGuard::set(&home);
+        let ws = home.join(".workbuddy").join("projects").join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("cid-S.jsonl"),
+            "{\"cwd\":\"/proj/s\",\"title\":\"S\",\"sessionId\":\"cid-S\"}\n",
+        )
+        .unwrap();
+        // 目标库存在，但 `cid-S` 属于别的账号（源账号是全新的，库里没有它的行）。
+        let db = workbuddy_db_path_for(Region::Cn);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                cwd TEXT,
+                title TEXT,
+                status TEXT,
+                transport TEXT,
+                created_at INTEGER,
+                updated_at INTEGER,
+                deleted_at INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, user_id, cwd, title, status, transport, created_at, updated_at)
+             VALUES ('cid-S', 'uid-other', '/x', 'old', 'completed', 'local', 1, 1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result =
+            copy_session_to_user_cross(Region::Cn, Region::Cn, "cid-S", "uid-src", "uid-dst")
+                .expect("复制不应报错");
+        assert_eq!(
+            result.get("sessionRowWritten").and_then(Value::as_bool),
+            Some(true),
+            "源行缺失时必须合成索引行：{result}"
+        );
+        assert!(result.get("sessionRowError").is_none(), "{result}");
+        assert!(result.get("failed").is_none(), "{result}");
+
+        let conn = Connection::open(&db).unwrap();
+        let (count, cwd): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(cwd), '') FROM sessions WHERE user_id = 'uid-dst'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "目标账号必须拿到 1 条索引行");
+        assert_eq!(cwd, "/proj/s", "cwd 应从 jsonl 取，供客户端工作区分组");
         cleanup_temp_home(&home);
     }
 
@@ -5169,6 +5469,105 @@ mod tests {
             .is_empty());
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ★ issue #147：账本值必须同时读得懂旧格式（裸字符串）与新格式（带血缘对象）。
+    ///
+    /// 变异：把 `ledger_new_of` 改回 `value.as_str()` ⇒ 升级后所有旧账本失配、
+    /// 全部会话被重新复制一遍（正是本次事故的放大器）。
+    #[test]
+    fn ledger_value_supports_legacy_and_bloodline_shapes() {
+        assert_eq!(
+            ledger_new_of(&json!("copy-1")).as_deref(),
+            Some("copy-1"),
+            "旧账本（裸字符串）必须继续可读"
+        );
+        let value = json!({"new": "copy-2", "originUid": "uid-a", "originCid": "cid-1"});
+        assert_eq!(ledger_new_of(&value).as_deref(), Some("copy-2"));
+        assert_eq!(
+            ledger_origin_of(&value),
+            Some(("uid-a".to_string(), "cid-1".to_string()))
+        );
+        assert_eq!(ledger_origin_of(&json!("copy-1")), None, "旧格式没有血缘");
+        assert_eq!(ledger_new_of(&json!({})), None);
+        assert_eq!(ledger_new_of(&json!("   ")), None);
+    }
+
+    /// 账本键 → `target_uid`：同 region 三元与跨 region 四元都要认。
+    #[test]
+    fn ledger_key_target_reads_both_key_shapes() {
+        let sep = LEDGER_SEP;
+        assert_eq!(
+            ledger_key_target(&format!("a{sep}b{sep}c")),
+            Some("b".to_string())
+        );
+        assert_eq!(
+            ledger_key_target(&format!("cn{sep}a{sep}b{sep}c")),
+            Some("b".to_string())
+        );
+        assert_eq!(ledger_key_target("nonsense"), None);
+    }
+
+    /// 副本识别索引：能回答「这个 cid 是哪个原始会话的副本」「已复制给谁」。
+    #[test]
+    fn origin_indexes_answer_bloodline_questions() {
+        let sep = LEDGER_SEP;
+        let mut map = serde_json::Map::new();
+        map.insert(
+            format!("uid-a{sep}uid-b{sep}cid-1"),
+            json!({"new": "copy-1", "originUid": "uid-a", "originCid": "cid-1"}),
+        );
+        // 旧格式条目：无血缘 ⇒ 不进索引（不能凭空猜）。
+        map.insert(format!("uid-x{sep}uid-y{sep}cid-9"), json!("copy-9"));
+
+        let (origins, copied) = build_origin_indexes(&map);
+        assert_eq!(
+            origins.get("copy-1").cloned(),
+            Some(("uid-a".to_string(), "cid-1".to_string()))
+        );
+        assert!(!origins.contains_key("copy-9"), "旧条目没有血缘可查");
+        assert!(copied.contains(&("cid-1".to_string(), "uid-b".to_string())));
+        assert!(!copied.contains(&("cid-1".to_string(), "uid-a".to_string())));
+    }
+
+    /// ★ issue #147 端到端：把副本当源再复制时，必须被血缘判定拦下（skipped），
+    /// 而不是再造一代副本。
+    #[test]
+    fn copying_a_replica_back_is_skipped_by_bloodline() {
+        let home = make_temp_home("copy-replica-skip");
+        let _g = crate::modules::config::HomeOverrideGuard::set(&home);
+        let ws = home.join(".workbuddy").join("projects").join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("cid-1.jsonl"), "{\"cwd\":\"/p\",\"title\":\"T\"}\n").unwrap();
+        // B 的副本（上一次 A→B 的产物）
+        std::fs::write(
+            ws.join("copy-1.jsonl"),
+            "{\"cwd\":\"/p\",\"title\":\"T\"}\n",
+        )
+        .unwrap();
+
+        let mut map = serde_json::Map::new();
+        map.insert(
+            format!("uid-a{LEDGER_SEP}uid-b{LEDGER_SEP}cid-1"),
+            json!({"new": "copy-1", "originUid": "uid-a", "originCid": "cid-1"}),
+        );
+        std::fs::write(
+            copy_ledger_path_for(Region::Cn),
+            serde_json::to_string(&Value::Object(map)).unwrap(),
+        )
+        .unwrap();
+
+        // B 的副本再复制回 A（origin 就是 A 自己的会话）⇒ 必须跳过。
+        let result = copy_session_to_user_cross(Region::Cn, Region::Cn, "copy-1", "uid-b", "uid-a")
+            .expect("副本识别不应报错");
+        assert_eq!(
+            result.get("deduplicated").and_then(Value::as_bool),
+            Some(true),
+            "副本回流必须判为去重跳过：{result}"
+        );
+        let files = std::fs::read_dir(&ws).unwrap().flatten().count();
+        assert_eq!(files, 2, "不得生成新一代副本：{files}");
+        cleanup_temp_home(&home);
     }
 
     /// 账本命中还必须要求副本仍存活：副本被删则允许重新复制。
