@@ -45,6 +45,19 @@ pub trait PoolEntryLike {
     /// 账号 uid（池键）。
     fn uid(&self) -> &str;
 
+    /// 账号库里**此刻是否还有**这个 uid 的凭据。
+    ///
+    /// 默认 `true`（视为存在）：只有「池条目比账号库活得久」的产品线才需要覆写。
+    /// WorkBuddy 池是**增量 upsert**（账号删到回收站后条目保留治理历史），因此由
+    /// [`crate::pool::Pool::sync_accounts`] 维护真实值 —— 见
+    /// [`crate::pool::PoolEntry::present_in_store`]。
+    ///
+    /// ★ 选号必须看它：拿一个账号库已经没有的 uid 去取凭据只会失败，而失败会被
+    /// 计入「这个号不行」，把整轮重试预算耗在一条脏数据上。
+    fn present_in_store(&self) -> bool {
+        true
+    }
+
     /// 可用积分总量。
     fn credits(&self) -> i64;
 

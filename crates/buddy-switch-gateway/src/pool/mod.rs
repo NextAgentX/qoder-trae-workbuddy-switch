@@ -72,6 +72,11 @@ pub fn realm_key(realm: Option<RealmTag>) -> &'static str {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PoolSummary {
+    /// 该域内**账号库里还有凭据**的账号数（不含「账号已删除、条目仍在」的残留，
+    /// 见 [`PoolEntry::present_in_store`]）。
+    ///
+    /// ★ 语义是「有几个号」而不是「池文件里有几行」：401 文案直接拿它说
+    /// 「本机账号库有 N 个账号」，两个数不一致时那句话就是错的。
     pub total: usize,
     pub available: usize,
     pub cooling: usize,
@@ -1052,7 +1057,17 @@ impl Pool {
 
     /// 用账号库快照对齐池：新增缺失账号，**不删除**已有账号
     /// （删除会让冷却/熔断历史丢失，重登同一账号即「洗白」）。
+    ///
+    /// ★ 但「不删」≠「不标记」：账号库里已经没有的 uid 会被标成
+    /// [`PoolEntry::present_in_store`]`= false`，选号 / 摘要 / 状态列表一律跳过它们
+    /// （2026-11-02）。没有这一步，池里一条删除残留就能让整区请求失败，而
+    /// `PoolSummary` 还会拿这条残留凑数 —— 文案自相矛盾（见 `PoolSummary::total`）。
+    ///
+    /// ★★ **只反向对齐同一个 realm 的条目**：WB 池一份同时装 CN 与 Global，用 CN 的
+    /// 快照去标 Global 的条目会把国际版整区标成「不在库里」。`realm = None` 的调用方
+    /// （测试 / 域未知）不做反向对齐 —— 无从判断该对齐哪一半。
     pub fn sync_accounts(&mut self, accounts: &[Value], realm: Option<RealmTag>) {
+        let mut present: HashSet<&str> = HashSet::with_capacity(accounts.len());
         for account in accounts {
             let Some(uid) = account
                 .get("uid")
@@ -1061,11 +1076,20 @@ impl Pool {
             else {
                 continue;
             };
+            present.insert(uid);
             let nickname = account
                 .get("nickname")
                 .and_then(Value::as_str)
                 .unwrap_or("");
             self.upsert(uid, realm, nickname);
+        }
+
+        let Some(realm) = realm else { return };
+        for entry in self.entries.values_mut() {
+            if entry.realm != Some(realm) {
+                continue;
+            }
+            entry.present_in_store = present.contains(entry.uid.as_str());
         }
     }
 
@@ -1944,6 +1968,13 @@ impl Pool {
             ..PoolSummary::default()
         };
         for entry in self.entries.values() {
+            // ★ 账号库里已经没有的条目**不进任何计数**（2026-11-02）：它们不是「账号」，
+            //   只是治理历史的载体。留着会让 `total` 大于账号库里的号数，于是 401 文案
+            //   变成「有 3 个账号、0 个已禁用、0 个冷却中、0 个余额为 0，却 0 个可用」——
+            //   一个自相矛盾且无法据以行动的说明（那 1 条其实是删除残留）。
+            if !entry.present_in_store {
+                continue;
+            }
             if realm.is_some() && entry.realm != realm {
                 continue;
             }
@@ -2018,6 +2049,10 @@ impl Pool {
     pub fn status_list(&self, now_ms: i64) -> Vec<Value> {
         self.entries
             .values()
+            // ★ 账号库里已没有的条目**不出现在卡里**（2026-11-02）：卡片描述的是「现在的
+            //   账号」，一条删除残留渲染成「可用」会让用户去重登一个已经不存在的号。
+            //   治理状态仍留在池里 —— 账号重新导入即原地恢复（`sync_accounts` 会翻回 true）。
+            .filter(|entry| entry.present_in_store)
             .map(|entry| {
                 let status = entry.status_of(now_ms);
                 // ★ 排除是**互斥第六态**：一个被排除的号可能同时「可用」，但它不能被选中，
@@ -2144,6 +2179,9 @@ impl Pool {
     pub fn diagnose(&self, now_ms: i64) -> Vec<String> {
         self.entries
             .values()
+            // 与 [`Self::status_list`] 同源：已从账号库删除的条目不是「路由候选」，
+            // 列进诊断只会让人去排查一个不存在的账号。
+            .filter(|entry| entry.present_in_store)
             .map(|entry| {
                 let tail = entry
                     .uid
@@ -2175,6 +2213,10 @@ impl Pool {
         let accounts: Vec<Value> = self
             .entries
             .values()
+            // 与 [`Self::status_list`] 同源：账号库里已没有的条目不进快照，
+            // 否则 `/status` 的五个计数之和与 `accounts` 长度对不上
+            // （残留条目渲染成「可用」，用户会去重登一个不存在的号）。
+            .filter(|entry| entry.present_in_store)
             .map(|entry| {
                 // ★ 冷却三件套（`cool_kind` / `until_ms` / `reason`）**只在真的冷却中**才给。
                 // 它们靠墙钟到期，而没有任何人在到期时清字段 ⇒ 照搬会把两天前的
@@ -2256,6 +2298,11 @@ impl Pool {
         let mut in_flight_full = 0;
         let mut realm_totals: BTreeMap<&str, [i64; 4]> = BTreeMap::new();
         for entry in self.entries.values() {
+            // 与上面的 `accounts` 列表同源（残留条目已被过滤），否则「计数」与
+            // 「列表长度」会在同一份 `/status` 里互相矛盾。
+            if !entry.present_in_store {
+                continue;
+            }
             let is_healthy = entry.healthy(now_ms);
             // ★ 安全审计 P2-11：`is_cooling` **必须与 `disabled` 互斥**。
             //
@@ -2802,6 +2849,117 @@ mod tests {
         assert_eq!(pool.len(), 2, "对齐是增量，不得删除既有账号");
         assert!(pool.get("keep").is_some());
         assert!(pool.get("new").is_some());
+        // ★ 「不删除」≠「当作还在」：快照里没有的条目会被标成不在库，
+        //   但仍留着治理历史（账号重新导入即原地复活）。
+        assert!(
+            !pool.get("keep").unwrap().present_in_store,
+            "不在快照里的条目必须标成 present_in_store=false"
+        );
+    }
+
+    /// 账号删到回收站后：条目保留、但**从计数与所有列表视图里消失**。
+    ///
+    /// 这是 #149 遗留的一半：只修「选号跳过脏条目」还不够 —— `PoolSummary` 仍按池内
+    /// 条目计数，于是 401 文案会说「有 3 个账号、0 个已禁用、0 个冷却中、0 个余额为 0，
+    /// 却 0 个可用」，而其中 1 条是删除残留。数字与事实不符，用户无法据此行动。
+    #[test]
+    fn sync_accounts_marks_entries_missing_from_store() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.sync_accounts(
+            &[
+                json!({"uid": "a", "nickname": "甲"}),
+                json!({"uid": "b", "nickname": "乙"}),
+                json!({"uid": "gone", "nickname": "已删"}),
+            ],
+            Some(RealmTag::Cn),
+        );
+        assert_eq!(pool.summary(NOW, Some(RealmTag::Cn)).total, 3);
+
+        // 用户把「已删」删进回收站：下一次对齐拿到的快照里没有它。
+        pool.sync_accounts(
+            &[json!({"uid": "a"}), json!({"uid": "b"})],
+            Some(RealmTag::Cn),
+        );
+
+        assert_eq!(pool.len(), 3, "条目仍保留（冷却/熔断历史不得丢）");
+        assert!(!pool.get("gone").unwrap().present_in_store);
+        assert!(pool.get("a").unwrap().present_in_store);
+
+        let summary = pool.summary(NOW, Some(RealmTag::Cn));
+        assert_eq!(summary.total, 2, "残留条目不得计入 total：{summary:?}");
+        assert_eq!(summary.available, 2);
+        assert_eq!(pool.status_list(NOW).len(), 2, "池卡不得渲染已删账号");
+        assert!(
+            !pool.diagnose(NOW).iter().any(|line| line.contains("已删")),
+            "诊断不得让人去排查一个不存在的账号"
+        );
+
+        // 账号重新导入 ⇒ 原地复活，历史还在。
+        pool.sync_accounts(
+            &[json!({"uid": "gone", "nickname": "已删"})],
+            Some(RealmTag::Cn),
+        );
+        assert!(pool.get("gone").unwrap().present_in_store);
+        assert_eq!(pool.summary(NOW, Some(RealmTag::Cn)).total, 1);
+    }
+
+    /// 反向对齐**只动同一个 realm**：WB 池一份同时装 CN 与 Global，
+    /// 用 CN 的快照去标 Global 的条目会把国际版整区标成「不在库里」（整区不可用）。
+    #[test]
+    fn sync_accounts_only_reconciles_its_own_realm() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("cn1", Some(RealmTag::Cn), "");
+        pool.upsert("global1", Some(RealmTag::Global), "");
+
+        pool.sync_accounts(&[json!({"uid": "cn2"})], Some(RealmTag::Cn));
+
+        assert!(!pool.get("cn1").unwrap().present_in_store, "同域缺失应标记");
+        assert!(
+            pool.get("global1").unwrap().present_in_store,
+            "★ 国际版条目不得被 CN 快照连带标记"
+        );
+        assert_eq!(pool.summary(NOW, Some(RealmTag::Global)).total, 1);
+    }
+
+    /// 选号不得挑「账号库已没有」的条目 —— 即便它的积分权重最高。
+    #[test]
+    fn pick_account_skips_entries_missing_from_store() {
+        let mut pool = Pool::new(PoolConfig::default());
+        pool.upsert("alive", Some(RealmTag::Cn), "");
+        pool.upsert("gone", Some(RealmTag::Cn), "");
+        pool.set_credits("gone", 10_000, 0);
+        pool.sync_accounts(&[json!({"uid": "alive"})], Some(RealmTag::Cn));
+
+        for seed in 0..32 {
+            let picked = pool.pick_account(
+                NOW,
+                Some(RealmTag::Cn),
+                "",
+                &HashSet::new(),
+                PickMode::Weighted,
+                seed,
+                None,
+                None,
+                "test",
+            );
+            assert_eq!(picked.as_deref(), Some("alive"), "seed={seed}");
+        }
+
+        // 只剩残留条目 ⇒ 一个都选不出来（调用方据此报「账号库为空」，而不是 503 冷却）。
+        pool.sync_accounts(&[], Some(RealmTag::Cn));
+        assert!(pool
+            .pick_account(
+                NOW,
+                Some(RealmTag::Cn),
+                "",
+                &HashSet::new(),
+                PickMode::Weighted,
+                0,
+                None,
+                None,
+                "test",
+            )
+            .is_none());
     }
 
     #[test]
