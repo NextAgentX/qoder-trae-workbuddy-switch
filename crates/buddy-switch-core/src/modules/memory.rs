@@ -18,6 +18,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use serde_json::{json, Value};
+
 use crate::modules::region::Region;
 
 /// 记忆文件相对于 session 数据目录的子目录名。
@@ -241,6 +243,105 @@ pub fn merge_memory_text(
     (out, result)
 }
 
+/// 客户端记忆文件里内嵌 JSON 块的标记（issue #148）。
+///
+/// ★ 真实的 `{uid}_memory.md` **不是纯 markdown**：正文在 `memoryBlock` 字段里，
+/// 且内嵌 `uid`。按纯 markdown 拼接会把源账号的 uid 原样写进目标文件。
+const RAW_JSON_START: &str = "<!-- RAW_JSON_START";
+const RAW_JSON_END: &str = "RAW_JSON_END -->";
+
+/// 记忆文件内嵌的 JSON 块（`{ uid, memoryBlock, updatedAt }`）。
+#[derive(Debug, Clone)]
+struct MemoryProfile {
+    json: Value,
+}
+
+impl MemoryProfile {
+    /// 记忆正文（`memoryBlock`；缺失或非字符串时为空）。
+    fn block(&self) -> String {
+        self.json
+            .get("memoryBlock")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// 块内声明的 uid（缺失时为 `None`）。
+    fn uid(&self) -> Option<&str> {
+        self.json.get("uid").and_then(Value::as_str)
+    }
+}
+
+/// 定位 `<!-- RAW_JSON_START ... RAW_JSON_END -->` 之间的 JSON 文本区间。
+fn raw_json_block_range(text: &str) -> Option<(usize, usize)> {
+    let marker = text.find(RAW_JSON_START)? + RAW_JSON_START.len();
+    let start = marker + text[marker..].find('\n')? + 1;
+    let end = start + text[start..].find(RAW_JSON_END)?;
+    Some((start, end))
+}
+
+/// 解析内嵌 JSON 块；不是该格式（纯 markdown 老文件）时返回 `None`。
+fn parse_memory_profile(text: &str) -> Option<MemoryProfile> {
+    let (start, end) = raw_json_block_range(text)?;
+    let json = serde_json::from_str::<Value>(text[start..end].trim()).ok()?;
+    json.is_object().then_some(MemoryProfile { json })
+}
+
+/// 把合并后的正文写回记忆文件，**强制** `uid` = 目标账号。
+///
+/// 文件已是内嵌 JSON 格式时就地替换该块（保留块外原文与未知字段）；
+/// 否则按客户端模板新建一份 —— 目标文件不存在时**不得**整段拷贝源文件。
+fn render_memory_profile(original: &str, target_uid: &str, block: &str, now: &str) -> String {
+    let mut json = parse_memory_profile(original)
+        .map(|profile| profile.json)
+        .unwrap_or_else(|| json!({"uid": target_uid, "memoryBlock": "", "updatedAt": now}));
+    if let Value::Object(map) = &mut json {
+        map.insert("uid".to_string(), Value::String(target_uid.to_string()));
+        map.insert("memoryBlock".to_string(), Value::String(block.to_string()));
+        map.insert("updatedAt".to_string(), Value::String(now.to_string()));
+    }
+    let json_text = serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string());
+
+    match raw_json_block_range(original) {
+        Some((start, end)) => {
+            let mut out = String::with_capacity(original.len());
+            out.push_str(&original[..start]);
+            out.push_str(&json_text);
+            out.push_str(&original[end..]);
+            replace_last_updated(&out, now)
+        }
+        None => {
+            let body = if block.trim().is_empty() {
+                String::new()
+            } else {
+                format!("\n{}\n", block.trim_end())
+            };
+            format!(
+                "# User Memory Profile\n> Last updated: {now}\n> Version: 0\n\n## Memory Block\n{body}\n---\n\n<!-- RAW_JSON_START\n{json_text}\nRAW_JSON_END -->\n"
+            )
+        }
+    }
+}
+
+/// 改写文件头里的 `> Last updated:` 行；没有该行时原样返回。
+fn replace_last_updated(text: &str, now: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut replaced = false;
+    for line in text.split_inclusive('\n') {
+        if !replaced && line.trim_start().starts_with("> Last updated:") {
+            out.push_str(&format!("> Last updated: {now}\n"));
+            replaced = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    if replaced {
+        out
+    } else {
+        text.to_string()
+    }
+}
+
 /// 合并两个账号的 Memory 文件（同一版本内）：读源 → 合并到目标 → 原子写回。
 ///
 /// 源文件不存在 / 为空 → 不写入，返回 `changed() == false`。
@@ -284,8 +385,48 @@ pub fn merge_memory_files_cross(
     };
 
     let label = shorten_uid(source_uid);
-    let (merged, mut result) = merge_memory_text(&target, &source, &label);
-    if result.changed() {
+    let now = crate::modules::config::utc_iso();
+    let source_profile = parse_memory_profile(&source);
+    let target_profile = parse_memory_profile(&target);
+
+    // ★ issue #148：客户端记忆文件的正文在 `memoryBlock` 字段里，按纯 markdown 拼接
+    //   会把源账号的 uid 写进目标文件。四种组合都要处理，否则「目标恰好是纯 markdown」
+    //   这一支会退回老行为、把新格式文件尾部追加成 markdown。
+    let (merged, mut result) = match (&source_profile, &target_profile) {
+        // 两侧都是新格式：正文逐行合并，块结构与目标那份保持一致。
+        (Some(src), Some(dst)) => {
+            let (block, result) = merge_memory_text(&dst.block(), &src.block(), &label);
+            (
+                render_memory_profile(&target, target_uid, &block, &now),
+                result,
+            )
+        }
+        // 目标不是新格式（不存在 / 纯 markdown）：源正文并入目标现有文本，再包成模板。
+        (Some(src), None) => {
+            let (block, result) = merge_memory_text(&target, &src.block(), &label);
+            (
+                render_memory_profile(&target, target_uid, &block, &now),
+                result,
+            )
+        }
+        // 源不是新格式、目标是：源全文并入目标 memoryBlock，避免破坏块结构。
+        (None, Some(dst)) => {
+            let (block, result) = merge_memory_text(&dst.block(), &source, &label);
+            (
+                render_memory_profile(&target, target_uid, &block, &now),
+                result,
+            )
+        }
+        // 两侧都是纯 markdown：保持既有行为。
+        (None, None) => merge_memory_text(&target, &source, &label),
+    };
+
+    // uid 内嵌错号本身也是缺陷：即使没有新增行，也要把 uid 修正为目标账号。
+    let uid_ok = match parse_memory_profile(&merged) {
+        Some(profile) => profile.uid() == Some(target_uid),
+        None => true,
+    };
+    if result.changed() || !uid_ok {
         // 采纳参考实现的「必须先备份」安全规则：改写目标前先留原文。
         // 只在**目标原本存在且实际改写**时备份 —— 目标不存在则无原文可留，
         // 幂等重跑也不会产生空备份。
@@ -521,5 +662,74 @@ mod tests {
         assert_eq!(shorten_uid("short"), "short");
         assert_eq!(shorten_uid("0123456789ab"), "0123456789ab");
         assert_eq!(shorten_uid("0123456789abcdef"), "0123456789ab...");
+    }
+
+    /// 客户端真实记忆文件的形状（含 `RAW_JSON` 块）。
+    fn sample_profile(uid: &str, block: &str) -> String {
+        format!(
+            "# User Memory Profile\n> Last updated: 2026-10-29T03:44:40.050Z\n> Version: 0\n\n\
+             ## Memory Block\n\n\n\n---\n\n<!-- RAW_JSON_START\n{{\n  \"uid\": \"{uid}\",\n  \
+             \"memoryBlock\": \"{block}\",\n  \"updatedAt\": \"2026-10-29T03:44:40.050Z\"\n}}\n\
+             RAW_JSON_END -->\n"
+        )
+    }
+
+    #[test]
+    fn render_profile_rewrites_uid_and_keeps_block_structure() {
+        let original = sample_profile("uid-a", "- 偏好表格");
+        let out = render_memory_profile(
+            &original,
+            "uid-b",
+            "- 偏好表格\n- 直接执行指令",
+            "2026-11-01T00:00:00.000Z",
+        );
+        let profile = parse_memory_profile(&out).expect("块结构必须保留");
+        assert_eq!(profile.uid(), Some("uid-b"), "内嵌 uid 必须是目标账号");
+        assert!(profile.block().contains("直接执行指令"));
+        assert!(out.contains("# User Memory Profile"));
+        assert!(
+            out.contains("> Last updated: 2026-11-01T00:00:00.000Z"),
+            "头部时间必须同步：{out}"
+        );
+    }
+
+    #[test]
+    fn render_profile_creates_template_for_missing_target() {
+        let out = render_memory_profile("", "uid-b", "- 偏好表格", "2026-11-01T00:00:00.000Z");
+        let profile = parse_memory_profile(&out).expect("目标不存在时必须按模板新建");
+        assert_eq!(profile.uid(), Some("uid-b"));
+        assert!(profile.block().contains("偏好表格"));
+        assert!(!out.contains("uid-a"), "不得残留源账号 uid");
+    }
+
+    #[test]
+    fn merge_files_rewrites_embedded_uid_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("buddy-switch-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let _guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+            let source_path = memory_file_for(Region::Cn, "uid-a");
+            std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+            std::fs::write(&source_path, sample_profile("uid-a", "- 偏好表格")).unwrap();
+
+            let first = merge_memory_files(Region::Cn, "uid-a", "uid-b").unwrap();
+            assert_eq!(first.appended, 1);
+            let target_path = memory_file_for(Region::Cn, "uid-b");
+            let target = std::fs::read_to_string(&target_path).unwrap();
+            let profile = parse_memory_profile(&target).expect("目标必须是内嵌 JSON 结构");
+            assert_eq!(profile.uid(), Some("uid-b"), "目标文件不得内嵌源账号 uid");
+            assert!(profile.block().contains("偏好表格"));
+
+            // 二次迁移：无新增且 uid 已正确 ⇒ 不写盘、不产生备份。
+            let second = merge_memory_files(Region::Cn, "uid-a", "uid-b").unwrap();
+            assert_eq!(second.appended, 0, "二次迁移必须幂等");
+            assert!(second.backup.is_none(), "无改写时不应产生备份");
+            assert_eq!(
+                std::fs::read_to_string(&target_path).unwrap(),
+                target,
+                "幂等重跑不得改动文件"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
