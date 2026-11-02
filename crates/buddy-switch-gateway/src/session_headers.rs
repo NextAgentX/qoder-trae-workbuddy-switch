@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 
+use axum::http::HeaderMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -140,6 +141,72 @@ pub fn conversation_id_of(body: &Value) -> Option<String> {
                 .or_else(|| metadata.get("conversationId"))
         })
         .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// 入站会话标识头的候选顺序（issue #150）。
+///
+/// - `x-claude-code-session-id`：Claude Code 自带的每会话 id；
+/// - `x-session-id`：透明代理（billion-context 等）在出站请求上盖的稳定每会话 id；
+/// - `x-conversation-id`：本网关自己对外约定过的透传头。
+///
+/// ★ 只认**会话级**标识。`metadata.user_id` 之类是用户维度，拿它做粘性键会把
+/// 一个人的所有会话粘到同一个账号上（等于关掉负载均衡），因此**刻意不读**。
+const SESSION_ID_HEADERS: [&str; 3] = [
+    "x-claude-code-session-id",
+    "x-session-id",
+    "x-conversation-id",
+];
+
+/// 读取**会话粘性键**（body 优先，头做回退）。
+///
+/// ## 为什么需要回退（issue #150）
+///
+/// `conversation_id_of` 只认 `metadata.conversation_id` —— 那是 Cursor / Cline /
+/// Continue / Cherry Studio 这类**直写 body** 的客户端的非标准扩展。Claude Code
+/// 把会话 id 放在 `x-claude-code-session-id` 头里，Codex（Responses wire）放在
+/// body 顶层 `session_id`。不认它们 ⇒ 没有粘性键 ⇒ 每请求在短名单里加权抽签
+/// ⇒ 各厂商账号各有独立 prefix cache，跨轮命中≈0，成本接近翻倍。
+///
+/// 优先级：body `metadata.conversation_id` → body `session_id`（顶层或 metadata）
+/// → 入站会话头（[`SESSION_ID_HEADERS`]）。body 优先是为了不改直写客户端的既有行为。
+pub fn session_key_of(body: &Value, headers: &HeaderMap) -> Option<String> {
+    if let Some(id) = conversation_id_of(body) {
+        return Some(id);
+    }
+    if let Some(id) = body_session_id_of(body) {
+        return Some(id);
+    }
+    SESSION_ID_HEADERS
+        .iter()
+        .find_map(|name| header_text(headers, name))
+}
+
+/// 读取单个请求头文本（去空白，空值视为未提供）。
+fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// 从请求体读取 Responses wire / Codex 的会话 id（顶层 `session_id`，或 `metadata` 内两种拼法）。
+fn body_session_id_of(body: &Value) -> Option<String> {
+    let top = body.get("session_id").and_then(Value::as_str);
+    let meta = body
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| {
+            metadata
+                .get("session_id")
+                .or_else(|| metadata.get("sessionId"))
+        })
+        .and_then(Value::as_str);
+    top.or(meta)
+        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
@@ -303,6 +370,69 @@ mod tests {
             conversation_id_of(&json!({"conversation_id": "x"})),
             None,
             "只认 metadata 内的键，不认顶层同名字段"
+        );
+    }
+
+    #[test]
+    fn session_key_falls_back_to_inbound_headers() {
+        // ★ issue #150：Claude Code 只发头、不发 body metadata ⇒ 必须有粘性键，
+        //   否则每请求抽签、上游 prefix cache 全废。
+        let mut headers = HeaderMap::new();
+        headers.insert("x-claude-code-session-id", "cc-session".parse().unwrap());
+        assert_eq!(
+            session_key_of(&json!({"model": "gpt-5"}), &headers).as_deref(),
+            Some("cc-session")
+        );
+
+        // 代理盖的通用头（billion-context 等）
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "proxy-session".parse().unwrap());
+        assert_eq!(
+            session_key_of(&json!({}), &headers).as_deref(),
+            Some("proxy-session")
+        );
+
+        // 空白头值视为未提供（否则会生成一个永不命中的粘性键）
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "   ".parse().unwrap());
+        assert_eq!(session_key_of(&json!({}), &headers), None);
+    }
+
+    #[test]
+    fn session_key_reads_responses_wire_session_id() {
+        // Codex（Responses wire）把会话 id 放 body 顶层
+        assert_eq!(
+            session_key_of(&json!({"session_id": "codex-1"}), &HeaderMap::new()).as_deref(),
+            Some("codex-1")
+        );
+        // 也接受 metadata 内的两种拼法
+        assert_eq!(
+            session_key_of(
+                &json!({"metadata": {"session_id": "meta-1"}}),
+                &HeaderMap::new()
+            )
+            .as_deref(),
+            Some("meta-1")
+        );
+    }
+
+    #[test]
+    fn session_key_prefers_body_over_headers() {
+        // 直写 body 的客户端行为不变：头里的值不得覆盖 body 的会话 id
+        let mut headers = HeaderMap::new();
+        headers.insert("x-claude-code-session-id", "from-header".parse().unwrap());
+        assert_eq!(
+            session_key_of(
+                &json!({"metadata": {"conversation_id": "from-body"}}),
+                &headers
+            )
+            .as_deref(),
+            Some("from-body")
+        );
+        // body 的 session_id 也优先于头
+        assert_eq!(
+            session_key_of(&json!({"session_id": "body-session"}), &headers).as_deref(),
+            Some("body-session")
         );
     }
 

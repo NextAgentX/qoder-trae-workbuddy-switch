@@ -152,7 +152,10 @@ pub async fn chat_for_region(
         crate::model_route::rewrite_body_model(&raw_source, &model)
     };
 
-    let conversation_id = relay::conversation_id_of(&parsed);
+    // ★ issue #150：粘性键不能只认 body 的 `metadata.conversation_id` —— Claude Code
+    //   发 `x-claude-code-session-id` 头、Codex 发 body `session_id`，都要认
+    //   （见 `session_headers::session_key_of`）。出站 `X-Conversation-ID` 同样用它。
+    let session_key = session_headers::session_key_of(&parsed, &headers);
     let turn_key = session_headers::turn_key(&parsed);
     let inbound_request_id = header_of(&headers, "x-conversation-request-id");
     let trace_id = header_of(&headers, "x-trace-id");
@@ -163,7 +166,7 @@ pub async fn chat_for_region(
         region,
         &raw,
         &model,
-        conversation_id.clone(),
+        session_key.clone(),
         turn_key.as_deref(),
         inbound_request_id.as_deref(),
         trace_id.clone(),
@@ -188,7 +191,7 @@ pub async fn chat_for_region(
                 region,
                 &raw,
                 &model,
-                conversation_id,
+                session_key.clone(),
                 turn_key.as_deref(),
                 inbound_request_id.as_deref(),
                 trace_id,
@@ -285,11 +288,7 @@ pub async fn chat_for_region(
             let failure = crate::failover::StreamFailure::new(auto_failover);
             // 粘性键用**客户端请求的模型**（与 `relay` 内部推导同一口径）——
             // 用降级后的目标模型算出来的键永远匹配不上，解绑会静默失效。
-            let sticky_key = relay::sticky_key_for(
-                region,
-                &model,
-                relay::conversation_id_of(&parsed).as_deref(),
-            );
+            let sticky_key = relay::sticky_key_for(region, &model, session_key.as_deref());
             let mut resp = if wants_stream {
                 // ★ 流式请求的日志**推迟到流结束**才写（`StreamingLogSink`）：写日志的
                 //   那一刻用量还没到达，此前只能把 token 写死 0（实测本机 200/200 条全 0）。
