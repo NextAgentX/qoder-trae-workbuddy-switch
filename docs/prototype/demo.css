@@ -1910,3 +1910,19 @@ td.num.full { color: var(--destructive); font-weight: 600; }
 .fb-slot { display: flex; align-items: center; gap: 6px; }
 .fb-slot .i { font-family: ui-monospace, Consolas, monospace; font-size: 10px; color: var(--muted-fg); width: 14px; text-align: right; flex: none; }
 .fb-slot select { flex: 1; min-width: 0; }
+
+/* issue #122 · 设置页顶部「这一页影响谁」提示条。
+   全局项与按作用域项的**视觉必须一致**（都是灰底提示），差别只在文案 ——
+   给全局项加醒目色会让它看起来像「警告」，而这不是警告，是归属说明。 */
+.scope-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--muted, #f5f5f5);
+  color: var(--muted-fg, #6b7280);
+  font-size: 12px;
+  line-height: 1.5;
+}

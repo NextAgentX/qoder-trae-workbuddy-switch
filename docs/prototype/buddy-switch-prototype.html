@@ -1919,6 +1919,22 @@ td.num.full { color: var(--destructive); font-weight: 600; }
 .fb-slot .i { font-family: ui-monospace, Consolas, monospace; font-size: 10px; color: var(--muted-fg); width: 14px; text-align: right; flex: none; }
 .fb-slot select { flex: 1; min-width: 0; }
 
+/* issue #122 · 设置页顶部「这一页影响谁」提示条。
+   全局项与按作用域项的**视觉必须一致**（都是灰底提示），差别只在文案 ——
+   给全局项加醒目色会让它看起来像「警告」，而这不是警告，是归属说明。 */
+.scope-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--muted, #f5f5f5);
+  color: var(--muted-fg, #6b7280);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 </style>
 </head>
 <body>
@@ -7707,9 +7723,20 @@ function drawerSession(key) {
 }
 
 /* ══════════════════════ 设置 ══════════════════════ */
+/* issue #122 · 每个设置分区的**作用域归属**。
+   判据（与真实现 `SETTINGS_SCOPE` 同一条）：看该分区的读写命令里有没有 scope / region。
+   全局 = 改一次对所有作用域生效；作用域 = 每个作用域各有一份。
+   ★ 用户的原话是「看起来不清楚哪些是改了影响所有作用域的」—— 这一条就是回答它。 */
+const SETTINGS_SCOPE = {
+  general: "global", account: "scoped", checkin: "global", gateway: "scoped",
+  schedule: "global", client: "scoped", cli: "global",
+  diagnostics: "global", logs: "global", backup: "global",
+};
+
 function viewSettings() {
   const p = curPlatform();
   const group = SETTINGS.find((s) => s.id === state.setSub);
+  const scopeKind = SETTINGS_SCOPE[group.id] || "global";
   return `<div class="page">
     <div class="page-head">
       <div><h1>设置</h1><p>${scopeLabel(state.scope)} · 按主题分区，不再是一屏长滚动</p></div>
@@ -7719,6 +7746,11 @@ function viewSettings() {
     <div class="split">
       <nav class="subnav">${SETTINGS.map((s) => `<button class="${state.setSub === s.id ? "on" : ""}" data-act="set-sub|${s.id}">${s.label}</button>`).join("")}</nav>
       <div class="split-main">
+        <div class="scope-note" data-settings-scope="${scopeKind}">
+          <span>${scopeKind === "global"
+            ? "全局设置 · 对所有作用域生效，切换作用域不会改变它"
+            : `仅影响当前作用域（${scopeLabel(state.scope)}）· 其他作用域有各自的设置`}</span>
+        </div>
         ${group.kind === "backup" ? viewBackup()
           : group.kind === "cli" ? viewCliIntegration()
           : group.groups.map((g) => {

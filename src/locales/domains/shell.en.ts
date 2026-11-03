@@ -192,6 +192,8 @@ export const en = {
   // ---- Settings sub-nav (P7 §3.9: 9 items, the 9th is "Backup & restore") ----
   "settings.subnav.aria": "Settings sections",
   "settings.subnav.general": "General",
+  "settings.scope.global": "Global setting · applies to every scope; switching scope will not change it",
+  "settings.scope.scoped": "Affects the current scope only ({scope}) · other scopes have their own settings",
   "settings.subnav.account": "Accounts & sign-in",
   "settings.subnav.checkin": "Check-in & credits",
   "settings.subnav.gateway": "Gateway",
