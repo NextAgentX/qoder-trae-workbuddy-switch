@@ -96,6 +96,7 @@ import { useScope } from "@/lib/use-scope";
 import { useAccountsStore } from "@/stores/accounts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n";
+import type { Translate } from "@/lib/i18n";
 import { daysUntil, nearestExpiringBatch } from "@/lib/credit-expiry";
 import {
   compareCreditPriority,
@@ -104,6 +105,27 @@ import {
 } from "@/lib/credit-priority";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { showUndoToast } from "@/lib/undo-toast";
+import { toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
+
+/**
+ * 资源包明细的**文案层**（WorkBuddy 词条域）。
+ *
+ * 过滤 / 排序 / 比例在 `credit-packs.ts` 里（四份实现合成一份）；这里只剩词条 ——
+ * 文案域本来就该按平台分开（混用会串），逻辑则不该。
+ */
+function WB_PACK_TEXTS(t: Translate): CreditPackTexts {
+  return {
+    remainingText: formatCredits,
+    totalText: formatCredits,
+    usedText: (value) => t("shared.credit.packUsed", { n: formatCredits(value) }),
+    expiryText: (expireAtMs, expired) =>
+      expired
+        ? t("wbAccounts.card.expired")
+        : expireAtMs !== null
+          ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(expireAtMs, t) })
+          : t("wbAccounts.card.forever"),
+  };
+}
 
 
 
@@ -1914,43 +1936,41 @@ function RegionPanel({ region }: { region: Region }) {
     ];
   }, [detail, creditMap, tokenTodayMap, tokenTodayTruncated, checkinMap, t]);
 
+  /**
+   * 资源包明细（issue #144 复核 · L1/L2）：**过滤 / 排序 / `ratio` 全部走
+   * `credit-packs.ts` 的共用装配**，这里只剩「字段改名 + 文案」。
+   *
+   * ⚠️ 三件事不再在这里写：① `remaining <= 0` 剔除；② 已过期垫底 → 到期升序 →
+   * 永久垫后；③ `ratio` 乘 100 并夹紧。此前这四份实现（三渠道页 + 聚合页）各自
+   * 决定，于是「同一账号的同一批包」在卡片与抽屉里排在不同位置。
+   *
+   * ⚠️ `expiringSoon` 改读**后端标记**（`EXPIRING_SOON_DAYS` = 7 天），不再前端写死
+   * 7 天窗口 —— 前端自设窗口正是 `credit-expiry.ts` 文件头那条规范要根除的东西。
+   */
   const detailPacks: DetailPack[] =
     detail && detailCredit?.ok
-      ? (detailCredit.resources ?? [])
-          .filter((resource) => resource.remaining > 0)
-          .map((resource, index) => ({ resource, index }))
-          .sort((left, right) => {
-            const leftExpiry = left.resource.expireAt ?? Number.POSITIVE_INFINITY;
-            const rightExpiry = right.resource.expireAt ?? Number.POSITIVE_INFINITY;
-            return leftExpiry === rightExpiry ? left.index - right.index : leftExpiry - rightExpiry;
-          })
-          .map(({ resource }) => ({
+      ? toDetailPacks(
+          (detailCredit.resources ?? []).map((resource) => ({
             key: `${resource.packageCode ?? resource.packageName ?? "pack"}-${resource.expireAt ?? "none"}`,
             // `packageName` / `packageCode` 声明为 `string | null`，但后端可能吐对象
             // （`api.ts` 只归一了账号字段，没归一 credit 的这两个）⇒ 直接当 React 子节点会
             // 卸载整棵树（issue #2 白屏）。过 `displayText` 出口归一，取不到再回落。
-            name: displayText(resource.packageName) || displayText(resource.packageCode) || t("wbAccounts.card.creditPackFallback"),
-            remainingText: formatCredits(resource.remaining),
-            totalText: formatCredits(resource.total),
-            usedText: t("wbAccounts.card.used", { n: formatCredits(resource.used) }),
-            expiryText: resource.expired
-              ? t("wbAccounts.card.expired")
-              : resource.expireAt
-                ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(resource.expireAt, t) })
-                : t("wbAccounts.card.forever"),
+            name:
+              displayText(resource.packageName) ||
+              displayText(resource.packageCode) ||
+              t("wbAccounts.card.creditPackFallback"),
+            total: resource.total,
+            remaining: resource.remaining,
+            used: resource.used,
+            /* WB 的 `CreditResource.expireAt` 是**毫秒**（后端 `parse_timestamp_ms`）——
+               与 Trae 的秒口径不同，见 `credit-packs.ts` 文件头第 ① 条。 */
+            expireAtMs: resource.expireAt,
             expired: resource.expired,
-            /* ⚠️ 与后端**逐条同口径**：`expired` 只覆盖「`expire_at <= now`」，
-               所以**下界 `> now` 不能省**。此前只判上界，靠的是「`expired` 恒等于
-               `expire_at <= now`」这条后端不变量 —— 隐式耦合，后端口径一改就会把
-               「已过期」的包标成「临期」。
-               `resource.expireAt` 是**毫秒**（`CreditResource.expireAt`，WB 侧口径）。 */
-            expiringSoon:
-              !resource.expired &&
-              resource.expireAt != null &&
-              resource.expireAt > now &&
-              resource.expireAt - now <= 7 * 86_400_000,
-            ratio: resource.total > 0 ? Math.min(100, Math.max(0, (resource.remaining / resource.total) * 100)) : 0,
-          }))
+            expiringSoon: resource.expiringSoon,
+          })),
+          WB_PACK_TEXTS(t),
+          now,
+        )
       : [];
   const detailPrograms: DetailProgramBadge[] = detail
     ? [

@@ -165,6 +165,32 @@ export interface DetailPack {
   expiringSoon: boolean;
   ratio: number;         // 0..100，已夹紧
 }
+```
+
+> ★ **装配只有一份**（issue #144 复核 · L1/L2）：`src/lib/credit-packs.ts` 的
+> `toDetailPacks()` 负责「`remaining > 0` / `total > 0` 过滤 → 已过期垫底 → 到期升序 →
+> `null`（永久）垫后 → `ratio` 夹紧到 0..100」，四个调用方（WB / Trae / Qoder 渠道页 +
+> 聚合页）只提供**平台适配**与**文案**（词条域本来就该分开，逻辑不该）。
+>
+> 量纲在入口归一成 `expireAtMs`（epoch 毫秒）：**Trae 上游给的是 Unix 秒**，只允许经
+> `secondsToMs()` 转一次 —— #144 那个「到期列全是 1970-01-22」就是漏了这一转。
+> 临期窗口只认后端 `expiringSoon` 标记（Qoder 无此标记 ⇒ 由适配层用
+> `qoder-packs.ts::EXPIRING_SOON_MS` 算），前端不自设窗口。
+>
+> 门禁 `scripts/check-credit-packs.mjs` 对上述四条跑**行为断言**（esbuild 转译生产代码），
+> 不再靠「文件里有没有某个字符串」。
+>
+> ★ **「已用 X」这一句归共用词条** `shared.credit.packUsed`（issue #144 复核 §3.4）：
+> 它不属于任何平台的词条域，四个装配点必须同一句。包名与到期文案仍按平台域给。
+>
+> ★★ **「打上游」的自动刷新默认关（opt-in）**（issue #133 复核 §3 / 方案 C）：
+> `credit-refresh-pref.ts` 是唯一开关（`localStorage`，默认 `false`），读者是
+> WB 统计页 / Qoder 积分页 / Qoder 账号页 + `useCreditAutoRefresh` 的余额轮询。
+> 只读本地快照的视图（Trae 积分 / 账号）**不接**这个开关 —— 它们零上游成本。
+> 判据与 `trae_checkin_enabled` / `qoder_checkin_enabled` 同源：**替用户花上游成本要 opt-in**。
+> 受影响的视图必须有手动入口，且顶部文案在关闭时要如实说「已关闭」（`shared.credit.autoOff`）。
+
+```ts
 
 /** 只读程序位徽标（**不是**切换控件）。 */
 export interface DetailProgramBadge {

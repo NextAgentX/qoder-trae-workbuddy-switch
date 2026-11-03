@@ -44,8 +44,9 @@ import type { UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
 import { balanceCaption, singleSideCaption } from "@/lib/chart-caption";
 import { formatDate } from "@/lib/format";
-import { CREDIT_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
+import { CREDITS_UPSTREAM_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
+import { useCreditRefreshPref } from "@/lib/credit-refresh-pref";
 import { displayText } from "@/lib/display-text";
 import { useT } from "@/lib/i18n";
 import type {
@@ -80,7 +81,7 @@ import { useAccountsStore } from "@/stores/accounts";
 const statisticsCache: Partial<Record<RegionFilter, { data: CreditStatistics; at: number }>> = {};
 
 /** 文案里的「每 N 分钟」从间隔常量推导 —— 常量改了文案不会说谎。 */
-const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000);
+const REFRESH_INTERVAL_MINUTES = Math.round(CREDITS_UPSTREAM_REFRESH_INTERVAL_MS / 60_000);
 
 /** 资源包名回落链 —— **必须**过 `displayText`（对象当 React 子节点 ⇒ 白屏，issue #2）。 */
 function resourceName(resource: CreditResource): string | null {
@@ -167,14 +168,24 @@ export default function CreditStatsPage({
   }, [load, region]);
 
   /**
-   * ★ 自动刷新（issue #133）：每 {@link CREDIT_REFRESH_INTERVAL_MS} 重取一轮，切后台即停。
+   * ★ 自动刷新（issue #133）：每 {@link CREDITS_UPSTREAM_REFRESH_INTERVAL_MS}（±20%）重取一轮，
+   * 切后台即停。
    *
-   * 间隔与账号卡的自动刷新**共用同一个常量** —— 两处各写一个数字，必然有一天两边不一致，
-   * 于是卡片上的余额和这一页的统计会在同一时刻互相矛盾。
+   * ★ **默认关，opt-in**（issue #133 复核 §3 / 方案 C）：这一页读的是官方用量统计，
+   * 一次刷新是「重、分页、近 30 天」的真请求 ⇒ 与 `trae_checkin` / `qoder_checkin` 同一条
+   * 判据「替用户做动作要 opt-in」。开关在「设置 · 通用 · 积分自动刷新」。
+   * 关掉之后手动入口仍在（顶部「刷新积分」）。
+   *
    * 静默刷新失败时保留上一次数据并显示错误条（`error`），不把整页清空。
    */
+  const upstreamAutoRefresh = useCreditRefreshPref((state) => state.upstreamAutoRefresh);
   const autoRefresh = useCallback(() => load(region, true, true), [load, region]);
-  useAutoRefreshWhenVisible(lastRefreshAt ?? 0, autoRefresh);
+  useAutoRefreshWhenVisible(
+    lastRefreshAt ?? 0,
+    autoRefresh,
+    CREDITS_UPSTREAM_REFRESH_INTERVAL_MS,
+    upstreamAutoRefresh,
+  );
 
   /* 请求口径的两份素材（与余额口径**并行**取；任一失败只让该来源缺席，
      不阻塞余额那一半 —— 余额是权威口径，不能因为附加维度取不到就整页报错）。 */
@@ -359,7 +370,9 @@ export default function CreditStatsPage({
           <div className="flex min-w-0 flex-wrap items-center gap-3">
             <span className="text-xs text-muted-foreground">{t("wbStats.credit.headBarHint")}</span>
             <span className="text-xs text-muted-foreground">
-              {t("shared.credit.autoEvery", { n: REFRESH_INTERVAL_MINUTES })}
+              {upstreamAutoRefresh
+                ? t("shared.credit.autoEvery", { n: REFRESH_INTERVAL_MINUTES })
+                : t("shared.credit.autoOff")}
             </span>
             {/* 「上次刷新」是**事实**（这份数字何时取的）：用绝对时刻而不是「x 分钟前」——
                 相对时间不会自己走，停在那里会一直说「刚刚」。 */}

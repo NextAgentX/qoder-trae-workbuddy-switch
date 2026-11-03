@@ -662,7 +662,13 @@ export const en = {
   "shared.refreshPart.credential": "Credential status refreshed",
   "shared.refreshPart.fail": "Refresh failed",
   // Credit auto-refresh cadence and "last refreshed" (shared by all three credit views, issue #133).
-  "shared.credit.autoEvery": "Auto-refreshes every {n} min",
+  // Two strings for two cost profiles: `autoEvery` hits upstream, `autoFollow` only re-reads
+  // the local snapshot. Jitter makes "every {n} min" false, hence "about".
+  "shared.credit.autoEvery": "Queries upstream about every {n} min",
+  "shared.credit.autoFollow": "Follows background sync",
+  "shared.credit.autoOff": "Auto-refresh is off (enable in Settings · General)",
+  /* The "Used X" line in the pack list — shared by all four assembly sites (issue #144 review §3.4). */
+  "shared.credit.packUsed": "Used {n}",
   "shared.credit.lastRefresh": "Last refreshed {time}",
   "shared.stat.credits": "Credits",
   "shared.stat.tokens": "Today's tokens",

@@ -15,6 +15,7 @@ import { Switch } from "@/components/ui/switch";
 import { UpdateInstallDialog } from "@/components/update-install-dialog";
 import { ScopeMark, scopeLabel } from "@/components/scope-chip";
 import * as api from "@/lib/api";
+import { useCreditRefreshPref } from "@/lib/credit-refresh-pref";
 import { isLocale, setLocale, useLocale, useT } from "@/lib/i18n";
 import { normalizeReleaseNotes } from "@/lib/release-notes";
 import { SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
@@ -705,6 +706,51 @@ function ScopeVisibilityCard() {
 }
 
 /**
+ * 积分自动刷新 —— **「打上游」默认关**（issue #133 复核 §3 / 方案 C）。
+ *
+ * ## 为什么要有这个开关
+ *
+ * 自动刷新此前是一刀切：`CREDIT_REFRESH_INTERVAL_MS` 同时管着「读本地快照」（零成本）与
+ * 「打上游」（真请求、可能被限流）。后者每 10 分钟替用户花一次上游成本，而用户从没要求过
+ * —— 与 `trae_checkin` / `qoder_checkin`（默认 `false`，理由写在 `default_schedule()`
+ * 注释里）是同一条判据：**替用户做动作要 opt-in**。
+ *
+ * 现在两类成本分开：本开关只管「打上游」那半边；只读本地快照的视图（Trae 两页）
+ * 不受影响，永远自动跟随。
+ *
+ * ⚠️ 默认关意味着升级后「余额不再自己动」。所以每个受影响的视图都必须有手动入口
+ * （WB 统计页「刷新积分」/ Qoder 积分页「重新查询」/ Qoder 账号卡「更多 → 刷新积分」），
+ * 且顶部文案要如实说「已关闭」——不能还写着「每 N 分钟自动刷新」。
+ */
+function CreditsAutoRefreshCard() {
+  const t = useT();
+  const upstreamAutoRefresh = useCreditRefreshPref((state) => state.upstreamAutoRefresh);
+  const setUpstreamAutoRefresh = useCreditRefreshPref((state) => state.setUpstreamAutoRefresh);
+
+  return (
+    <SettingsGroup id="settings-credit-auto-refresh" title={t("appSettings.creditAutoRefresh.groupTitle")}>
+      <CardContent className="space-y-0 p-0">
+        <SettingsFieldRow
+          label={t("appSettings.creditAutoRefresh.upstreamLabel")}
+          description={t("appSettings.creditAutoRefresh.upstreamDesc")}
+          htmlFor="credit-auto-upstream"
+          operational
+        >
+          <Switch
+            id="credit-auto-upstream"
+            checked={upstreamAutoRefresh}
+            onCheckedChange={setUpstreamAutoRefresh}
+          />
+        </SettingsFieldRow>
+        <p className="border-t border-border/60 px-4 py-3 text-xs text-muted-foreground">
+          {t("appSettings.creditAutoRefresh.hint")}
+        </p>
+      </CardContent>
+    </SettingsGroup>
+  );
+}
+
+/**
  * 五个应用级设置块，**门禁与原先设置页逐条对齐**。
  *
  * 门禁必须留在这里而不是交给调用方：本模块同时被设置页与顶栏 ⚙「应用设置」抽屉引用，
@@ -725,6 +771,7 @@ export function AppSettingsGroups({ variant = "card" }: { variant?: AppSettingsV
       {api.isDesktop() || api.isDemoMode() ? <StartupCard variant={variant} /> : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard variant={variant} />}
       <ScopeVisibilityCard />
+      <CreditsAutoRefreshCard />
     </>
   );
 }

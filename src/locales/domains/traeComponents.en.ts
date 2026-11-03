@@ -122,7 +122,6 @@ export const en = {
   "trae.comp.card.section.info": "Account info",
   "trae.comp.card.package.fallback": "Credit package",
   // P4: "used / expiry" text for the drawer `DetailPack` (mirrors the WorkBuddy drawer).
-  "trae.comp.card.package.used": "Used {n}",
   "trae.comp.card.package.expired": "Expired",
 
   // ---- Action explanations (used as menu-item titles) ----

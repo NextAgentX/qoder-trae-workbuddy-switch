@@ -488,6 +488,14 @@ export const en = {
   "appSettings.scopeVisibility.hint": "Hidden scopes disappear from the top bar and shortcuts; direct URLs remain accessible.",
   "appSettings.scopeVisibility.onlyOneLeft": "Only one scope left visible — cannot hide more",
 
+  // ---- Credit auto-refresh (app-settings.tsx; issue #133 review §3: upstream off by default) ----
+  "appSettings.creditAutoRefresh.groupTitle": "Credit auto-refresh",
+  "appSettings.creditAutoRefresh.upstreamLabel": "Query upstream automatically",
+  "appSettings.creditAutoRefresh.upstreamDesc":
+    "Queries upstream for balances and usage about every 10 minutes. These are real requests, so this is off by default — when off, data refreshes only on page load or when you click refresh.",
+  "appSettings.creditAutoRefresh.hint":
+    "Views that only re-read local snapshots (Trae credits / accounts) are unaffected: they make no upstream requests and keep following the background sync.",
+
   // ---- Shared fallbacks ----
   "common.unknownError": "Unknown error",
 

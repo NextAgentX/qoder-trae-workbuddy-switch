@@ -724,7 +724,15 @@ export const zh = {
   "shared.refreshPart.credential": "凭据状态已刷新",
   "shared.refreshPart.fail": "刷新失败",
   // 积分的自动刷新节拍与「上次刷新」（三平台积分视图共用，issue #133）。
-  "shared.credit.autoEvery": "每 {n} 分钟自动刷新",
+  // ★ 两句文案对应**两种成本**（issue #133 复核 §3）：`autoEvery` 是「打上游」的视图，
+  //   `autoFollow` 是「只读本地快照」的视图。有抖动之后「每 N 分钟」不再成立 ⇒ 用「约」。
+  "shared.credit.autoEvery": "约每 {n} 分钟向官方查询一次",
+  "shared.credit.autoFollow": "自动跟随后台同步",
+  "shared.credit.autoOff": "自动刷新已关闭（设置 · 通用可开启）",
+  /* 资源包明细里那一句「已用 X」。**四个装配点共用这一条**（issue #144 复核 §3.4）：
+     它不属于任何平台的词条域，而此前渠道页写「已用 13.99」、聚合页与 Qoder 写裸数字
+     —— 同一个抽屉里同一列有两种说法，用户无从判断那个数字是什么。 */
+  "shared.credit.packUsed": "已用 {n}",
   "shared.credit.lastRefresh": "上次刷新 {time}",
   // 详情抽屉顶部的四个指标块（文本在页面侧格式化，这里只提供标签与固定短语）。
   "shared.stat.credits": "积分",
