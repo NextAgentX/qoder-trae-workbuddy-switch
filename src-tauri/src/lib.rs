@@ -608,6 +608,9 @@ pub fn run() {
             commands::sync_session_replicas,
             // P8 · **分歧处理（覆盖式统一）**：目标分歧内容会被丢弃 ⇒ 前端二次确认（两宿主同步）。
             commands::unify_session_replicas,
+            commands::export_sessions_bundle,
+            commands::preview_sessions_bundle,
+            commands::import_sessions_bundle,
             commands::copy_sessions,
             // P14 S4a · VS Code 插件 / CodeBuddy IDE 的**会话仓**（只读枚举 + 加法复制；两宿主同步）。
             commands::list_vscode_sessions,

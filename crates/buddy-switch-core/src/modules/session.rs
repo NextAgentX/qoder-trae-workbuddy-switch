@@ -43,7 +43,7 @@ use crate::modules::config::{backup_dir, home_dir, now_ms, now_secs, utc_iso};
 use crate::modules::region::Region;
 
 /// 打开数据库并设置 busy_timeout（对照 Python `sqlite3.connect(timeout=5)`）。
-fn open_db(path: &Path, read_only: bool) -> Option<Connection> {
+pub(crate) fn open_db(path: &Path, read_only: bool) -> Option<Connection> {
     let conn = if read_only {
         Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?
     } else {
@@ -413,7 +413,7 @@ fn find_project_jsonl_in(projects: &Path, cid: &str) -> Option<PathBuf> {
 /// - 只收 `.jsonl`（`.file-rollback.ndjson` / `.meta.json` / 子代理文件不参与）；
 /// - **直立在先**：`projects/{cid}.jsonl` 与子目录里的同名文件并存时，直立赢；
 /// - 子目录兜底：`projects/{workspace}/{cid}.jsonl`。
-fn build_projects_index_for(region: Region) -> HashMap<String, PathBuf> {
+pub(crate) fn build_projects_index_for(region: Region) -> HashMap<String, PathBuf> {
     build_projects_index_in(&session_data_dir(region).join("projects"))
 }
 
@@ -2366,7 +2366,7 @@ fn dedup_report(cid: &str, existing: &str) -> Value {
 }
 
 /// 从源行里取进度展示名（`custom_title` 优先，与 [`session_display_title`] 同优先级）。
-fn row_title(cols: &[String], vals: &[rusqlite::types::Value]) -> String {
+pub(crate) fn row_title(cols: &[String], vals: &[rusqlite::types::Value]) -> String {
     let column = |name: &str| -> Option<String> {
         let index = cols.iter().position(|c| c == name)?;
         match vals.get(index)? {
@@ -2664,7 +2664,7 @@ fn target_jsonl_path_for(
 }
 
 /// 表的列名清单（按 PRAGMA 顺序）；表不存在时为空。
-fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
+pub(crate) fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
     let Ok(mut stmt) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
         return Vec::new();
     };
@@ -2680,7 +2680,7 @@ fn table_columns(conn: &Connection, table: &str) -> Vec<String> {
 ///
 /// 入参是**连接**而不是路径：批量管线的 phase 0 对每个会话都要读行，
 /// 连接由调用方（[`CopyBatch`]）整批复用 —— 旧实现每个会话各开一次库。
-fn read_session_row(
+pub(crate) fn read_session_row(
     conn: &Connection,
     cid: &str,
     source_uid: &str,
@@ -2784,7 +2784,7 @@ fn synthesize_session_row(dst_cols: &[String], plan: &CopyPlan) -> SessionRow {
 /// ★ 必须回读：`execute` 成功只代表语句没报错，触发器 / 约束 / 主键冲突都可能让行
 /// 落到别处或根本不存在，而「报告成功但目标账号看不到」正是本次事故的根因。
 /// Claw 拒绝发生在**读行**阶段（[`read_session_row`]），与本函数无关。
-fn insert_session_row(
+pub(crate) fn insert_session_row(
     dst: &Connection,
     dst_cols: &[String],
     cols: &[String],

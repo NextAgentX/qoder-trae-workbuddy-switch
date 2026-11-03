@@ -11,8 +11,8 @@ use buddy_switch_core::modules::{
     account, app_prefs, auth_file, backup, cache, capability, checkin, client_limits,
     client_settings, codebuddy_cli, config, credit_usage, credits, diagnostics, export_import,
     gateway_ledger, migrate, oauth, process, programs, qoder, refresh, region::Region,
-    region::RegionFilter, rotate, runtime_log, session, skill, switch, token_daily, token_stats,
-    trae, travel, update, vscode_session,
+    region::RegionFilter, rotate, runtime_log, session, session_bundle, skill, switch, token_daily,
+    token_stats, trae, travel, update, vscode_session,
 };
 use tauri::{Emitter, Manager};
 // P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
@@ -1664,6 +1664,71 @@ pub async fn unify_session_replicas(
     })
     .await
     .map_err(|error| format!("统一会话副本失败: {error}"))
+}
+
+/// POST /api/sessions/export —— 把选中的会话导出成一个 JSON 包（issue #87）。
+///
+/// **只读**：不写客户端任何数据。导出包是单个 `.json`（不是 zip —— 见
+/// `session_bundle` 模块头：本仓不为一个搬运功能引入解压攻击面）。
+///
+/// async + spawn_blocking：要读会话正文（可能几十 MB）并写文件，不跑在 Tauri 主线程上。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn export_sessions_bundle(
+    uid: String,
+    session_ids: Vec<String>,
+    out_path: String,
+    region: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    if uid.trim().is_empty() {
+        return Err("缺少 uid".to_string());
+    }
+    if session_ids.is_empty() {
+        return Err("请至少选择一个会话".to_string());
+    }
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        session_bundle::export_sessions_for(
+            region,
+            &uid,
+            &session_ids,
+            std::path::Path::new(&out_path),
+        )
+    })
+    .await
+    .map_err(|error| format!("导出会话失败: {error}"))?
+}
+
+/// GET /api/sessions/import/preview —— 只读导出包，回报条数与标题（导入前给用户确认）。
+#[tauri::command]
+pub async fn preview_sessions_bundle(path: String) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_bundle::preview_bundle(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|error| format!("读取导出包失败: {error}"))?
+}
+
+/// POST /api/sessions/import —— 把导出包里的会话**作为新会话**写进指定账号（issue #87）。
+///
+/// ★ 只做加法：每条都生成新 id，绝不覆盖既有会话（见 `session_bundle` 的硬约束）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn import_sessions_bundle(
+    uid: String,
+    path: String,
+    region: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    if uid.trim().is_empty() {
+        return Err("缺少 uid".to_string());
+    }
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        session_bundle::import_sessions_for(region, &uid, std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|error| format!("导入会话失败: {error}"))?
 }
 
 /// 把前端的 `client` 字符串解析成 [`vscode_session::ExtClient`]。
