@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   CircleCheck,
   FolderOpen,
+  Info,
   Loader2,
   Play,
   RefreshCw,
@@ -27,7 +28,12 @@ import {
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { SettingsFieldRow, SettingsGroup, SettingsRow } from "@/components/settings-primitives";
 // P7 T03：设置页子导航（9 项）+「备份与恢复」分区 + 通用设置分组（与侧栏弹层共用）。
-import { parseSettingsSubnav, SettingsSubnav, type SettingsSubnavId } from "@/components/settings/settings-subnav";
+import {
+  parseSettingsSubnav,
+  SETTINGS_SCOPE,
+  SettingsSubnav,
+  type SettingsSubnavId,
+} from "@/components/settings/settings-subnav";
 import { BackupSection } from "@/components/settings/backup-section";
 import { CodebuddyCliCard } from "@/components/settings/codebuddy-cli-card";
 import { CacheSection } from "@/components/settings/cache-section";
@@ -1693,6 +1699,21 @@ export default function SettingsPage() {
 
         {/* 主区 `.split-main`：分区之间 16px（原型 `:378`）。 */}
         <div className="min-w-0 flex-1 space-y-4">
+          {/* issue #122：说清「这一页的设置影响谁」。
+              用户原话：「现在修改设置，看起来不清楚哪些是改了影响所有作用域的」。
+              判据在 `SETTINGS_SCOPE`（按读写命令是否带 scope/region 归类），这里只负责显性化。 */}
+          <div
+            data-settings-scope={SETTINGS_SCOPE[section]}
+            className="flex items-start gap-2 rounded-[10px] bg-muted px-3 py-2 text-[12px] leading-[1.5] text-muted-foreground"
+          >
+            <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            <span>
+              {SETTINGS_SCOPE[section] === "global"
+                ? t("settings.scope.global")
+                : t("settings.scope.scoped", { scope: scopeLabel(t, scope) })}
+            </span>
+          </div>
+
           {section === "general" && <AppSettingsGroups />}
 
           {section === "account" && (

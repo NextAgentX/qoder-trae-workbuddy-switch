@@ -1126,6 +1126,36 @@ async function boot(query) {
     return "6/6 默认全选";
   });
 
+  /* ★ issue #122 · 设置页必须说清「这一页影响谁」。
+     用户原话：「现在修改设置，看起来不清楚哪些是改了影响所有作用域的」。
+     变异：把 `SETTINGS_SCOPE` 全改成 "global" ⇒ 第二条（按作用域项）红；
+     把提示条整块删掉 ⇒ 第一条红。 */
+  check("★ issue #122 设置页标明归属：全局项写「对所有作用域生效」，按作用域项写「仅影响当前作用域」", () => {
+    const note = dB.querySelector("[data-settings-scope]");
+    if (!note) throw new Error("设置页没有作用域归属提示条");
+    if (note.dataset.settingsScope !== "global") {
+      throw new Error(`备份页应为全局项，实际 ${note.dataset.settingsScope}`);
+    }
+    const text = flat(note.textContent);
+    if (!text.includes("对所有作用域生效")) throw new Error("全局项没写「对所有作用域生效」：" + text);
+
+    /* 切到「账号与登录」（按作用域）—— 同一页面的另一侧也要说清。 */
+    bByAct("set-sub|account").click();
+    const note2 = dB.querySelector("[data-settings-scope]");
+    if (!note2) throw new Error("切分区后提示条消失了（归属说明不该只在一个分区里有）");
+    if (note2.dataset.settingsScope !== "scoped") {
+      throw new Error(`账号页应为按作用域项，实际 ${note2.dataset.settingsScope}`);
+    }
+    const text2 = flat(note2.textContent);
+    if (!text2.includes("仅影响当前作用域")) {
+      throw new Error("按作用域项没写「仅影响当前作用域」：" + text2);
+    }
+    /* ★ 切回备份页：后面还有一组备份断言，它们默认「当前就在备份页」。
+       少了这一句，它们会因为读到账号页而集体假红（本条一开始就踩了这个坑）。 */
+    bByAct("set-sub|backup").click();
+    return "全局 / 按作用域两侧文案都在";
+  });
+
   check("★ 备份页：每个作用域行都有名字（不是空串）", () => {
     /* 曾经的缺陷：`BACKUP_SECTIONS` 取 `SCOPES[id].label`，而 SCOPES 的条目**只有**
        `platform` + `region`（没有 `label`）⇒ `esc(undefined)` 归成空串 ⇒

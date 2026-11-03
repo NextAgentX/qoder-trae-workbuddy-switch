@@ -70,6 +70,50 @@ export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
   { id: "backup", labelKey: "settings.subnav.backup" },
 ];
 
+/**
+ * 每个设置分区的**作用域归属**（issue #122）。
+ *
+ * ## 为什么需要这张表
+ *
+ * 设置页始终带着作用域徽标，但里面的项目其实**分两类**：一类改了对所有作用域生效
+ * （主题、签到、计划任务、备份…），一类只影响当前作用域（账号库、网关密钥、模型清单…）。
+ * 界面此前不区分，用户的原话是「**看起来不清楚哪些是改了影响所有作用域的**」。
+ *
+ * ## 判据（可复核，不是拍脑袋）
+ *
+ * 看该项的**读写命令签名**里有没有 `scope` / `region`：
+ *
+ * | 分区 | 归属 | 依据 |
+ * |:--|:--|:--|
+ * | general | 全局 | 主题 / 语言在 `localStorage`，托盘在 `app_prefs.json`（单份） |
+ * | account | 作用域 | 账号库按产品 + 区域分家（每个作用域一份） |
+ * | checkin | 全局 | `save_auto_checkin_config(config)` —— **无 scope 参数** |
+ * | gateway | 作用域 | 密钥 / 模型清单 / 图片能力均按产品线（+ 区域） |
+ * | schedule | 全局 | `save_schedule_config(config)` —— 无 scope 参数 |
+ * | client | 作用域 | 客户端探测按作用域（探测命令带 region） |
+ * | network | 作用域 | Qoder 出站代理**按区域** |
+ * | cli | 全局 | CodeBuddy CLI 凭据只有一份（`~/.codebuddy/settings.json`） |
+ * | diagnostics | 全局 | 诊断 / 权限是本机能力，与作用域无关 |
+ * | logs | 全局 | 运行日志按本机存一份 |
+ * | backup | 全局 | `save_auto_backup_config(config)` —— 无 scope 参数 |
+ *
+ * ★ 改这张表之前先按同一判据复核命令签名：**别凭界面观感归类** ——
+ * 「页面上带着作用域徽标」不等于「这项按作用域存」。
+ */
+export const SETTINGS_SCOPE: Record<SettingsSubnavId, "global" | "scoped"> = {
+  general: "global",
+  account: "scoped",
+  checkin: "global",
+  gateway: "scoped",
+  schedule: "global",
+  client: "scoped",
+  network: "scoped",
+  cli: "global",
+  diagnostics: "global",
+  logs: "global",
+  backup: "global",
+};
+
 /** 从 URL 段解析设置分区（非法值 fail-closed 回 `general`，不把任意串塞进 state）。 */
 export function parseSettingsSubnav(raw: string | null): SettingsSubnavId {
   return SETTINGS_SUBNAV.some((item) => item.id === raw) ? (raw as SettingsSubnavId) : "general";

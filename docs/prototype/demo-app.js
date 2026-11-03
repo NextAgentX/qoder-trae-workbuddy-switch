@@ -4244,9 +4244,20 @@ function drawerSession(key) {
 }
 
 /* ══════════════════════ 设置 ══════════════════════ */
+/* issue #122 · 每个设置分区的**作用域归属**。
+   判据（与真实现 `SETTINGS_SCOPE` 同一条）：看该分区的读写命令里有没有 scope / region。
+   全局 = 改一次对所有作用域生效；作用域 = 每个作用域各有一份。
+   ★ 用户的原话是「看起来不清楚哪些是改了影响所有作用域的」—— 这一条就是回答它。 */
+const SETTINGS_SCOPE = {
+  general: "global", account: "scoped", checkin: "global", gateway: "scoped",
+  schedule: "global", client: "scoped", cli: "global",
+  diagnostics: "global", logs: "global", backup: "global",
+};
+
 function viewSettings() {
   const p = curPlatform();
   const group = SETTINGS.find((s) => s.id === state.setSub);
+  const scopeKind = SETTINGS_SCOPE[group.id] || "global";
   return `<div class="page">
     <div class="page-head">
       <div><h1>设置</h1><p>${scopeLabel(state.scope)} · 按主题分区，不再是一屏长滚动</p></div>
@@ -4256,6 +4267,11 @@ function viewSettings() {
     <div class="split">
       <nav class="subnav">${SETTINGS.map((s) => `<button class="${state.setSub === s.id ? "on" : ""}" data-act="set-sub|${s.id}">${s.label}</button>`).join("")}</nav>
       <div class="split-main">
+        <div class="scope-note" data-settings-scope="${scopeKind}">
+          <span>${scopeKind === "global"
+            ? "全局设置 · 对所有作用域生效，切换作用域不会改变它"
+            : `仅影响当前作用域（${scopeLabel(state.scope)}）· 其他作用域有各自的设置`}</span>
+        </div>
         ${group.kind === "backup" ? viewBackup()
           : group.kind === "cli" ? viewCliIntegration()
           : group.groups.map((g) => {

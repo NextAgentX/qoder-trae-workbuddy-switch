@@ -183,6 +183,8 @@ export const zh = {
   // 应用级导航，与 appSettings 同域（§5：应用级放 shell，备份功能放 backup）。
   "settings.subnav.aria": "设置分区",
   "settings.subnav.general": "通用",
+  "settings.scope.global": "全局设置 · 对所有作用域生效，切换作用域不会改变它",
+  "settings.scope.scoped": "仅影响当前作用域（{scope}）· 其他作用域有各自的设置",
   "settings.subnav.account": "账号与登录",
   "settings.subnav.checkin": "签到与积分",
   "settings.subnav.gateway": "网关",
