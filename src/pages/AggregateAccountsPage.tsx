@@ -27,7 +27,7 @@
  * 被筛没（整页空态 + 显示全部）。三者混用会让用户以为账号被删了。
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AlertTriangle, ListTree, RotateCw, SearchX, UserPlus } from "lucide-react";
 import { toast } from "sonner";
@@ -83,6 +83,7 @@ import {
   type AggregateAccount,
 } from "@/lib/aggregate-accounts";
 import { useAggregateAccounts } from "@/lib/use-aggregate-accounts";
+import { qoderPackKey, qoderPacksNotice, useQoderWebPacks } from "@/lib/use-qoder-web-packs";
 import {
   checkinTodayOf,
   signalKeyOf,
@@ -189,15 +190,15 @@ export default function AggregateAccountsPage() {
    */
   const [oauthRegion, setOauthRegion] = useState<Region | null>(null);
   /**
-   * Qoder 逐资源包明细（issue #111）：按 `scope:uid` 缓存。
+   * Qoder 逐资源包明细（issue #111）：与 Qoder 账号页**共用同一份控制器**
+   * （`useQoderWebPacks`，issue #144 复核 §4.5）。
    *
    * 与其它平台不同，这份数据**不在账号快照里**（走网页会话，仅桌面端 + 需登录一次），
-   * 所以只能打开抽屉时按需拉。拿不到就不渲染资源包区块 —— 聚合页不做登录引导
-   * （那一步在 Qoder 账号页），这里只负责「有就展示」。
+   * 所以只能打开抽屉时按需拉。★ 此前聚合页只自己拉一次 `qoderWebCreditPacks`，
+   * 拿不到就什么都不渲染 ⇒ 用户看到一片空白，既不知道「登录一次就能看」，也没有按钮。
+   * 现在引导（`packsNotice`）与动作（读取 / 退出）都在抽屉里，与账号页逐字相同。
    */
-  const [qoderPackMap, setQoderPackMap] = useState<Record<string, api.QoderWebCreditPacks>>({});
-  /** 上次取数时刻（TTL 用 ref：改它不该触发重渲染）。 */
-  const qoderPackFetchedAt = useRef<Record<string, number>>({});
+  const qoderWebPacks = useQoderWebPacks(t);
 
   /** WorkBuddy 主程序位（「WB」那枚）的切换：与账号页同一个向导（含会话迁移）。 */
   const [wbSwitchDialog, setWbSwitchDialog] = useState<{
@@ -1240,38 +1241,41 @@ export default function AggregateAccountsPage() {
     );
   }
 
-  const detailAccount = detailRef ? accounts.find((item) => item.ref === detailRef) : undefined;
+  /**
+   * 抽屉的**详情对象** = 账号 + 它的信号（issue #144 复核 §4.1）。
+   *
+   * ★ 为什么在这里合并：渠道页打开抽屉时，存进 state 的是**卡片渲染时那份已合并的数据**
+   * （`{ ...account, creditPackages: credits.packages[uid] }`）；而聚合页此前拿的是
+   * `list_account_views_for` 的原样输出 —— 后端根本不产出 `creditPackages` 键。
+   * 于是同一句 `detail.creditPackages` 在两边一个拿到数据、一个拿到 `null`（#144 的
+   * 「资源包区块恒为空」就是这么来的）。
+   *
+   * 现在「账号 + 信号」的合并**只发生在这里**（聚合页这一侧），下游 `aggregate-detail`
+   * 读的字段与渠道页**同名同义**，不必再额外传一个 `traePacks` 侧信道。
+   */
+  const detailAccount = useMemo<AggregateAccount | undefined>(() => {
+    const base = detailRef ? accounts.find((item) => item.ref === detailRef) : undefined;
+    if (!base || base.platform !== "trae") return base;
+    const packs = signalsByScope.get(base.scope)?.traeCredits.get(base.data.userId) ?? null;
+    /* 信号层没取到 ⇒ **保持原样**（不写 `null`）：账号视图里的值同样是「不知道」，
+       两者都只会让区块不渲染，没必要用一个 `null` 去覆盖可能的旧值。 */
+    if (packs === null) return base;
+    return { ...base, data: { ...base.data, creditPackages: packs } };
+  }, [accounts, detailRef, signalsByScope]);
 
   /**
-   * 打开抽屉时按需拉 Qoder 逐包（TTL 60s，与 Qoder 账号页同一个常量口径）。
+   * 打开抽屉时按需拉 Qoder 逐包。
    *
+   * TTL / 并发去重都在控制器里（与 Qoder 账号页同一份），这里只负责「打开就取一次」。
    * ★ 依赖用 `detailRef` 而不是 `detailAccount`：后者是每次渲染新算出来的对象，
    *   把它放进依赖会让 effect 每渲染一次都跑一遍（页面渲染很频繁）。
    */
   useEffect(() => {
     if (!detailAccount || detailAccount.platform !== "qoder") return;
-    const uid = detailAccount.data.uid;
-    const scope = detailAccount.scope;
-    const key = `${scope}:${uid}`;
-    const last = qoderPackFetchedAt.current[key] ?? 0;
-    if (Date.now() - last < 60_000) return;
-    let cancelled = false;
-    api
-      .qoderWebCreditPacks(scope, uid)
-      .then((result) => {
-        if (cancelled) return;
-        qoderPackFetchedAt.current[key] = Date.now();
-        setQoderPackMap((prev) => ({ ...prev, [key]: result }));
-      })
-      .catch(() => {
-        /* 静默：拿不到逐包不是错误，抽屉不渲染该区块即可。 */
-      });
-    return () => {
-      cancelled = true;
-    };
+    void qoderWebPacks.load(detailAccount.scope, detailAccount.data.uid);
+    // `load` 是纯读取 + setState，只按抽屉指向的账号变化触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailRef]);
-
 
   /**
    * 抽屉的数据上下文。**只喂页面已经有的东西**（不为了打开抽屉再发一轮请求）：
@@ -1313,19 +1317,13 @@ export default function AggregateAccountsPage() {
       qoderPrograms: detailAccount.platform === "qoder" ? signals?.qoderPrograms : undefined,
       qoderPacks:
         detailAccount.platform === "qoder"
-          ? qoderPackMap[`${detailAccount.scope}:${detailAccount.data.uid}`]
-          : undefined,
-      /* ★ issue #144：逐包明细同样要按 uid 从信号层合并 —— 抽屉此前读的是未合并的
-         `account.data`，而账号视图根本不含 `creditPackages` ⇒ Trae 的资源包区块恒为空。 */
-      traePacks:
-        detailAccount.platform === "trae"
-          ? (signals?.traeCredits.get(detailAccount.data.userId) ?? null)
+          ? qoderWebPacks.packs[qoderPackKey(detailAccount.scope, detailAccount.data.uid)]
           : undefined,
     };
   }, [
     creditOf,
     detailAccount,
-    qoderPackMap,
+    qoderWebPacks.packs,
     signalsByScope,
     t,
     wbCnStatus,
@@ -1982,6 +1980,13 @@ export default function AggregateAccountsPage() {
         stats={detailAccount && detailContext ? aggregateDetailStats(detailAccount, detailContext) : []}
         sections={detailAccount && detailContext ? aggregateDetailSections(detailAccount, detailContext) : []}
         packs={detailAccount && detailContext ? aggregateDetailPacks(detailAccount, detailContext) : []}
+        /* ★ issue #144 复核 §4.5：聚合页此前**没有**这条引导 —— 逐包为空时用户只看到
+           一个空白区块，分不清「没登录」与「真的没有包」。文案与动作与 Qoder 账号页同源。 */
+        packsNotice={
+          detailAccount?.platform === "qoder"
+            ? qoderPacksNotice(t, qoderWebPacks, detailAccount.scope, detailAccount.data.uid)
+            : null
+        }
         programs={detailAccount && detailContext ? aggregateDetailPrograms(detailAccount, detailContext) : []}
         /* ★ issue #89 · 4.3：这三项的数据与回调**都已经在页面里**（`refreshPart` 是卡片
            正在用的同一个函数），此前只是没传给抽屉 ⇒ 抽屉只能看不能刷。 */
