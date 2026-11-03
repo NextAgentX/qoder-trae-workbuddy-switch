@@ -7564,6 +7564,10 @@ function viewSessions() {
         <button class="${state.sessionSort === "recent" ? "on" : ""}" data-act="sess-sort|recent">最近更新</button>
         <button class="${state.sessionSort === "oldest" ? "on" : ""}" data-act="sess-sort|oldest">最早更新</button>
       </div>
+      <!-- issue #87 · 会话导出 / 导入。导出**只读**（只写用户选的那个文件）；
+           导入会先预览再确认 —— 写用户数据的东西不许一步到位。 -->
+      <button class="btn" data-act="sess-export" title="把当前账号的全部会话导出成一个 JSON 包（备份 / 换机用）">${ICON.download}导出会话</button>
+      <button class="btn ghost" data-act="sess-import" title="从导出的 JSON 包里恢复会话（只新增，不覆盖）">${ICON.upload}导入会话</button>
     </div>
 
     ${sorted.length ? `<div class="sg-grid">${cards}</div>` : empty}
@@ -10532,6 +10536,17 @@ document.addEventListener("click", (e) => {
     case "sess-client": stop(); state.sessionClient = a1; state.sessionFilter = "all"; renderContent(); break;
     case "sess-filter": stop(); state.sessionFilter = a1; renderContent(); break;
     case "sess-sort": stop(); state.sessionSort = a1; renderContent(); break;
+    /* issue #87 · 会话导出 / 导入（导出只读；导入先预览再确认、只做加法）。 */
+    case "sess-export":
+      stop();
+      toast("ok", "已导出 12 个会话", "BuddySwitch-sessions-2026-11-03.json",
+        null, "原型说明：导出只写你选的那个文件，不碰客户端数据");
+      break;
+    case "sess-import":
+      stop();
+      toast("ok", "已导入 12 个会话", "只新增，不覆盖任何现有会话",
+        null, "原型说明：同一份包导两次就是两份 —— 不做静默去重");
+      break;
     case "sess-open": stop(); drawerSession(a1); break;
     case "sess-sync": stop(); closeDrawer(); toast("ok", "已同步 1 个会话组", "新增内容已追加到落后的副本（加法，不删除原有内容）"); break;
     case "sess-unify": stop(); closeDrawer(); toast("ok", "已统一到其他副本", "保留了你选择的那一份"); break;

@@ -1258,6 +1258,33 @@ async function boot(query) {
     return opts.join(" / ");
   });
 
+  /* ★ issue #87 · 会话导出 / 导入：两个入口都要在，且**导入必须说清「只新增」**。
+     变异：把 `case "sess-import"` 的文案改成「已导入」而不提「只新增，不覆盖」
+     ⇒ 第二条断言红（用户最怕的是「导入把我的历史冲掉了」）。 */
+  check("★ issue #87 会话页有「导出 / 导入」两个入口", () => {
+    const exp = sByAct("sess-export");
+    const imp = sByAct("sess-import");
+    if (!exp) throw new Error("没有「导出会话」入口");
+    if (!imp) throw new Error("没有「导入会话」入口");
+    if (!sFlat(exp.textContent).includes("导出")) throw new Error("导出按钮文案不含「导出」");
+    if (!sFlat(imp.textContent).includes("导入")) throw new Error("导入按钮文案不含「导入」");
+    return "导出 + 导入";
+  });
+
+  check("★ issue #87 点导出 / 导入都有反馈，且导入明说「只新增，不覆盖」", () => {
+    const toasts = dSG.querySelector("#toasts");
+    sByAct("sess-export").click();
+    const afterExport = sFlat(toasts.textContent);
+    if (!afterExport.includes("已导出")) throw new Error("点导出没有成功反馈");
+
+    sByAct("sess-import").click();
+    const afterImport = sFlat(toasts.textContent);
+    if (!afterImport.includes("已导入")) throw new Error("点导入没有结果反馈");
+    /* 用户最怕「导入把我的历史冲掉」⇒ 文案必须把「只新增」说在前面。 */
+    if (!afterImport.includes("只新增")) throw new Error("导入反馈没说清「只新增，不覆盖」");
+    return "导出/导入均有反馈 · 导入文案含「只新增」";
+  });
+
   /* 注：「结构化空态」的断言已合并到下面 Trae 的那条（原版依赖的「空客户端」是演示数据里
      一个不存在的客户端，已随 v2.6 的客户端清单修正一并删除）。 */
 

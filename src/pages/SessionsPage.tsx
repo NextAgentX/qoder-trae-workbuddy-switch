@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Download, Filter, GitBranch, Loader2, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  Download,
+  Filter,
+  GitBranch,
+  Loader2,
+  RefreshCw,
+  Upload,
+} from "lucide-react";
 import { toast } from "sonner";
 
+import { ImportSessionsDialog } from "@/components/sessions/import-sessions-dialog";
 import { SessionReplicaView } from "@/components/sessions/session-replica-view";
 import { UnifyReplicasDialog } from "@/components/sessions/unify-replicas-dialog";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
@@ -17,7 +26,11 @@ import { platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf } from "@/lib/scope";
 import { buildSyncItems, buildUnifyItems, failedGroupKeys } from "@/lib/session-replicas";
 import type { SessionGroupStatus, SessionGroupView } from "@/lib/session-replicas";
-import type { SyncSessionReplicaItem, UnifySessionReplicaItem } from "@/lib/types";
+import type {
+  SessionBundlePreview,
+  SyncSessionReplicaItem,
+  UnifySessionReplicaItem,
+} from "@/lib/types";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 import { useScope } from "@/lib/use-scope";
 import { useSessionsStore } from "@/stores/sessions";
@@ -301,6 +314,111 @@ export default function SessionsPage() {
     void runUnify(buildUnifyItems(unifyTarget, keepSessionId), keepSessionId);
   }
 
+  /* ── issue #87 · 会话导出 / 导入 ────────────────────────────────────────
+   *
+   * 导出**只读**（只写用户选的那个文件）⇒ 不需要二次确认；
+   * 导入**写用户数据** ⇒ 先预览、再在 [`ImportSessionsDialog`] 里确认。
+   *
+   * 两处都用**动态 import** 取 `plugin-dialog`：浏览器构建（webui / 演示站）里
+   * 那条路径不存在，静态引入会让整页崩（与 `trae-client-import.tsx` 同一纪律）。
+   */
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [importPath, setImportPath] = useState<string | null>(null);
+  const [importPreview, setImportPreview] = useState<SessionBundlePreview | null>(null);
+
+  /** 导出当前账号**全部会话**到一个 JSON 包（v1 口径：备份 / 换机不需要先学多选）。 */
+  async function exportBundle() {
+    if (bundleBusy) return;
+    setBundleBusy(true);
+    // 文件对话框只有桌面端有：webui / 演示站里这条 import 会失败 —— **说清楚**，
+    // 不要让用户看到一句模块解析错误（与 `trae-client-import.tsx` 同一纪律）。
+    let save: (options?: unknown) => Promise<string | null>;
+    try {
+      ({ save } = (await import("@tauri-apps/plugin-dialog")) as unknown as {
+        save: (options?: unknown) => Promise<string | null>;
+      });
+    } catch {
+      toast.error(t("sessions.bundle.desktopOnly"));
+      setBundleBusy(false);
+      return;
+    }
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const picked = await save({
+        defaultPath: `BuddySwitch-sessions-${stamp}.json`,
+        filters: [{ name: "JSON", extensions: ["json"] }],
+      });
+      if (typeof picked !== "string" || picked.trim() === "") return;
+      const report = await api.exportSessionsBundle(picked, { region });
+      // 跳过的会话**必须说出来**：勾了 10 个只出去 8 个而不吭声，是最坏的那种静默。
+      const skipped = report.skipped.length;
+      toast.success(
+        skipped > 0
+          ? t("sessions.bundle.exportOkPartial", { n: report.exported, skipped })
+          : t("sessions.bundle.exportOk", { n: report.exported }),
+        { description: report.path },
+      );
+    } catch (error) {
+      toast.error(t("sessions.bundle.exportFailed"), { description: api.asError(error) });
+    } finally {
+      setBundleBusy(false);
+    }
+  }
+
+  /** 选包 → **只读预览**（不写任何东西）→ 交给对话框确认。 */
+  async function pickBundle() {
+    if (bundleBusy) return;
+    setBundleBusy(true);
+    let open: (options?: unknown) => Promise<string | string[] | null>;
+    try {
+      ({ open } = (await import("@tauri-apps/plugin-dialog")) as unknown as {
+        open: (options?: unknown) => Promise<string | string[] | null>;
+      });
+    } catch {
+      toast.error(t("sessions.bundle.desktopOnly"));
+      setBundleBusy(false);
+      return;
+    }
+    try {
+      const picked = await open({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] });
+      if (typeof picked !== "string" || picked.trim() === "") return;
+      const preview = await api.previewSessionsBundle(picked);
+      setImportPath(picked);
+      setImportPreview(preview);
+    } catch (error) {
+      toast.error(t("sessions.bundle.previewFailed"), { description: api.asError(error) });
+    } finally {
+      setBundleBusy(false);
+    }
+  }
+
+  /** 对话框确认后才真正写盘（只做加法：每条生成新 id，不覆盖任何现有会话）。 */
+  async function confirmImport() {
+    if (!importPath || bundleBusy) return;
+    setBundleBusy(true);
+    try {
+      const report = await api.importSessionsBundle(importPath, { region });
+      await load(region);
+      if (report.failedCount > 0) {
+        toast.warning(
+          t("sessions.bundle.importPartial", {
+            n: report.importedCount,
+            failed: report.failedCount,
+          }),
+          { description: report.failed[0]?.error },
+        );
+      } else {
+        toast.success(t("sessions.bundle.importOk", { n: report.importedCount }));
+      }
+      setImportPreview(null);
+      setImportPath(null);
+    } catch (error) {
+      toast.error(t("sessions.bundle.importFailed"), { description: api.asError(error) });
+    } finally {
+      setBundleBusy(false);
+    }
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-[1240px] flex-col gap-5 px-7 pt-[26px] pb-[60px]">
       {/* 页头（原型 `viewSessions`）：28px 标题 + 作用域副标题 + 只读 scope-chip。
@@ -330,6 +448,30 @@ export default function SessionsPage() {
             {t("sessions.sync.all", { count: allSyncable.reduce((n, x) => n + x.items.length, 0) })}
           </Button>
         ) : null}
+        {/* issue #87：会话导出 / 导入。导出**只读**（只写用户选的那个文件）；
+            导入会先弹预览确认 —— 写用户数据的东西不许一步到位。 */}
+        <Button
+          size="default"
+          variant="outline"
+          disabled={bundleBusy}
+          data-bundle="export"
+          title={t("sessions.bundle.exportHint")}
+          onClick={() => void exportBundle()}
+        >
+          <Download className="size-3.5" aria-hidden="true" />
+          {t("sessions.bundle.export")}
+        </Button>
+        <Button
+          size="default"
+          variant="ghost"
+          disabled={bundleBusy}
+          data-bundle="import"
+          title={t("sessions.bundle.importHint")}
+          onClick={() => void pickBundle()}
+        >
+          <Upload className="size-3.5" aria-hidden="true" />
+          {t("sessions.bundle.import")}
+        </Button>
         <ScopeChip scope={scope} />
       </header>
 
@@ -459,6 +601,19 @@ export default function SessionsPage() {
         }}
         busy={unifyBusy}
         onConfirm={confirmUnify}
+      />
+
+      {/* issue #87：导入确认（`preview` 为 null ⇒ 不渲染）。 */}
+      <ImportSessionsDialog
+        preview={importPreview}
+        busy={bundleBusy}
+        onOpenChange={(open) => {
+          if (!open) {
+            setImportPreview(null);
+            setImportPath(null);
+          }
+        }}
+        onConfirm={() => void confirmImport()}
       />
     </div>
   );

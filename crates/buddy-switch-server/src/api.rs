@@ -2533,15 +2533,13 @@ async fn api_export_sessions_bundle(Json(body): Json<Value>) -> Response {
     {
         return json_err(error, StatusCode::FORBIDDEN);
     }
+    // uid 省略 ⇒ 当前登录账号（与 Tauri 侧同契约）。
     let uid = body
         .get("uid")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if uid.is_empty() {
-        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
-    }
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let session_ids: Vec<String> = body
         .get("sessionIds")
         .and_then(Value::as_array)
@@ -2553,9 +2551,6 @@ async fn api_export_sessions_bundle(Json(body): Json<Value>) -> Response {
                 .collect()
         })
         .unwrap_or_default();
-    if session_ids.is_empty() {
-        return json_err("请至少选择一个会话".to_string(), StatusCode::BAD_REQUEST);
-    }
     let Some(out_path) = body
         .get("outPath")
         .and_then(Value::as_str)
@@ -2564,12 +2559,26 @@ async fn api_export_sessions_bundle(Json(body): Json<Value>) -> Response {
         return json_err("缺少 outPath".to_string(), StatusCode::BAD_REQUEST);
     };
     let region = parse_region(body.get("region").and_then(Value::as_str));
-    match session_bundle::export_sessions_for(
-        region,
-        &uid,
-        &session_ids,
-        std::path::Path::new(out_path),
-    ) {
+    let uid = match uid {
+        Some(uid) => uid,
+        None => match session::current_user_uid_for(region) {
+            Some(uid) => uid,
+            None => {
+                return json_err(
+                    "读不到当前登录账号（客户端是否已登录？）".to_string(),
+                    StatusCode::BAD_REQUEST,
+                )
+            }
+        },
+    };
+    let path = std::path::Path::new(out_path);
+    // 空 sessionIds ⇒ 导出该账号全部会话（v1 口径，与 Tauri 侧一致）。
+    let result = if session_ids.is_empty() {
+        session_bundle::export_all_for(region, &uid, path)
+    } else {
+        session_bundle::export_sessions_for(region, &uid, &session_ids, path)
+    };
+    match result {
         Ok(report) => json_ok(report),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
@@ -2608,12 +2617,9 @@ async fn api_import_sessions_bundle(Json(body): Json<Value>) -> Response {
     let uid = body
         .get("uid")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if uid.is_empty() {
-        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
-    }
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let Some(path) = body
         .get("path")
         .and_then(Value::as_str)
@@ -2622,6 +2628,18 @@ async fn api_import_sessions_bundle(Json(body): Json<Value>) -> Response {
         return json_err("缺少 path".to_string(), StatusCode::BAD_REQUEST);
     };
     let region = parse_region(body.get("region").and_then(Value::as_str));
+    let uid = match uid {
+        Some(uid) => uid,
+        None => match session::current_user_uid_for(region) {
+            Some(uid) => uid,
+            None => {
+                return json_err(
+                    "读不到当前登录账号（客户端是否已登录？）".to_string(),
+                    StatusCode::BAD_REQUEST,
+                )
+            }
+        },
+    };
     match session_bundle::import_sessions_for(region, &uid, std::path::Path::new(path.trim())) {
         Ok(report) => json_ok(report),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
