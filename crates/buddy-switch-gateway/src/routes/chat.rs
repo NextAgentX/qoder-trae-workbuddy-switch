@@ -225,6 +225,7 @@ pub async fn chat_for_region(
                     total_ms: elapsed,
                     prompt_tokens: 0,
                     completion_tokens: 0,
+                    cached_tokens: 0,
                     credit: 0.0,
                     stream: true,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -255,6 +256,7 @@ pub async fn chat_for_region(
                     total_ms: elapsed_ms,
                     prompt_tokens: 0,
                     completion_tokens: 0,
+                    cached_tokens: 0,
                     credit: 0.0,
                     stream: wants_stream,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -312,6 +314,7 @@ pub async fn chat_for_region(
                         total_ms: 0,
                         prompt_tokens: 0,
                         completion_tokens: 0,
+                        cached_tokens: 0,
                         credit: 0.0,
                         stream: true,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -398,6 +401,7 @@ pub async fn chat_for_region(
                         total_ms: started.elapsed().as_millis() as i64,
                         prompt_tokens: accumulator.prompt_tokens.unwrap_or(0),
                         completion_tokens: accumulator.completion_tokens.unwrap_or(0),
+                        cached_tokens: 0,
                         credit: accumulator.credit.unwrap_or(0.0),
                         stream: false,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -465,6 +469,7 @@ async fn envelope_error_response(
             total_ms: elapsed_ms,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
             credit: 0.0,
             stream: false,
             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。

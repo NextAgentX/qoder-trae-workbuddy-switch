@@ -69,6 +69,14 @@ pub struct RequestMeta {
     pub total_ms: i64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// ★ issue #154：**命中上游前缀缓存的输入 token**（`usage` 里那几家的不同字段，
+    /// 由 [`crate::protocol::usage_tap::extract_usage`] 归一）。
+    ///
+    /// 为什么进日志：命中率与**选号**强相关（缓存按账号分家），而此前日志只有
+    /// promptTokens / completionTokens ⇒ 「命中率掉了」与「换号了」这两件事在日志里
+    /// **无法 join**，只能靠客户端界面上的一个百分比去猜。
+    /// `0` = 上游没报 / 本入口拿不到（不是「没命中」）。
+    pub cached_tokens: u64,
     /// **上游上报的积分消耗**（`usage.credit`，与客户端 jsonl 的 `usage.credit` 同单位）。
     ///
     /// 为什么进日志：用量页的「积分」视图要按**来源**拆消耗（客户端 / 网关），
@@ -108,6 +116,7 @@ impl RequestMeta {
             "totalMs": self.total_ms,
             "promptTokens": self.prompt_tokens,
             "completionTokens": self.completion_tokens,
+            "cachedTokens": self.cached_tokens,
             "credit": self.credit,
             "stream": self.stream,
             // ★ issue #76：调用方的 Key id。**无 Key 时写 `null`**（不是省略这个键）——
@@ -175,13 +184,14 @@ impl StreamingLogSink {
 impl UsageSink for StreamingLogSink {
     fn finish(&self, usage: Option<UsageReport>) {
         // 与 `PoolUsageSink` 相反：**没有用量也要落日志**（用量填 0）。
-        let (prompt_tokens, completion_tokens, credit) = match usage {
+        let (prompt_tokens, completion_tokens, cached_tokens, credit) = match usage {
             Some(usage) => (
                 u64::try_from(usage.prompt_tokens).unwrap_or(0),
                 u64::try_from(usage.completion_tokens).unwrap_or(0),
+                u64::try_from(usage.cached_tokens).unwrap_or(0),
                 usage.credit,
             ),
-            None => (0, 0, 0.0),
+            None => (0, 0, 0, 0.0),
         };
         // ★ issue #129：流中途失败 ⇒ 日志写**真实**状态码 + 摘要。
         //   不这么做的话，一次「账号在流中途挂掉」在日志页会显示成成功的 200 请求
@@ -195,6 +205,7 @@ impl UsageSink for StreamingLogSink {
             RequestMeta {
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
                 credit,
                 status,
                 error,
@@ -311,6 +322,7 @@ mod tests {
             total_ms: 3456,
             prompt_tokens: 10,
             completion_tokens: 2,
+            cached_tokens: 0,
             credit: 0.0,
             stream: false,
             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -352,6 +364,8 @@ mod tests {
                 "totalMs",
                 "promptTokens",
                 "completionTokens",
+                // ★ issue #154：缓存命中数（与选号 join 用）。
+                "cachedTokens",
                 "credit",
                 "stream",
                 // ★ issue #76：调用方 Key id 与**归属台账**（`null` = 无 Key / 老条目）。
@@ -384,6 +398,7 @@ mod tests {
             total_ms: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
             credit: 0.0,
             stream: true,
             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
