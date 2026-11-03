@@ -48,6 +48,16 @@ export function shortTime(seconds: number | null): string {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/**
+ * `shortTime` 的**毫秒**版。
+ *
+ * Trae 上游给的是秒，但归一之后（`credit-packs.ts` 的 `expireAtMs`）全仓只传毫秒。
+ * 有这一层，调用方就不必各自记得「这里要除回 1000」—— 少一次心算，少一次 #144。
+ */
+export function shortTimeFromMs(ms: number | null): string {
+  return shortTime(ms === null ? null : ms / 1000);
+}
+
 /** JWT 状态 → Badge 变体与文案。 */
 export function jwtBadge(status: TraeJwtStatus, hours: number | null, t: Translate) {
   switch (status) {

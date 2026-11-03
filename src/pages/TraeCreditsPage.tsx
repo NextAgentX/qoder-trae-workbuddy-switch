@@ -70,7 +70,7 @@ import {
 import type { TraeRegionId, TraeTokenScope, TraeTokenStatistics } from "@/lib/trae-types";
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
-import { CREDIT_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
+import { CREDITS_LOCAL_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import { balanceCurve, expiryBuckets } from "@/lib/usage-charts";
 import { usageWindowSpanDays } from "@/lib/usage-window";
@@ -78,8 +78,11 @@ import { usageWindowSpanDays } from "@/lib/usage-window";
 /** 原型的两个环形只展示**前 6 名**账号（`accountShare.slice(0, 6)`）。 */
 const ACCOUNT_SHARE_LIMIT = 6;
 
-/** 文案里的「每 N 分钟」从间隔常量推导（与账号卡、WB 积分页同一个来源）。 */
-const REFRESH_INTERVAL_MINUTES = Math.round(CREDIT_REFRESH_INTERVAL_MS / 60_000);
+/**
+ * ⚠️ 这一页**没有**「每 N 分钟」的文案了（issue #133 复核 §3）：它读的是**本地快照**，
+ * 不向上游发请求 ⇒ 「向官方查询一次」是假话，「跟随后台同步」才是事实。文案见
+ * `shared.credit.autoFollow`。
+ */
 
 /**
  * 「用量 · 积分」视图（Trae 分区）。
@@ -126,13 +129,15 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
   );
 
   /**
-   * ★ 每 10 分钟自动重取一轮（issue #133），无手动操作也能看到新余额。
+   * ★ 自动跟随本地快照（issue #133），无手动操作也能看到新余额。
    *
    * ⚠️ 只**重读快照**，不调 `traeRefreshCredits`（那才是「去上游同步」，会真的打接口）。
    * 上游同步由后台 `TRAE_CREDITS_REFRESH_INTERVAL_MS` 循环负责 —— 页面跟着把新读数读回来即可。
-   * 两者各司其职：页面每 10 分钟读一次，后台每 10 分钟写一次，节奏同源。
+   *
+   * ★ 节拍用 `CREDITS_LOCAL_REFRESH_INTERVAL_MS`（3 分钟）：读本地库零上游成本，比
+   * 后台的 10 分钟写循环更密也无所谓 —— 页面只是「更及时地看到后台刚写进去的数」。
    */
-  useAutoRefreshWhenVisible(snapshotAt, revalidateSnapshot);
+  useAutoRefreshWhenVisible(snapshotAt, revalidateSnapshot, CREDITS_LOCAL_REFRESH_INTERVAL_MS);
 
   /**
    * 原型的两个环形（账号 Token 占比 / 网关状态码分布）数据在 **Token 统计**里，
@@ -247,7 +252,7 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
       <div className="flex min-w-0 flex-wrap items-center gap-3">
         <span className="text-[11px] text-muted-foreground">{t("trae.stats.credits.subtitle")}</span>
         <span className="text-[11px] text-muted-foreground">
-          {t("shared.credit.autoEvery", { n: REFRESH_INTERVAL_MINUTES })}
+          {t("shared.credit.autoFollow")}
         </span>
         {/* 「上次刷新」是事实：这份数字何时读到的（绝对时刻；相对时间不会自己走）。 */}
         {snapshotAt > 0 && (

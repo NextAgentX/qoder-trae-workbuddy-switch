@@ -146,6 +146,8 @@ export const zh = {
   "aggregate.detail.qoderPackBonus": "赠送资源包",
   "aggregate.detail.qoderPackDedicated": "专用资源包",
   "aggregate.detail.packFallbackName": "积分包",
+  "aggregate.detail.packExpired": "已到期",
+  "aggregate.detail.packForever": "长期有效",
   "aggregate.detail.groupSaved": "分组已保存",
 
   // ---- 导出（按作用域：导出命令是单 scope 的）----

@@ -160,7 +160,6 @@ export const zh = {
   "trae.comp.card.section.info": "账号信息",
   "trae.comp.card.package.fallback": "积分包",
   // P4：抽屉 `DetailPack` 的「已用 / 到期」文本（与 WorkBuddy 抽屉同形，各平台自持文案）。
-  "trae.comp.card.package.used": "已用 {n}",
   "trae.comp.card.package.expired": "已到期",
 
   // ---- 操作说明（作为「更多」菜单项的 `title`）----

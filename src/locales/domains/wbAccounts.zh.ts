@@ -202,7 +202,6 @@ export const zh = {
   // `expiringSoonTitle` / `resourceTitle` / `creditsUnit` / `noCredits` 一并删除。
   "wbAccounts.card.expired": "已到期",
   "wbAccounts.card.expiresOn": "到期 {date}",
-  "wbAccounts.card.used": "已用 {n}",
 
   // ---- 详情抽屉的信息区块（由 AccountsPage 装配后注入）----
   "wbAccounts.detail.section.account": "账号信息",

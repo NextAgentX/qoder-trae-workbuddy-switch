@@ -499,6 +499,14 @@ export const zh = {
   "appSettings.scopeVisibility.hint": "隐藏的作用域不再出现在顶栏菜单与快捷键中；URL 直达仍可达。",
   "appSettings.scopeVisibility.onlyOneLeft": "只剩一个作用域可见——不能再隐藏更多",
 
+  // ---- 积分自动刷新（app-settings.tsx；issue #133 复核 §3：打上游默认关）----
+  "appSettings.creditAutoRefresh.groupTitle": "积分自动刷新",
+  "appSettings.creditAutoRefresh.upstreamLabel": "自动向官方查询",
+  "appSettings.creditAutoRefresh.upstreamDesc":
+    "开启后每约 10 分钟向官方查询一次余额与用量。这是真的上游请求，默认关闭 —— 关闭时只在打开页面或手动点击时更新。",
+  "appSettings.creditAutoRefresh.hint":
+    "只读本地快照的视图（Trae 积分 / 账号）不受此开关影响：它们不产生上游请求，会一直自动跟随后台同步。",
+
   // ---- 通用兜底 ----
   "common.unknownError": "未知错误",
 

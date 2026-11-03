@@ -132,6 +132,8 @@ export const en = {
   "aggregate.detail.qoderPackBonus": "Bonus pack",
   "aggregate.detail.qoderPackDedicated": "Dedicated pack",
   "aggregate.detail.packFallbackName": "Credit pack",
+  "aggregate.detail.packExpired": "Expired",
+  "aggregate.detail.packForever": "Never expires",
   "aggregate.detail.groupSaved": "Group saved",
 
   // ---- Export (per scope: the export command is single-scope) ----

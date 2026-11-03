@@ -166,7 +166,6 @@ export const en = {
   // prototype card (top / chips / metrics / actions only).
   "wbAccounts.card.expired": "Expired",
   "wbAccounts.card.expiresOn": "Expires {date}",
-  "wbAccounts.card.used": "Used {n}",
 
   // ---- Detail drawer sections (assembled by AccountsPage) ----
   "wbAccounts.detail.section.account": "Account",
