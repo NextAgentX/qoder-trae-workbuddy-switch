@@ -144,6 +144,28 @@ pub fn export_sessions_for(
     }))
 }
 
+/// 导出**当前账号的全部会话**（v1 的默认口径：备份 / 换机不需要先学会多选）。
+///
+/// 会话清单走 [`session::list_sessions_for_user_for`] —— 与「会话页看到的那一份」
+/// 同源，**不另写一套筛选**（两套筛选迟早对不上：页面看得到 12 个、导出只出 10 个）。
+pub fn export_all_for(region: Region, uid: &str, out_path: &Path) -> Result<Value, String> {
+    let listed = session::list_sessions_for_user_for(region, uid);
+    let cids: Vec<String> = listed
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if cids.is_empty() {
+        return Err("当前账号没有可导出的会话".to_string());
+    }
+    export_sessions_for(region, uid, &cids, out_path)
+}
+
 /// 预览：只读包并回报**摘要**（UI 在真正导入前给用户看一眼）。
 pub fn preview_bundle(bundle_path: &Path) -> Result<Value, String> {
     let bundle = read_bundle(bundle_path)?;

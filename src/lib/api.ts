@@ -1576,12 +1576,15 @@ export function copyExtSessions(
  * `outPath` 由前端用系统「另存为」对话框拿到（后端不弹窗）。
  */
 export function exportSessionsBundle(
-  uid: string,
-  sessionIds: string[],
   outPath: string,
-  region?: string,
+  options: { uid?: string; sessionIds?: string[]; region?: string } = {},
 ): Promise<SessionBundleExportReport> {
-  return call("export_sessions_bundle", { uid, sessionIds, outPath, region });
+  return call("export_sessions_bundle", {
+    outPath,
+    uid: options.uid,
+    sessionIds: options.sessionIds ?? [],
+    region: options.region,
+  });
 }
 
 /**
@@ -1601,11 +1604,10 @@ export function previewSessionsBundle(path: string): Promise<SessionBundlePrevie
  * 逐条结果在 `imported[]` / `failed[]` 里，失败必带原因。
  */
 export function importSessionsBundle(
-  uid: string,
   path: string,
-  region?: string,
+  options: { uid?: string; region?: string } = {},
 ): Promise<SessionBundleImportReport> {
-  return call("import_sessions_bundle", { uid, path, region });
+  return call("import_sessions_bundle", { path, uid: options.uid, region: options.region });
 }
 
 /**

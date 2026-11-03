@@ -1666,34 +1666,42 @@ pub async fn unify_session_replicas(
     .map_err(|error| format!("统一会话副本失败: {error}"))
 }
 
-/// POST /api/sessions/export —— 把选中的会话导出成一个 JSON 包（issue #87）。
+/// POST /api/sessions/export —— 把会话导出成一个 JSON 包（issue #87）。
 ///
 /// **只读**：不写客户端任何数据。导出包是单个 `.json`（不是 zip —— 见
 /// `session_bundle` 模块头：本仓不为一个搬运功能引入解压攻击面）。
 ///
+/// ## `uid` / `sessionIds` 都可省略
+///
+/// - 省略 `uid` ⇒ 取**当前登录账号**（与 `list_sessions` 同一口径：本仓不猜
+///   「用户指的是哪个账号」，但这里"当前账号"是有权威来源的）。
+/// - 省略 `sessionIds`（或空数组）⇒ 导出该账号**全部会话** —— v1 的口径：
+///   备份 / 换机不需要先学会多选。传了 id 就只导那几个（留给后续的多选 UI）。
+///
 /// async + spawn_blocking：要读会话正文（可能几十 MB）并写文件，不跑在 Tauri 主线程上。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn export_sessions_bundle(
-    uid: String,
-    session_ids: Vec<String>,
     out_path: String,
+    uid: Option<String>,
+    session_ids: Option<Vec<String>>,
     region: Option<String>,
 ) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
-    if uid.trim().is_empty() {
-        return Err("缺少 uid".to_string());
-    }
-    if session_ids.is_empty() {
-        return Err("请至少选择一个会话".to_string());
-    }
     let region = parse_region(region.as_deref());
+    let explicit_uid = uid.filter(|value| !value.trim().is_empty());
+    let ids = session_ids.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
-        session_bundle::export_sessions_for(
-            region,
-            &uid,
-            &session_ids,
-            std::path::Path::new(&out_path),
-        )
+        let uid = match explicit_uid {
+            Some(uid) => uid,
+            None => session::current_user_uid_for(region)
+                .ok_or_else(|| "读不到当前登录账号（客户端是否已登录？）".to_string())?,
+        };
+        let path = std::path::Path::new(&out_path);
+        if ids.is_empty() {
+            session_bundle::export_all_for(region, &uid, path)
+        } else {
+            session_bundle::export_sessions_for(region, &uid, &ids, path)
+        }
     })
     .await
     .map_err(|error| format!("导出会话失败: {error}"))?
@@ -1710,21 +1718,25 @@ pub async fn preview_sessions_bundle(path: String) -> Result<Value, String> {
     .map_err(|error| format!("读取导出包失败: {error}"))?
 }
 
-/// POST /api/sessions/import —— 把导出包里的会话**作为新会话**写进指定账号（issue #87）。
+/// POST /api/sessions/import —— 把导出包里的会话**作为新会话**写进当前账号（issue #87）。
 ///
 /// ★ 只做加法：每条都生成新 id，绝不覆盖既有会话（见 `session_bundle` 的硬约束）。
+/// `uid` 省略 ⇒ 当前登录账号。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn import_sessions_bundle(
-    uid: String,
     path: String,
+    uid: Option<String>,
     region: Option<String>,
 ) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
-    if uid.trim().is_empty() {
-        return Err("缺少 uid".to_string());
-    }
     let region = parse_region(region.as_deref());
+    let explicit_uid = uid.filter(|value| !value.trim().is_empty());
     tauri::async_runtime::spawn_blocking(move || {
+        let uid = match explicit_uid {
+            Some(uid) => uid,
+            None => session::current_user_uid_for(region)
+                .ok_or_else(|| "读不到当前登录账号（客户端是否已登录？）".to_string())?,
+        };
         session_bundle::import_sessions_for(region, &uid, std::path::Path::new(&path))
     })
     .await
