@@ -77,6 +77,9 @@ import type {
   ExtClientId,
   ExtCopyItem,
   ExtCopyResponse,
+  SessionBundleExportReport,
+  SessionBundleImportReport,
+  SessionBundlePreview,
   ExtDiffResponse,
   ExtSessionsResponse,
   ExtSyncResponse,
@@ -402,6 +405,11 @@ const ROUTES: Record<string, Route> = {
   // ★ **破坏性写操作**（目标原有的分歧内容会被丢弃）⇒ 不进演示只读命令表。
   unify_session_replicas: { method: "POST", path: "/api/sessions/unify" },
   copy_sessions: { method: "POST", path: "/api/sessions/copy" },
+  // issue #87 · **会话导出 / 导入**（单文件 JSON 包）。
+  // 导出**只读**（只写用户选的落点文件）；导入是**加法写**（每条都生成新 id，不覆盖）。
+  export_sessions_bundle: { method: "POST", path: "/api/sessions/export" },
+  preview_sessions_bundle: { method: "GET", path: "/api/sessions/import/preview" },
+  import_sessions_bundle: { method: "POST", path: "/api/sessions/import" },
   // 客户端限流台账（**只读**观测：账号 × 模型 × 恢复时刻）。
   client_limits: { method: "GET", path: "/api/client/limits" },
   // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入。
@@ -1556,6 +1564,48 @@ export function copyExtSessions(
   items: ExtCopyItem[],
 ): Promise<ExtCopyResponse> {
   return call("copy_vscode_sessions", { client, sourceUid, targetUid, items });
+}
+
+/**
+ * issue #87 · **导出会话**成一个 JSON 包（**只读**：不碰客户端数据）。
+ *
+ * 包是单个 `.json` 而不是 zip —— 本仓不为一个搬运功能引入解压攻击面（见后端
+ * `session_bundle` 模块头）。体积约为正文的两倍（JSON 转义），换来的是**人可读、
+ * 可 diff、可用任何工具检查**。
+ *
+ * `outPath` 由前端用系统「另存为」对话框拿到（后端不弹窗）。
+ */
+export function exportSessionsBundle(
+  uid: string,
+  sessionIds: string[],
+  outPath: string,
+  region?: string,
+): Promise<SessionBundleExportReport> {
+  return call("export_sessions_bundle", { uid, sessionIds, outPath, region });
+}
+
+/**
+ * issue #87 · **预览导出包**（只读）：条数 + 前 50 条的标题。
+ *
+ * 导入是写操作，所以先让用户看一眼「这个包里到底有什么」，再决定要不要导。
+ */
+export function previewSessionsBundle(path: string): Promise<SessionBundlePreview> {
+  return call("preview_sessions_bundle", { path });
+}
+
+/**
+ * issue #87 · **导入导出包**：把包里的会话**作为新会话**写进 `uid`。
+ *
+ * ★ **只做加法**：每条都生成新 id，绝不覆盖既有会话。同一份包导两次 ⇒ 两份副本
+ * （**不静默去重** —— 「我以为覆盖了，结果两份」比「我以为合并了，结果只有一份」更难查）。
+ * 逐条结果在 `imported[]` / `failed[]` 里，失败必带原因。
+ */
+export function importSessionsBundle(
+  uid: string,
+  path: string,
+  region?: string,
+): Promise<SessionBundleImportReport> {
+  return call("import_sessions_bundle", { uid, path, region });
 }
 
 /**

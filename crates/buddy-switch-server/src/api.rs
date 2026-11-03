@@ -20,7 +20,8 @@ use buddy_switch_core::modules::{
     account, auth_file, backup, checkin, client_limits, client_settings, codebuddy_cli, config,
     credit_usage, credits, diagnostics, export_import, gateway_ledger, migrate, oauth, process,
     programs, qoder, refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler,
-    session, skill, switch, token_daily, token_stats, trae, travel, update, vscode_session,
+    session, session_bundle, skill, switch, token_daily, token_stats, trae, travel, update,
+    vscode_session,
 };
 use buddy_switch_gateway::unified::UnifiedGatewayConfig;
 use buddy_switch_gateway::GatewayProduct;
@@ -254,6 +255,13 @@ fn api_routes() -> Router {
         .route("/api/sessions/sync", post(api_session_sync))
         .route("/api/sessions/unify", post(api_session_unify))
         .route("/api/sessions/copy", post(api_copy_sessions))
+        // issue #87 · 会话导出 / 导入（单文件 JSON 包；导入是加法写）。
+        .route("/api/sessions/export", post(api_export_sessions_bundle))
+        .route(
+            "/api/sessions/import/preview",
+            get(api_preview_sessions_bundle),
+        )
+        .route("/api/sessions/import", post(api_import_sessions_bundle))
         // P14 S4a · VS Code 插件 / CodeBuddy IDE 的会话仓（只读枚举 + 加法复制）。
         .route("/api/vscode-sessions", get(api_vscode_sessions))
         .route("/api/vscode-sessions/copy", post(api_copy_vscode_sessions))
@@ -2511,6 +2519,113 @@ async fn api_session_unify(Json(body): Json<Value>) -> Response {
         .cloned()
         .unwrap_or_default();
     json_ok(session::unify_session_replicas_for(region, &items))
+}
+
+/// POST /api/sessions/export —— 把选中的会话导出成一个 JSON 包（issue #87）。
+///
+/// 与 Tauri 侧 `commands::export_sessions_bundle` **同契约**（两宿主同步）。
+/// body：`{ uid, sessionIds: [...], outPath, region? }`。
+///
+/// **只读**：不碰客户端数据，只写用户指定的落点文件（单文件 JSON，不是 zip ——
+/// 见 core `session_bundle` 模块头：不为一个搬运功能引入解压攻击面）。
+async fn api_export_sessions_bundle(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let uid = body
+        .get("uid")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if uid.is_empty() {
+        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let session_ids: Vec<String> = body
+        .get("sessionIds")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if session_ids.is_empty() {
+        return json_err("请至少选择一个会话".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let Some(out_path) = body
+        .get("outPath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return json_err("缺少 outPath".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    match session_bundle::export_sessions_for(
+        region,
+        &uid,
+        &session_ids,
+        std::path::Path::new(out_path),
+    ) {
+        Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// GET /api/sessions/import/preview —— 只读导出包，回报条数与标题（导入前确认）。
+///
+/// 查询参数：`path`（**必填**）。
+async fn api_preview_sessions_bundle(RawQuery(query): RawQuery) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let Some(path) = query_value(query.as_deref(), "path").filter(|path| !path.trim().is_empty())
+    else {
+        return json_err("缺少 path".to_string(), StatusCode::BAD_REQUEST);
+    };
+    match session_bundle::preview_bundle(std::path::Path::new(path.trim())) {
+        Ok(preview) => json_ok(preview),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/sessions/import —— 把导出包里的会话**作为新会话**写进指定账号（issue #87）。
+///
+/// 与 Tauri 侧 `commands::import_sessions_bundle` **同契约**（两宿主同步）。
+/// body：`{ uid, path, region? }`。
+///
+/// ★ **只做加法**：每条都生成新 id，绝不覆盖既有会话；同一份包导两次 = 两份副本
+/// （不静默去重 —— 「我以为覆盖了，结果两份」比「我以为合并了，结果只有一份」更难查）。
+async fn api_import_sessions_bundle(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let uid = body
+        .get("uid")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if uid.is_empty() {
+        return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
+    }
+    let Some(path) = body
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return json_err("缺少 path".to_string(), StatusCode::BAD_REQUEST);
+    };
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    match session_bundle::import_sessions_for(region, &uid, std::path::Path::new(path.trim())) {
+        Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 /// 把前端的 `client` 字符串解析成 [`vscode_session::ExtClient`]。

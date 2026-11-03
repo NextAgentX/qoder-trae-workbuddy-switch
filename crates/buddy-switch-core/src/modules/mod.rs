@@ -79,6 +79,7 @@ pub mod schedule;
 pub mod scheduler;
 pub mod school;
 pub mod session;
+pub mod session_bundle;
 // 追加型 jsonl 的尾部窗口读取（token_daily / client_limits 共用的唯一实现）。
 pub(crate) mod jsonl_tail;
 // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入 —— 目录即 SSOT。

@@ -452,6 +452,60 @@ export interface ExtCopyResponse {
 }
 
 /**
+ * issue #87 · **会话导出**报告。
+ *
+ * `skipped` 里的每一条都有原因 —— 导出不做「静默少几条」：用户勾了 10 个、只出去 8 个，
+ * 必须当场看见少了哪两个、为什么。
+ */
+export interface SessionBundleExportReport {
+  /** 落盘路径（用户用「另存为」选的）。 */
+  path: string;
+  /** 真正写进包里的会话数。 */
+  exported: number;
+  /** 跳过的会话（找不到正文 / 不在 projects/ 下 / 读失败）。 */
+  skipped: Array<{ id: string; reason: string }>;
+  /** 包体积（字节）。 */
+  bytes: number;
+}
+
+/** issue #87 · **导出包预览**（导入前给用户确认）。 */
+export interface SessionBundlePreview {
+  kind: string;
+  schema: number | null;
+  exportedAt: string | null;
+  /** 导出端所在的区域（`cn` / `global`）—— 只作参考，导入按当前账号的区域写。 */
+  region: string | null;
+  count: number;
+  /** 前 50 条（`count` 可能更大）。 */
+  sessions: Array<{
+    title: string | null;
+    sourceCid: string | null;
+    workspace: string | null;
+    /** 包里是否带索引行（不带 ⇒ 导入只写正文，客户端列表里可能看不到）。 */
+    hasRow: boolean;
+  }>;
+}
+
+/**
+ * issue #87 · **会话导入**报告。
+ *
+ * ★ **只做加法**：每条都生成新 id，绝不覆盖既有会话；同一份包导两次就是两份副本
+ * （不静默去重 —— 「我以为覆盖了，结果两份」比「我以为合并了，结果只有一份」更难查）。
+ */
+export interface SessionBundleImportReport {
+  imported: Array<{
+    sourceCid: string;
+    /** 新会话 id（带连字符的 UUID）。 */
+    newId: string;
+    /** 是否写了索引行；`false` = 包里没带行，只写了正文。 */
+    rowWritten: boolean;
+  }>;
+  failed: Array<{ sourceCid: string; error: string }>;
+  importedCount: number;
+  failedCount: number;
+}
+
+/**
  * P14 S4b · 记录级 diff 的状态。**判据顺序即优先级**（与 core 的实现逐条对应）。
  *
  * - `error`：源缺失 / 标识非法 / **目标损坏**（索引说有、磁盘上没有正文文件）
