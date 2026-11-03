@@ -1322,20 +1322,25 @@ mod tests {
     #[test]
     fn macos_cn_ps_filter_excludes_self_and_international() {
         let self_pid = std::process::id();
+        // ★ 假 pid 必须远离**真实** pid（macOS 上限 99999）：2026-11-03 `process.rs`
+        //   的同款用例就因为写死 5001 撞上 runner 自己的 pid 而让 main 变红。
+        //   这里同样从 90 万级派生，永不与真实进程冲突。
+        const BASE: u32 = 900_100;
+        let (cn_main, intl, shouty, cn_helper) = (BASE + 1, BASE + 2, BASE + 3, BASE + 4);
         let stdout = format!(
             "{self_pid} /Applications/workbuddy-switch.app/Contents/MacOS/buddy-switch\n\
-             6001 /Applications/CodeBuddy CN.app/Contents/MacOS/CodeBuddy CN --foo\n\
-             6002 /Applications/CodeBuddy.app/Contents/MacOS/CodeBuddy\n\
-             6003 /bin/zsh -c 'echo CodeBuddy CN.app mention via buddy-switch'\n\
-             6004 /Applications/CodeBuddy CN.app/Contents/Resources/helper\n"
+             {cn_main} /Applications/CodeBuddy CN.app/Contents/MacOS/CodeBuddy CN --foo\n\
+             {intl} /Applications/CodeBuddy.app/Contents/MacOS/CodeBuddy\n\
+             {shouty} /bin/zsh -c 'echo CodeBuddy CN.app mention via buddy-switch'\n\
+             {cn_helper} /Applications/CodeBuddy CN.app/Contents/Resources/helper\n"
         );
         let main_kept = process::filter_ps_rows(&stdout, &macos_cn_main_patterns(None), self_pid);
         let main_pids: Vec<u32> = main_kept.iter().map(|(pid, _)| *pid).collect();
-        assert_eq!(main_pids, vec![6001]);
+        assert_eq!(main_pids, vec![cn_main]);
 
         let bundle_kept =
             process::filter_ps_rows(&stdout, &macos_cn_bundle_patterns(None), self_pid);
         let bundle_pids: Vec<u32> = bundle_kept.iter().map(|(pid, _)| *pid).collect();
-        assert_eq!(bundle_pids, vec![6001, 6004]);
+        assert_eq!(bundle_pids, vec![cn_main, cn_helper]);
     }
 }
