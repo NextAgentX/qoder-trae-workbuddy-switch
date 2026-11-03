@@ -207,6 +207,7 @@ pub async fn messages_for_region(
                     total_ms: elapsed,
                     prompt_tokens: 0,
                     completion_tokens: 0,
+                    cached_tokens: 0,
                     credit: 0.0,
                     stream: true,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -237,6 +238,7 @@ pub async fn messages_for_region(
                     total_ms: elapsed_ms,
                     prompt_tokens: 0,
                     completion_tokens: 0,
+                    cached_tokens: 0,
                     credit: 0.0,
                     stream: wants_stream,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -288,6 +290,7 @@ pub async fn messages_for_region(
                         total_ms: 0,
                         prompt_tokens: 0,
                         completion_tokens: 0,
+                        cached_tokens: 0,
                         credit: 0.0,
                         stream: true,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -349,6 +352,7 @@ pub async fn messages_for_region(
                             total_ms: elapsed_ms,
                             prompt_tokens: 0,
                             completion_tokens: 0,
+                            cached_tokens: 0,
                             credit: 0.0,
                             stream: false,
                             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -386,6 +390,13 @@ pub async fn messages_for_region(
                     .and_then(|usage| usage.get("credit"))
                     .and_then(serde_json::Value::as_f64)
                     .unwrap_or(0.0);
+                // ★ issue #154：Anthropic 的缓存命中字段叫 `cache_read_input_tokens`
+                //   （不是 OpenAI 的 `prompt_tokens_details.cached_tokens`）。
+                let cached_tokens = message
+                    .get("usage")
+                    .and_then(|usage| usage.get("cache_read_input_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
                 state.log.record(
                     RequestMeta {
                         endpoint: "/v1/messages",
@@ -401,6 +412,7 @@ pub async fn messages_for_region(
                         total_ms: started.elapsed().as_millis() as i64,
                         prompt_tokens,
                         completion_tokens,
+                        cached_tokens,
                         credit,
                         stream: false,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。

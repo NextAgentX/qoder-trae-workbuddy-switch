@@ -46,6 +46,16 @@ pub struct UsageReport {
     pub prompt_tokens: i64,
     /// 输出 token（`usage.completion_tokens`，负数已钳到 0）。
     pub completion_tokens: i64,
+    /// **命中上游前缀缓存的输入 token**（issue #154 的观测缺口）。
+    ///
+    /// 三家上游的字段名不同，取第一个能读到的：
+    /// - DeepSeek：`usage.prompt_cache_hit_tokens`
+    /// - OpenAI：`usage.prompt_tokens_details.cached_tokens`
+    /// - Anthropic：`usage.cache_read_input_tokens`
+    ///
+    /// 读不到就是 `0`（**不是**「没有命中」）—— 与 `credit` 写 0 同一诚实口径：
+    /// 上游没报 ≠ 事实为零。
+    pub cached_tokens: i64,
 }
 
 impl UsageReport {
@@ -101,6 +111,21 @@ pub fn extract_usage(frame: &Value) -> Option<UsageReport> {
         credit,
         prompt_tokens: prompt,
         completion_tokens: completion,
+        // ★ issue #154：缓存命中数此前被**直接丢弃** —— 上游返回了，本层没接。
+        //   三家字段名不同，按优先级取第一个可读的；再钳到 `prompt` 以内
+        //   （命中数不可能超过输入总数，超了说明上游口径变了，不能把脏数记进日志）。
+        cached_tokens: usage
+            .get("prompt_cache_hit_tokens")
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|details| details.get("cached_tokens"))
+            })
+            .or_else(|| usage.get("cache_read_input_tokens"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0)
+            .min(prompt),
     })
 }
 
@@ -536,6 +561,7 @@ mod tests {
             credit,
             prompt_tokens: prompt,
             completion_tokens: completion,
+            cached_tokens: 0,
         })
     }
 
@@ -684,6 +710,53 @@ mod tests {
         );
     }
 
+    /// ★ issue #154：缓存命中数必须被**读出来**，且三家上游的字段名都要认。
+    ///
+    /// 可证伪：把 `extract_usage` 里的 `cached_tokens` 删掉（恒 0）⇒ 前三条断言红。
+    /// 这条用例存在的理由：此前这三家的字段**全都**被丢掉，于是「命中率掉了」与
+    /// 「换号了」在网关日志里无法 join，只能看客户端界面上的一个百分比去猜。
+    #[test]
+    fn extract_usage_reads_cache_hit_tokens_from_all_three_shapes() {
+        // DeepSeek：`prompt_cache_hit_tokens`
+        let deepseek = extract_usage(&json!({"usage": {
+            "credit": 0.1, "prompt_tokens": 100, "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 20
+        }}))
+        .expect("合法样本");
+        assert_eq!(deepseek.cached_tokens, 80);
+
+        // OpenAI：`prompt_tokens_details.cached_tokens`
+        let openai = extract_usage(&json!({"usage": {
+            "credit": 0.1, "prompt_tokens": 100, "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 64}
+        }}))
+        .expect("合法样本");
+        assert_eq!(openai.cached_tokens, 64);
+
+        // Anthropic：`cache_read_input_tokens`
+        let anthropic = extract_usage(&json!({"usage": {
+            "credit": 0.1, "prompt_tokens": 100, "completion_tokens": 20,
+            "cache_read_input_tokens": 96
+        }}))
+        .expect("合法样本");
+        assert_eq!(anthropic.cached_tokens, 96);
+
+        // 上游没报 ⇒ 0（不是「没命中」，是「不知道」）。
+        let absent = extract_usage(&json!({"usage": {
+            "credit": 0.1, "prompt_tokens": 100, "completion_tokens": 20
+        }}))
+        .expect("合法样本");
+        assert_eq!(absent.cached_tokens, 0);
+
+        // 脏数（命中数 > 输入总数）⇒ 钳到输入总数，不把不可能的读数写进日志。
+        let dirty = extract_usage(&json!({"usage": {
+            "credit": 0.1, "prompt_tokens": 10, "completion_tokens": 1,
+            "prompt_cache_hit_tokens": 999
+        }}))
+        .expect("合法样本");
+        assert_eq!(dirty.cached_tokens, 10, "命中数不可能超过输入总数");
+    }
+
     #[test]
     fn extract_usage_rejects_degenerate_payloads() {
         assert_eq!(extract_usage(&json!({})), None);
@@ -706,7 +779,8 @@ mod tests {
             Some(UsageReport {
                 credit: 1.0,
                 prompt_tokens: 0,
-                completion_tokens: 2
+                completion_tokens: 2,
+                cached_tokens: 0
             }),
             "负数项应被钳制为 0，而不是让求和变成负数"
         );
@@ -716,7 +790,8 @@ mod tests {
             Some(UsageReport {
                 credit: 0.0,
                 prompt_tokens: 3,
-                completion_tokens: 0
+                completion_tokens: 0,
+                cached_tokens: 0
             }),
             "显式 credit=0 是合法样本（免费模型），不同于「缺 credit」"
         );
