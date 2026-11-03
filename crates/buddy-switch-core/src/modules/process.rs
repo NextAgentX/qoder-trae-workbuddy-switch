@@ -1687,6 +1687,39 @@ fn focus_workbuddy_linux_for(region: Region) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// 测试用**假 pid 基址**：必须远大于真实 pid 上限（macOS 默认 `kern.maxproc` 下
+    /// 的 pid 上限是 99999）。
+    ///
+    /// ## 为什么不能写死 5001 这类小数字（2026-11-03 CI 实测）
+    ///
+    /// `macos_ps_filter_*` 两条用例把「自身 pid」与一组写死的假 pid 拼进同一份 `ps`
+    /// 输出，再断言「除自身外都保留」。**刚开机的 macOS runner 上，测试进程自己的 pid
+    /// 就可能落在 5001** —— 于是那行假数据被「排除自身」规则剔掉，断言变成
+    /// `left: [5004]` / `right: [5001, 5004]`，main 随机变红。
+    ///
+    /// ⇒ 假 pid 一律从本常量派生（90 万级，真实进程不可能占用）。
+    const FAKE_PID_BASE: u32 = 900_000;
+
+    /// ★ 假 pid 必须与**本进程真实 pid** 拉开距离（2026-11-03 main 变红的根因）。
+    ///
+    /// 这条在**所有平台**都跑：它挡的是「测试数据撞上运行环境」这一类错误 ——
+    /// macOS 那两条用例本身是 `cfg(macos)`，在 Windows 上编译不到，只有这条能兜住。
+    #[test]
+    fn fake_pids_never_collide_with_the_real_one() {
+        let self_pid = std::process::id();
+        assert!(
+            FAKE_PID_BASE > 99_999,
+            "假 pid 基址必须高于 macOS 的 pid 上限（99999）"
+        );
+        for offset in 0..32 {
+            assert_ne!(
+                FAKE_PID_BASE + offset,
+                self_pid,
+                "假 pid 撞上真实 pid ⇒ 该行会被「排除自身」规则剔掉，macOS 用例随机变红"
+            );
+        }
+    }
+
     #[test]
     fn region_app_stems_differ_by_region() {
         assert_eq!(region_app_stems(Region::Cn), &["WorkBuddy", "CodeBuddy"]);
@@ -2227,21 +2260,29 @@ C:\\Users\\X\\Programs\\workbuddy-switch\\workbuddy-switch.exe
     #[test]
     fn macos_ps_filter_matches_case_sensitively_and_excludes_self() {
         let self_pid = std::process::id();
-        // 5002 用小写目录：pgrep -f 大小写不敏感会命中，这里必须不命中。
-        // 5003 全大写引用：旧的 pgrep -f 不敏感匹配的典型反例，这里必须不命中。
-        // 5005 args 含 buddy-switch：非自身 pid 也按自排除规则剔除。
+        // 假 pid 一律从 [`FAKE_PID_BASE`] 派生（写死小数字会撞上 runner 自己的 pid）。
+        // +1 正常大写目录（应保留）；+2 小写目录（`pgrep -f` 不敏感会误命中，这里必须不命中）；
+        // +3 全大写引用（旧实现大小写不敏感的典型反例）；+4 CodeBuddy（应保留）；
+        // +5 args 含 buddy-switch（非自身 pid 也按自排除规则剔除）。
+        let (kept_a, lower, shouty, kept_b, selfish) = (
+            FAKE_PID_BASE + 1,
+            FAKE_PID_BASE + 2,
+            FAKE_PID_BASE + 3,
+            FAKE_PID_BASE + 4,
+            FAKE_PID_BASE + 5,
+        );
         let stdout = format!(
             "{self_pid} /Applications/workbuddy-switch.app/Contents/MacOS/buddy-switch\n\
-             5001 /Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy --foo\n\
-             5002 /Applications/workbuddy.app/Contents/MacOS/WorkBuddy\n\
-             5003 /bin/zsh -c 'echo WORKBUDDY.APP/CONTENTS/MACOS mention'\n\
-             5004 /Applications/CodeBuddy.app/Contents/MacOS/CodeBuddy\n\
-             5005 /opt/tool/buddy-switch/helper run\n"
+             {kept_a} /Applications/WorkBuddy.app/Contents/MacOS/WorkBuddy --foo\n\
+             {lower} /Applications/workbuddy.app/Contents/MacOS/WorkBuddy\n\
+             {shouty} /bin/zsh -c 'echo WORKBUDDY.APP/CONTENTS/MACOS mention'\n\
+             {kept_b} /Applications/CodeBuddy.app/Contents/MacOS/CodeBuddy\n\
+             {selfish} /opt/tool/buddy-switch/helper run\n"
         );
         let patterns = macos_main_patterns(None);
         let kept = filter_ps_rows(&stdout, &patterns, self_pid);
         let pids: Vec<u32> = kept.iter().map(|(pid, _)| *pid).collect();
-        assert_eq!(pids, vec![5001, 5004]);
+        assert_eq!(pids, vec![kept_a, kept_b]);
     }
 
     #[cfg(target_os = "macos")]
@@ -2249,18 +2290,25 @@ C:\\Users\\X\\Programs\\workbuddy-switch\\workbuddy-switch.exe
     fn macos_bundle_filter_keeps_bundle_daemons_and_drops_self() {
         let self_pid = std::process::id();
         // 包内任意进程：主进程 + Contents/Resources 下守护 + 引用 bundle 的自家进程。
-        // 5012 用小写目录名（对应字面量全小写变体）。5014 是无关 .app，不误杀。
+        // +12 用小写目录名（对应字面量全小写变体）。+14 是无关 .app，不误杀。
+        // 假 pid 一律从 [`FAKE_PID_BASE`] 派生（同 `macos_ps_filter_*` 的理由）。
+        let (main_proc, lower, daemon, other) = (
+            FAKE_PID_BASE + 11,
+            FAKE_PID_BASE + 12,
+            FAKE_PID_BASE + 13,
+            FAKE_PID_BASE + 14,
+        );
         let stdout = format!(
             "{self_pid} /Applications/workbuddy-switch.app/Contents/MacOS/workbuddy-switch\n\
-             5011 /Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/vendor/sandbox/5.5.5/sandbox-center --config x\n\
-             5012 /Applications/workbuddy.app/Contents/Resources/.../sandbox-center\n\
-             5013 node ~/.workbuddy/binaries/cliguard-daemon --app_bundle /Applications/WorkBuddy.app\n\
-             5014 /Applications/SomeOther.app/Contents/MacOS/SomeOther\n"
+             {main_proc} /Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/vendor/sandbox/5.5.5/sandbox-center --config x\n\
+             {lower} /Applications/workbuddy.app/Contents/Resources/.../sandbox-center\n\
+             {daemon} node ~/.workbuddy/binaries/cliguard-daemon --app_bundle /Applications/WorkBuddy.app\n\
+             {other} /Applications/SomeOther.app/Contents/MacOS/SomeOther\n"
         );
         let patterns = macos_bundle_patterns(None);
         let kept = filter_ps_rows(&stdout, &patterns, self_pid);
         let pids: Vec<u32> = kept.iter().map(|(pid, _)| *pid).collect();
-        assert_eq!(pids, vec![5011, 5012, 5013]);
+        assert_eq!(pids, vec![main_proc, lower, daemon]);
     }
 
     #[cfg(target_os = "macos")]
