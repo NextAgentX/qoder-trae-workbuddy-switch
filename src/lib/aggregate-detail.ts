@@ -32,7 +32,6 @@
 import type { CreditExpiry } from "@/lib/types";
 import type { QoderProgramStatus, QoderWebCreditPacks } from "@/lib/api";
 import type { TraeProgram } from "@/components/trae-account-card";
-import type { TraeCreditPackage } from "@/lib/trae-types";
 import type {
   DetailPack,
   DetailProgramBadge,
@@ -83,14 +82,6 @@ export interface AggregateDetailContext {
    * 此时抽屉不渲染资源包区块（不是渲染空包）。
    */
   qoderPacks?: QoderWebCreditPacks | null;
-  /**
-   * Trae 的逐包明细（issue #144）。
-   *
-   * 账号视图（`TraeAccount`）只带聚合积分，逐包在 `get_trae_credits` 的
-   * `packages[uid]` 里 —— 卡片已合并过（`AggregateAccountsPage` 渲染时），
-   * 但抽屉拿的是**未合并的** `account.data`，于是 Trae 的明细区块恒为空。
-   */
-  traePacks?: TraeCreditPackage[] | null;
 }
 
 /**
@@ -366,9 +357,11 @@ export function aggregateDetailPacks(
   }
 
   if (account.platform === "trae") {
-    // ★ issue #144：优先用页面合并进来的逐包（`signals.traeCredits`），
-    //   账号视图本身不含 `creditPackages` ⇒ 只读后者会让区块恒为空。
-    const packs = ctx.traePacks ?? account.data.creditPackages ?? [];
+    /* ★ issue #144 复核 §4.1：「账号 + 其信号」的合并**在页面里做一次**
+       （`AggregateAccountsPage` 的 `detailAccount`），所以这里读的字段与 Trae 渠道页
+       **同名同义**（`account.creditPackages`）。此前这里多传一个 `ctx.traePacks` 侧信道，
+       而账号视图本身不含该键 ⇒ 两条路径对「这个账号有哪些包」各答一次。 */
+    const packs = account.data.creditPackages ?? [];
     return toDetailPacks(
       packs.map((item) => ({
         key: `${item.packageCode ?? "pack"}-${item.expireAt ?? "none"}`,
