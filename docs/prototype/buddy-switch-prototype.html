@@ -6461,7 +6461,10 @@ function gwSubId() {
 function uniOverviewSection() {
   const running = UNI.enabled;
   const onCount = UNI.namespaces.size;
+  /* ★ 两档语义（#165）：`base` 是**根地址**（Anthropic 系要它），`baseV1` 是 OpenAI 基址。
+     接入地址行显示 / 复制的是 `baseV1` —— 与下方「接入说明」同口径，否则照抄必然 404。 */
   const base = `http://127.0.0.1:${UNI.port}`;
+  const baseV1 = `${base}/v1`;
   const tot = uniPoolTotals();
   const verdict = uniVerdict();
   /* 失败态走深链（`?err=unified`），与既有 `?err=gateway` / `?err=usage` 同一口径。 */
@@ -6481,8 +6484,8 @@ function uniOverviewSection() {
       <span class="badge ${verdict.cls}" title="${esc(verdict.hint)}">${verdict.label}</span></div>
     <div class="srow"><div class="lab"><b>启用统一网关</b><span>在 ${esc(UNI.bind)}:${UNI.port} 上提供带命名空间前缀的单一入口</span></div>
       <button class="switch${running ? " on" : ""}" data-act="uni-toggle" aria-label="启用统一网关"></button></div>
-    <div class="srow"><div class="lab"><b>接入地址</b><span class="mono">${base}</span></div>
-      <button class="btn sm" data-act="copy|${base}">${ICON.copy}复制</button></div>
+    <div class="srow"><div class="lab"><b>接入地址</b><span class="mono">${baseV1}</span></div>
+      <button class="btn sm" data-act="copy|${baseV1}">${ICON.copy}复制</button></div>
     <div class="srow"><div class="lab"><b>监听地址</b><span class="mono">${esc(UNI.bind)}${UNI.bind === "0.0.0.0" ? " · 局域网内任何设备都能消耗你的额度" : ""}</span></div>
       <select class="inp" data-uni-bind aria-label="监听地址">
         <option value="127.0.0.1"${UNI.bind === "127.0.0.1" ? " selected" : ""}>仅本机 127.0.0.1</option>
@@ -7365,8 +7368,8 @@ function viewGateway() {
         <span class="badge ${g.enabled ? "ok" : ""}">${g.enabled ? "运行中" : "已停用"}</span></div>
       <div class="srow"><div class="lab"><b>启用本地网关</b><span>在 127.0.0.1 上提供 OpenAI / Anthropic 兼容接口</span></div>
         <button class="switch${g.enabled ? " on" : ""}" data-act="toggle|gw-enabled"></button></div>
-      <div class="srow"><div class="lab"><b>接入地址</b><span class="mono">${g.baseUrl}</span></div>
-        <button class="btn sm" data-act="copy|${g.baseUrl}">${ICON.copy}复制</button></div>
+      <div class="srow"><div class="lab"><b>接入地址</b><span class="mono">${g.baseUrl}/v1</span></div>
+        <button class="btn sm" data-act="copy|${g.baseUrl}/v1">${ICON.copy}复制</button></div>
       <div class="srow"><div class="lab"><b>上游账号凭据</b><span>账号池读取上游凭据的有效性</span></div>
         <button class="btn sm" data-act="gw-verify">${ICON.refresh}校验</button></div>
       <div class="srow"><div class="lab"><b>可用模型</b><span>${g.models.filter((m) => m.available).length} 个</span></div>

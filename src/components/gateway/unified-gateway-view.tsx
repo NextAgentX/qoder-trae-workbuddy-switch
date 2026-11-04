@@ -47,6 +47,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { gatewayRootUrl } from "@/lib/gateway-url";
 import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import {
@@ -426,19 +427,34 @@ export function UnifiedGatewayView({
   );
   const platforms = useMemo(() => platformOrder(visibleIds), [visibleIds]);
   const activeKeyCount = keys.filter((key) => !key.revoked).length;
-  /** 接入地址（与「独立网关」同款：`bind_addr:port`）—— 概览里要能一眼看到 + 一键复制。 */
-  const baseUrl = `http://${snapshot?.config.bind_addr ?? LOOPBACK}:${snapshot?.config.port ?? ""}`;
+  /**
+   * 根地址（**不带** `/v1`）—— Anthropic 系客户端要的就是它。
+   * ★ 两档语义由 `lib/gateway-url.ts` 唯一给出（#165）：`0.0.0.0` 是**监听**通配地址，
+   * 不能当目标地址 ⇒ 展示 / 复制一律归一回环（与 Trae / Qoder 两页同款）。
+   */
+  const rootUrl = useMemo(
+    () => gatewayRootUrl(snapshot?.config.bind_addr, snapshot?.config.port),
+    [snapshot?.config.bind_addr, snapshot?.config.port],
+  );
+  /** OpenAI 系 Base URL（**含** `/v1`）—— 概览「接入地址」显示并复制的就是它。 */
+  const baseUrl = `${rootUrl}/v1`;
+  /**
+   * 端口缺失（配置加载失败 / 尚未就绪）⇒ 不给出「看起来能用」的串：
+   * 否则会渲染成 `http://127.0.0.1:/v1`，复制出去必然失败。
+   */
+  const endpointReady = Boolean(snapshot?.config.port);
   /** 概览的一句话结论（见 `verdictOf`）。 */
   const verdict = verdictOf();
 
-  /** 接入说明的代码样例（两种协议的认证头不同 —— 把协议做成 Tab，认证头就不可能给错）。 */
+  /** 接入说明的代码样例（两种协议的认证头不同 —— 把协议做成 Tab，认证头就不可能给错）。
+      ★ 端点路径自带 `/v1` ⇒ 这里一律用**根地址**拼（用 `baseUrl` 会得到 `/v1/v1/...`）。 */
   const guideSnippet =
     guideApi === "anthropic"
-      ? `curl ${baseUrl}/v1/messages \\
+      ? `curl ${rootUrl}/v1/messages \\
   -H "x-api-key: $BUDDY_SWITCH_KEY" \\
   -H "anthropic-version: 2023-06-01" \\
   -d '{"model":"${SAMPLE_MODEL}","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}'`
-      : `curl ${baseUrl}/v1/chat/completions \\
+      : `curl ${rootUrl}/v1/chat/completions \\
   -H "Authorization: Bearer $BUDDY_SWITCH_KEY" \\
   -d '{"model":"${SAMPLE_MODEL}","messages":[{"role":"user","content":"hi"}]}'`;
 
@@ -555,15 +571,19 @@ export function UnifiedGatewayView({
         )}
 
         {/* 接入地址（与两个既有网关卡同构的一行：值 + 复制出口）——
-            改造前这一行只在摘要条里露了个 `addr`，没有完整 URL、也没有复制。 */}
+            改造前这一行只在摘要条里露了个 `addr`，没有完整 URL、也没有复制。
+            ★ 值必须是**能直接填进 OpenAI 客户端**的串（含 `/v1`），与下方接入说明同口径（#165）。 */}
         <div className="flex items-center gap-3 border-b border-border/60 px-5 py-3">
           <div className="min-w-0 flex-1">
             <div className="text-xs font-medium">{t("unifiedGateway.addr")}</div>
-            <div className="mt-0.5 break-all font-mono text-[11.5px] text-muted-foreground">{baseUrl}</div>
+            <div className="mt-0.5 break-all font-mono text-[11.5px] text-muted-foreground">
+              {endpointReady ? baseUrl : "—"}
+            </div>
           </div>
           <Button
             variant="outline"
             size="sm"
+            disabled={!endpointReady}
             onClick={() => void copyText(baseUrl, t("wbStats.gateway.baseUrlCopied"))}
           >
             <Copy />
@@ -696,7 +716,7 @@ export function UnifiedGatewayView({
             {guideSnippet}
           </pre>
           <p className="mt-2.5 text-[11.5px] leading-5 text-muted-foreground">
-            {t("unifiedGateway.guideBase", { openai: `${baseUrl}/v1`, anthropic: baseUrl })}
+            {t("unifiedGateway.guideBase", { openai: baseUrl, anthropic: rootUrl })}
           </p>
           <p className="mt-1.5 text-[11.5px] leading-5 text-muted-foreground">
             {t("unifiedGateway.guideModels", { sample: SAMPLE_MODEL })}

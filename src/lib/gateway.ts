@@ -7,6 +7,7 @@
 // 因此本文件对 Config 以 snake_case 为准、对 Status 以 camelCase 为准，并各自保留别名兜底。
 
 import { t } from "@/lib/i18n";
+import { gatewayOpenAiBaseUrlFrom } from "@/lib/gateway-url";
 import type {
   GatewayConfig,
   GatewayPoolAccount,
@@ -318,21 +319,24 @@ export function poolOf(status: GatewayStatus | null, region: Region): {
 }
 
 /**
- * 计算对外展示的 Base URL。
+ * 计算对外展示的 **OpenAI 系 Base URL（含 `/v1`）**。
  *
- * 优先使用后端返回的 `baseUrl`；否则按监听地址与端口拼接（兜底，正常不应触发）。
- * `0.0.0.0` 对外不可直接使用，展示时回退为 `127.0.0.1`。
+ * ★ 语义是**单一形态**：无论走「后端 `baseUrl`」还是「按监听地址拼」的分支，返回的都带 `/v1`。
+ * 历史缺陷（#165 / 集成文档附录 B）：两条分支形态不同（后端值是根地址、兜底带 `/v1`），
+ * 消费方按「带 `/v1`」用 ⇒ 主路径少一层、请求 404。现在统一经 `stripV1Suffix` 收敛再拼。
+ *
+ * `0.0.0.0` 对外不可直接使用，展示时归一回环（在 `gateway-url.ts` 里，唯一一处）。
  */
 export function resolveGatewayBaseUrl(
   status: GatewayStatus | null,
   fallbackAddr: string,
   fallbackPort: number,
 ): string {
-  if (status?.baseUrl) return status.baseUrl;
-  const rawHost = status?.addr ?? fallbackAddr;
-  const host = rawHost === "0.0.0.0" ? "127.0.0.1" : rawHost;
-  const port = status?.port ?? fallbackPort;
-  return `http://${host}:${port}/v1`;
+  return gatewayOpenAiBaseUrlFrom(
+    status?.baseUrl,
+    status?.addr ?? fallbackAddr,
+    status?.port ?? fallbackPort,
+  );
 }
 
 /** 网关进程是否实际在监听（缺省视为已停止）。 */

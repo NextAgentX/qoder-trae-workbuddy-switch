@@ -1857,7 +1857,12 @@ export interface GatewayStatus {
   port: number;
   /** 是否允许非回环（局域网）监听。 */
   allowNonLoopback: boolean;
-  /** 后端返回的 Base URL（源自 snake_case `base_url`，如 http://127.0.0.1:57891/v1），优先使用。 */
+  /**
+   * 后端返回的**根地址**（源自 snake_case `base_url`，形如 `http://127.0.0.1:57891`，**不含 `/v1`**）。
+   *
+   * ★ OpenAI 系 Base URL 由前端派生（`lib/gateway-url.ts` 的 `gatewayOpenAiBaseUrlFrom`），
+   * 不要直接把本字段粘给 OpenAI 客户端 —— 少一层 `/v1` 必然 404（#165）。
+   */
   baseUrl?: string;
   /**
    * **最近一次请求失败**的可读原因（源自 snake_case `last_error`；`null` = 还没失败过）。

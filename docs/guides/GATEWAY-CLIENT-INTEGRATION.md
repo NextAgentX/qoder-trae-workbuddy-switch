@@ -140,7 +140,8 @@ webui/CLI：`buddy-switch serve` 后同样在「网关」页打开开关。
 
 Anthropic 系客户端**自己会拼 `/v1/messages`**；给它带 `/v1` 的地址会拼成 `/v1/v1/messages` → 404。
 
-> ⚠️ 界面上的「Base URL」一行显示的是**根地址**（后端 `base_url` 字段就是 `http://host:port`）。照抄进 OpenAI 系客户端会缺 `/v1` —— 见附录 B。
+> ✅ 界面「接入地址」行显示并复制的就是**OpenAI 基址（含 `/v1`）**，可直接填进 OpenAI 系客户端；
+> Anthropic 系请把末尾的 `/v1` 去掉（或看「接入说明」卡里给出的根地址）。口径收口见附录 B。
 
 ### 2.4 模型名不用手填（但也不能瞎填）
 
@@ -658,21 +659,20 @@ Trae IDE 与 SOLO 桌面端**支持自定义模型**（国内版 v3.3.51 起灰�
 | Qoder 网关 Key / 配置 | `~/.buddy-switch/qoder/gateway_keys.json` / `gateway_config.json` |
 | 统一入口 Key / 配置 | `~/.buddy-switch/gateway_unified_keys.json` / `gateway_unified.json` |
 
-## 附录 B：已知偏差（界面接入指引的 Base URL）
+## 附录 B：Base URL 口径（已收口，issue #165）
 
-**现象**：「API 服务」页 →「接入指引」里，**OpenAI 协议**的片段（Codex / opencode / 通用）给出的 Base URL **缺 `/v1`**；Anthropic 协议（Claude Code）的片段是对的。
+**曾经的偏差**：界面「接入地址」给的是根地址（`http://host:port`），照抄进 OpenAI 系客户端缺 `/v1` ⇒ 404；而同一屏的「接入说明」卡又写着带 `/v1` 的串，自相矛盾。
 
-**根因**：后端 `GatewayStatusView.base_url` 的值是 `http://host:port`（**不含 `/v1`**，见 `gateway/state.rs` 的 `GatewayConfig::base_url()` 与其单测）；而前端 `resolveGatewayBaseUrl` 的**兜底分支**返回的是 `http://host:port/v1`。主路径走后端值 ⇒ 拿到不带 `/v1` 的串。接入指引的 `rootUrl = baseUrl.replace(/\/v1\/?$/,"")` 因此没做任何剥离，OpenAI 片段就少了 `/v1`。
+**根因**：后端 `GatewayStatusView.base_url` 是根地址，而前端 `resolveGatewayBaseUrl` 的兜底分支返回带 `/v1` 的串 —— 两条分支形态不同，消费方按「带 `/v1`」用就少一层。
 
-**影响**：照抄界面片段配置 Codex / opencode / 通用 OpenAI 客户端 ⇒ 请求打到 `/chat/completions`（少一层 `/v1`）⇒ **404**。Anthropic 系不受影响。
+**现在的约定**（改这块前先读）：
 
-**本文怎么处理**：本文所有片段一律按**正确值**给出（OpenAI 系带 `/v1`，Anthropic 系不带）。
+- 后端 `base_url` **只给根地址**，不带 `/v1`；
+- 前端派生只有一处入口 `src/lib/gateway-url.ts`：`gatewayRootUrl`（根地址）/ `gatewayOpenAiBaseUrl`（含 `/v1`）/ `gatewayOpenAiBaseUrlFrom`（收敛两条分支，恒定带 `/v1`）；
+- 四个网关页（WB / Trae / Qoder / 统一）一律调用，**禁止手拼** `http://${host}:${port}`；
+- `0.0.0.0` 是监听通配地址，展示与复制一律归一回环。
 
-**建议修法**（择一，属代码改动）：
-- 让 `GatewayConfig::base_url()` 返回带 `/v1` 的值，并同步 `resolveGatewayBaseUrl` 的兜底分支与 `state.rs` 的单测；或
-- 让两个接入指引按协议自行拼 `/v1`，与 `resolveGatewayBaseUrl` 的语义解耦。
-
-> 注意：现有门禁 `scripts/check-scope-registry.cjs` 的夹具用的是 `baseUrl: "http://127.0.0.1:8080/v1"`（**带 `/v1`**），所以这个偏差在门禁下**看不出来** —— 改的时候记得把夹具也一起改成后端真实值，否则修完仍然是绿的。
+**门禁**：`scripts/check-gateway-url.mjs`（已挂进 `npm run check:scope`）跑真断言钉住上面四条，含「`src/**` 不许手拼」的扫描。
 
 ## 附录 C：安全边界
 

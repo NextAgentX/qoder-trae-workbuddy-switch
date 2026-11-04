@@ -162,7 +162,10 @@ impl GatewayConfig {
         core_config::atomic_write(&file, &content).map_err(|error| error.to_string())
     }
 
-    /// 对外 Base URL（供接入指引展示）。
+    /// 对外**根地址**（含协议与端口，**不含 `/v1`**）。
+    ///
+    /// OpenAI 系 Base URL 由前端派生（`src/lib/gateway-url.ts`），本字段只给根地址 ——
+    /// 两条分支返回不同形态曾导致「接入地址」少一层 `/v1`（#165）。
     pub fn base_url(&self) -> String {
         let host = if self.bind_addr.trim().is_empty() {
             "127.0.0.1"
@@ -193,7 +196,7 @@ pub struct GatewayStatusView {
     pub running: bool,
     /// 实际监听地址；未监听时为 `None`。
     pub addr: Option<String>,
-    /// 对外 Base URL（含协议与端口，供接入指引展示）。
+    /// 对外**根地址**（含协议与端口，**不含 `/v1`**；OpenAI 基址由前端派生）。
     pub base_url: String,
     /// 配置中的监听地址。
     pub bind_addr: String,

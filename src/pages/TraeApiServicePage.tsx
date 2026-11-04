@@ -44,6 +44,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
+import { gatewayOpenAiBaseUrl } from "@/lib/gateway-url";
 import { useT } from "@/lib/i18n";
 import { scopeOf } from "@/lib/scope";
 import { copyText } from "@/lib/clipboard";
@@ -457,10 +458,12 @@ export default function TraeApiServicePage() {
   }
 
   const running = status?.running ?? false;
-  const baseUrl = useMemo(() => {
-    const host = config.bindAddr === LAN ? LOOPBACK : config.bindAddr;
-    return `http://${host}:${config.port}/v1`;
-  }, [config.bindAddr, config.port]);
+  /* ★ OpenAI 系 Base URL（含 `/v1`）统一由 `lib/gateway-url.ts` 派生（#165）：`0.0.0.0` 归一、
+     `/v1` 只加一次，别在这里手拼。 */
+  const baseUrl = useMemo(
+    () => gatewayOpenAiBaseUrl(config.bindAddr, config.port),
+    [config.bindAddr, config.port],
+  );
 
   const keyPrefix = status?.apiKeyPrefix || "";
   /* ★ 概览两行的取数（与 WB 侧 `ApiServicePage` 的概览行**同源口径**）：
