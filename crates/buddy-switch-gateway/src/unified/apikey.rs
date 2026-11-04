@@ -21,8 +21,10 @@
 //! | 前缀 | `sk-wb-` | `sk-uni-` |
 //! | `create` | 不会失败 | **会失败**（要校验命名空间在册、业务转发只能是 `wb-*`） |
 //!
-//! 其余（只存 sha256 + 前 4 / 后 4 位、明文只返回一次、每次操作实时读盘、
-//! 吊销可逆 / 删除只允许已吊销）**逐条照搬** —— 这些是既有实现踩出来的，不重新发明。
+//! 其余（`sha256` 校验 + 前 4 / 后 4 位掩码、每次操作实时读盘、吊销可逆 / 删除只允许已吊销）
+//! **逐条照搬** —— 这些是既有实现踩出来的，不重新发明。
+//! ★ 2026-11-04：明文**不随创建落盘** —— 创建响应带明文，用户在面板里点「保存到本软件」
+//!   才由 `save_plaintext` 写入 `plaintext` 字段（旧记录为 `None`，列表不显示眼睛）。
 
 use std::path::PathBuf;
 
@@ -32,7 +34,10 @@ use buddy_switch_core::modules::config as core_config;
 
 /* ★ issue #76：策略类型**直接复用** WorkBuddy 侧那一套（`crate::apikey`）。
 四条产品线的 Key 策略语义完全相同，各定义一份必然漂移。 */
-use crate::apikey::{KeyPolicy, QuotaMode, QuotaPeriod, QuotaUnit, ScopeMode};
+use crate::apikey::{
+    key_taken_message, resolve_key_plaintext, KeyPolicy, QuotaMode, QuotaPeriod, QuotaUnit,
+    ScopeMode,
+};
 use buddy_switch_core::modules::gateway_namespace;
 
 use super::config::unified_keys_file;
@@ -41,7 +46,7 @@ use crate::apikey::{constant_time_eq, sha256_hex};
 /// 统一网关 Key 的前缀（与 `sk-wb-` / `sk-trae-` 同族，一眼认出来源）。
 pub const UNIFIED_KEY_PREFIX: &str = "sk-uni-";
 
-/// 单条统一密钥记录（明文不落库）。
+/// 单条统一密钥记录。`plaintext` 仅在用户选择「保存到本软件」后有值，旧记录为 `None`。
 ///
 /// ⚠️ **不加 `deny_unknown_fields`**：将来前端加了字段而宿主还没升级时，
 /// 严格模式会让**整份台账解析失败** ⇒ 回落空表 ⇒ 用户的全部 Key「凭空消失」。
@@ -60,6 +65,9 @@ pub struct UnifiedApiKeyRecord {
     pub suffix: String,
     /// `sha256(hex)` of 完整明文。
     pub hash: String,
+    /// 完整明文；旧记录缺字段时为 `None`。
+    #[serde(default)]
+    pub plaintext: Option<String>,
     /// ★ 授权使用的命名空间集合（空数组 ⇒ **无授权**，fail-closed，不等于「全开」）。
     #[serde(default)]
     pub namespaces: Vec<String>,
@@ -108,13 +116,14 @@ impl UnifiedApiKeyRecord {
         self.namespaces.iter().any(|id| id == namespace)
     }
 
-    /// 脱敏展示（**不含 `hash`**）。
+    /// 列表视图（**不含 `hash`**，含可空 `plaintext`）。
     pub fn masked(&self) -> serde_json::Value {
         serde_json::json!({
             "id": self.id,
             "name": self.name,
             "prefix": self.prefix,
             "suffix": self.suffix,
+            "plaintext": self.plaintext,
             "namespaces": self.namespaces,
             "bizNamespace": self.biz_namespace,
             "createdAt": self.created_at,
@@ -224,27 +233,67 @@ impl UnifiedApiKeyStore {
         Ok(())
     }
 
-    /// 生成 Key：明文 `sk-uni-` + 32 位 hex；返回 (记录, 明文)。**明文仅此一次返回**。
-    ///
-    /// 与 WB 那份不同，本方法**会失败**（授权集不合法）—— 故先校验再落盘，
-    /// 避免「创建成功但一把废 Key」。
+    /// 生成 Key：明文 `sk-uni-` + 32 位 hex；返回 (记录, 明文)。
+    /// 保留三参签名 ⇒ 存量调用点零改动（等价于「不自定义密钥」）。
     pub fn create(
         &self,
         name: String,
         namespaces: Vec<String>,
         biz_namespace: Option<String>,
     ) -> Result<(UnifiedApiKeyRecord, String), String> {
+        self.create_with_key(name, namespaces, biz_namespace, None)
+    }
+
+    /// 自定义密钥的**创建前查重**（与另三条产品线同一规则）：`sha256(明文)` 不得与台账里
+    /// 任何一条记录相同；已吊销的记录也算占用 —— 正确动作是 [`Self::restore`]。
+    pub fn ensure_custom_key_available(&self, custom_key: Option<&str>) -> Result<(), String> {
+        let Some(raw) = custom_key else {
+            return Ok(());
+        };
+        let plaintext = raw.trim();
+        if plaintext.is_empty() {
+            return Ok(());
+        }
+        let hash = sha256_hex(plaintext);
+        match self.load().iter().find(|record| record.hash == hash) {
+            Some(existing) => Err(key_taken_message(
+                &existing.name,
+                existing.revoked_at.is_some(),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// 生成 / 接收 Key；返回 (记录, 明文)。
+    ///
+    /// `custom_key` 非空 ⇒ 原样使用该密钥；为空 ⇒ 按原规则生成。
+    ///
+    /// 与 WB 那份不同，本方法**会失败**（授权集不合法 / 自定义密钥重复）—— 故先校验再落盘，
+    /// 避免「创建成功但一把废 Key」。两项校验都在写盘之前，顺序无关。
+    ///
+    /// ★ 2026-11-04：**创建时不落盘明文**（`plaintext: None`），
+    ///   改由用户点「保存到本软件」时走 [`Self::save_plaintext`]。
+    pub fn create_with_key(
+        &self,
+        name: String,
+        namespaces: Vec<String>,
+        biz_namespace: Option<String>,
+        custom_key: Option<String>,
+    ) -> Result<(UnifiedApiKeyRecord, String), String> {
+        self.ensure_custom_key_available(custom_key.as_deref())?;
         Self::validate_authorization(&namespaces, biz_namespace.as_deref())?;
-        let secret = uuid::Uuid::new_v4().simple().to_string(); // 32 hex
-        let plaintext = format!("{UNIFIED_KEY_PREFIX}{secret}");
-        let prefix = format!("{UNIFIED_KEY_PREFIX}{}", &secret[..4]);
-        let suffix = secret[secret.len() - 4..].to_string();
+        let (plaintext, prefix, suffix) = resolve_key_plaintext(
+            custom_key,
+            || format!("{UNIFIED_KEY_PREFIX}{}", uuid::Uuid::new_v4().simple()),
+            UNIFIED_KEY_PREFIX,
+        );
         let record = UnifiedApiKeyRecord {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             prefix,
             suffix,
             hash: sha256_hex(&plaintext),
+            plaintext: None,
             namespaces,
             biz_namespace,
             created_at: core_config::now_ms(),
@@ -263,6 +312,37 @@ impl UnifiedApiKeyStore {
         records.push(record.clone());
         self.save(&records)?;
         Ok((record, plaintext))
+    }
+
+    /// 把「本次创建返回的明文」写入台账（用户点「保存到本软件」才走这里）。
+    ///
+    /// 与另三条产品线同一规则：id 必须存在、`sha256(明文)` 必须等于 `hash`、已有明文幂等不覆盖。
+    pub fn save_plaintext(&self, id: &str, plaintext: &str) -> Result<(), String> {
+        let plaintext = plaintext.trim();
+        if plaintext.is_empty() {
+            return Err("明文为空".to_string());
+        }
+        let digest = sha256_hex(plaintext);
+        let mut records = self.load();
+        let mut found = false;
+        for record in records.iter_mut() {
+            if record.id != id {
+                continue;
+            }
+            found = true;
+            if record.plaintext.is_some() {
+                return Ok(());
+            }
+            if !constant_time_eq(record.hash.as_bytes(), digest.as_bytes()) {
+                return Err("明文与该密钥不匹配".to_string());
+            }
+            record.plaintext = Some(plaintext.to_string());
+            break;
+        }
+        if !found {
+            return Err("API Key 不存在".to_string());
+        }
+        self.save(&records)
     }
 
     /// 常量时间比较哈希；无效 / 不存在 / **已吊销** 一律 `None`。
@@ -417,6 +497,31 @@ mod tests {
         ]
     }
 
+    /// 自定义密钥查重：同 `hash` 只能有一条记录，被拒时不落盘。
+    ///
+    /// 变异：删掉 `create_with_key` 里的 `ensure_custom_key_available(...)?` ⇒ 本测试红。
+    #[test]
+    fn duplicate_custom_key_is_rejected() {
+        let (store, _dir) = temp_store();
+        let key = "dup-uni-key-0001";
+        let (record, _) = store
+            .create_with_key("甲".into(), all_four(), None, Some(key.into()))
+            .expect("首次创建");
+
+        let error = store
+            .create_with_key("乙".into(), all_four(), None, Some(key.into()))
+            .expect_err("重复的自定义密钥必须被拒");
+        assert!(error.contains("甲"), "要点名占用者: {error}");
+        assert_eq!(store.load().len(), 1, "被拒时不得落盘");
+
+        store.revoke(&record.id).expect("吊销");
+        let error = store
+            .create_with_key("丙".into(), all_four(), None, Some(key.into()))
+            .expect_err("已吊销也占用");
+        assert!(error.contains("恢复"), "应提示走恢复: {error}");
+        assert_eq!(store.load().len(), 1);
+    }
+
     /// ★ 一把 Key 可**同时**授权两个产品线的命名空间 —— 这是「合并入口」的全部意义。
     #[test]
     fn legacy_ledger_without_policy_fields_reads_as_before() {
@@ -506,18 +611,24 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// 明文只存 sha256：台账里**不得**出现明文，脱敏出口**不得**含 hash。
+    /// 明文**只在用户选择保存后**才落盘；列表视图仍不得含 hash。
     #[test]
-    fn plaintext_is_never_persisted_and_masked_hides_the_hash() {
+    fn plaintext_persists_only_after_save_and_masked_hides_hash() {
         let (store, dir) = temp_store();
         let (record, plaintext) = store
             .create("k".into(), vec!["wb-cn".into()], None)
             .unwrap();
         let raw = std::fs::read_to_string(store.path()).unwrap();
-        assert!(!raw.contains(&plaintext), "台账里不得出现明文");
-        assert!(raw.contains(&record.hash), "台账里应当只有 hash");
-        let masked = record.masked();
-        assert!(masked.get("hash").is_none(), "脱敏出口不得含 hash");
+        assert!(!raw.contains(&plaintext), "创建时不得落盘明文");
+        assert!(raw.contains(&record.hash), "hash 仍要落盘（校验链路）");
+        assert!(record.masked()["plaintext"].is_null());
+
+        store.save_plaintext(&record.id, &plaintext).unwrap();
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+        assert!(raw.contains(&plaintext), "保存后台账应含明文");
+        let masked = store.list()[0].masked();
+        assert!(masked.get("hash").is_none(), "列表视图不得含 hash");
+        assert_eq!(masked["plaintext"], serde_json::json!(plaintext));
         assert_eq!(masked["namespaces"][0], "wb-cn");
         assert_eq!(masked["revoked"], false);
         std::fs::remove_dir_all(dir).unwrap();

@@ -1070,9 +1070,10 @@ export interface TraeClientModel {
 /**
  * 单条 Trae API Key（`list_trae_api_keys` 的 `keys[]`）。
  *
- * **不含 hash 与明文**：服务端只下发脱敏白名单（`prefix` / `suffix` / `name` / `variant`…），
- * 明文仅在创建时一次性返回。`suffix` 是明文的**末 4 位**，与 `prefix`（前 4 位）一样
- * 不足以还原 32 位 secret —— 它的用途是让用户在列表里**认出是哪一把**。
+ * **不含 hash**：服务端只下发脱敏白名单（`prefix` / `suffix` / `name` / `variant`…）。
+ * `plaintext` 只有在用户选「保存到本软件」之后才有值（没存的 Key 为 `null`，列表不出眼睛）。
+ * `suffix` 是明文的**末 4 位**，与 `prefix`（前 4 位）一样不足以还原 32 位 secret
+ * —— 它的用途是让用户在列表里**认出是哪一把**。
  *
  * `variant` 是该 Key 的**归属区域**（`"cn"` / `"global"`）—— 账号池按区域建，
  * 因此它决定这把 Key 能取到哪个区域的账号。**新 Key 一律落到区域的线上标识**；
@@ -1094,6 +1095,11 @@ export interface TraeApiKeyRecord {
    * （不报错、不补造）。
    */
   suffix?: string;
+  /**
+   * ★ 2026-11-04：完整明文。旧台账 / 改造前的 Key 没有该字段 ⇒ `null`，
+   * 列表里**不渲染眼睛按钮**。
+   */
+  plaintext?: string | null;
   createdAt: number;
   revokedAt: number | null;
   revoked: boolean;
@@ -1112,12 +1118,16 @@ export interface TraeApiKeyRecord {
 /**
  * 新建 Key 的返回（`create_trae_api_key`）。
  *
- * `key` 为**一次性明文**——只会出现在本次响应里，之后无从取回；界面必须提示用户立即复制。
+ * `key` 是本次创建的那把明文，只随本响应回来；用户在面板里选「保存到本软件」后
+ * 才写进台账（之后列表里能随时用眼睛查看），选「自行保存」则永远只剩掩码。
+ * `ok === false`（自定义密钥与台账里已有记录撞车）时**没有建出任何记录**，`error` 是原因。
  */
 export interface TraeApiKeyCreated {
   ok: boolean;
   key?: string;
   record?: TraeApiKeyRecord;
+  /** `ok === false` 时的原因（自定义密钥与台账里已有的 Key 撞车）。 */
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------

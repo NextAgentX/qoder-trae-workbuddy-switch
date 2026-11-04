@@ -269,7 +269,68 @@ where
     Some(allowed)
 }
 
-/// 单条 API Key 记录（明文不落库）。
+/// 自定义密钥**与台账里已有记录撞车**时的统一提示。四条产品线共用一句话。
+///
+/// 带上占用者的名字，用户才知道该去吊销 / 恢复哪一把；只说「密钥重复」等于把
+/// 排查工作丢回给用户。已吊销（`revoked`）单独说一句 —— 那种情况的正确动作是
+/// `restore` 而不是再建一把。
+pub fn key_taken_message(name: &str, revoked: bool) -> String {
+    if revoked {
+        format!("该密钥已存在（「{name}」已吊销，点「恢复」可继续使用）")
+    } else {
+        format!("该密钥已存在（正被「{name}」使用）")
+    }
+}
+
+/// 决定一把 Key 的明文，并派生列表展示用的前 / 后缀。四条产品线共用。
+///
+/// - `provided` 为 `None` / 纯空白 ⇒ 走 `generator()` 按原规则生成；
+/// - 否则**原样使用用户输入的密钥**（只 trim 首尾空白），不补前缀、不改大小写；
+/// - `tag` 是各产品线的前缀（如 `sk-wb-`）。前缀 / 后缀只做展示，
+///   按字符切而不是按字节切 ⇒ 短密钥、含中文的密钥都不会 panic。
+pub fn resolve_key_plaintext(
+    provided: Option<String>,
+    generator: impl FnOnce() -> String,
+    tag: &str,
+) -> (String, String, String) {
+    let plaintext = provided
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(generator);
+    let chars: Vec<char> = plaintext.chars().collect();
+    let tag_len = tag.chars().count();
+    // 前缀固定「认出是哪一把」所需的最少字符：带平台前缀的取 `tag + 4` 位，
+    // 用户自带的自定义密钥取前 4 位。
+    // ⚠️ 边界（有测试钉住）：自定义密钥短于 4 个字符时，前缀就是**它自己**
+    //   （如 `abc` ⇒ 掩码 `abc…`）；再短于「前缀 + 4」则不给尾部（免得拼两遍）。
+    //   也就是说极短的自定义密钥在列表里等于明文可见 —— 用户填了 3 个字符的 Key，
+    //   这已经是它唯一的辨识信息，前端另有一道「眼睛」出口，不因此特殊处理。
+    let (prefix, prefix_len) = if plaintext.starts_with(tag) {
+        (
+            format!(
+                "{tag}{}",
+                chars.iter().skip(tag_len).take(4).collect::<String>()
+            ),
+            tag_len + 4,
+        )
+    } else {
+        (chars.iter().take(4).collect::<String>(), 4)
+    };
+    // 前后缀不得重叠：短于「前缀 + 4」就干脆不给尾部（列表显示 `prefix…`）。
+    let suffix: String = if chars.len() > prefix_len + 4 {
+        chars.iter().skip(chars.len() - 4).collect()
+    } else {
+        String::new()
+    };
+    (plaintext, prefix, suffix)
+}
+
+/// 单条 API Key 记录。
+///
+/// ★ 2026-11-04：`plaintext` **不由创建写入** —— 创建时永远是 `None`，明文只随创建响应
+///   返回一次；用户在面板里点「保存到本软件」才由 [`ApiKeyStore::save_plaintext`] 落盘，
+///   之后列表里的眼睛才能查看。点「自行保存」的 Key 与旧台账一样永远只有掩码。
+///   `hash` 始终保留，校验链路不变；`#[serde(default)]` ⇒ 旧台账读出 `None`（眼睛不显示）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyRecord {
     pub id: String,
@@ -282,8 +343,12 @@ pub struct ApiKeyRecord {
     /// ⚠️ `#[serde(default)]` ⇒ **旧台账没有该字段时按空串处理**（显示时省略尾部，不报错）。
     #[serde(default)]
     pub suffix: String,
-    /// `sha256(hex)` of full plaintext key。
+    /// `sha256(hex)` of full plaintext key（校验仍只认它）。
     pub hash: String,
+    /// 完整明文：用户选择「保存到本软件」后为 `Some`，其余情况（含刚创建）为 `None`。
+    /// ⚠️ 有值时它会随 `masked()` 下发到前端，也会写进磁盘台账 —— 这是用户的显式选择。
+    #[serde(default)]
+    pub plaintext: Option<String>,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
     #[serde(default)]
@@ -324,7 +389,7 @@ impl ApiKeyRecord {
         }
     }
 
-    /// 脱敏展示（不含 hash）。
+    /// 前端列表视图（**不含 hash**，但含可空的 `plaintext`）。
     pub fn masked(&self) -> serde_json::Value {
         serde_json::json!({
             "id": self.id,
@@ -332,6 +397,8 @@ impl ApiKeyRecord {
             "region": self.region,
             "prefix": self.prefix,
             "suffix": self.suffix,
+            // ★ 旧记录 = null ⇒ 前端不渲染眼睛；新记录 = 完整明文 ⇒ 点眼睛可查看。
+            "plaintext": self.plaintext,
             "createdAt": self.created_at,
             "revokedAt": self.revoked_at,
             "revoked": self.revoked_at.is_some(),
@@ -502,13 +569,65 @@ impl ApiKeyStore {
         core_config::atomic_write(&self.path, &content).map_err(|error| error.to_string())
     }
 
-    /// 生成 Key：明文 `sk-wb-` + 32 位 hex；返回 (记录, 明文)。明文仅此一次返回。
+    /// 自定义密钥的**创建前查重**：`sha256(明文)` 不得与台账里任何一条记录相同。
+    ///
+    /// - `None` / 纯空白 ⇒ `Ok`：那是「按原规则自动生成」，不参与查重；
+    /// - **已吊销的记录也算占用**：它是同一把密钥的历史。再建一把会让两条记录共用一个
+    ///   `hash`（吊销其中一条、另一条仍能通过校验），吊销语义就此烂掉 —— 正确动作是
+    ///   [`Self::restore`]。
+    ///
+    /// 校验挂在 [`Self::create_with_key`] 入口，而不是只写在 HTTP / IPC 里：
+    /// 两条通道、`create_response*` 帮助函数、将来的调用点都绕不过去。
+    pub fn ensure_custom_key_available(&self, custom_key: Option<&str>) -> Result<(), String> {
+        let Some(raw) = custom_key else {
+            return Ok(());
+        };
+        let plaintext = raw.trim();
+        if plaintext.is_empty() {
+            return Ok(());
+        }
+        let hash = sha256_hex(plaintext);
+        match self.load().iter().find(|record| record.hash == hash) {
+            Some(existing) => Err(key_taken_message(
+                &existing.name,
+                existing.revoked_at.is_some(),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// 生成 Key：明文 `sk-wb-` + 32 位 hex；返回 (记录, 明文)。
+    /// 保留两参签名 ⇒ 存量测试 / e2e 调用点零改动（等价于「不自定义密钥」）。
     pub fn create(&self, name: String, region: Region) -> (ApiKeyRecord, String) {
-        let secret = uuid::Uuid::new_v4().simple().to_string(); // 32 hex
-        let plaintext = format!("sk-wb-{secret}");
-        let prefix = format!("sk-wb-{}", &secret[..4]);
-        // ★ E3：尾部 4 位（32 hex 的末 4）—— 与 prefix 一样**不可逆推**出整把 key。
-        let suffix = secret[secret.len() - 4..].to_string();
+        self.create_with_key(name, region, None)
+            // `None` ⇒ 走自动生成，`ensure_custom_key_available` 必返回 `Ok`。
+            .expect("自动生成的 Key 不会与存量重复")
+    }
+
+    /// 生成 / 接收 Key；返回 (记录, 明文)。
+    ///
+    /// `custom_key` 为空 ⇒ 按原规则生成；非空 ⇒ 原样使用用户输入的密钥
+    /// （只 trim，见 [`resolve_key_plaintext`]）。
+    ///
+    /// 自定义密钥**先查重**（[`Self::ensure_custom_key_available`]）：同一个 `hash` 在台账里
+    /// 只能有一条记录，否则吊销会变成「吊一条、另一条照用」。
+    ///
+    /// ★ 2026-11-04：**创建时不落盘明文**（`plaintext: None`）。明文随本次响应返回给前端，
+    ///   由用户在弹出的面板里二选一：点「保存到本软件」→ [`Self::save_plaintext`] 落盘；
+    ///   点「自行保存」→ 永远只有 `hash`。改造前这里是 `Some(...)` 无条件落盘，
+    ///   那等于替用户做了「把明文留在本机」的决定。
+    pub fn create_with_key(
+        &self,
+        name: String,
+        region: Region,
+        custom_key: Option<String>,
+    ) -> Result<(ApiKeyRecord, String), String> {
+        self.ensure_custom_key_available(custom_key.as_deref())?;
+        let (plaintext, prefix, suffix) = resolve_key_plaintext(
+            custom_key,
+            || format!("sk-wb-{}", uuid::Uuid::new_v4().simple()),
+            "sk-wb-",
+        );
         let record = ApiKeyRecord {
             id: uuid::Uuid::new_v4().to_string(),
             name,
@@ -516,6 +635,7 @@ impl ApiKeyStore {
             prefix,
             suffix,
             hash: sha256_hex(&plaintext),
+            plaintext: None,
             created_at: core_config::now_ms(),
             revoked_at: None,
             last_used_at: None,
@@ -533,7 +653,46 @@ impl ApiKeyStore {
         if let Err(error) = self.save(&records) {
             eprintln!("[gateway] 保存 API Key 失败: {error}");
         }
-        (record, plaintext)
+        Ok((record, plaintext))
+    }
+
+    /// 把「本次创建返回的明文」写入台账，供列表里的眼睛查看。
+    ///
+    /// 这是明文落盘的**唯一入口**：创建时不写，用户点「保存到本软件」才走到这里；
+    /// 点「自行保存」的 Key 永远只有 hash（等同改造前的行为）。
+    ///
+    /// 两道校验，缺一不可：
+    /// - id 必须存在 —— 面板打开期间记录被删掉时明确报错，不静默成功；
+    /// - `sha256(plaintext)` 必须等于记录里的 `hash` —— 前端把明文回传时传错
+    ///   （串了另一把、被截断）就拒绝写入，否则台账里会存下一把「眼睛显示的值根本不能用」的 Key。
+    ///
+    /// 幂等：已有明文直接成功、不覆盖（重复点保存不会改值）。
+    pub fn save_plaintext(&self, id: &str, plaintext: &str) -> Result<(), String> {
+        let plaintext = plaintext.trim();
+        if plaintext.is_empty() {
+            return Err("明文为空".to_string());
+        }
+        let digest = sha256_hex(plaintext);
+        let mut records = self.load();
+        let mut found = false;
+        for record in records.iter_mut() {
+            if record.id != id {
+                continue;
+            }
+            found = true;
+            if record.plaintext.is_some() {
+                return Ok(());
+            }
+            if !constant_time_eq(record.hash.as_bytes(), digest.as_bytes()) {
+                return Err("明文与该密钥不匹配".to_string());
+            }
+            record.plaintext = Some(plaintext.to_string());
+            break;
+        }
+        if !found {
+            return Err("API Key 不存在".to_string());
+        }
+        self.save(&records)
     }
 
     /// 常量时间比较哈希；返回有效记录，无效/不存在/已吊销返回 `None`。
@@ -710,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn create_returns_plaintext_once_and_stores_only_hash() {
+    fn create_generates_plaintext_but_persists_only_hash() {
         let store = temp_store();
         let (record, plaintext) = store.create("cursor".to_string(), Region::Cn);
 
@@ -721,10 +880,162 @@ mod tests {
             format!("sk-wb-{}", &plaintext["sk-wb-".len().."sk-wb-".len() + 4])
         );
         assert_eq!(record.hash, sha256_hex(&plaintext));
-        assert_ne!(record.hash, plaintext, "不得明文落库");
 
+        // ★ 需求变更（第二次）：创建时**不落盘**明文 —— 是否保存由用户在面板里选。
+        assert!(record.plaintext.is_none(), "创建时不得自动落盘明文");
         let on_disk = std::fs::read_to_string(&store.path).unwrap();
-        assert!(!on_disk.contains(&plaintext), "磁盘不得出现明文");
+        assert!(!on_disk.contains(&plaintext), "创建后磁盘不得出现明文");
+    }
+
+    /// 用户点「保存到本软件」：明文才落盘；且必须与记录里的 hash 对得上。
+    ///
+    /// 变异：去掉 hash 比对 ⇒ 传一把别的 Key 也会被写入，`rejects_mismatched` 会红。
+    #[test]
+    fn save_plaintext_persists_only_after_user_choice() {
+        let store = temp_store();
+        let (record, plaintext) = store.create("cursor".to_string(), Region::Cn);
+
+        store.save_plaintext(&record.id, &plaintext).unwrap();
+        let on_disk = std::fs::read_to_string(&store.path).unwrap();
+        assert!(on_disk.contains(&plaintext), "保存后台账应含明文");
+        assert_eq!(
+            store.list()[0].plaintext.as_deref(),
+            Some(plaintext.as_str())
+        );
+
+        // 幂等 + 不覆盖：重复保存 / 传别的值都不改已存的明文。
+        store.save_plaintext(&record.id, "another-key").unwrap();
+        assert_eq!(
+            store.list()[0].plaintext.as_deref(),
+            Some(plaintext.as_str())
+        );
+    }
+
+    #[test]
+    fn save_plaintext_rejects_mismatch_and_unknown_id() {
+        let store = temp_store();
+        let (record, _plaintext) = store.create("cursor".to_string(), Region::Cn);
+
+        let error = store
+            .save_plaintext(&record.id, "sk-wb-ffffffffffffffffffffffffffffffff")
+            .unwrap_err();
+        assert!(error.contains("不匹配"), "{error}");
+        assert!(store.list()[0].plaintext.is_none(), "校验失败不得写入");
+
+        let error = store.save_plaintext("no-such-id", "sk-wb-x").unwrap_err();
+        assert!(error.contains("不存在"), "{error}");
+    }
+
+    #[test]
+    fn create_with_custom_key_uses_it_verbatim() {
+        let store = temp_store();
+        let custom = "my-own-key-1234567890".to_string();
+        let (record, plaintext) = store
+            .create_with_key("custom".into(), Region::Cn, Some(format!("  {custom}  ")))
+            .expect("首次创建自定义密钥必须成功");
+        assert_eq!(plaintext, custom);
+        assert_eq!(record.hash, sha256_hex(&custom));
+        assert!(record.plaintext.is_none(), "创建时不落盘，等用户选择");
+        assert!(
+            store.verify(&custom).is_some(),
+            "自定义密钥必须能直接校验通过"
+        );
+
+        // 空输入 / 纯空白 ⇒ 退回自动生成（不复用上面那把自定义 Key）。
+        let (generated, auto) = store
+            .create_with_key("auto".into(), Region::Cn, Some("   ".into()))
+            .expect("空白输入走自动生成，不参与查重");
+        assert!(auto.starts_with("sk-wb-"));
+        assert_ne!(generated.hash, record.hash);
+    }
+
+    /// 自定义密钥**撞车**必须被拒，且**不落盘**（否则吊销就成了一句空话）。
+    ///
+    /// 变异：删掉 `create_with_key` 里的 `ensure_custom_key_available(...)?` ⇒ 本测试红
+    /// （第二条记录会被写进去，`records().len()` 变成 2）。
+    #[test]
+    fn duplicate_custom_key_is_rejected_without_writing() {
+        let store = temp_store();
+        let key = "duplicated-custom-key-0001";
+        store
+            .create_with_key("甲".into(), Region::Cn, Some(key.into()))
+            .expect("首次创建");
+
+        // 只差首尾空白也算同一把（`resolve_key_plaintext` 同样会 trim）。
+        let error = store
+            .create_with_key("乙".into(), Region::Cn, Some(format!("  {key} ")))
+            .expect_err("重复的自定义密钥必须被拒");
+        assert!(error.contains("已存在"), "{error}");
+        assert!(
+            error.contains("甲"),
+            "要指出占用者，方便用户去吊销 / 恢复: {error}"
+        );
+        assert_eq!(store.list().len(), 1, "被拒时不得落盘");
+
+        // 大小写不同是**另一把**（hash 精确比较，不做归一化）。
+        store
+            .create_with_key("丙".into(), Region::Cn, Some(key.to_uppercase()))
+            .expect("大小写不同即不同密钥");
+        assert_eq!(store.list().len(), 2);
+    }
+
+    /// 已吊销的记录**仍然占用**这个 hash：提示语要指向「恢复」而不是让用户再建一把。
+    #[test]
+    fn duplicate_against_revoked_key_points_to_restore() {
+        let store = temp_store();
+        let key = "revoked-custom-key-0002";
+        let (record, _) = store
+            .create_with_key("旧".into(), Region::Cn, Some(key.into()))
+            .expect("首次创建");
+        store.revoke(&record.id).expect("吊销");
+
+        let error = store
+            .create_with_key("新".into(), Region::Cn, Some(key.into()))
+            .expect_err("已吊销的密钥也不能再建一条同 hash 的记录");
+        assert!(error.contains("已吊销"), "{error}");
+        assert!(error.contains("恢复"), "{error}");
+        assert_eq!(store.list().len(), 1);
+    }
+
+    /// `resolve_key_plaintext` 的边界：**按字符切**，短密钥 / 中文密钥都不得 panic。
+    ///
+    /// 变异：把 `chars()` 改回按字节 `&plaintext[..n]` ⇒ 中文用例直接 panic（本测试红）。
+    #[test]
+    fn resolve_key_plaintext_never_panics_on_short_or_wide_input() {
+        // 生成态：前缀 / 后缀都从 32 位 hex 里切出来。
+        let (generated, prefix, suffix) = resolve_key_plaintext(
+            None,
+            || "sk-wb-0123456789abcdef0123456789abcdef".into(),
+            "sk-wb-",
+        );
+        assert_eq!(prefix, "sk-wb-0123");
+        assert_eq!(suffix, "cdef");
+        assert!(generated.starts_with("sk-wb-"));
+
+        // 自定义但**不带平台前缀**：前缀退化为「开头若干字符」，不得 panic。
+        let (custom, prefix, suffix) =
+            resolve_key_plaintext(Some("  abc  ".into()), || unreachable!(), "sk-wb-");
+        assert_eq!(custom, "abc");
+        assert_eq!(prefix, "abc", "短密钥的前缀就是它自己（不补造）");
+        assert_eq!(suffix, "", "短到放不下前后缀时**省略尾部**，显示 `prefix…`");
+
+        // 中文密钥：按字节切会 panic，按字符切不会。
+        let (wide, _prefix, _suffix) = resolve_key_plaintext(
+            Some("密钥密钥密钥密钥密钥".into()),
+            || unreachable!(),
+            "sk-wb-",
+        );
+        assert_eq!(wide, "密钥密钥密钥密钥密钥");
+    }
+
+    #[test]
+    fn legacy_record_without_plaintext_is_none() {
+        let store = temp_store();
+        let raw = r#"[{"id":"old","name":"old","region":"cn","prefix":"sk-wb-a1b2","suffix":"9f3c","hash":"h","created_at":1,"revoked_at":null}]"#;
+        std::fs::write(&store.path, raw).unwrap();
+        let loaded = store.list();
+        assert_eq!(loaded[0].plaintext, None, "旧台账不得凭空造出明文");
+        assert!(loaded[0].masked()["plaintext"].is_null());
     }
 
     #[test]
@@ -735,14 +1046,14 @@ mod tests {
         let object = masked.as_object().unwrap();
         let fields: std::collections::BTreeSet<&str> = object.keys().map(String::as_str).collect();
         let expected: std::collections::BTreeSet<&str> = [
-            // ★ E3 新增 `suffix`（尾部 4 位）。它是**显式白名单**的一员 ——
-            //   本测试的意义正是「掩码视图只能有这些键」，多一个键就要**在这里被批准**，
-            //   而不是悄悄混进去。下面两条断言保证它不泄露 hash / 明文。
+            // ★ 本测试的意义正是「列表视图只能有这些键」，多一个键就要**在这里被批准**，
+            //   而不是悄悄混进去。`plaintext` 是 2026-11-04 显式批准的新字段（可空）。
             "id",
             "name",
             "region",
             "prefix",
             "suffix",
+            "plaintext",
             "createdAt",
             "revokedAt",
             "revoked",
@@ -759,13 +1070,21 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(fields, expected);
-        assert!(!object.contains_key("hash"));
+        assert!(!object.contains_key("hash"), "hash 仍不得下发");
         assert!(!masked.to_string().contains(&record.hash));
-        assert!(!masked.to_string().contains(&plaintext));
-        // ★ `suffix` 恰好是明文的**末 4 位**（这是设计意图：用户靠它确认是哪一把），
-        //   所以「明文以 suffix 结尾」是**必然**的，不是泄露。
-        //   真正的边界是：suffix **只有 4 位**，加上 prefix 的 4 位也**远不足以**还原 32 位 secret
-        //   ⇒ 掩码视图绝不包含 hash / 明文主体（上面两条断言已在守这条）。
+        // 新建记录还没经过用户选择 ⇒ `plaintext` 键必须在、值为 null。
+        assert!(object.contains_key("plaintext"), "键必须存在（可为 null）");
+        assert!(masked["plaintext"].is_null(), "未保存前不得下发明文");
+        store.save_plaintext(&record.id, &plaintext).unwrap();
+        let saved = store
+            .list()
+            .into_iter()
+            .find(|entry| entry.id == record.id)
+            .unwrap()
+            .masked();
+        assert_eq!(saved["plaintext"], json!(plaintext), "保存后随列表下发");
+        // ★ `suffix` 恰好是明文的**末 4 位**（这是设计意图：用户靠它确认是哪一把）。
+        //   掩码只是**默认展示形态**：明文经 `plaintext` 显式下发，由前端的眼睛按钮控制显隐。
         assert_eq!(record.suffix.len(), 4, "suffix 应恰好 4 位");
         assert!(
             plaintext.ends_with(&record.suffix),
@@ -942,6 +1261,7 @@ mod tests {
             prefix: "sk-wb-a1b2".into(),
             suffix: "9f3c".into(),
             hash: "x".into(),
+            plaintext: None,
             created_at: 0,
             revoked_at: None,
             last_used_at: None,
@@ -1147,6 +1467,7 @@ mod tests {
     fn masked_carries_policy_fields_and_still_no_hash() {
         let store = temp_store();
         let (record, plaintext) = store.create("m".into(), Region::Cn);
+        store.save_plaintext(&record.id, &plaintext).unwrap();
         store
             .update_policy(
                 &record.id,
@@ -1173,7 +1494,11 @@ mod tests {
         assert_eq!(masked["quotaPeriod"], json!("weekly"));
         assert_eq!(masked["scopeMode"], json!("selected"));
         assert_eq!(masked["scopeAccounts"], json!(["u1"]));
-        assert!(!masked.to_string().contains(&plaintext), "掩码不得泄露明文");
+        assert_eq!(masked["plaintext"], json!(plaintext), "更新策略不得丢明文");
+        assert!(
+            !masked.to_string().contains(&record.hash),
+            "hash 仍不得下发"
+        );
     }
 
     #[test]

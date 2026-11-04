@@ -85,7 +85,6 @@ export const zh = {
   // ---- toast ----
   "trae.gateway.key.loadFailed": "读取 API Key 列表失败",
   "trae.gateway.key.nameRequired": "请填写名称",
-  "trae.gateway.key.noPlaintext": "创建成功但未返回明文，请重试",
   "trae.gateway.key.createFailed": "创建失败",
   "trae.gateway.key.revoked": "已吊销",
   "trae.gateway.key.revokeFailed": "吊销失败",
@@ -93,7 +92,6 @@ export const zh = {
   "trae.gateway.key.deleteFailed": "删除失败",
   "trae.gateway.key.restored": "已恢复",
   "trae.gateway.key.restoreFailed": "恢复失败",
-  "trae.gateway.key.copied": "API Key 已复制",
 
   // ---- 列表 ----
   "trae.gateway.key.create": "创建 API Key",
@@ -123,11 +121,7 @@ export const zh = {
   "trae.gateway.key.cancel": "取消",
   "trae.gateway.key.createSubmit": "创建",
 
-  // ---- 一次性明文 ----
-  "trae.gateway.key.createdTitle": "API Key 已创建",
-  "trae.gateway.key.createdDesc": "完整 Key 只显示这一次，请立即复制保存。",
-  "trae.gateway.key.copy": "复制",
-  "trae.gateway.key.saved": "我已保存，关闭",
+  // 创建后的「保存到本软件 / 自行保存」二选一面板与眼睛文案走 `shared.gateway.keys.*`。
 
   // ---- 吊销 / 恢复 / 删除 确认 ----
   "trae.gateway.key.revokeTitle": "吊销 API Key",

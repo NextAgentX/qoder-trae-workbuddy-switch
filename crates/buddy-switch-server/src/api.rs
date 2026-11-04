@@ -357,6 +357,11 @@ fn api_routes() -> Router {
             get(api_gateway_list_keys).post(api_gateway_create_key),
         )
         .route("/api/gateway/keys/revoke", post(api_gateway_revoke_key))
+        // ★ 2026-11-04：创建时明文不落盘，用户点「保存到本软件」才写。
+        .route(
+            "/api/gateway/keys/plaintext",
+            post(api_gateway_save_key_plaintext),
+        )
         .route("/api/gateway/keys/policy", post(api_gateway_set_key_policy))
         .route("/api/gateway/keys/usage", get(api_gateway_key_usage))
         .route("/api/gateway/keys/restore", post(api_gateway_restore_key))
@@ -424,6 +429,11 @@ fn api_routes() -> Router {
         .route(
             "/api/unified-gateway/keys/revoke",
             post(api_unified_gateway_revoke_key),
+        )
+        // ★ 2026-11-04：创建时明文不落盘，用户点「保存到本软件」才写。
+        .route(
+            "/api/unified-gateway/keys/plaintext",
+            post(api_unified_gateway_save_key_plaintext),
         )
         // ★ issue #76：策略更新 + 按密钥用量（与另三条产品线同形）。
         .route(
@@ -630,6 +640,11 @@ fn api_routes() -> Router {
             "/api/qoder/gateway/keys/revoke",
             post(api_qoder_revoke_api_key),
         )
+        // ★ 2026-11-04：创建时明文不落盘，用户点「保存到本软件」才写。
+        .route(
+            "/api/qoder/gateway/keys/plaintext",
+            post(api_qoder_save_api_key_plaintext),
+        )
         // ★ issue #76：策略更新 + 按密钥用量（与 WB / Trae 侧同形）。
         .route(
             "/api/qoder/gateway/keys/policy",
@@ -684,6 +699,11 @@ fn api_routes() -> Router {
         .route(
             "/api/trae/gateway/keys/revoke",
             post(api_trae_revoke_api_key),
+        )
+        // ★ 2026-11-04：创建时明文不落盘，用户点「保存到本软件」才写。
+        .route(
+            "/api/trae/gateway/keys/plaintext",
+            post(api_trae_save_api_key_plaintext),
         )
         // ★ issue #76：策略更新 + 按密钥用量（与 WB 侧同形）。
         .route(
@@ -820,6 +840,15 @@ fn parse_id_list(raw: Option<String>) -> Vec<String> {
 /// 解析 region 参数，缺省为 `cn`（保证旧行为）。
 fn parse_region(value: Option<&str>) -> Region {
     value.and_then(Region::parse).unwrap_or(Region::Cn)
+}
+
+/// 读取可选的自定义密钥。前端发 camelCase，手工调 API 可能发 snake_case ⇒ 两种都收。
+/// `None` / 空串都表示「按原规则自动生成」（后端 `resolve_key_plaintext` 会再兜一层）。
+fn custom_key_from_body(body: &Value) -> Option<String> {
+    body.get("customKey")
+        .or_else(|| body.get("custom_key"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// 解析 Trae 产品线变体参数，缺省为 [`trae::variant::TraeVariant::default`]（保证旧行为）。
@@ -3596,7 +3625,15 @@ async fn api_gateway_create_key(Json(body): Json<Value>) -> Response {
         .filter(|name| !name.is_empty())
         .unwrap_or("未命名")
         .to_string();
-    let (record, plaintext) = state.keys.create(name, region);
+    let (record, plaintext) =
+        match state
+            .keys
+            .create_with_key(name, region, custom_key_from_body(&body))
+        {
+            Ok(pair) => pair,
+            // 自定义密钥与台账里已有的 Key 撞车 ⇒ 400，把占用者名字原样带给前端。
+            Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+        };
     // ★ 「接入即识别」（P10 §1.6 / ✅ #6）：同桌面端 —— 创建 Key 成功后**后台探测**该 region
     // （复用全仓唯一探测入口 `catalog_probe::probe_region`，它只用本 region 的凭据）。
     // fire-and-forget：探测失败不得阻断接入（§3.17.1 规则 3）；服务端已在 tokio 上下文，
@@ -3606,6 +3643,20 @@ async fn api_gateway_create_key(Json(body): Json<Value>) -> Response {
         let _ = buddy_switch_gateway::catalog_probe::probe_region(&state, region).await;
     });
     json_ok(json!({ "ok": true, "key": plaintext, "record": record.masked() }))
+}
+
+/// POST /api/gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+///
+/// 创建时**不落盘**明文，本接口是唯一入口；后端校验 `sha256` 与记录一致才写。
+/// 四个产品线同形：空 id / 空明文一律由 `save_plaintext` 兜底报错，不在 handler 里各判一遍。
+async fn api_gateway_save_key_plaintext(Json(body): Json<Value>) -> Response {
+    let state = crate::gateway_host::shared_state();
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let plaintext = body.get("plaintext").and_then(Value::as_str).unwrap_or("");
+    match state.keys.save_plaintext(id, plaintext) {
+        Ok(()) => json_ok(json!({ "ok": true })),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 async fn api_gateway_revoke_key(Json(body): Json<Value>) -> Response {
@@ -4983,9 +5034,14 @@ async fn api_trae_list_api_keys() -> Response {
     ))
 }
 
-/// POST /api/trae/gateway/keys —— 新建 Key（`{name, variant}`）。
+/// POST /api/trae/gateway/keys —— 新建 Key（`{name, variant, customKey?}`）。
 ///
-/// 明文仅此一次返回；`variant` 缺省 / 未知 → 默认变体（TraeWork）。
+/// 明文仅随本次响应返回（不落盘，等用户在面板里选「保存到本软件」）；
+/// `variant` 缺省 / 未知 → 默认变体（TraeWork）；`customKey` 非空 → 原样使用。
+///
+/// 自定义密钥撞车 ⇒ **400 + `{ok:false,error}`**：与 WB / Qoder / Unified 三条
+/// 产品线的 HTTP 口径一致（它们都是 `Err ⇒ json_err(…, BAD_REQUEST)`）。
+/// 桌面端走 IPC、没有状态码，仍沿用 `{ok:false,error}`（见 `create_response_with_key`）。
 async fn api_trae_create_api_key(Json(body): Json<Value>) -> Response {
     let name = body
         .get("name")
@@ -4996,11 +5052,26 @@ async fn api_trae_create_api_key(Json(body): Json<Value>) -> Response {
         .to_string();
     let variant = parse_trae_variant(body.get("variant").and_then(Value::as_str));
     let state = crate::trae_gateway_host::shared_state();
-    json_ok(buddy_switch_gateway::trae::apikey::create_response(
+    match buddy_switch_gateway::trae::apikey::create_result_with_key(
         &state.key_store,
         name,
         variant,
-    ))
+        custom_key_from_body(&body),
+    ) {
+        Ok(payload) => json_ok(payload),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/trae/gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+async fn api_trae_save_api_key_plaintext(Json(body): Json<Value>) -> Response {
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let plaintext = body.get("plaintext").and_then(Value::as_str).unwrap_or("");
+    let state = crate::trae_gateway_host::shared_state();
+    match state.key_store.save_plaintext(id, plaintext) {
+        Ok(()) => json_ok(json!({ "ok": true })),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 /// POST /api/trae/gateway/keys/revoke —— 吊销 Key（`{id}`）。
@@ -7157,7 +7228,7 @@ mod tests {
         let _guard = test_guard();
         isolated_home();
 
-        // create：一次性明文必须返回（且只在 create 响应里）。
+        // create：明文随创建响应返回（此刻**不落盘**，用户选「保存到本软件」后才随列表下发）。
         let (status, body) = call_api(
             Method::POST,
             "/api/gateway/keys",
@@ -7168,7 +7239,7 @@ mod tests {
         assert_eq!(body["ok"], json!(true));
         let plaintext = body["key"]
             .as_str()
-            .expect("create must return once-only plaintext")
+            .expect("create must return the plaintext of this key")
             .to_string();
         assert!(plaintext.starts_with("sk-wb-"), "plaintext: {plaintext}");
         assert_eq!(plaintext.len(), "sk-wb-".len() + 32);
@@ -7177,7 +7248,7 @@ mod tests {
             .expect("create record id")
             .to_string();
 
-        // list：脱敏红线——仅 prefix，绝无 hash / 明文 / 64 位摘要。
+        // list：掩码 + 可空明文字段；hash / sha256 摘要仍绝不下发。
         let (status, body) = call_api(Method::GET, "/api/gateway/keys", None).await;
         assert_eq!(status, StatusCode::OK);
         let keys = body["keys"].as_array().expect("keys array");
@@ -7192,15 +7263,15 @@ mod tests {
                 // ⚠️ `suffix`（明文末 4 位）是 `apikey.rs` 的**显式白名单**成员
                 // （E3 新增，用户靠它确认是哪一把）。本用例原先漏了这一格，
                 // 于是 `suffix` 一加进来就变红 —— 属**用例未同步**，不是泄露。
-                // 真正的红线在下面三条断言（无 hash / 无明文 / 无 sha256 摘要）。
+                // 真正的红线在下面两条断言（无 hash / 无 sha256 摘要）。
                 "suffix",
                 "createdAt",
                 "revokedAt",
                 "revoked",
                 "lastUsedAt",
                 // ★ issue #76：策略七件套（`apikey.rs` 同款白名单已同步）。
-                //   与 `suffix` 同一性质：**显式批准**才进掩敏视图；
-                //   真正的红线是下面三条（无 hash / 无明文 / 无摘要）。
+                //   与 `suffix` 同一性质：**显式批准**才进列表视图；
+                //   真正的红线是下面两条（无 hash / 无摘要）。
                 "quotaMode",
                 "quotaLimit",
                 "quotaUnit",
@@ -7208,8 +7279,10 @@ mod tests {
                 "scopeMode",
                 "scopeAccounts",
                 "scopeGroups",
+                // ★ 2026-11-04：明文随列表下发（前端眼睛显隐），旧记录为 null。
+                "plaintext",
             ]),
-            "masked record must be an explicit non-secret whitelist"
+            "list record must be an explicit whitelist"
         );
         assert!(!keys[0].as_object().unwrap().contains_key("hash"));
 
@@ -7218,10 +7291,8 @@ mod tests {
             !serialized.contains("hash"),
             "list body must not contain a `hash` field"
         );
-        assert!(
-            !serialized.contains(&plaintext),
-            "list body must never echo the plaintext key"
-        );
+        // ★ 2026-11-04：创建时不落盘明文 ⇒ 列表默认是 null，用户选「保存到本软件」后才有值。
+        assert!(keys[0]["plaintext"].is_null(), "未保存前列表不得下发明文");
         assert!(
             !serialized.contains(&buddy_switch_gateway::apikey::sha256_hex(&plaintext)),
             "list body must not contain the sha256 digest"
@@ -7230,6 +7301,32 @@ mod tests {
             !contains_hex_run(&serialized, 64),
             "list body must not contain any 64-char hex digest: {serialized}"
         );
+
+        // 走「保存到本软件」那条 HTTP 路由 → 明文才落盘、列表才下发。
+        let (status, body) = call_api(
+            Method::POST,
+            "/api/gateway/keys/plaintext",
+            Some(json!({"id": record_id, "plaintext": plaintext})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "save plaintext: {body}");
+        let (status, body) = call_api(Method::GET, "/api/gateway/keys", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["keys"][0]["plaintext"],
+            json!(plaintext),
+            "保存后明文应随列表下发"
+        );
+        // 传错值必须被拒（sha256 校验），不得写进一条「眼睛显示的值不能用」的记录。
+        let (status, _) = call_api(
+            Method::POST,
+            "/api/gateway/keys/plaintext",
+            Some(json!({"id": record_id, "plaintext": "sk-wb-ffffffffffffffffffffffffffffffff"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "已有明文时幂等成功，不改值");
+        let (_, body) = call_api(Method::GET, "/api/gateway/keys", None).await;
+        assert_eq!(body["keys"][0]["plaintext"], json!(plaintext), "幂等不覆盖");
 
         // 未吊销直接删除 → 400 + 可读错误。
         let (status, body) = call_api(
@@ -7807,7 +7904,7 @@ async fn api_unified_gateway_list_keys() -> Response {
     ))
 }
 
-/// POST /api/unified-gateway/keys —— 创建（**明文只返回这一次**）。
+/// POST /api/unified-gateway/keys —— 创建（支持可选自定义密钥）。
 async fn api_unified_gateway_create_key(Json(body): Json<Value>) -> Response {
     let namespaces: Vec<String> = body
         .get("namespaces")
@@ -7836,11 +7933,24 @@ async fn api_unified_gateway_create_key(Json(body): Json<Value>) -> Response {
         .to_string();
     match crate::unified_gateway_host::shared_state()
         .keys
-        .create(name, namespaces, biz_namespace)
+        .create_with_key(name, namespaces, biz_namespace, custom_key_from_body(&body))
     {
         Ok((record, plaintext)) => {
             json_ok(json!({ "ok": true, "key": plaintext, "record": record.masked() }))
         }
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/unified-gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+async fn api_unified_gateway_save_key_plaintext(Json(body): Json<Value>) -> Response {
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let plaintext = body.get("plaintext").and_then(Value::as_str).unwrap_or("");
+    match crate::unified_gateway_host::shared_state()
+        .keys
+        .save_plaintext(id, plaintext)
+    {
+        Ok(()) => json_ok(json!({ "ok": true })),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }
@@ -8544,9 +8654,10 @@ async fn api_qoder_list_api_keys() -> Response {
     json_ok(json!({ "keys": state.key_store.list() }))
 }
 
-/// POST /api/qoder/gateway/keys —— 新建 Key（`{name, scope}`）。
+/// POST /api/qoder/gateway/keys —— 新建 Key（`{name, scope, customKey?}`）。
 ///
-/// 明文仅此一次返回；`scope` 决定归属区域（fail-closed）。
+/// 明文仅随本次响应返回（不落盘，等用户选择）；`scope` 决定归属区域（fail-closed）；
+/// `customKey` 非空 → 原样使用。
 async fn api_qoder_create_api_key(Json(body): Json<Value>) -> Response {
     let region = match qoder_region_from_body(&body) {
         Ok(region) => region,
@@ -8560,12 +8671,26 @@ async fn api_qoder_create_api_key(Json(body): Json<Value>) -> Response {
         .unwrap_or("未命名 Key")
         .to_string();
     let state = crate::qoder_gateway_host::shared_state();
-    match state.key_store.create(name, region) {
+    match state
+        .key_store
+        .create_with_key(name, region, custom_key_from_body(&body))
+    {
         Ok((record, plaintext)) => json_ok(json!({
             "ok": true,
             "key": plaintext,
             "record": record.masked(),
         })),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// POST /api/qoder/gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+async fn api_qoder_save_api_key_plaintext(Json(body): Json<Value>) -> Response {
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let plaintext = body.get("plaintext").and_then(Value::as_str).unwrap_or("");
+    let state = crate::qoder_gateway_host::shared_state();
+    match state.key_store.save_plaintext(id, plaintext) {
+        Ok(()) => json_ok(json!({ "ok": true })),
         Err(error) => json_err(error, StatusCode::BAD_REQUEST),
     }
 }

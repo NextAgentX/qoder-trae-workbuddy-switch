@@ -67,7 +67,6 @@ export const en = {
   // ---- Toasts ----
   "trae.gateway.key.loadFailed": "Failed to load the API Key list",
   "trae.gateway.key.nameRequired": "Please enter a name",
-  "trae.gateway.key.noPlaintext": "Created successfully but no plaintext returned; please retry",
   "trae.gateway.key.createFailed": "Create failed",
   "trae.gateway.key.revoked": "Revoked",
   "trae.gateway.key.revokeFailed": "Revoke failed",
@@ -75,7 +74,6 @@ export const en = {
   "trae.gateway.key.deleteFailed": "Delete failed",
   "trae.gateway.key.restored": "Restored",
   "trae.gateway.key.restoreFailed": "Restore failed",
-  "trae.gateway.key.copied": "API Key copied",
 
   // ---- List ----
   "trae.gateway.key.create": "Create API Key",
@@ -103,11 +101,7 @@ export const en = {
   "trae.gateway.key.cancel": "Cancel",
   "trae.gateway.key.createSubmit": "Create",
 
-  // ---- One-time plaintext ----
-  "trae.gateway.key.createdTitle": "API Key created",
-  "trae.gateway.key.createdDesc": "The full key is shown only this once; copy and save it immediately.",
-  "trae.gateway.key.copy": "Copy",
-  "trae.gateway.key.saved": "I have saved it, close",
+  // The post-create "save to this app / save it myself" panel and eye labels live in `shared.gateway.keys.*`.
 
   // ---- Revoke / restore / delete confirmations ----
   "trae.gateway.key.revokeTitle": "Revoke API Key",

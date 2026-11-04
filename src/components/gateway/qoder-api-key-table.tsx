@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, KeyRound, Loader2, RotateCcw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Copy, KeyRound, Loader2, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { DemoAction } from "@/components/demo-action";
+import { KeySecretCell } from "@/components/gateway/key-secret-cell";
 import { KeysBar } from "@/components/gateway/keys-bar";
 import {
   Dialog,
@@ -53,7 +54,8 @@ import { cn } from "@/lib/utils";
  * **恢复**（清 `revokedAt`，同一把 Key 明文未变 ⇒ 客户端无需改配置）；
  * **删除**（仅已吊销可删，物理删除）。只给删除等于逼用户为一次误吊销删掉重建。
  *
- * 明文只在创建时一次性返回（`create_qoder_api_key`），列表接口永远只给脱敏前缀 + 末 4 位。
+ * 明文只在创建时随响应返回一次（`create_qoder_api_key`）；列表接口下发可空 `plaintext`
+ * —— 用户选「保存到本软件」后才有值，才有眼睛可点，否则只有掩码（前缀 + 末 4 位）。
  *
  * ## 2026-10-15 骨架对齐原型：卡头 → `KeysBar` 工具条 + 裸表
  *
@@ -93,16 +95,16 @@ export function QoderApiKeyTable({
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [region, setRegion] = useState<Region>(defaultRegion);
+  /** 第三行：自定义密钥（留空 ⇒ 自动生成，填写 ⇒ 原样使用）。 */
+  const [customKey, setCustomKey] = useState("");
   const [creating, setCreating] = useState(false);
-  const [plaintext, setPlaintext] = useState<{ value: string; name: string } | null>(null);
   /**
-   * 「刚复制成功」态（驱动 `Copy` → `Check`）。
-   *
-   * 与另两条产品线**同一规则**：只影响图标与文案，**不影响可点性** —— 明文只显示这一次，
-   * 用户可能要反复复制，按钮永远保持可点。定时器存 ref：连点两次时旧定时器不会提前复位。
+   * 创建成功后的**二选一面板**（2026-11-04）：
+   * 「保存到本软件」→ 明文落盘、列表出眼睛；「自行保存」→ 只有 hash。
+   * 关闭面板（X / ESC / 点遮罩）等同「自行保存」。
    */
-  const [copied, setCopied] = useState(false);
-  const copyTimer = useRef<number | null>(null);
+  const [pending, setPending] = useState<{ id: string; value: string; name: string } | null>(null);
+  const [saving, setSaving] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<QoderApiKeyRecord | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<QoderApiKeyRecord | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<QoderApiKeyRecord | null>(null);
@@ -225,6 +227,7 @@ export function QoderApiKeyTable({
   function openCreate() {
     setName("");
     setRegion(defaultRegion);
+    setCustomKey("");
     setCreateOpen(true);
   }
 
@@ -238,16 +241,28 @@ export function QoderApiKeyTable({
     try {
       // Key 的归属是**区域**，但命令面统一收 `scope`（与另两条产品线同一纪律：
       // 作用域是唯一的区域载体）。这里把当前区域升成 `qoder-*` 作用域。
-      const result = await api.createQoderApiKey(scopeOf("qoder", region), trimmed);
-      const value = result.key;
-      if (!value) {
-        // 创建成功但没回明文 = 契约异常，必须显式提示而不是静默（明文不可复原）。
-        toast.error(t("qoder.gateway.key.noPlaintext"));
+      // 第三行可选自定义密钥：空 ⇒ 后端自动生成；非空 ⇒ 原样使用。
+      const result = await api.createQoderApiKey(
+        scopeOf("qoder", region),
+        trimmed,
+        customKey.trim() || null,
+      );
+      if (result.ok === false) {
+        // 带上原因：自定义密钥撞车时后端会说清「被谁占了」。
+        toast.error(t("qoder.gateway.key.createFailed"), { description: result.error });
+        return;
+      }
+      // ★ 明文只随本次响应返回 ⇒ **先把面板打开，再刷新列表**。
+      //   反过来写会让 load 的网络往返卡在「Key 已创建、面板还没弹」的中间态，
+      //   期间切页 / 组件卸载就等于把明文丢了（`load` 自己吞异常，不会报错，丢了也不会有提示）。
+      if (!result.record?.id || !result.key) {
+        setCreateOpen(false);
+        toast.error(t("qoder.gateway.key.createFailed"));
         return;
       }
       setCreateOpen(false);
-      setCopied(false);
-      setPlaintext({ value, name: trimmed });
+      setPending({ id: result.record.id, value: result.key, name: trimmed });
+      // `load` 内部已把失败转成 toast，不会 reject ⇒ 列表刷新不会影响面板里的明文。
       await load();
       onChanged?.();
     } catch (e) {
@@ -257,21 +272,29 @@ export function QoderApiKeyTable({
     }
   }
 
-  /** 复制明文。**可反复调用**：成功后把按钮切成「已复制」，1.6s 后复位。 */
-  async function onCopyPlaintext() {
-    if (!plaintext) return;
-    await copyText(plaintext.value, t("qoder.gateway.key.copied"));
-    setCopied(true);
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
+  /** 面板「保存到本软件」：写台账 → 刷新列表让眼睛出现。失败时保留面板（关掉等于丢明文）。 */
+  async function savePending() {
+    if (!pending) return;
+    setSaving(true);
+    try {
+      await api.saveQoderApiKeyPlaintext(pending.id, pending.value);
+      setPending(null);
+      // `load` 内部已把失败转成 toast（不 reject）⇒ 保存成功不会被刷新失败反报成失败。
+      await load();
+      onChanged?.();
+      toast.success(t("shared.gateway.keys.savedToApp"), { description: pending.name });
+    } catch (e) {
+      // 失败必须留着面板：关掉就等于把明文丢了（保存没成功，就不该变成「自行保存」）。
+      setPending(pending);
+      toast.error(t("shared.gateway.keys.saveFailed"), { description: api.asError(e) });
+    } finally {
+      setSaving(false);
+    }
   }
 
-  /** 关闭明文对话框。**唯一的关闭路径**（遮罩 / ESC 已被拦截，见下方 DialogContent）。 */
-  function closePlaintext() {
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    copyTimer.current = null;
-    setCopied(false);
-    setPlaintext(null);
+  /** 面板「自行保存」/ 关闭：不落盘，明文随面板一起消失。 */
+  function dismissPending() {
+    setPending(null);
   }
 
   async function confirmRevoke() {
@@ -382,13 +405,14 @@ export function QoderApiKeyTable({
                         {regionDescriptor(keyRegion(key)).versionLabel}
                       </Badge>
                     </td>
-                    {/* 掩码补尾部 4 位（`prefix••••••••suffix`）—— 用户靠它**确认是哪一把**
-                        （同时建两把时前缀可能只差一两位）。无 `suffix` ⇒ 只显示前缀 + 省略号
-                        （与另两条产品线同一规则）。 */}
-                    <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">
-                      {key.suffix
-                        ? `${key.prefix}••••••••${key.suffix}`
-                        : `${key.prefix}…`}
+                    {/* ★ 掩码 + 眼睛（四条产品线共用 `KeySecretCell`）：
+                        默认 `prefix••••••••suffix`，有明文时可点眼睛查看完整密钥。 */}
+                    <td className="py-2 pr-4">
+                      <KeySecretCell
+                        plaintext={key.plaintext}
+                        prefix={key.prefix}
+                        suffix={key.suffix}
+                      />
                     </td>
                     <td className="py-2 pr-4 text-xs text-muted-foreground">
                       {formatDate(key.createdAt)}
@@ -522,6 +546,22 @@ export function QoderApiKeyTable({
               </Select>
               <p className="text-xs text-muted-foreground">{t("qoder.gateway.key.regionHint")}</p>
             </div>
+            {/* ★ 第三行：可选自定义密钥（空 ⇒ 自动生成；非空 ⇒ 原样使用）。 */}
+            <div className="space-y-2">
+              <Label htmlFor="qoder-key-custom">{t("shared.gateway.keys.customLabel")}</Label>
+              <Input
+                id="qoder-key-custom"
+                value={customKey}
+                onChange={(event) => setCustomKey(event.target.value)}
+                placeholder={t("shared.gateway.keys.customPlaceholder")}
+                spellCheck={false}
+                autoComplete="off"
+                className="font-mono"
+              />
+              <p className="text-[11.5px] leading-5 text-muted-foreground">
+                {t("shared.gateway.keys.customHint")}
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
@@ -535,38 +575,48 @@ export function QoderApiKeyTable({
         </DialogContent>
       </Dialog>
 
-      {/* 一次性明文展示。
-          ★ 与另两条产品线**同规则**：遮罩点击与 ESC 一律拦截（明文不可复原，误关即永久丢失），
-            复制按钮不禁用（允许反复复制）。 */}
-      <Dialog open={plaintext !== null} onOpenChange={(open) => !open && closePlaintext()}>
-        <DialogContent
-          className="sm:max-w-md"
-          onInteractOutside={(event) => event.preventDefault()}
-          onEscapeKeyDown={(event) => event.preventDefault()}
-        >
+      {/* 创建后的二选一面板（2026-11-04）——与另两条产品线同一形态：
+          创建时不落盘明文，明文只随本次响应回来，关掉即永久丢失。
+          故给复制按钮兜底；X / ESC / 遮罩 = 「自行保存」，不拦截。 */}
+      <Dialog open={pending !== null} onOpenChange={(open) => !open && dismissPending()}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{t("qoder.gateway.key.createdTitle")}</DialogTitle>
-            <DialogDescription>{t("qoder.gateway.key.createdDesc")}</DialogDescription>
+            <DialogTitle>{t("shared.gateway.keys.createdTitle")}</DialogTitle>
+            <DialogDescription>{t("shared.gateway.keys.createdDesc")}</DialogDescription>
           </DialogHeader>
-          {plaintext && (
+          {pending && (
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
-              {/* `select-all`：点一下即全选，手动 Ctrl+C 也能用（剪贴板 API 被拒时的兜底）。 */}
               <code className="min-w-0 flex-1 select-all break-all font-mono text-xs">
-                {plaintext.value}
+                {pending.value}
               </code>
               <Button
                 variant="outline"
                 size="sm"
-                data-act="gw-key-copy"
-                onClick={() => void onCopyPlaintext()}
+                data-act="gw-key-panel-copy"
+                onClick={() => void copyText(pending.value)}
               >
-                {copied ? <Check /> : <Copy />}
-                {copied ? t("shared.clipboard.copied") : t("qoder.gateway.key.copy")}
+                <Copy />
+                {t("shared.gateway.keys.copy")}
               </Button>
             </div>
           )}
           <DialogFooter>
-            <Button onClick={closePlaintext}>{t("qoder.gateway.key.saved")}</Button>
+            <Button
+              variant="outline"
+              data-act="gw-key-panel-dismiss"
+              onClick={dismissPending}
+              disabled={saving}
+            >
+              {t("shared.gateway.keys.saveSelf")}
+            </Button>
+            <Button
+              data-act="gw-key-panel-save"
+              onClick={() => void savePending()}
+              disabled={saving}
+            >
+              {saving && <Loader2 className="animate-spin" />}
+              {t("shared.gateway.keys.saveToApp")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Copy, KeyRound, Loader2, RotateCcw, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Copy, KeyRound, Loader2, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { DemoAction } from "@/components/demo-action";
+import { KeySecretCell } from "@/components/gateway/key-secret-cell";
 import { KeysBar } from "@/components/gateway/keys-bar";
 import {
   Dialog,
@@ -51,7 +52,12 @@ const EMPTY_POLICY: KeyPolicy = {
   scopeGroups: [],
 };
 
-/** API Key 列表 + 创建对话框 + 一次性明文展示 + 吊销 / 恢复 / 删除（P0-3）。
+/** API Key 列表 + 创建对话框（名称 / 归属 / 可选自定义密钥）+ 眼睛查看明文 + 吊销 / 恢复 / 删除（P0-3）。
+ *
+ * ★ 2026-11-04：创建后不再「直接落盘明文」，改为弹一个**二选一面板**：
+ *   「保存到本软件」→ 明文写进台账，列表掩码列后出现眼睛（`KeySecretCell`），点开即见；
+ *   「自行保存」/ X / ESC / 点遮罩 → 不落盘，明文随面板消失，此后只有掩码。
+ *   旧台账没有 `plaintext`（`null`）⇒ 同样只有掩码、没有眼睛 —— 不补造、不给死按钮。
  *
  * ## 2026-10-15 骨架对齐原型：卡头 → `KeysBar` 工具条 + 裸表
  *
@@ -67,6 +73,7 @@ const EMPTY_POLICY: KeyPolicy = {
 export function ApiKeyTable({ className }: { className?: string }) {
   const t = useT();
   const keys = useGatewayStore((s) => s.keys);
+  const loadKeys = useGatewayStore((s) => s.loadKeys);
   const createKey = useGatewayStore((s) => s.createKey);
   const revokeKey = useGatewayStore((s) => s.revokeKey);
   const restoreKey = useGatewayStore((s) => s.restoreKey);
@@ -76,17 +83,21 @@ export function ApiKeyTable({ className }: { className?: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [region, setRegion] = useState<Region>("cn");
+  /** 第三行：自定义密钥。留空 ⇒ 后端按原规则生成；填写 ⇒ 原样使用。 */
+  const [customKey, setCustomKey] = useState("");
   const [creating, setCreating] = useState(false);
-  const [plaintext, setPlaintext] = useState<{ value: string; name: string } | null>(null);
   /**
-   * 「刚复制成功」态（驱动复制按钮 `Copy` → `Check`）。
+   * 创建成功后的**二选一面板**（2026-11-04 需求）。
    *
-   * 它**只影响图标与文案，不影响可点性** —— 明文只显示这一次，用户可能需要反复复制
-   * （粘到多个客户端、或先粘进密码管理器），所以按钮**永远保持可点**。
-   * 用 ref 存定时器：连点两次时旧定时器不会把新一次的「已复制」提前复位。
+   * 创建时后端**不落盘**明文，明文只随本次响应回来。用户在这里选：
+   * - 「保存到本软件」→ 调 `save_api_key_plaintext` 写进台账，列表出现眼睛；
+   * - 「自行保存」→ 什么都不做，这把 Key 以后只有掩码（等同改造前的行为）。
+   *
+   * 面板关闭（X / ESC / 点遮罩）**等同「自行保存」** —— 用户已明确这个口径。
+   * 一旦关闭就无法再看到明文，故面板里另给一个复制按钮兜底。
    */
-  const [copied, setCopied] = useState(false);
-  const copyTimer = useRef<number | null>(null);
+  const [pending, setPending] = useState<{ id: string; value: string; name: string } | null>(null);
+  const [saving, setSaving] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<ApiKeyRecord | null>(null);
   /**
    * ★ 恢复目标：与 `revokeTarget` **互逆**。已吊销的行必须同时给出「恢复」与「删除」
@@ -191,6 +202,7 @@ export function ApiKeyTable({ className }: { className?: string }) {
   function openCreate() {
     setName("");
     setRegion("cn");
+    setCustomKey("");
     setCreateOpen(true);
   }
 
@@ -202,15 +214,22 @@ export function ApiKeyTable({ className }: { className?: string }) {
     }
     setCreating(true);
     try {
-      const result = await createKey(trimmed, region);
-      const value = result.key;
-      if (!value) {
-        toast.error(t("wbStats.gateway.createdNoPlaintext"));
+      // 第三行是**可选的自定义密钥**：空 ⇒ 后端自动生成；非空 ⇒ 原样使用。
+      const result = await createKey(trimmed, region, customKey.trim() || null);
+      if (result.ok === false) {
+        toast.error(t("wbStats.gateway.createFail"), { description: result.error });
+        return;
+      }
+      // 明文只随本次响应返回 ⇒ 先校验拿到手，再关对话框、交给面板。
+      const record = result.record;
+      if (!record?.id || !result.key) {
+        // 契约异常（创建成功但没回明文 / 没回记录）：不弹空面板，明确报错。
+        setCreateOpen(false);
+        toast.error(t("wbStats.gateway.createFail"));
         return;
       }
       setCreateOpen(false);
-      setCopied(false);
-      setPlaintext({ value, name: trimmed });
+      setPending({ id: record.id, value: result.key, name: trimmed });
     } catch (e) {
       toast.error(t("wbStats.gateway.createFail"), { description: api.asError(e) });
     } finally {
@@ -218,21 +237,30 @@ export function ApiKeyTable({ className }: { className?: string }) {
     }
   }
 
-  /** 复制明文。**可反复调用**：成功后把按钮切成「已复制」，1.6s 后复位。 */
-  async function onCopyPlaintext() {
-    if (!plaintext) return;
-    await copyText(plaintext.value, t("wbStats.gateway.keyCopied"));
-    setCopied(true);
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
+  /** 面板「保存到本软件」：把明文写进台账，再刷新列表让眼睛出现。 */
+  async function savePending() {
+    if (!pending) return;
+    setSaving(true);
+    try {
+      await api.saveApiKeyPlaintext(pending.id, pending.value);
+      setPending(null);
+      // `loadKeys` 内部已把失败收进 store 的 `error`（不 reject）⇒ 保存成功不会被它反报成失败。
+      await loadKeys();
+      toast.success(t("shared.gateway.keys.savedToApp"), { description: pending.name });
+    } catch (e) {
+      // 失败必须留着面板：关掉就等于把明文丢了，用户再也没机会存。
+      // `pending` 是本次闭包捕获的值 —— 用户若在保存期间按了 ESC / 点了遮罩，
+      // 这里把面板恢复出来（保存没成功，就不该让它变成「自行保存」）。
+      setPending(pending);
+      toast.error(t("shared.gateway.keys.saveFailed"), { description: api.asError(e) });
+    } finally {
+      setSaving(false);
+    }
   }
 
-  /** 关闭明文对话框。**唯一的关闭路径**（遮罩 / ESC 已被拦截，见下方 DialogContent）。 */
-  function closePlaintext() {
-    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-    copyTimer.current = null;
-    setCopied(false);
-    setPlaintext(null);
+  /** 面板「自行保存」/ 关闭：不落盘，明文随面板一起消失。 */
+  function dismissPending() {
+    setPending(null);
   }
 
   async function confirmRevoke() {
@@ -332,12 +360,14 @@ export function ApiKeyTable({ className }: { className?: string }) {
                         {regionDescriptor(key.region).versionLabel}
                       </Badge>
                     </td>
-                    {/* ★ E3：掩码补上尾部 4 位（`prefix••••••••suffix`）——
-                    用户靠它**确认是哪一把**。旧台账无 suffix ⇒ 只显示前缀 + 省略号。 */}
-                    <td className="py-2 pr-4 font-mono text-xs text-muted-foreground">
-                      {key.suffix
-                        ? `${key.prefix}••••••••${key.suffix}`
-                        : `${key.prefix}…`}
+                    {/* ★ 掩码 + 眼睛（四条产品线共用 `KeySecretCell`）：
+                    默认 `prefix••••••••suffix`，有明文时可直接点眼睛查看完整密钥。 */}
+                    <td className="py-2 pr-4">
+                      <KeySecretCell
+                        plaintext={key.plaintext}
+                        prefix={key.prefix}
+                        suffix={key.suffix}
+                      />
                     </td>
                     <td className="py-2 pr-4 text-xs text-muted-foreground">{formatDate(key.createdAt)}</td>
                     {/* ★ 与 Trae 侧同列同序：`lastUsedAt` 字段后端一直有（`ApiKeyRecord`），
@@ -452,6 +482,23 @@ export function ApiKeyTable({ className }: { className?: string }) {
                 </SelectContent>
               </Select>
             </div>
+            {/* ★ 第三行：**可选的**自定义密钥。留空 ⇒ 按原规则自动生成；
+                填写 ⇒ 原样使用（只 trim 首尾空格，不补前缀、不改大小写）。 */}
+            <div className="space-y-2">
+              <Label htmlFor="key-custom">{t("shared.gateway.keys.customLabel")}</Label>
+              <Input
+                id="key-custom"
+                value={customKey}
+                onChange={(event) => setCustomKey(event.target.value)}
+                placeholder={t("shared.gateway.keys.customPlaceholder")}
+                spellCheck={false}
+                autoComplete="off"
+                className="font-mono"
+              />
+              <p className="text-[11.5px] leading-5 text-muted-foreground">
+                {t("shared.gateway.keys.customHint")}
+              </p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
@@ -465,37 +512,50 @@ export function ApiKeyTable({ className }: { className?: string }) {
         </DialogContent>
       </Dialog>
 
-      {/* 一次性明文展示。
-          ★ 2026-10-13：遮罩点击与 ESC **一律拦截** —— 明文不可复原（库里只有 sha256），
-            误关一次就得吊销重建、并把所有客户端配置改一遍。关闭只剩下面那个显式按钮。
-            复制按钮**不禁用**：用户可能要反复复制（多个客户端 / 先存进密码管理器）。 */}
-      <Dialog open={plaintext !== null} onOpenChange={(open) => !open && closePlaintext()}>
-        <DialogContent
-          className="sm:max-w-md"
-          onInteractOutside={(event) => event.preventDefault()}
-          onEscapeKeyDown={(event) => event.preventDefault()}
-        >
+      {/* 创建后的**二选一面板**（2026-11-04）。
+          创建时后端不落盘明文，明文只随本次响应回来 —— 关掉就再也看不到。
+          故面板里给一个复制按钮兜底（用户选「自行保存」时得先复制走）。
+          X / ESC / 点遮罩 = 「自行保存」：用户已明确这个口径，不做拦截。
+          保存失败时由 `savePending` 的 catch 把面板恢复出来（明文不丢，也没有「关不掉的弹窗」）。 */}
+      <Dialog open={pending !== null} onOpenChange={(open) => !open && dismissPending()}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>{t("wbStats.gateway.createdTitle")}</DialogTitle>
-            <DialogDescription>{t("wbStats.gateway.createdDesc")}</DialogDescription>
+            <DialogTitle>{t("shared.gateway.keys.createdTitle")}</DialogTitle>
+            <DialogDescription>{t("shared.gateway.keys.createdDesc")}</DialogDescription>
           </DialogHeader>
-          {plaintext && (
+          {pending && (
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2.5">
-              {/* `select-all`：点一下即全选，手动 Ctrl+C 也能用（剪贴板 API 被拒时的兜底）。 */}
-              <code className="min-w-0 flex-1 select-all break-all font-mono text-xs">{plaintext.value}</code>
+              <code className="min-w-0 flex-1 select-all break-all font-mono text-xs">
+                {pending.value}
+              </code>
               <Button
                 variant="outline"
                 size="sm"
-                data-act="gw-key-copy"
-                onClick={() => void onCopyPlaintext()}
+                data-act="gw-key-panel-copy"
+                onClick={() => void copyText(pending.value)}
               >
-                {copied ? <Check /> : <Copy />}
-                {copied ? t("shared.clipboard.copied") : t("wbStats.gateway.copy")}
+                <Copy />
+                {t("shared.gateway.keys.copy")}
               </Button>
             </div>
           )}
           <DialogFooter>
-            <Button onClick={closePlaintext}>{t("wbStats.gateway.savedClose")}</Button>
+            <Button
+              variant="outline"
+              data-act="gw-key-panel-dismiss"
+              onClick={dismissPending}
+              disabled={saving}
+            >
+              {t("shared.gateway.keys.saveSelf")}
+            </Button>
+            <Button
+              data-act="gw-key-panel-save"
+              onClick={() => void savePending()}
+              disabled={saving}
+            >
+              {saving && <Loader2 className="animate-spin" />}
+              {t("shared.gateway.keys.saveToApp")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

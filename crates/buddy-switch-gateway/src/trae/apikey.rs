@@ -1,4 +1,6 @@
-//! Trae 多 API Key 存储：**只存 sha256 哈希 + 前缀 + 归属程序位**，明文仅创建时返回一次。
+//! Trae 多 API Key 存储：**sha256 哈希 + 前缀 + 归属程序位 + 可空明文**。
+//! 明文**不随创建落盘**：用户点「保存到本软件」后由 `save_plaintext` 写入；
+//! 「自行保存」的 Key 与旧记录一样无明文（列表不显示眼睛）。
 //!
 //! 落盘 `~/.buddy-switch/trae/api_gateway_keys.json`（见 [`paths::api_gateway_keys_file`]）。
 //! 与 WorkBuddy 的 [`crate::apikey::ApiKeyStore`] 同构（每次操作都读盘、无进程内缓存，
@@ -42,7 +44,10 @@ use buddy_switch_core::modules::config as core_config;
 /* ★ issue #76：策略类型**直接复用** WorkBuddy 侧那一套（`crate::apikey`）。
 两条产品线的 Key 策略语义完全相同（配额单位/周期、账号白名单），各定义一份
 必然漂移 —— 前端也只有一套 `KeyPolicy` 类型。 */
-use crate::apikey::{KeyPolicy, QuotaMode, QuotaPeriod, QuotaUnit, ScopeMode};
+use crate::apikey::{
+    key_taken_message, resolve_key_plaintext, KeyPolicy, QuotaMode, QuotaPeriod, QuotaUnit,
+    ScopeMode,
+};
 use buddy_switch_core::modules::trae::{settings as trae_settings, variant::TraeVariant};
 
 use crate::apikey::{constant_time_eq, sha256_hex};
@@ -69,7 +74,7 @@ where
     Ok(TraeVariant::parse(&raw).unwrap_or_default())
 }
 
-/// 单条 Trae API Key（明文不落库）。**含归属产品线**。
+/// 单条 Trae API Key。**含归属产品线**；`plaintext` 仅在用户选择「保存到本软件」后有值，旧记录为 `None`。
 ///
 /// 线上/磁盘形状为 camelCase（`createdAt` / `revokedAt` / `lastUsedAt`），
 /// 前端类型 `TraeApiKeyRecord` 逐字对齐。
@@ -103,6 +108,9 @@ pub struct TraeApiKeyRecord {
     pub suffix: String,
     /// `sha256(hex)` of 完整明文 Key。
     pub hash: String,
+    /// 完整明文；旧记录 / legacy 缺字段时为 `None`。
+    #[serde(default)]
+    pub plaintext: Option<String>,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
     #[serde(default)]
@@ -128,7 +136,7 @@ pub struct TraeApiKeyRecord {
 }
 
 impl TraeApiKeyRecord {
-    /// 脱敏展示（**不含 hash**，可安全下发到前端）。
+    /// 列表视图（**不含 hash**，含可空 `plaintext`）。
     pub fn masked(&self) -> Value {
         json!({
             "id": self.id,
@@ -136,6 +144,7 @@ impl TraeApiKeyRecord {
             "variant": self.variant.as_str(),
             "prefix": self.prefix,
             "suffix": self.suffix,
+            "plaintext": self.plaintext,
             "createdAt": self.created_at,
             "revokedAt": self.revoked_at,
             "revoked": self.revoked_at.is_some(),
@@ -233,6 +242,8 @@ impl TraeApiKeyStore {
             prefix: legacy_prefix(trimmed),
             suffix: legacy_suffix(trimmed),
             hash: sha256_hex(trimmed),
+            // legacy 属「旧记录」：不把 settings.json 里的明文复制进新台账 ⇒ 眼睛不显示。
+            plaintext: None,
             created_at: 0,
             revoked_at: None,
             last_used_at: None,
@@ -275,16 +286,60 @@ impl TraeApiKeyStore {
         core_config::atomic_write(&self.path, &content).map_err(|error| error.to_string())
     }
 
-    /// 生成 Key：明文 `sk-trae-` + 32 位 hex；返回 `(记录, 明文)`。明文仅此一次返回。
-    ///
-    /// 写回时先 `load()`（可能含合成的 legacy 记录）再 `save()`，于是 legacy Key
-    /// **一并物化落盘**——新建 Key 不会让升级前那把 Key 失效。
+    /// 生成 Key：明文 `sk-trae-` + 32 位 hex；返回 `(记录, 明文)`。
+    /// 保留两参签名 ⇒ 存量测试 / e2e 调用点零改动（等价于「不自定义密钥」）。
     pub fn create(&self, name: String, variant: TraeVariant) -> (TraeApiKeyRecord, String) {
-        let secret = uuid::Uuid::new_v4().simple().to_string(); // 32 hex
-        let plaintext = format!("sk-trae-{secret}");
-        let prefix = format!("sk-trae-{}", &secret[..4]);
-        // ★ 尾部 4 位（32 hex 的末 4）—— 与 WorkBuddy 侧同形，用户靠它确认是哪一把。
-        let suffix = secret[secret.len() - 4..].to_string();
+        self.create_with_key(name, variant, None)
+            // `None` ⇒ 走自动生成，查重必返回 `Ok`。
+            .expect("自动生成的 Key 不会与存量重复")
+    }
+
+    /// 自定义密钥的**创建前查重**（与 WorkBuddy 侧同一规则）：`sha256(明文)` 不得与
+    /// 台账里任何一条记录相同；已吊销的记录也算占用 —— 那是同一把密钥的历史，
+    /// 正确动作是 [`Self::restore`]。
+    ///
+    /// 注意 `load()` 会带出**合成的 legacy 记录**（升级前那把 Key）⇒ 老 Key 无法被
+    /// 重复创建，用户得先删掉旧记录。
+    pub fn ensure_custom_key_available(&self, custom_key: Option<&str>) -> Result<(), String> {
+        let Some(raw) = custom_key else {
+            return Ok(());
+        };
+        let plaintext = raw.trim();
+        if plaintext.is_empty() {
+            return Ok(());
+        }
+        let hash = sha256_hex(plaintext);
+        match self.load().iter().find(|record| record.hash == hash) {
+            Some(existing) => Err(key_taken_message(
+                &existing.name,
+                existing.revoked_at.is_some(),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// 生成 / 接收 Key；返回 `(记录, 明文)`。
+    ///
+    /// `custom_key` 非空 ⇒ 原样使用该密钥；为空 ⇒ 按原规则生成。
+    /// 写回时先 `load()`（可能含合成的 legacy 记录）再 `save()`，于是 legacy Key
+    /// **一并物化落盘** —— 新建 Key 不会让升级前那把 Key 失效。
+    ///
+    /// 自定义密钥**先查重**（[`Self::ensure_custom_key_available`]）：同 hash 只允许一条记录。
+    ///
+    /// ★ 2026-11-04：**创建时不落盘明文**（`plaintext: None`），
+    ///   改由用户点「保存到本软件」时走 [`Self::save_plaintext`]。
+    pub fn create_with_key(
+        &self,
+        name: String,
+        variant: TraeVariant,
+        custom_key: Option<String>,
+    ) -> Result<(TraeApiKeyRecord, String), String> {
+        self.ensure_custom_key_available(custom_key.as_deref())?;
+        let (plaintext, prefix, suffix) = resolve_key_plaintext(
+            custom_key,
+            || format!("sk-trae-{}", uuid::Uuid::new_v4().simple()),
+            "sk-trae-",
+        );
         let record = TraeApiKeyRecord {
             id: uuid::Uuid::new_v4().to_string(),
             name,
@@ -292,6 +347,7 @@ impl TraeApiKeyStore {
             prefix,
             suffix,
             hash: sha256_hex(&plaintext),
+            plaintext: None,
             created_at: core_config::now_ms(),
             revoked_at: None,
             last_used_at: None,
@@ -309,7 +365,39 @@ impl TraeApiKeyStore {
         if let Err(error) = self.save(&records) {
             eprintln!("[trae-gateway] 保存 API Key 失败: {error}");
         }
-        (record, plaintext)
+        Ok((record, plaintext))
+    }
+
+    /// 把「本次创建返回的明文」写入台账（用户点「保存到本软件」才走这里）。
+    ///
+    /// 与 WorkBuddy 侧同一规则：id 必须存在、`sha256(明文)` 必须等于 `hash`、已有明文幂等不覆盖。
+    /// 写回同样先 `load()` 再 `save()` ⇒ 合成的 legacy 记录会被一并物化（与 `create` 同行为）。
+    pub fn save_plaintext(&self, id: &str, plaintext: &str) -> Result<(), String> {
+        let plaintext = plaintext.trim();
+        if plaintext.is_empty() {
+            return Err("明文为空".to_string());
+        }
+        let digest = sha256_hex(plaintext);
+        let mut records = self.load();
+        let mut found = false;
+        for record in records.iter_mut() {
+            if record.id != id {
+                continue;
+            }
+            found = true;
+            if record.plaintext.is_some() {
+                return Ok(());
+            }
+            if !constant_time_eq(record.hash.as_bytes(), digest.as_bytes()) {
+                return Err("明文与该密钥不匹配".to_string());
+            }
+            record.plaintext = Some(plaintext.to_string());
+            break;
+        }
+        if !found {
+            return Err("API Key 不存在".to_string());
+        }
+        self.save(&records)
     }
 
     /// 常量时间比较哈希；返回有效记录（携带 `variant`）。无效 / 不存在 / 已吊销返回 `None`。
@@ -456,16 +544,53 @@ pub fn list_response(store: &TraeApiKeyStore) -> Value {
     json!({ "keys": keys })
 }
 
-/// 两条通道共用：`create` 的响应形状（明文**仅此一次**返回）。
-///
-/// 返回 `{ "ok": true, "key": "<明文>", "record": masked }`。
+/// 两条通道共用：`create` 的响应形状。保留三参签名供存量调用点使用。
 pub fn create_response(store: &TraeApiKeyStore, name: String, variant: TraeVariant) -> Value {
-    let (record, plaintext) = store.create(name, variant);
-    json!({
-        "ok": true,
-        "key": plaintext,
-        "record": record.masked(),
-    })
+    create_response_with_key(store, name, variant, None)
+}
+
+/// 创建成功的响应体（**形状唯一来源**，四条产品线同形）。
+fn created_payload(record: &TraeApiKeyRecord, plaintext: String) -> Value {
+    json!({ "ok": true, "key": plaintext, "record": record.masked() })
+}
+
+/// `create` 的 **`Result` 版**响应：`Err(message)` 交给**调用方**决定通道语义。
+///
+/// 为什么需要它：HTTP 通道要把「自定义密钥撞车」映射成 `400`（与另三条产品线一致，
+/// `WB` / `Qoder` / `Unified` 的 handler 都是 `Err ⇒ json_err(…, BAD_REQUEST)`），
+/// 而 IPC 通道没有状态码、只能把错误塞进 body。若本函数直接返回 `Value`，
+/// HTTP 侧就只剩「200 + `{ok:false}`」一条路 ⇒ 同族接口出现两种错误码。
+///
+/// 因此：**HTTP** 用本函数（`Ok ⇒ json_ok`，`Err ⇒ json_err(400)`）；
+/// **IPC** 用 [`create_response_with_key`]（错误折进 `{ok:false,error}`）。
+/// 失败时**不落盘**（查重在 `create_with_key` 入口）。
+pub fn create_result_with_key(
+    store: &TraeApiKeyStore,
+    name: String,
+    variant: TraeVariant,
+    custom_key: Option<String>,
+) -> Result<Value, String> {
+    let (record, plaintext) = store.create_with_key(name, variant, custom_key)?;
+    Ok(created_payload(&record, plaintext))
+}
+
+/// 两条通道共用：`create` 的响应形状，支持自定义密钥。
+///
+/// 返回 `{ "ok": true, "key": "<明文>", "record": masked }`；
+/// 自定义密钥撞车 ⇒ `{ "ok": false, "error": "…" }`（**不落盘**，前端原样显示 error）。
+///
+/// ★ 这是 **IPC（桌面端）** 的口径（无 HTTP 状态码可用）。webui 走 HTTP，
+///   用 [`create_result_with_key`] 由 handler 映射成 `400`。
+pub fn create_response_with_key(
+    store: &TraeApiKeyStore,
+    name: String,
+    variant: TraeVariant,
+    custom_key: Option<String>,
+) -> Value {
+    match create_result_with_key(store, name, variant, custom_key) {
+        Ok(payload) => payload,
+        Err(error) => json!({ "ok": false, "error": error }),
+    }
 }
 
 #[cfg(test)]
@@ -624,6 +749,47 @@ mod tests {
         assert_eq!(record.masked()["suffix"], json!(record.suffix));
     }
 
+    /// 自定义密钥查重：同 `hash` 只能有一条记录（**已吊销的也算占用**），被拒时不落盘。
+    ///
+    /// 变异：删掉 `create_with_key` 里的 `ensure_custom_key_available(...)?` ⇒ 本测试红。
+    #[test]
+    fn duplicate_custom_key_is_rejected() {
+        let (_guard, store) = isolated("dup");
+        let key = "dup-trae-key-0001";
+        let (record, _) = store
+            .create_with_key("甲".to_string(), TraeVariant::default(), Some(key.into()))
+            .expect("首次创建");
+
+        let error = store
+            .create_with_key("乙".to_string(), TraeVariant::default(), Some(key.into()))
+            .expect_err("重复的自定义密钥必须被拒");
+        assert!(error.contains("甲"), "要点名占用者: {error}");
+        assert_eq!(store.load().len(), 1, "被拒时不得落盘");
+
+        // HTTP 通道走 `create_result_with_key`（handler 负责映射 400）⇒ 它必须**同样**拒绝，
+        // 否则 webui 会 200 成功但没建出记录。变异：让它改调 `create_response_with_key`
+        // 吞掉错误 ⇒ 本断言红。
+        let error = create_result_with_key(
+            &store,
+            "丁".to_string(),
+            TraeVariant::default(),
+            Some(key.into()),
+        )
+        .expect_err("Result 版也必须拒绝重复");
+        assert!(
+            error.contains("甲"),
+            "Result 版的提示语要与 store 一致: {error}"
+        );
+        assert_eq!(store.load().len(), 1);
+
+        store.revoke(&record.id).expect("吊销");
+        let error = store
+            .create_with_key("丙".to_string(), TraeVariant::default(), Some(key.into()))
+            .expect_err("已吊销也占用");
+        assert!(error.contains("恢复"), "应提示走恢复: {error}");
+        assert_eq!(store.load().len(), 1);
+    }
+
     #[test]
     fn creating_a_new_key_materializes_legacy_and_keeps_it_valid() {
         let (guard, store) = isolated("materialize");
@@ -669,16 +835,24 @@ mod tests {
             .any(|record| record.id == "legacy" && record.is_revoked()));
     }
 
+    /// ★ 需求变更（第二次）：**创建时不落盘**，用户点「保存到本软件」才写。
     #[test]
-    fn plaintext_never_touches_disk() {
-        let (_guard, store) = isolated("noplaintext");
-        let (_record, plaintext) = store.create("k".to_string(), TraeVariant::TraeWork);
+    fn new_key_plaintext_touches_disk_only_after_save() {
+        let (_guard, store) = isolated("plaintext");
+        let (record, plaintext) = store.create("k".to_string(), TraeVariant::TraeWork);
         let on_disk = std::fs::read_to_string(store.path()).unwrap();
-        assert!(!on_disk.contains(&plaintext), "磁盘不得出现明文：{on_disk}");
+        assert!(
+            !on_disk.contains(&plaintext),
+            "创建时不得把明文写进台账：{on_disk}"
+        );
         assert!(
             plaintext.starts_with("sk-trae-") && plaintext.len() == "sk-trae-".len() + 32,
             "明文形态应为 sk-trae-<32hex>：{plaintext}"
         );
+
+        store.save_plaintext(&record.id, &plaintext).unwrap();
+        let on_disk = std::fs::read_to_string(store.path()).unwrap();
+        assert!(on_disk.contains(&plaintext), "保存后明文应落盘：{on_disk}");
     }
 
     #[test]
@@ -962,6 +1136,7 @@ mod tests {
             "variant",
             "prefix",
             "suffix",
+            "plaintext",
             "createdAt",
             "revokedAt",
             "revoked",
@@ -981,7 +1156,15 @@ mod tests {
         assert_eq!(fields, expected);
         assert!(!object.contains_key("hash"));
         assert!(!masked.to_string().contains(&record.hash));
-        assert!(!masked.to_string().contains(&plaintext));
+        assert!(masked["plaintext"].is_null(), "未保存前不得下发明文");
+        store.save_plaintext(&record.id, &plaintext).unwrap();
+        let saved = store
+            .list()
+            .into_iter()
+            .find(|entry| entry.id == record.id)
+            .unwrap()
+            .masked();
+        assert_eq!(saved["plaintext"], json!(plaintext));
         assert_eq!(masked["variant"], json!("trae_cn"));
         assert_eq!(masked["revoked"], json!(false));
     }

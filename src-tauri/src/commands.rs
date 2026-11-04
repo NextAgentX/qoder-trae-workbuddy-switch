@@ -2860,8 +2860,9 @@ async fn probe_catalog(region: Region) {
     let _ = buddy_switch_gateway::catalog_probe::probe_region(&state, region).await;
 }
 
-/// POST /api/gateway/keys —— 创建 Key（返回一次性明文）。
+/// POST /api/gateway/keys —— 创建 Key（`{name, region, customKey?}`）。
 ///
+/// 明文仅随本次响应返回（不落盘「保存到本软件」前）；`customKey` 非空 → 原样使用。
 /// ★ **接入即识别**（P10 §1.6 / ✅ #6）：创建 Key 即用户认知里的「接入」动作
 /// （「我要让某工具连上这个网关」）⇒ 创建成功后**后台探测**该 region，
 /// 用户无需手动点「重新识别」就能看到模型清单。
@@ -2871,18 +2872,43 @@ async fn probe_catalog(region: Region) {
 /// ⚠️ 桌面端必须用 `tauri::async_runtime::spawn`（**不是** `tokio::spawn`）——
 /// 见本文件既有的同款用法说明（同步命令 / 无 tokio 上下文时 `tokio::spawn` 会 panic）。
 #[tauri::command]
-pub async fn create_api_key(name: Option<String>, region: Option<String>) -> Value {
+pub async fn create_api_key(
+    name: Option<String>,
+    region: Option<String>,
+    custom_key: Option<String>,
+) -> Value {
     let region = parse_region(region.as_deref());
     let name = name
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "未命名".to_string());
-    let (record, plaintext) = gateway::shared_state().keys.create(name, region);
+    // `custom_key` 为空 ⇒ 后端按原规则生成；非空 ⇒ 原样使用用户输入的密钥。
+    let (record, plaintext) = match gateway::shared_state()
+        .keys
+        .create_with_key(name, region, custom_key)
+    {
+        Ok(pair) => pair,
+        // 自定义密钥与台账里已有的 Key 撞车 ⇒ 走 `ok:false`（前端原样显示 error）。
+        Err(error) => return json!({ "ok": false, "error": error }),
+    };
     // 顺序不可颠倒：先落 Key、再触发探测 —— 探测失败也绝不能影响「Key 已创建」这个事实。
     tauri::async_runtime::spawn(async move {
         probe_catalog(region).await;
     });
     json!({ "ok": true, "key": plaintext, "record": record.masked() })
+}
+
+/// POST /api/gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+///
+/// 创建时**不落盘明文**，本命令是明文落盘的唯一入口；用户选「自行保存」就不会走到这里。
+/// 后端会校验 `sha256(plaintext)` 与记录里的 `hash` 一致 —— 传错值拒绝写入。
+#[tauri::command]
+pub async fn save_api_key_plaintext(id: String, plaintext: String) -> Result<Value, String> {
+    let state = gateway::shared_state();
+    tauri::async_runtime::spawn_blocking(move || state.keys.save_plaintext(&id, &plaintext))
+        .await
+        .map_err(|error| format!("保存密钥明文失败: {error}"))?
+        .map(|()| json!({ "ok": true }))
 }
 
 /// POST /api/gateway/keys/revoke —— 吊销 Key。
@@ -4317,24 +4343,39 @@ pub async fn list_trae_api_keys() -> Value {
     .unwrap_or_else(|_| json!({ "keys": [] }))
 }
 
-/// POST /api/trae/gateway/keys —— 新建 Key（`{name, variant}`，明文仅此一次返回）。
+/// POST /api/trae/gateway/keys —— 新建 Key（`{name, variant, customKey?}`，明文仅随本次响应返回）。
 #[tauri::command]
-pub async fn create_trae_api_key(name: Option<String>, variant: Option<String>) -> Value {
+pub async fn create_trae_api_key(
+    name: Option<String>,
+    variant: Option<String>,
+    custom_key: Option<String>,
+) -> Value {
     let name = name
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "未命名 Key".to_string());
     let state = trae_gateway::shared_state();
     tauri::async_runtime::spawn_blocking(move || {
-        buddy_switch_gateway::trae::apikey::create_response(
+        buddy_switch_gateway::trae::apikey::create_response_with_key(
             &state.key_store,
             name,
             parse_trae_variant(variant.as_deref()),
+            custom_key,
         )
     })
     .await
     // 线程 panic ⇒ 交回 `ok:false`（无 `key` 字段），前端按「保存失败」提示，不静默成功。
     .unwrap_or_else(|_| json!({ "ok": false }))
+}
+
+/// POST /api/trae/gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+#[tauri::command]
+pub async fn save_trae_api_key_plaintext(id: String, plaintext: String) -> Result<Value, String> {
+    let state = trae_gateway::shared_state();
+    tauri::async_runtime::spawn_blocking(move || state.key_store.save_plaintext(&id, &plaintext))
+        .await
+        .map_err(|error| format!("保存密钥明文失败: {error}"))?
+        .map(|()| json!({ "ok": true }))
 }
 
 /// POST /api/trae/gateway/keys/revoke —— 吊销 Key（`{id}`）。
@@ -5158,7 +5199,9 @@ pub async fn list_unified_api_keys() -> Value {
     .unwrap_or_else(|_| json!({ "keys": [] }))
 }
 
-/// POST /api/unified-gateway/keys —— 创建统一密钥；**明文只返回这一次**。
+/// POST /api/unified-gateway/keys —— 创建统一密钥（`{name, namespaces, bizNamespace, customKey?}`）。
+///
+/// 明文仅随本次响应返回（用户在面板里选「保存到本软件」才落盘）；`customKey` 非空 → 原样使用。
 ///
 /// 授权集不合规（空 / 不在册 / 业务转发非 WB 或不在授权集内）⇒ 直接报错，
 /// 校验发生在**落盘之前**（不留一把废 Key）。
@@ -5171,6 +5214,7 @@ pub async fn create_unified_api_key(
     name: Option<String>,
     namespaces: Vec<String>,
     biz_namespace: Option<String>,
+    custom_key: Option<String>,
 ) -> Result<Value, String> {
     let name = name
         .map(|value| value.trim().to_string())
@@ -5178,11 +5222,27 @@ pub async fn create_unified_api_key(
         .unwrap_or_else(|| "未命名".to_string());
     let state = unified_gateway::shared_state();
     tauri::async_runtime::spawn_blocking(move || {
-        let (record, plaintext) = state.keys.create(name, namespaces, biz_namespace)?;
+        let (record, plaintext) =
+            state
+                .keys
+                .create_with_key(name, namespaces, biz_namespace, custom_key)?;
         Ok(json!({ "ok": true, "key": plaintext, "record": record.masked() }))
     })
     .await
     .map_err(|error| format!("创建统一密钥失败: {error}"))?
+}
+
+/// POST /api/unified-gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+#[tauri::command]
+pub async fn save_unified_api_key_plaintext(
+    id: String,
+    plaintext: String,
+) -> Result<Value, String> {
+    let state = unified_gateway::shared_state();
+    tauri::async_runtime::spawn_blocking(move || state.keys.save_plaintext(&id, &plaintext))
+        .await
+        .map_err(|error| format!("保存密钥明文失败: {error}"))?
+        .map(|()| json!({ "ok": true }))
 }
 
 /// POST /api/unified-gateway/keys/revoke —— 吊销（置标记，**可逆**）。
@@ -5782,9 +5842,13 @@ pub async fn list_qoder_api_keys() -> Value {
         .unwrap_or_else(|_| json!({ "keys": [] }))
 }
 
-/// POST /api/qoder/gateway/keys —— 新建 Key（`{name, scope}`，明文仅此一次返回）。
+/// POST /api/qoder/gateway/keys —— 新建 Key（`{name, scope, customKey?}`，明文仅随本次响应返回）。
 #[tauri::command]
-pub async fn create_qoder_api_key(scope: String, name: Option<String>) -> Result<Value, String> {
+pub async fn create_qoder_api_key(
+    scope: String,
+    name: Option<String>,
+    custom_key: Option<String>,
+) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
     let name = name
@@ -5793,7 +5857,7 @@ pub async fn create_qoder_api_key(scope: String, name: Option<String>) -> Result
         .unwrap_or_else(|| "未命名 Key".to_string());
     let state = qoder_gateway::shared_state();
     tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
-        let (record, plaintext) = state.key_store.create(name, region)?;
+        let (record, plaintext) = state.key_store.create_with_key(name, region, custom_key)?;
         Ok(json!({
             "ok": true,
             "key": plaintext,
@@ -5802,6 +5866,16 @@ pub async fn create_qoder_api_key(scope: String, name: Option<String>) -> Result
     })
     .await
     .map_err(|error| format!("创建密钥失败: {error}"))?
+}
+
+/// POST /api/qoder/gateway/keys/plaintext —— 用户点「保存到本软件」后把明文写入台账。
+#[tauri::command]
+pub async fn save_qoder_api_key_plaintext(id: String, plaintext: String) -> Result<Value, String> {
+    let state = qoder_gateway::shared_state();
+    tauri::async_runtime::spawn_blocking(move || state.key_store.save_plaintext(&id, &plaintext))
+        .await
+        .map_err(|error| format!("保存密钥明文失败: {error}"))?
+        .map(|()| json!({ "ok": true }))
 }
 
 /// POST /api/qoder/gateway/keys/revoke —— 吊销 Key（`{id}`）。

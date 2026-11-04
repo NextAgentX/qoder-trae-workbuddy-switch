@@ -20,7 +20,24 @@ export const zh = {
   /* 密钥表下方的说明段 —— **三个平台的密钥表共用同一段话**（差异只有「归属」那一列）。
      ★ 抽取理由：改造前这段文案在 WB / Trae / Qoder 三个组件里各写一遍，措辞已经漂移过。 */
   "shared.gateway.keys.note":
-    "密钥明文只在创建时展示一次；此处永远只显示掩码。请求数为该密钥创建以来的累计值，与概览的「今日」口径不同。吊销可逆：已吊销的密钥仍留在表里，可「恢复」回启用态（库中存的是同一把 Key，明文未变，客户端无需改配置），也可「删除」清掉记录。",
+    "密钥默认以掩码展示（前缀 + 尾部 4 位），点右侧眼睛可查看完整密钥。创建时选「自行保存」的密钥不会存进本软件 —— 与改造前的旧密钥一样，只显示掩码、不提供眼睛（明文当时只在你眼前出现过一次）；要能随时查看，创建时选「保存到本软件」。请求数为该密钥创建以来的累计值，与概览的「今日」口径不同。吊销可逆：已吊销的密钥仍留在表里，可「恢复」回启用态（库中存的是同一把 Key，明文未变，客户端无需改配置），也可「删除」清掉记录。",
+  /* 密钥眼睛（`key-secret-cell.tsx`，四条产品线共用）。
+     ★ 2026-11-04：明文**不随创建落盘**，用户在创建后的面板里二选一：
+       「保存到本软件」→ 落盘、列表出眼睛；「自行保存」→ 只有 hash，永久只看得到掩码。 */
+  "shared.gateway.keys.createdTitle": "API Key 已创建",
+  "shared.gateway.keys.createdDesc": "完整 Key，你可以选择存储到本软件或自行保存。",
+  "shared.gateway.keys.saveToApp": "保存到本软件",
+  "shared.gateway.keys.saveSelf": "自行保存",
+  "shared.gateway.keys.savedToApp": "已保存到本软件",
+  "shared.gateway.keys.saveFailed": "保存失败",
+  "shared.gateway.keys.reveal": "显示完整密钥",
+  "shared.gateway.keys.hide": "隐藏完整密钥",
+  "shared.gateway.keys.copy": "复制密钥",
+  /* 创建弹窗第二行以外的**第三个输入**：自定义密钥（留空即自动生成）。 */
+  "shared.gateway.keys.customLabel": "自定义密钥（可选）",
+  "shared.gateway.keys.customPlaceholder": "留空则自动生成，或粘贴你已有的密钥",
+  "shared.gateway.keys.customHint":
+    "留空：按本产品线的规则自动生成（带该线自己的前缀）。填写：原样使用你输入的密钥，仅去掉首尾空格、不补前缀、不改大小写 —— 适合沿用你已有的密钥。不能与本产品线已创建过的密钥重复（重复会被拒绝创建）。",
   // ---- 版本区域（region.ts / trae-types.ts / trae-variant-status.ts） ----
   "shared.region.version.cn": "国内版",
   "shared.region.version.global": "国际版",

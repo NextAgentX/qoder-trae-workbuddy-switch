@@ -872,8 +872,10 @@ function demoApiKeys(): ApiKeyRecord[] {
      列表按 `prefix••••••••suffix` 渲染。夹具缺它 ⇒ 演示站显示 `sk-wb-a1b2…`
      而真机显示 `sk-wb-a1b2••••••••7d31` —— 那正是「演示数据自造结构」的红线。 */
   return [
-    { id: "demo-key-1", name: "Cursor", region: "cn", prefix: "sk-wb-a1b2", suffix: "7d31", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
-    { id: "demo-key-2", name: "Claude Code", region: "global", prefix: "sk-wb-c3d4", suffix: "9e02", createdAt: atLocalTime(3, 17, 5), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 41) },
+    /* ★ 前两把带 `plaintext`（列表里点眼睛可看，演示也能看到新形态）；
+       第三把刻意**不带** —— 旧台账形态：只有掩码、没有眼睛。 */
+    { id: "demo-key-1", name: "Cursor", region: "cn", prefix: "sk-wb-a1b2", suffix: "7d31", plaintext: "sk-wb-a1b2c3d4e5f60718293a4b5c6d7e7d31", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
+    { id: "demo-key-2", name: "Claude Code", region: "global", prefix: "sk-wb-c3d4", suffix: "9e02", plaintext: "sk-wb-c3d4e5f6a1b2c3d4e5f60718293a9e02", createdAt: atLocalTime(3, 17, 5), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 41) },
     { id: "demo-key-3", name: "OpenWebUI", region: "cn", prefix: "sk-wb-e5f6", suffix: "b4a8", createdAt: atLocalTime(4, 10, 0), revokedAt: atLocalTime(1, 12, 30), revoked: true, lastUsedAt: atLocalTime(2, 9, 12) },
   ];
 }
@@ -2445,7 +2447,8 @@ function demoQoderGatewayModels(scope: string): unknown {
 }
 
 /**
- * Qoder 多 Key（脱敏；**明文 / 哈希一律不出现**）。
+ * Qoder 多 Key（脱敏；**不下发 hash**）。前两把带 `plaintext`（演示「保存到本软件」之后
+ * 的形态，列表里点眼睛可看），第三把刻意保持旧形态（无明文 ⇒ 不出眼睛）。
  *
  * 每个区域各一组，且**都带一条已吊销的**（与 WB / Trae 演示数据同形）：已吊销行必须
  * 同时给出「恢复 + 删除」两个出口，这条产品纪律要在演示里就能看见。
@@ -2459,6 +2462,7 @@ function demoQoderApiKeys(): { keys: unknown[] } {
         region: "cn",
         prefix: "sk-qoder-5b2e",
         suffix: "c14f",
+        plaintext: "sk-qoder-5b2e0f7c9a1d4b6e8f2a3c5d7e9b1c14f",
         createdAt: atLocalTime(23, 10, 12),
         revokedAt: null,
         revoked: false,
@@ -2470,6 +2474,7 @@ function demoQoderApiKeys(): { keys: unknown[] } {
         region: "cn",
         prefix: "sk-qoder-9a07",
         suffix: "4e83",
+        plaintext: "sk-qoder-9a07123456789abcdef0123456789a4e83",
         createdAt: atLocalTime(13, 15, 40),
         revokedAt: atLocalTime(1, 9, 20),
         revoked: true,
@@ -2961,8 +2966,8 @@ function demoTraeApiKeys(): { keys: TraeApiKeyRecord[] } {
      所以这里也必须是 `sk-trae-0a1b` + `cdef`，**不是**带省略号的整串。 */
   return {
     keys: [
-      { id: "demo-trae-key-1", name: t("shared.demo.trae.key.cursorCn"), variant: "trae_work", prefix: "sk-trae-9f2c", suffix: "7d31", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
-      { id: "demo-trae-key-2", name: t("shared.demo.trae.key.continueCode"), variant: "trae_cn", prefix: "sk-trae-6d18", suffix: "a0e9", createdAt: atLocalTime(2, 20, 12), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 58) },
+      { id: "demo-trae-key-1", name: t("shared.demo.trae.key.cursorCn"), variant: "trae_work", prefix: "sk-trae-9f2c", suffix: "7d31", plaintext: "sk-trae-9f2c1a3b5c7d9e0f2a4b6c8d0e1f7d31", createdAt: atLocalTime(3, 17, 3), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 17, 10) },
+      { id: "demo-trae-key-2", name: t("shared.demo.trae.key.continueCode"), variant: "trae_cn", prefix: "sk-trae-6d18", suffix: "a0e9", plaintext: "sk-trae-6d180f1e2d3c4b5a69788796a5b4a0e9", createdAt: atLocalTime(2, 20, 12), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 58) },
       { id: "demo-trae-key-3", name: t("shared.demo.trae.key.cherryGlobal"), variant: "global", prefix: "sk-trae-4b7e", suffix: "2f4a", createdAt: atLocalTime(2, 9, 40), revokedAt: null, revoked: false, lastUsedAt: atLocalTime(0, 16, 41) },
       { id: "demo-trae-key-4", name: t("shared.demo.trae.key.legacy"), variant: "cn", prefix: "sk-trae-0a1b", suffix: "cdef", createdAt: atLocalTime(9, 8, 0), revokedAt: atLocalTime(1, 12, 30), revoked: true, lastUsedAt: atLocalTime(3, 10, 5) },
     ],
