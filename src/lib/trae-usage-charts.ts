@@ -22,6 +22,7 @@
  * 渲染层 `CreditDivergingBar` 按数据自动决定单/双向（P3 决策 #1），不需要平台分支。
  */
 
+import { TRAE_EXPIRING_SOON_MS } from "@/lib/credit-expiry";
 import type { CreditExpiry, TokenStatsGroup, TokenStatsSource } from "@/lib/types";
 import type {
   TraeDailySnapshot,
@@ -140,7 +141,8 @@ export function traeCreditExpiry(
         status: null,
         expireAt,
         expired: expireAt !== null && expireAt <= now,
-        expiringSoon: expireAt !== null && expireAt > now && expireAt - now <= 7 * 86_400_000,
+        expiringSoon:
+          expireAt !== null && expireAt > now && expireAt - now <= TRAE_EXPIRING_SOON_MS,
       };
     });
   return { ok: true, resources };

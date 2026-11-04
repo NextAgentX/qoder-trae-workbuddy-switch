@@ -34,6 +34,7 @@ import {
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { TraeAccountCard, formatCredits, jwtBadge, shortTime, shortTimeFromMs, type TraeProgram } from "@/components/trae-account-card";
 import { secondsToMs, toDetailPacks } from "@/lib/credit-packs";
+import { TRAE_EXPIRING_SOON_MS } from "@/lib/credit-expiry";
 import { REFRESH_DONE_LABEL, useAccountRefreshBusy, type AccountRefreshKind } from "@/lib/account-refresh";
 import { TraeExportAccountsDialog } from "@/components/trae-export-accounts-dialog";
 import { TraeImportAccountsDialog } from "@/components/trae-import-accounts-dialog";
@@ -1698,8 +1699,15 @@ export default function TraeAccountsPage() {
   const detailStats = useMemo<DetailStat[]>(() => {
     if (!detail) return [];
     const badge = jwtBadge(detail.jwtStatus, detail.jwtExpHours, t);
+    /* ★ 临期判据**只认后端标记**（`EXPIRING_SOON_SECS` = 14 天）：此前这里前端写死 7 天，
+       于是「10 天后到期的包」在卡片上说临期、点开抽屉的指标块却不说（#144 复核 §3.3）。
+       拿不到逐包标记（旧快照 / 该账号没有包）时才退回镜像常量，不再另立一个数。 */
+    const packs = detail.creditPackages ?? [];
     const soon =
-      detail.creditsExpireAt != null && detail.creditsExpireAt - Date.now() <= 7 * 86_400_000;
+      packs.length > 0
+        ? packs.some((pack) => pack.expiringSoon)
+        : detail.creditsExpireAt != null &&
+          detail.creditsExpireAt - Date.now() <= TRAE_EXPIRING_SOON_MS;
     const credBad = detail.jwtStatus === "expired";
 
     /* 今日 Token（issue #47）：只统计**经本网关**的调用，客户端那一档 Trae 拿不到

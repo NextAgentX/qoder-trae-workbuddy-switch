@@ -24,7 +24,7 @@
  * 用法：`node scripts/check-credit-packs.mjs`（已挂进 `npm run check:scope`）。
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -43,6 +43,18 @@ async function loadTs(relative) {
 const { normalizePacks, toDetailPacks, packIsExpired, packRatio, secondsToMs } = await loadTs(
   "src/lib/credit-packs.ts",
 );
+/* 临期窗口的镜像常量（#144 复核 §3.3）：与后端 `EXPIRING_SOON_SECS` 必须同值。 */
+const { TRAE_EXPIRING_SOON_MS } = await loadTs("src/lib/credit-expiry.ts");
+
+/** 递归列出 `src/**` 的 ts/tsx（用法断言的扫描面）。 */
+function walkTs(dir, out = []) {
+  for (const entry of readdirSync(dir)) {
+    const abs = path.join(dir, entry);
+    if (statSync(abs).isDirectory()) walkTs(abs, out);
+    else if (/\.(ts|tsx)$/.test(entry)) out.push(abs);
+  }
+  return out;
+}
 
 let failed = 0;
 let passed = 0;
@@ -239,10 +251,36 @@ check("★ 打上游的三处自动刷新都接到 opt-in 开关（新增视图�
   }
 });
 
+/* ── 临期窗口：只认后端标记，缺标记时用**镜像常量**（#144 复核 §3.3）────────
+ *
+ * 这条失败模式很隐蔽：同一个包在卡片上说「临期」、点开抽屉却不说 —— 因为两处用了
+ * 不同窗口（前端写死 7 天 vs 后端 14 天）。#144 复核当时数出五处实现，其中三处是
+ * 前端自设窗口；现在收敛成「后端标记 + 一个镜像常量」。
+ */
+check("★ 临期窗口只剩两档：后端标记，或镜像后端的 14 天常量（不许再写死 7 天）", () => {
+  eq(TRAE_EXPIRING_SOON_MS, 14 * DAY, "TRAE_EXPIRING_SOON_MS 必须镜像后端 EXPIRING_SOON_SECS");
+  const offenders = [];
+  for (const file of walkTs(path.join(root, "src"))) {
+    const code = readFileSync(file, "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+      .join("\n");
+    /* 只抓「7 天窗口」这一种写法：`7 * 86_400_000` / `7 * 86400000` / `7 * 24 * 3600`。 */
+    if (/\b7\s*\*\s*(?:86_?400_?000|24\s*\*\s*3600)/.test(code)) {
+      offenders.push(path.relative(root, file));
+    }
+  }
+  if (offenders.length > 0) {
+    throw new Error(
+      `这些文件仍在前端自设 7 天临期窗口（应用后端标记或 TRAE_EXPIRING_SOON_MS）：${offenders.join("、")}`,
+    );
+  }
+});
+
 if (failed > 0) {
   console.error(`\ncredit-packs 门禁：${passed} 通过 / ${failed} 失败`);
   process.exit(1);
 }
 console.log(
-  `credit-packs 门禁：${passed} 项通过（秒→毫秒 · 过滤 · 排序 · ratio · 临期标记 · 调用点 · opt-in 接线）`,
+  `credit-packs 门禁：${passed} 项通过（秒→毫秒 · 过滤 · 排序 · ratio · 临期标记 · 调用点 · opt-in 接线 · 临期窗口）`,
 );

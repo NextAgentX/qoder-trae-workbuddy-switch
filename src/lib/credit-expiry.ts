@@ -21,15 +21,29 @@
  * ## 窗口由**后端**决定，前端不再自设
  *
  * 是否临期只认后端下发的 `expiringSoon` 标记（`credits.rs::EXPIRING_SOON_DAYS` = 7 天、
- * `trae/credits.rs::EXPIRING_SOON_SECS` = 7 天）。此前 WorkBuddy 卡片在前端另设 3 天窗口，
+ * `trae/credits.rs::EXPIRING_SOON_SECS` = **14 天**）。此前 WorkBuddy 卡片在前端另设 3 天窗口，
  * 与统计页 / 总览页（都读后端的 `expiringSoonRemaining`）口径不一致 —— 同一件事两个数字。
  *
  * ⚠️ 不可把 `expiringSoon`（布尔）当额度求和，也不可在缺该字段时自行推窗口：
  * 缺字段一律当「未知」跳过，宁可少一枚徽章，不可编一个到期日。
+ *
+ * ⚠️ 拿不到后端标记的**少数**地方（积分页的到期分桶、账号抽屉的积分指标块）用
+ * {@link TRAE_EXPIRING_SOON_MS} —— 它是后端窗口的**镜像**，不是第二个口径。
  */
 
 /** 一天的毫秒数。 */
 const DAY_MS = 86_400_000;
+
+/**
+ * Trae 的临期窗口，**镜像后端** `trae/credits.rs::EXPIRING_SOON_SECS`（14 天）。
+ *
+ * 只给「拿不到后端 `expiringSoon` 标记」的地方用（积分页到期分桶、账号抽屉的积分指标块）。
+ * 有标记时必须只认标记 —— 前端写死 7 天正是 #144 复核 §3.3 的残差：
+ * 10 天后到期的包在卡片上说临期、点开抽屉却不说。
+ *
+ * ⚠️ 改后端那个常量时这里要跟着改（两个数刻意分开写，不跨语言共享，但**必须同值**）。
+ */
+export const TRAE_EXPIRING_SOON_MS = 14 * DAY_MS;
 
 /** 一批到期：同一时刻到期的剩余积分之和。 */
 export interface ExpiringBatch {
