@@ -6,7 +6,22 @@
  */
 export const en = {
   "shared.gateway.keys.note":
-    "The plaintext key is shown once at creation; only the mask is kept here. Request counts are lifetime totals for that key, not the “today” figure on the overview. Revocation is reversible: a revoked key stays in the list and can be restored (the same key is stored, so clients need no changes) or deleted.",
+    "Keys are masked by default (prefix + last 4). Click the eye to reveal the full key. Keys you chose to save yourself are not stored in this app — like keys created before this feature, they keep the mask and show no eye (the plaintext was only shown to you once); pick “Save to this app” at creation to keep it viewable. Request counts are lifetime totals for that key, not the “today” figure on the overview. Revocation is reversible: a revoked key stays in the list and can be restored (the same key is stored, so clients need no changes) or deleted.",
+  // 2026-11-04: plaintext is NOT stored at creation — the user picks in the panel afterwards.
+  "shared.gateway.keys.createdTitle": "API key created",
+  "shared.gateway.keys.createdDesc":
+    "Full key. You can store it in this app, or save it yourself.",
+  "shared.gateway.keys.saveToApp": "Save to this app",
+  "shared.gateway.keys.saveSelf": "Save it myself",
+  "shared.gateway.keys.savedToApp": "Saved to this app",
+  "shared.gateway.keys.saveFailed": "Failed to save",
+  "shared.gateway.keys.reveal": "Show full key",
+  "shared.gateway.keys.hide": "Hide full key",
+  "shared.gateway.keys.copy": "Copy key",
+  "shared.gateway.keys.customLabel": "Custom key (optional)",
+  "shared.gateway.keys.customPlaceholder": "Leave empty to generate one, or paste your existing key",
+  "shared.gateway.keys.customHint":
+    "Empty: generate one following this product line's own prefix. Filled: use your key verbatim — only surrounding spaces are trimmed; no prefix is added and case is kept. It must not equal a key that already exists on this product line (duplicates are rejected).",
   // ---- Version regions (region.ts / trae-types.ts / trae-variant-status.ts) ----
   "shared.region.version.cn": "CN version",
   "shared.region.version.global": "Global version",

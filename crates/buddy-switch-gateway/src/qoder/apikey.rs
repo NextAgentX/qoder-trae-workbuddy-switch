@@ -1,7 +1,7 @@
 //! Qoder 网关的多 API Key 存储（`sk-qoder-` 前缀 + **归属区域** + 三态动作）。
 //!
-//! 与 Trae 侧（`trae/apikey.rs`）**同款结构**：明文不落库、只存 `sha256`；
-//! `prefix` / `suffix` 供脱敏展示（`prefix••••••••suffix`，**不含省略号**）；三态动作
+//! 与 Trae 侧（`trae/apikey.rs`）**同款结构**：`sha256` + 可空明文（用户选择「保存到本软件」才落盘）；
+//! `prefix` / `suffix` 供掩码展示（`prefix••••••••suffix`，**不含省略号**）；三态动作
 //! **吊销 → 恢复 → 删除**，且**已吊销的行必须同时给「恢复 + 删除」两个出口**
 //! （两平台同形的产品纪律 —— 只给删除会让「误吊销」只能靠删号重来）。
 //!
@@ -32,7 +32,10 @@ use buddy_switch_core::modules::qoder::region::QoderRegion;
 
 /* ★ issue #76：策略类型**直接复用** WorkBuddy 侧那一套（`crate::apikey`）。
 三条产品线的 Key 策略语义完全相同，各定义一份必然漂移。 */
-use crate::apikey::{KeyPolicy, QuotaMode, QuotaPeriod, QuotaUnit, ScopeMode};
+use crate::apikey::{
+    constant_time_eq, key_taken_message, resolve_key_plaintext, KeyPolicy, QuotaMode, QuotaPeriod,
+    QuotaUnit, ScopeMode,
+};
 
 /// 新 Key 的前缀字面量（创建时 `sk-qoder-<secret 前 4 位>`）。
 ///
@@ -57,7 +60,7 @@ fn region_from_str<'de, D: serde::Deserializer<'de>>(
     Ok(QoderRegion::parse(&raw).unwrap_or_default())
 }
 
-/// 单条 Qoder API Key（明文不落库）。**含归属区域**。
+/// 单条 Qoder API Key。**含归属区域**；`plaintext` 仅在用户选择「保存到本软件」后有值，旧记录为 `None`。
 ///
 /// 磁盘 / 线上形状为 camelCase（`createdAt` / `revokedAt` / `lastUsedAt`），
 /// 前端类型逐字对齐。
@@ -80,6 +83,9 @@ pub struct QoderApiKeyRecord {
     pub suffix: String,
     /// `sha256(hex)` of 完整明文 Key。
     pub hash: String,
+    /// 完整明文；旧记录缺字段时为 `None`。
+    #[serde(default)]
+    pub plaintext: Option<String>,
     pub created_at: i64,
     pub revoked_at: Option<i64>,
     #[serde(default)]
@@ -103,7 +109,7 @@ pub struct QoderApiKeyRecord {
 }
 
 impl QoderApiKeyRecord {
-    /// 脱敏展示（**不含 hash**，可安全下发到前端）。
+    /// 列表视图（**不含 hash**，含可空 `plaintext`）。
     pub fn masked(&self) -> Value {
         json!({
             "id": self.id,
@@ -111,6 +117,7 @@ impl QoderApiKeyRecord {
             "region": self.region.as_str(),
             "prefix": self.prefix,
             "suffix": self.suffix,
+            "plaintext": self.plaintext,
             "createdAt": self.created_at,
             "revokedAt": self.revoked_at,
             "revoked": self.revoked_at.is_some(),
@@ -200,14 +207,54 @@ impl QoderApiKeyStore {
             .map_err(|error| error.to_string())
     }
 
-    /// 创建一把新 Key：返回 `(记录, 明文)` —— **明文只在这一刻出现一次**。
+    /// 生成 Key：明文 `sk-qoder-` + 32 位 hex；返回 `(记录, 明文)`。保留两参签名 ⇒ 存量调用点零改动。
     pub fn create(
         &self,
         name: String,
         region: QoderRegion,
     ) -> Result<(QoderApiKeyRecord, String), String> {
-        // 明文形态与另三条产品线逐字同族：`sk-qoder-` + 32 位 hex。
-        let secret = format!("{KEY_PREFIX}{}", &random_id()[..SECRET_HEX_LEN]);
+        self.create_with_key(name, region, None)
+    }
+
+    /// 自定义密钥的**创建前查重**（与 WB / Trae 侧同一规则）：`sha256(明文)` 不得与台账里
+    /// 任何一条记录相同；已吊销的记录也算占用 —— 正确动作是 [`Self::restore`]。
+    pub fn ensure_custom_key_available(&self, custom_key: Option<&str>) -> Result<(), String> {
+        let Some(raw) = custom_key else {
+            return Ok(());
+        };
+        let plaintext = raw.trim();
+        if plaintext.is_empty() {
+            return Ok(());
+        }
+        let hash = sha256_hex(plaintext);
+        match self.load().iter().find(|record| record.hash == hash) {
+            Some(existing) => Err(key_taken_message(
+                &existing.name,
+                existing.revoked_at.is_some(),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// 生成 / 接收 Key：`custom_key` 非空 ⇒ 原样使用；为空 ⇒ 按原规则 `sk-qoder-` + 32 位 hex 生成。
+    ///
+    /// 自定义密钥**先查重**（[`Self::ensure_custom_key_available`]）：同 hash 只允许一条记录，
+    /// 否则吊销一条、另一条仍能通过 `verify`，吊销语义就烂了。
+    ///
+    /// ★ 2026-11-04：**创建时不落盘明文**（`plaintext: None`），
+    ///   改由用户点「保存到本软件」时走 [`Self::save_plaintext`]。
+    pub fn create_with_key(
+        &self,
+        name: String,
+        region: QoderRegion,
+        custom_key: Option<String>,
+    ) -> Result<(QoderApiKeyRecord, String), String> {
+        self.ensure_custom_key_available(custom_key.as_deref())?;
+        let (secret, prefix, suffix) = resolve_key_plaintext(
+            custom_key,
+            || format!("{KEY_PREFIX}{}", &random_id()[..SECRET_HEX_LEN]),
+            KEY_PREFIX,
+        );
         let record = QoderApiKeyRecord {
             id: random_id(),
             name: if name.trim().is_empty() {
@@ -216,12 +263,10 @@ impl QoderApiKeyStore {
                 name.trim().to_string()
             },
             region,
-            prefix: format!(
-                "{KEY_PREFIX}{}",
-                &secret[KEY_PREFIX.len()..KEY_PREFIX.len() + 4]
-            ),
-            suffix: secret.chars().skip(secret.chars().count() - 4).collect(),
+            prefix,
+            suffix,
             hash: sha256_hex(&secret),
+            plaintext: None,
             created_at: now_ms(),
             revoked_at: None,
             last_used_at: None,
@@ -238,6 +283,38 @@ impl QoderApiKeyStore {
         records.push(record.clone());
         self.save(&records)?;
         Ok((record, secret))
+    }
+
+    /// 把「本次创建返回的明文」写入台账（用户点「保存到本软件」才走这里）。
+    ///
+    /// 与 WB / Trae 侧同一语义：id 必须存在、`sha256(明文)` 必须等于 `hash`、已有明文幂等不覆盖。
+    pub fn save_plaintext(&self, id: &str, plaintext: &str) -> Result<(), String> {
+        let plaintext = plaintext.trim();
+        if plaintext.is_empty() {
+            return Err("明文为空".to_string());
+        }
+        let digest = sha256_hex(plaintext);
+        let mut records = self.load();
+        let mut found = false;
+        for record in records.iter_mut() {
+            if record.id != id {
+                continue;
+            }
+            found = true;
+            if record.plaintext.is_some() {
+                return Ok(());
+            }
+            // 与另三条产品线同一写法：常量时间比较（`verify` 也用它）。
+            if !constant_time_eq(record.hash.as_bytes(), digest.as_bytes()) {
+                return Err("明文与该密钥不匹配".to_string());
+            }
+            record.plaintext = Some(plaintext.to_string());
+            break;
+        }
+        if !found {
+            return Err("API Key 不存在".to_string());
+        }
+        self.save(&records)
     }
 
     /// 校验一把明文 Key：命中且未吊销 ⇒ 记录，并**顺手 touch** `lastUsedAt`。
@@ -350,19 +427,48 @@ mod tests {
         (QoderApiKeyStore::new(path.clone()), path)
     }
 
-    /// 三态动作的合同：吊销 → 恢复 → 删除；未吊销不可删；记录里**永远没有明文**。
+    /// 自定义密钥查重：同 `hash` 只能有一条记录（**已吊销的也算占用**），被拒时不落盘。
+    ///
+    /// 变异：删掉 `create_with_key` 里的 `ensure_custom_key_available(...)?` ⇒ 本测试红。
+    #[test]
+    fn duplicate_custom_key_is_rejected() {
+        let (store, _path) = temp_store();
+        let key = "dup-qoder-key-0001";
+        let (record, _) = store
+            .create_with_key("甲".into(), QoderRegion::Cn, Some(key.into()))
+            .expect("首次创建");
+
+        let error = store
+            .create_with_key("乙".into(), QoderRegion::Cn, Some(key.into()))
+            .expect_err("重复的自定义密钥必须被拒");
+        assert!(error.contains("甲"), "要点名占用者: {error}");
+        assert_eq!(store.load().len(), 1, "被拒时不得落盘");
+
+        // 吊销不释放 hash：再建一把同值只会得到两条同 hash 记录（吊销语义就废了）。
+        store.revoke(&record.id).expect("吊销");
+        let error = store
+            .create_with_key("丙".into(), QoderRegion::Cn, Some(key.into()))
+            .expect_err("已吊销也占用");
+        assert!(error.contains("恢复"), "应提示走恢复: {error}");
+        assert_eq!(store.load().len(), 1);
+    }
+
+    /// 三态动作的合同：吊销 → 恢复 → 删除；未吊销不可删。
     ///
     /// 变异：把 `delete` 的「仅已吊销可删」守卫删掉 ⇒ 本测试红。
     #[test]
-    fn key_lifecycle_three_states_and_no_plaintext_on_disk() {
+    fn key_lifecycle_three_states_and_plaintext_on_disk() {
         let (store, path) = temp_store();
         let (record, secret) = store.create("测试".into(), QoderRegion::Cn).unwrap();
         assert!(secret.starts_with(KEY_PREFIX), "{secret}");
         assert!(record.prefix.starts_with(KEY_PREFIX));
 
-        // 明文**不落盘**：磁盘文件里不得出现 secret 本体。
+        // ★ 需求变更（第二次）：创建时不落盘，用户点「保存到本软件」才写。
         let on_disk = std::fs::read_to_string(&path).unwrap();
-        assert!(!on_disk.contains(&secret), "磁盘出现明文 Key");
+        assert!(!on_disk.contains(&secret), "创建时不得落盘明文");
+        store.save_plaintext(&record.id, &secret).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains(&secret), "保存后明文应落盘");
 
         // 校验通过 + touch 生效。
         assert!(store.verify(&secret).is_some());
@@ -478,13 +584,16 @@ mod tests {
     }
 
     #[test]
-    fn masked_never_contains_hash_or_secret() {
+    fn list_carries_plaintext_but_never_hash() {
         let (store, path) = temp_store();
-        let (_record, secret) = store.create("m".into(), QoderRegion::Global).unwrap();
+        let (record, secret) = store.create("m".into(), QoderRegion::Global).unwrap();
+        // 未保存前：键在、值为 null。
+        assert!(store.list()[0]["plaintext"].is_null());
+        store.save_plaintext(&record.id, &secret).unwrap();
         let list = store.list();
         let text = serde_json::to_string(&list).unwrap();
-        assert!(!text.contains(&secret));
-        assert!(!text.contains("hash"), "脱敏列表不得带 hash 字段");
+        assert_eq!(list[0]["plaintext"], serde_json::json!(secret));
+        assert!(!text.contains("hash"), "列表不得带 hash 字段");
         assert_eq!(list[0]["region"], "global");
         assert!(list[0]["prefix"].as_str().unwrap().starts_with(KEY_PREFIX));
         let _ = std::fs::remove_file(&path);
@@ -532,6 +641,7 @@ mod tests {
             prefix: "qd-0123".to_string(),
             suffix: "abcd".to_string(),
             hash: sha256_hex(legacy),
+            plaintext: None,
             created_at: 0,
             revoked_at: None,
             last_used_at: None,

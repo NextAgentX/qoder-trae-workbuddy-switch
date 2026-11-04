@@ -483,7 +483,7 @@ async fn variant_ids_are_underscore_form_on_disk_and_in_api_response() {
         "不得出现派生 serde 的小写形态: {on_disk}"
     );
 
-    // 上线形态：list_response 的每条记录都带下划线形态的 variant，且不含明文/hash。
+    // 上线形态：list_response 的每条记录都带下划线形态的 variant，含明文（新建 Key）、不含 hash。
     let store = TraeApiKeyStore::new(keys_file(&home));
     let response = list_response(&store);
     let keys = response["keys"].as_array().expect("keys 是数组");
@@ -495,15 +495,31 @@ async fn variant_ids_are_underscore_form_on_disk_and_in_api_response() {
     let expected: std::collections::BTreeSet<&str> =
         ["trae_merged", "global_trae_merged"].into_iter().collect();
     assert_eq!(variants, expected, "上线 variant 集合漂移: {response}");
-    // 脱敏红线：响应里不得出现明文 / hash。
+    // ★ 2026-11-04：创建时**不落盘**明文 ⇒ 列表默认不含明文；用户选「保存到本软件」后才随列表下发。
     let serialized = response.to_string();
     assert!(
         !serialized.contains(&work_key) && !serialized.contains(&cn_key),
-        "不得泄漏明文"
+        "未保存前列表不得下发明文"
     );
     assert!(
         keys.iter().all(|entry| entry.get("hash").is_none()),
         "不得下发 hash"
+    );
+
+    for (variant, secret) in [("global_trae_merged", &work_key), ("trae_merged", &cn_key)] {
+        let id = keys
+            .iter()
+            .find(|entry| entry["variant"] == variant)
+            .and_then(|entry| entry["id"].as_str())
+            .expect("variant 必须命中一条记录")
+            .to_string();
+        store.save_plaintext(&id, secret).unwrap();
+    }
+    let after = list_response(&store);
+    let after_text = after.to_string();
+    assert!(
+        after_text.contains(&work_key) && after_text.contains(&cn_key),
+        "保存后明文应随列表下发（眼睛查看）"
     );
 
     let _ = std::fs::remove_dir_all(&home);

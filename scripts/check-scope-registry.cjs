@@ -2347,9 +2347,16 @@ check("★ P10（独立验证）接入即识别：create_api_key 先落 Key 再 
   if (start < 0) throw new Error("commands.rs 找不到 `create_api_key`（是否改名？）");
   const end = code.indexOf("pub fn revoke_api_key", start);
   const body = end < 0 ? code.slice(start) : code.slice(start, end);
-  const createIdx = body.indexOf("keys.create(");
+  /* ★ 2026-11-04：`create` 保留两参签名、新增 `create_with_key`（第三行「自定义密钥」）。
+     这里两种落 Key 出口都认 —— 断言的是**顺序与出口**，不是方法名。 */
+  const createIdx =
+    ["keys.create(", ".create_with_key("]
+      .map((needle) => body.indexOf(needle))
+      .find((index) => index >= 0) ?? -1;
   const spawnIdx = body.indexOf("tauri::async_runtime::spawn");
-  if (createIdx < 0) throw new Error("create_api_key 未落 Key（找不到 `keys.create(`）");
+  if (createIdx < 0) {
+    throw new Error("create_api_key 未落 Key（找不到 `keys.create(` / `create_with_key(`）");
+  }
   if (spawnIdx < 0) {
     throw new Error("create_api_key 缺 fire-and-forget `spawn`（探测被改成阻塞？会阻断接入）");
   }
@@ -8539,14 +8546,16 @@ check("★ E2 代理关闭态必须有说明行", () => {
 });
 
 check("★ E3 密钥掩码补尾部 4 位（旧台账不报错）", () => {
-  /* 原型 `prefix••••••••suffix4`；真实只显示 `{prefix}…` ⇒ 用户无法确认是哪一把。 */
-  const table = stripComments(
-    fs.readFileSync(path.join(ROOT, "src/components/gateway/api-key-table.tsx"), "utf8"),
+  /* 原型 `prefix••••••••suffix4`；真实只显示 `{prefix}…` ⇒ 用户无法确认是哪一把。
+     ★ 2026-11-04：掩码渲染抽进 `key-secret-cell.tsx`（四条产品线共用，眼睛也在这里），
+       故断言改锚该组件 —— 若被拆回各表各写一遍，本条会立刻变红（那正是要防的漂移）。 */
+  const cell = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/components/gateway/key-secret-cell.tsx"), "utf8"),
   );
-  if (!/••••••••/.test(table)) {
+  if (!/••••••••/.test(cell)) {
     throw new Error("密钥掩码没有尾部 4 位（应是 `prefix••••••••suffix`）");
   }
-  if (!/key\.suffix/.test(table)) {
+  if (!/suffix/.test(cell)) {
     throw new Error("掩码没有使用后端的 `suffix` 字段");
   }
   // 后端必须真的产出 suffix，且**旧台账兼容**。
@@ -8558,43 +8567,152 @@ check("★ E3 密钥掩码补尾部 4 位（旧台账不报错）", () => {
   return "掩码含尾部 4 位 + 后端产出 + 旧台账 serde 兼容";
 });
 
-check("★ 一次性明文：可反复复制，且不能被遮罩 / ESC 误关销毁（两平台同规则）", () => {
-  /* 明文不可复原（库里只有 sha256 + 前后各 4 位）⇒ 对话框一旦被误关，用户只能吊销重建
-     并把所有客户端配置改一遍。因此：
-       ① 遮罩点击与 ESC **必须**被拦截，关闭只剩显式按钮；
-       ② 复制按钮**必须**保持可点（明文只显示这一次，用户可能要粘到多个客户端）。
-     可证伪：删掉任一处 `preventDefault` ⇒ 变红；给复制按钮加 `disabled={copied}` ⇒ 变红。 */
-  const targets = [
-    "src/components/gateway/api-key-table.tsx",
-    "src/components/gateway/trae-api-key-table.tsx",
+check("★ 明文可见性 + 创建后二选一：眼睛只在有真实明文时出现", () => {
+  /* ★ 2026-11-04 最终口径（两次调整后的形态）：
+     ① 创建时后端**不落盘**明文，明文只随创建响应回来；
+     ② 前端立刻弹面板，由用户二选一：「保存到本软件」→ 落盘、列表出眼睛；
+        「自行保存」→ 只有 hash，永久只看得到掩码（= 改造前的行为）；
+     ③ 面板关闭（X / ESC / 点遮罩）等同「自行保存」；
+     ④ 四张表共用 `KeySecretCell` 渲染掩码 + 眼睛（各写一遍必然漂移）。
+     可证伪：把 create 里的 `plaintext: None` 改回 `Some(...)` ⇒ A 变红；
+     删掉任一面板 / 把「自行保存」也接上 save ⇒ B 变红；删 `stopPropagation` ⇒ C 变红。 */
+  const tables = [
+    { rel: "src/components/gateway/api-key-table.tsx", save: "saveApiKeyPlaintext" },
+    { rel: "src/components/gateway/trae-api-key-table.tsx", save: "saveTraeApiKeyPlaintext" },
+    { rel: "src/components/gateway/qoder-api-key-table.tsx", save: "saveQoderApiKeyPlaintext" },
+    { rel: "src/components/gateway/unified-gateway-view.tsx", save: "saveUnifiedApiKeyPlaintext" },
   ];
-  for (const rel of targets) {
-    const name = path.basename(rel);
-    const code = stripComments(fs.readFileSync(path.join(ROOT, rel), "utf8"));
-    const dialog = /open=\{plaintext !== null\}[\s\S]{0,2200}?<\/Dialog>/.exec(code);
-    if (!dialog) {
-      throw new Error(`${name}: 找不到一次性明文对话框（结构已变，请更新本断言）`);
+
+  // A. 后端：四套台账的创建路径都不得无条件落盘明文。
+  const ledgers = [
+    "crates/buddy-switch-gateway/src/apikey.rs",
+    "crates/buddy-switch-gateway/src/trae/apikey.rs",
+    "crates/buddy-switch-gateway/src/qoder/apikey.rs",
+    "crates/buddy-switch-gateway/src/unified/apikey.rs",
+  ];
+  for (const rel of ledgers) {
+    const code = fs.readFileSync(path.join(ROOT, rel), "utf8");
+    if (/plaintext:\s*Some\((plaintext|secret)\.clone\(\)\)/.test(code)) {
+      throw new Error(`${path.basename(rel)}: 创建时又无条件落盘明文了（应等用户选「保存到本软件」）`);
     }
-    const block = dialog[0];
-    if (!/onInteractOutside/.test(block) || !/preventDefault/.test(block)) {
-      throw new Error(`${name}: 明文对话框可被遮罩点击关闭 —— 明文不可复原，误关即永久丢失`);
+    if (!/pub fn save_plaintext/.test(code)) {
+      throw new Error(`${path.basename(rel)}: 缺 save_plaintext（明文落盘的唯一入口）`);
     }
-    if (!/onEscapeKeyDown/.test(block) || !/preventDefault/.test(block)) {
-      throw new Error(`${name}: 明文对话框可被 ESC 关闭 —— 同上，误关即永久丢失`);
+    /* ★ 2026-11-04：自定义密钥**先查重**。同一把密钥落两条记录 ⇒ 两条记录共用一个
+       `hash`，吊销其中一条、另一条仍能通过 `verify` —— 吊销语义直接失效。
+       断言两件事：方法存在、且**挂在 create_with_key 入口**（不是只写在某个 handler 里，
+       那样另一条通道 / `create_response*` 帮助函数就能绕过去）。 */
+    if (!/pub fn ensure_custom_key_available/.test(code)) {
+      throw new Error(`${path.basename(rel)}: 缺 ensure_custom_key_available（自定义密钥查重）`);
     }
-    if (!/onCopyPlaintext\(\)/.test(block)) {
-      throw new Error(`${name}: 明文对话框里没有复制按钮（或按钮没接到复制处理函数）`);
-    }
-    /* `copyText` 的调用在**处理函数**里（不在 JSX 块内）⇒ 按文件级断言：
-       有按钮、有处理函数、处理函数真的走共享 `copyText`，三者缺一即假控件。 */
-    if (!/copyText\(/.test(code)) {
-      throw new Error(`${name}: 复制没有走共享的 \`copyText\`（按钮会是假控件）`);
-    }
-    if (/disabled=\{copied\}/.test(block)) {
-      throw new Error(`${name}: 复制按钮在复制后被禁用 —— 明文只显示这一次，必须允许反复复制`);
+    if (!/ensure_custom_key_available\(custom_key\.as_deref\(\)\)\?/.test(code)) {
+      throw new Error(
+        `${path.basename(rel)}: create_with_key 没有调用查重 —— 自定义密钥能重复落盘`,
+      );
     }
   }
-  return "遮罩 / ESC 不可关 · 复制可反复点（WB + Trae 同规则）";
+
+  // B. 前端：四张表都有二选一面板，且「自行保存」不落盘。
+  for (const { rel, save } of tables) {
+    const name = path.basename(rel);
+    const code = stripComments(fs.readFileSync(path.join(ROOT, rel), "utf8"));
+    if (!/KeySecretCell/.test(code)) {
+      throw new Error(`${name}: 密钥列没有走共用构件 KeySecretCell（四边必然漂移）`);
+    }
+    for (const key of [
+      "shared.gateway.keys.createdTitle",
+      "shared.gateway.keys.createdDesc",
+      "shared.gateway.keys.saveToApp",
+      "shared.gateway.keys.saveSelf",
+    ]) {
+      if (!code.includes(key)) {
+        throw new Error(`${name}: 创建后的二选一面板缺文案键 ${key}`);
+      }
+    }
+    if (!code.includes(save)) {
+      throw new Error(`${name}: 面板「保存到本软件」没有调用 ${save}`);
+    }
+    // 关闭 = 自行保存：面板的 onOpenChange 必须是「!open 就关」，不得拦截成死按钮。
+    // ⚠️ 别为了「防止保存中误关」在这里加 `!saving` 守卫 —— 那会把用户困在弹窗里
+    //    （保存走 IPC，一旦卡住就再也关不掉）。保存失败由 catch 里的 `setPending(pending)`
+    //    把面板恢复出来，明文不会丢。
+    if (!/onOpenChange=\{\(open\) => !open && dismiss/.test(code)) {
+      throw new Error(`${name}: 面板的 X / ESC 没有走「自行保存」（应为 !open && dismiss...）`);
+    }
+    /* 「自行保存」必须是**不落盘**的出口：它至少要出现三次 —— 定义、onOpenChange、
+       底部按钮各一次。把按钮接到 `save*` 上就会掉到两次 ⇒ 本条变红。
+       （只断言文案键 `saveSelf` 存在是不够的：文案还在、按钮接错，用户点「自行保存」
+        反而把明文存进了本机，正是本需求的**反面**。） */
+    const dismissHits = (code.match(/dismissPending(Key)?\b/g) ?? []).length;
+    if (dismissHits < 3) {
+      throw new Error(
+        `${name}: 「自行保存」出口不足 3 处（定义 / onOpenChange / 按钮），可能被接上了保存`,
+      );
+    }
+    /* ★ 2026-11-04：面板与列内眼睛的复制按钮**长得一样**（都是 `<Copy />` 图标），
+       改造前共用 `data-act="gw-key-copy"` ⇒ e2e 选择器命中两个，取到哪个看渲染顺序。
+       现在按作用域分名：`gw-key-panel-*` = 创建后的二选一面板，`gw-key-reveal*` = 列内眼睛。
+       三个出口各要有一个名字，否则 e2e 只能靠文案（i18n 之后就断了）。 */
+    for (const act of ["gw-key-panel-copy", "gw-key-panel-save", "gw-key-panel-dismiss"]) {
+      if (!code.includes(`data-act="${act}"`)) {
+        throw new Error(`${name}: 创建后面板缺 \`data-act="${act}"\`（e2e 无法精确点到该按钮）`);
+      }
+    }
+    if (code.includes('data-act="gw-key-copy"')) {
+      throw new Error(
+        `${name}: 仍在用有歧义的 \`gw-key-copy\`（面板复制 / 眼睛复制会撞名，选择器命中多个）`,
+      );
+    }
+  }
+
+  // C. 眼睛构件本身：判据 / 可逆 / 不冒泡。
+  const cell = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/components/gateway/key-secret-cell.tsx"), "utf8"),
+  );
+  if (!/Eye/.test(cell) || !/EyeOff/.test(cell)) {
+    throw new Error("`KeySecretCell` 缺眼睛 / 闭眼图标（点击切换显隐）");
+  }
+  if (!/plaintext/.test(cell) || !/length > 0/.test(cell)) {
+    throw new Error("`KeySecretCell` 没有按「明文非空」决定是否出眼睛");
+  }
+  if (!/revealed/.test(cell) || !/setRevealed/.test(cell)) {
+    throw new Error("`KeySecretCell` 缺显隐状态（点了不会切回掩码）");
+  }
+  if (!/stopPropagation/.test(cell)) {
+    throw new Error("`KeySecretCell` 的按钮没有挡住冒泡 —— 点眼睛会顺手展开行明细");
+  }
+  // 列内眼睛的复制按钮用 `gw-key-reveal-copy`（与面板的 `gw-key-panel-copy` 分名）。
+  if (!/data-act="gw-key-reveal-copy"/.test(cell)) {
+    throw new Error("`KeySecretCell` 的复制按钮缺 `data-act=\"gw-key-reveal-copy\"`");
+  }
+  if (/data-act="gw-key-copy"/.test(cell)) {
+    throw new Error("`KeySecretCell` 仍在用有歧义的 `gw-key-copy`（会与创建面板撞名）");
+  }
+
+  /* 同一个文件里 `data-act` 必须唯一：一个页面可能同时挂多张密钥表，
+     同一文件内重名 = e2e 命中多个。跨文件的同名（四张表各一份面板）是设计如此 ——
+     四张表分属不同页面区块，且 Radix 对话框关闭时不渲染内容。 */
+  for (const rel of [...tables.map((table) => table.rel), "src/components/gateway/key-secret-cell.tsx"]) {
+    const code = stripComments(fs.readFileSync(path.join(ROOT, rel), "utf8"));
+    const seen = new Map();
+    for (const match of code.matchAll(/data-act="([^"]+)"/g)) {
+      const act = match[1];
+      seen.set(act, (seen.get(act) ?? 0) + 1);
+    }
+    for (const [act, count] of seen) {
+      if (count > 1) {
+        throw new Error(`${path.basename(rel)}: \`data-act="${act}"\` 出现 ${count} 次，选择器会命中多个`);
+      }
+    }
+  }
+
+  // D. 旧「一次性明文 + 强制关闭」那套残留（键已被复用到新面板，只禁旧实现符号）。
+  for (const old of ["savedClose", "onCopyPlaintext", "closePlaintext"]) {
+    if (tables.some(({ rel }) => fs.readFileSync(path.join(ROOT, rel), "utf8").includes(old))) {
+      throw new Error(`旧「一次性明文」实现的残留（${old}）还在密钥表里`);
+    }
+  }
+  return "创建不落盘 · 面板二选一 · 眼睛仅在有明文时出现 · 四表同形";
 });
 
 check("★ B5-程序位：卡片 = 注册表 ∪ {WorkBuddy 主位}（刻意例外，已登记）", () => {

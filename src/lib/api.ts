@@ -469,6 +469,7 @@ const ROUTES: Record<string, Route> = {
   list_api_keys: { method: "GET", path: "/api/gateway/keys" },
   create_api_key: { method: "POST", path: "/api/gateway/keys" },
   revoke_api_key: { method: "POST", path: "/api/gateway/keys/revoke" },
+  save_api_key_plaintext: { method: "POST", path: "/api/gateway/keys/plaintext" },
   // 撤销吊销（恢复）与吊销互逆：已吊销的 Key **两个出口都必须在**（恢复 / 删除）。
   restore_api_key: { method: "POST", path: "/api/gateway/keys/restore" },
   delete_api_key: { method: "POST", path: "/api/gateway/keys/delete" },
@@ -502,6 +503,7 @@ const ROUTES: Record<string, Route> = {
   list_unified_api_keys: { method: "GET", path: "/api/unified-gateway/keys" },
   create_unified_api_key: { method: "POST", path: "/api/unified-gateway/keys" },
   revoke_unified_api_key: { method: "POST", path: "/api/unified-gateway/keys/revoke" },
+  save_unified_api_key_plaintext: { method: "POST", path: "/api/unified-gateway/keys/plaintext" },
   // ★ issue #76：统一网关密钥策略（配额 + 账号范围）与按密钥用量。
   set_unified_key_policy: { method: "POST", path: "/api/unified-gateway/keys/policy" },
   unified_key_usage: { method: "GET", path: "/api/unified-gateway/keys/usage" },
@@ -601,6 +603,7 @@ const ROUTES: Record<string, Route> = {
   list_trae_api_keys: { method: "GET", path: "/api/trae/gateway/keys" },
   create_trae_api_key: { method: "POST", path: "/api/trae/gateway/keys" },
   revoke_trae_api_key: { method: "POST", path: "/api/trae/gateway/keys/revoke" },
+  save_trae_api_key_plaintext: { method: "POST", path: "/api/trae/gateway/keys/plaintext" },
   // ★ issue #76：Trae 密钥策略（配额 + 账号范围）与按密钥用量（与 WB 侧同形）。
   set_trae_key_policy: { method: "POST", path: "/api/trae/gateway/keys/policy" },
   trae_key_usage: { method: "GET", path: "/api/trae/gateway/keys/usage" },
@@ -664,6 +667,7 @@ const ROUTES: Record<string, Route> = {
   list_qoder_api_keys: { method: "GET", path: "/api/qoder/gateway/keys" },
   create_qoder_api_key: { method: "POST", path: "/api/qoder/gateway/keys" },
   revoke_qoder_api_key: { method: "POST", path: "/api/qoder/gateway/keys/revoke" },
+  save_qoder_api_key_plaintext: { method: "POST", path: "/api/qoder/gateway/keys/plaintext" },
   // ★ issue #76：Qoder 密钥策略（配额 + 账号范围）与按密钥用量。
   set_qoder_key_policy: { method: "POST", path: "/api/qoder/gateway/keys/policy" },
   qoder_key_usage: { method: "GET", path: "/api/qoder/gateway/keys/usage" },
@@ -2213,12 +2217,33 @@ export function listApiKeys(): Promise<{ keys: ApiKeyRecord[] }> {
   return call("list_api_keys");
 }
 
-export function createApiKey(name: string, region: Region): Promise<CreateApiKeyResult> {
-  return call("create_api_key", { name, region });
+/**
+ * 创建 WorkBuddy 网关 Key。
+ *
+ * `customKey` 为空 ⇒ 后端按原规则生成 `sk-wb-<32hex>`；非空 ⇒ **原样使用**用户输入的密钥。
+ * 明文只随**本次响应**的 `key` 字段返回，`record.plaintext` 此时为 `null`；用户在面板里
+ * 选「保存到本软件」后再调 {@link saveApiKeyPlaintext}，列表才会出现眼睛。
+ */
+export function createApiKey(
+  name: string,
+  region: Region,
+  customKey?: string | null,
+): Promise<CreateApiKeyResult> {
+  return call("create_api_key", { name, region, customKey: customKey ?? null });
 }
 
 export function revokeApiKey(id: string): Promise<{ ok: boolean }> {
   return call("revoke_api_key", { id });
+}
+
+/**
+ * ★ 2026-11-04：用户点「保存到本软件」后，把本次创建返回的明文写进台账。
+ *
+ * 创建时后端**不落盘**明文；这是明文落盘的唯一入口。后端会校验 `sha256(plaintext)`
+ * 与记录里的 `hash` 一致，传错值会被拒绝（不会写进一条「眼睛显示的值不能用」的记录）。
+ */
+export function saveApiKeyPlaintext(id: string, plaintext: string): Promise<{ ok: boolean }> {
+  return call("save_api_key_plaintext", { id, plaintext });
 }
 
 /* ─────────── 统一网关（第三个产品线 · 跨作用域）───────────
@@ -2258,12 +2283,14 @@ export interface UnifiedGatewaySnapshot {
   keys: { total: number; active: number };
 }
 
-/** 统一密钥的**脱敏**视图（不含 hash，明文只在创建时返回一次）。 */
+/** 统一密钥的**脱敏视图**（不含 hash）：`plaintext` 仅在用户选了「保存到本软件」之后才有值。 */
 export interface UnifiedApiKeyView {
   id: string;
   name: string;
   prefix: string;
   suffix: string;
+  /** 完整明文；旧记录（或改造前创建的 Key）为 `null` ⇒ 列表不渲染眼睛按钮。 */
+  plaintext?: string | null;
   /** 该 Key 被授权的命名空间。 */
   namespaces: string[];
   /** 业务转发（`/biz/*path`）用哪个命名空间；`null` ⇒ 该端点返回 400。 */
@@ -2387,7 +2414,11 @@ export function listUnifiedApiKeys(): Promise<{ keys: UnifiedApiKeyView[] }> {
 }
 
 /**
- * 创建统一密钥。★ **明文只返回这一次**（库里只存 sha256）。
+ * 创建统一密钥。
+ *
+ * 明文只随**本次响应**的 `key` 返回（库里此刻只有 `sha256`）；用户在面板里选
+ * 「保存到本软件」后才会落盘，之后列表里才带 `plaintext`。自定义密钥与台账里已有记录
+ * 撞车时后端拒绝创建（不落盘），错误信息带上占用者的名称。
  *
  * `bizNamespace` 传 `null` 表示该 Key 不做业务转发（调用 `/biz/*` 会被明确拒绝）。
  */
@@ -2395,12 +2426,26 @@ export function createUnifiedApiKey(
   name: string,
   namespaces: string[],
   bizNamespace: string | null,
+  customKey?: string | null,
 ): Promise<CreateApiKeyResult> {
-  return call("create_unified_api_key", { name, namespaces, bizNamespace });
+  return call("create_unified_api_key", {
+    name,
+    namespaces,
+    bizNamespace,
+    customKey: customKey ?? null,
+  });
 }
 
 export function revokeUnifiedApiKey(id: string): Promise<{ ok: boolean }> {
   return call("revoke_unified_api_key", { id });
+}
+
+/** ★ 2026-11-04：统一网关 —— 用户选「保存到本软件」后落盘明文。 */
+export function saveUnifiedApiKeyPlaintext(
+  id: string,
+  plaintext: string,
+): Promise<{ ok: boolean }> {
+  return call("save_unified_api_key_plaintext", { id, plaintext });
 }
 
 /** ★ issue #76：更新某把统一 Key 的策略（完整策略，非补丁；**不动命名空间授权**）。 */
@@ -3610,22 +3655,32 @@ export function listTraeApiKeys(): Promise<{ keys: TraeApiKeyRecord[] }> {
 }
 
 /**
- * 新建 API Key：明文**仅此一次**返回（`{ok,key,record}`）。
+ * 新建 API Key：返回 `{ok, key, record}`。
+ *
+ * `key` 是**本次创建的那把**明文，只随本次响应回来；用户选「保存到本软件」后才落盘，
+ * 列表里才会出现眼睛（`record.plaintext` 此刻仍为 `null`）。
  *
  * `variant` 决定该 Key 归属哪条产品线，缺省 = TraeWork（默认变体）。
  */
 export function createTraeApiKey(
   name: string,
   variant?: TraeVariantId | null,
+  customKey?: string | null,
 ): Promise<TraeApiKeyCreated> {
   const args: Record<string, unknown> = { name };
   if (variant) args.variant = variant;
+  args.customKey = customKey ?? null;
   return call("create_trae_api_key", args);
 }
 
 /** 吊销 API Key（置 `revokedAt`，不物理删除）。 */
 export function revokeTraeApiKey(id: string): Promise<{ ok: boolean }> {
   return call("revoke_trae_api_key", { id });
+}
+
+/** ★ 2026-11-04：Trae —— 用户选「保存到本软件」后落盘明文。 */
+export function saveTraeApiKeyPlaintext(id: string, plaintext: string): Promise<{ ok: boolean }> {
+  return call("save_trae_api_key_plaintext", { id, plaintext });
 }
 
 /** ★ issue #76：更新某把 Trae Key 的策略（完整策略，非补丁）。 */
@@ -4289,21 +4344,39 @@ export function listQoderApiKeys(): Promise<unknown> {
   return call("list_qoder_api_keys");
 }
 
-/** 新建 Key —— **明文仅此一次返回**。 */
+/** 新建 Key —— **明文仅随本次响应返回**（创建时不落盘，用户选「保存到本软件」才写台账）。 */
 export interface QoderCreateApiKeyResult {
   ok: boolean;
-  /** 一次性明文（`sk-qoder-` 前缀）。 */
+  /** 本次明文（`sk-qoder-` 前缀或用户自定义值）。 */
   key?: string;
   record?: { id: string; name: string; region: string; prefix: string };
+  /** `ok === false` 时的原因（授权集不合法 / 自定义密钥重复）。 */
+  error?: string;
 }
 
-export function createQoderApiKey(scope: Scope, name: string): Promise<QoderCreateApiKeyResult> {
-  return call<QoderCreateApiKeyResult>("create_qoder_api_key", { scope, name });
+export function createQoderApiKey(
+  scope: Scope,
+  name: string,
+  customKey?: string | null,
+): Promise<QoderCreateApiKeyResult> {
+  return call<QoderCreateApiKeyResult>("create_qoder_api_key", {
+    scope,
+    name,
+    customKey: customKey ?? null,
+  });
 }
 
 /** 吊销 Key（置 `revokedAt`；可逆）。 */
 export function revokeQoderApiKey(id: string): Promise<{ ok: boolean }> {
   return call<{ ok: boolean }>("revoke_qoder_api_key", { id });
+}
+
+/** ★ 2026-11-04：Qoder —— 用户选「保存到本软件」后落盘明文。 */
+export function saveQoderApiKeyPlaintext(
+  id: string,
+  plaintext: string,
+): Promise<{ ok: boolean }> {
+  return call<{ ok: boolean }>("save_qoder_api_key_plaintext", { id, plaintext });
 }
 
 /** ★ issue #76：更新某把 Qoder Key 的策略（完整策略，非补丁）。 */

@@ -215,7 +215,11 @@ export interface QoderGatewayCatalog {
   rows: QoderGatewayModelRow[];
 }
 
-/** 一条 API Key（列表脱敏返回；**永不含明文与哈希**）。 */
+/**
+ * 一条 Qoder API Key（列表脱敏返回；**永不含哈希**）。
+ *
+ * `plaintext` 仅在用户选「保存到本软件」之后才有值 —— 没存的 Key 为 `null`，列表不出眼睛。
+ */
 export interface QoderApiKeyRecord {
   id: string;
   name: string;
@@ -223,6 +227,8 @@ export interface QoderApiKeyRecord {
   region: string;
   prefix: string;
   suffix: string;
+  /** 完整明文；旧记录 / 改造前创建的 Key 为 `null` ⇒ 列表不渲染眼睛按钮。 */
+  plaintext?: string | null;
   createdAt: number;
   revokedAt: number | null;
   revoked: boolean;
@@ -509,6 +515,8 @@ export function normalizeQoderApiKeys(raw: unknown): QoderApiKeyRecord[] {
         region: asString(entry.region) ?? "cn",
         prefix: asString(entry.prefix) ?? "",
         suffix: asString(entry.suffix) ?? "",
+        // 只有非空字符串才算「有真实秘钥」：空串 / 缺字段一律归一成 null（不显示眼睛）。
+        plaintext: asString(entry.plaintext) ?? null,
         createdAt: asNumber(pick(entry, "createdAt", "created_at")) ?? 0,
         revokedAt: asNumber(pick(entry, "revokedAt", "revoked_at")) ?? null,
         revoked: asBoolean(entry.revoked) ?? false,

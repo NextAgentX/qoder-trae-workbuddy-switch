@@ -171,7 +171,12 @@ interface GatewayState {
   saveConfig: (config: GatewayConfig) => Promise<void>;
   refreshStatus: () => Promise<void>;
   loadKeys: () => Promise<void>;
-  createKey: (name: string, region: Region) => Promise<CreateApiKeyResult>;
+  /** `customKey` 为空 ⇒ 后端自动生成；非空 ⇒ 原样使用（第三行「自定义密钥」）。 */
+  createKey: (
+    name: string,
+    region: Region,
+    customKey?: string | null,
+  ) => Promise<CreateApiKeyResult>;
   revokeKey: (id: string) => Promise<void>;
   /** ★ issue #76：更新某把 Key 的策略（完整策略，非补丁）。 */
   setKeyPolicy: (id: string, policy: api.KeyPolicy) => Promise<void>;
@@ -296,8 +301,12 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
     }
   },
 
-  async createKey(name, region) {
-    const result = await api.createApiKey(name, region);
+  async createKey(name, region, customKey) {
+    const result = await api.createApiKey(name, region, customKey);
+    /* 失败（如自定义密钥与台账里已有 Key 撞车）时后端**没有建出记录**，
+       这里必须直接返回：否则会顺带做一次列表刷新 + 模型快照刷新，
+       页面看起来「动了但没变化」，还会把 `error` 覆盖成模型侧的报错。 */
+    if (result.ok === false) return result;
     if (result.record) {
       set((s) => ({ keys: [result.record!, ...s.keys.filter((key) => key.id !== result.record!.id)] }));
     } else {

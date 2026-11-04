@@ -908,6 +908,7 @@ mod tests {
             prefix: "sk-uni-test".into(),
             suffix: "0000".into(),
             hash: "0".repeat(64),
+            plaintext: None,
             namespaces: namespaces.iter().map(|v| v.to_string()).collect(),
             biz_namespace: None,
             created_at: 0,

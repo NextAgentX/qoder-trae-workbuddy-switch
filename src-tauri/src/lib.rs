@@ -700,6 +700,8 @@ pub fn run() {
             commands::open_workbuddy_data_dir,
             commands::list_api_keys,
             commands::create_api_key,
+            // ★ 2026-11-04：创建时明文不落盘，用户点「保存到本软件」才写。
+            commands::save_api_key_plaintext,
             commands::revoke_api_key,
             commands::restore_api_key,
             commands::delete_api_key,
@@ -713,6 +715,7 @@ pub fn run() {
             commands::unified_gateway_pool_overview,
             commands::list_unified_api_keys,
             commands::create_unified_api_key,
+            commands::save_unified_api_key_plaintext,
             commands::revoke_unified_api_key,
             // ★ issue #76：统一网关密钥策略与按密钥用量。
             commands::set_unified_key_policy,
@@ -827,6 +830,7 @@ pub fn run() {
             // 多 Key 管理（含归属产品线）+ 打开数据目录（替代旧的单 Key regenerate）。
             commands::list_trae_api_keys,
             commands::create_trae_api_key,
+            commands::save_trae_api_key_plaintext,
             commands::revoke_trae_api_key,
             // ★ issue #76：Trae 密钥策略与按密钥用量（与 WB 侧同形）。
             commands::set_trae_key_policy,
@@ -845,6 +849,7 @@ pub fn run() {
             commands::qoder_gateway_quota,
             commands::list_qoder_api_keys,
             commands::create_qoder_api_key,
+            commands::save_qoder_api_key_plaintext,
             commands::revoke_qoder_api_key,
             // ★ issue #76：Qoder 密钥策略与按密钥用量（与 WB / Trae 侧同形）。
             commands::set_qoder_key_policy,

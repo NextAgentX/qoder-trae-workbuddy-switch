@@ -349,7 +349,7 @@ async function onRescan() {
 
 ```rust
 // commands.rs
-/// POST /api/gateway/keys —— 创建 Key（返回一次性明文）。
+/// POST /api/gateway/keys —— 创建 Key（返回本次明文；用户选「保存到本软件」后列表才能用眼睛查看）。
 /// ★ 创建成功后**后台探测**该 region（「接入即识别」，§3.17.2 / D23）。
 #[tauri::command]
 pub async fn create_api_key(name: Option<String>, region: Option<String>) -> Value;
@@ -480,7 +480,7 @@ sequenceDiagram
   U->>Page: 新建 API Key
   Page->>Store: createKey(name, region)
   Store->>BE: create_api_key(name, region)
-  BE->>BE: keys.create(...) 返回一次性明文
+  BE->>BE: keys.create_with_key(...) 只落 hash，明文仅随响应返回
   BE-->>Store: {ok, key, record}   ★ 立即返回，不阻塞
   BE->>Cat: probe_catalog(region)（fire-and-forget）
   Cat->>Up: fetch_models(region, 该 region 凭据)

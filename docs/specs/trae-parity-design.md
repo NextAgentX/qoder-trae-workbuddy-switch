@@ -268,7 +268,7 @@ WorkBuddy 的 `gateway/*` 五组件是 store + region 耦合的，不能直接�
 | 路径 | 职责 |
 |:--|:--|
 | `crates/buddy-switch-gateway/src/trae/apikey.rs` | Trae 多 Key 存储（hash+前缀+**归属变体**、legacy 兼容读、create/verify/revoke/delete/list）与两条通道共用的响应拼装 |
-| `src/components/gateway/trae-api-key-table.tsx` | Trae 版 Key 表（**含归属产品线列**；创建/吊销/删除/一次性明文） |
+| `src/components/gateway/trae-api-key-table.tsx` | Trae 版 Key 表（**含归属产品线列**；创建/吊销/删除/创建后二选一面板/眼睛查看明文） |
 | `src/components/gateway/trae-model-list.tsx` | Trae 版模型清单（单变体、**无假刷新**、含常量说明） |
 | `src/components/gateway/trae-request-log.tsx` | Trae 版请求日志（元数据 + 清空；可显示归属变体） |
 | `src/components/gateway/trae-integration-guide.tsx` | Trae 版接入指引（单 Base URL，无 region Tabs） |
@@ -339,8 +339,16 @@ impl TraeApiKeyStore {
     /// 读文件；缺失/为空/解析失败 → 回落 legacy（settings.apiKey 合成记录，variant=TraeWork）。
     fn load(&self) -> Vec<TraeApiKeyRecord>;
     fn save(&self, records: &[TraeApiKeyRecord]) -> Result<(), String>;   // 原子写
-    /// 生成 `sk-trae-<32hex>`；返回 (record, 明文)；明文仅此一次。
+    /// 生成 `sk-trae-<32hex>`；返回 (record, 明文)。保留两参签名（= 不自定义密钥）。
     pub fn create(&self, name: String, variant: TraeVariant) -> (TraeApiKeyRecord, String);
+    /// ★ 2026-11-04：自定义密钥**创建前查重**（sha256 与台账任一记录相同 ⇒ Err，含占用者名称）。
+    pub fn ensure_custom_key_available(&self, custom_key: Option<&str>) -> Result<(), String>;
+    /// 生成 / 接收 Key；`custom_key` 非空 ⇒ 原样使用（仅 trim）。
+    /// ★ 创建时**不落盘明文**（`plaintext: None`），明文只随本次响应返回。
+    pub fn create_with_key(&self, name: String, variant: TraeVariant, custom_key: Option<String>)
+        -> Result<(TraeApiKeyRecord, String), String>;
+    /// 用户点「保存到本软件」后写明文：校验 `sha256(明文) == hash`，已有值幂等不覆盖。
+    pub fn save_plaintext(&self, id: &str, plaintext: &str) -> Result<(), String>;
     /// 常量时间比对哈希；无效/不存在/已吊销 → None。返回记录携带 variant。
     pub fn verify(&self, presented: &str) -> Option<TraeApiKeyRecord>;
     pub fn touch(&self, id: &str);                                        // 60s 节流
@@ -350,7 +358,13 @@ impl TraeApiKeyStore {
 }
 /// 两条通道共用（消除形状漂移）。
 pub fn list_response(store: &TraeApiKeyStore) -> Value;                  // {keys:[masked…]}
-pub fn create_response(store: &TraeApiKeyStore, name: String, variant: TraeVariant) -> Value; // {ok,key,record}
+pub fn create_response_with_key(store: &TraeApiKeyStore, name: String, variant: TraeVariant,
+                                custom_key: Option<String>) -> Value;    // {ok,key,record} / {ok:false,error}
+/// ★ 2026-11-04：`Result` 版 —— **HTTP 通道**用它把撞车映射成 `400`
+/// （另三条产品线的 handler 都是 `Err ⇒ json_err(BAD_REQUEST)`），
+/// 成功体仍由 gateway 的 `created_payload` 唯一拼装；IPC 通道继续用上面那个 `Value` 版。
+pub fn create_result_with_key(store: &TraeApiKeyStore, name: String, variant: TraeVariant,
+                              custom_key: Option<String>) -> Result<Value, String>;
 ```
 
 **`crates/buddy-switch-gateway/src/trae/mod.rs`（改）**
@@ -466,7 +480,7 @@ export interface TraeVariantCounts { work: number; cn: number; unlabeled: number
 | 命令 | method | path | 入参 | 返回 |
 |:--|:--|:--|:--|:--|
 | `list_trae_api_keys` | GET | `/api/trae/gateway/keys` | — | `{keys: TraeApiKeyRecord[]}` |
-| `create_trae_api_key` | POST | `/api/trae/gateway/keys` | `{name: string, variant: "trae_work"\|"trae_cn"}` | `{ok:true, key:string, record:TraeApiKeyRecord}` |
+| `create_trae_api_key` | POST | `/api/trae/gateway/keys` | `{name: string, variant: "trae_work"\|"trae_cn", customKey?: string}` | `{ok:true, key:string, record:TraeApiKeyRecord}`；撞车 ⇒ HTTP `400` + `{ok:false,error}` |
 | `revoke_trae_api_key` | POST | `/api/trae/gateway/keys/revoke` | `{id: string}` | `{ok:true}` |
 | `delete_trae_api_key` | POST | `/api/trae/gateway/keys/delete` | `{id: string}` | `{ok:true}` |
 | `open_trae_data_dir` | POST | `/api/trae/open-data-dir` | `{variant?: string}` | `{ok:true, path}` 或 `Unsupported` |
@@ -488,6 +502,13 @@ export interface TraeVariantCounts { work: number; cn: number; unlabeled: number
 `api.rs` 与 `commands.rs` 的同名操作**必须返回同一 JSON**：两者都调 gateway crate 的
 `trae::apikey::{list_response, create_response}`（返回 `Value`），**不在通道层各自拼装**——这是 `copy_sessions`
 事故（`MEMORY.md §二`）的直接对策。
+
+**唯一例外是错误码，不是 body**（2026-11-04 统一）：自定义密钥撞车时 HTTP 通道返回
+`400 + {ok:false,error}`（与 WB / Qoder / Unified 一致），IPC 通道无状态码、仍是
+`200 语义 + {ok:false,error}`。为此 HTTP 侧调 `create_result_with_key`（`Err` 交由 handler
+`json_err(BAD_REQUEST)`），**成功体两边同源**于 gateway 的 `created_payload`，通道层依旧不拼形状。
+前端因此有两条分支都要处理：`result.ok === false`（IPC）与 `catch`（HTTP 400 抛错），
+四条产品线的创建面板均已覆盖。
 
 ---
 

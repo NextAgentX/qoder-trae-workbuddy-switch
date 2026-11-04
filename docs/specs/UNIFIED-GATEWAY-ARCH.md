@@ -269,7 +269,7 @@ pub fn parse(id: &str) -> Option<NamespaceTarget> {
 }
 ```
 
-- 前缀 `sk-uni-`（与 `sk-wb-` / `sk-trae-` 同族）。**明文只在创建时返回一次**，库里只存 sha256 + 前 4 / 后 4 位 —— 与既有两套 Key 同款。
+- 前缀 `sk-uni-`（与 `sk-wb-` / `sk-trae-` 同族）。★ 2026-11-04：创建时明文**不落盘**（`plaintext: null`），只随创建响应返回；用户点「保存到本软件」才由 `save_plaintext` 写入并随列表下发（列表眼睛可看），选「自行保存」则永久只有掩码。校验仍只认 sha256 + 前 4 / 后 4 位。
 - `namespaces` 空数组或缺失 ⇒ **无授权**（fail-closed），**不当作「全开」**。表里不存在的 id ⇒ 保存时拒绝（不静默丢弃）。
 - 认证头：**`Bearer` 与 `x-api-key` 都收**（统一 Key 是新库，不继承 Trae「只认 Bearer」的历史包袱）；**不按认证头反推产品线**。
 - `biz_namespace`：见 §4.5，仅 `wb-*` 合法。
