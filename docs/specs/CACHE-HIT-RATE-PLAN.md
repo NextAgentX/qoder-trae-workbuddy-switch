@@ -1,6 +1,18 @@
 # 缓存命中率：三平台 × 两本账 实现方案
 
-> 状态：待拍板（2026-11-03）· 预研已完成，未写码
+> 状态：**P0/P2 已落地**（2026-11-05，issue #154 / PR #168 #169）· P1/P3 未做
+>
+> 已落地的是 §11 的 **P0 探针**（三平台日志落 `cachedTokens`）与 **P2 网关账本**
+> （`token_daily` / `gateway_ledger` 的 `cached` 维度 + 出口 `null`≠`0` + 迁移不播种历史）。
+> **P1（客户端三桶）与 P3（UI 全量）仍未做** —— 当前 UI 只在网关账本下出命中率，
+> 客户端账本的命中率仍是 `token_stats` 原有那一列。§12 的四个待拍板项里，
+> 第 3 项（`to_openai()` 透传）与第 4 项（模型表给率）已按「给」实现，另两项仍待定。
+>
+> ⚠️ 上面「第 3 项已实现」是第一版写错后补上的：当时 `TokenUsage.cached` 已经解析出来
+> 并进了账本，但 `to_openai()` 仍然只吐三个键 ⇒ Trae 线的客户端根本读不到命中量。
+> 现在 `to_openai()` 在 `cached > 0` 时补 `prompt_tokens_details.cached_tokens`
+> （没命中量时整个键不出现，不写 0），由 `to_openai_carries_cached_tokens_when_observed`
+> 与「无命中时键不存在」两条断言钉住。
 >
 > 目标：WorkBuddy / Trae / Qoder 三个平台，**客户端账本与网关账本都能给出缓存命中率**，且「算不出来」时如实显示「无数据」而不是 0%。
 
@@ -328,9 +340,9 @@ grep -o '"cachedTokens":[^,]*' \
 
 | 阶段 | 内容 | 量 | 验收 |
 |:--|:--|:--|:--|
-| **P0 探针** | `Option` 化 + 三平台落 `cachedTokens` + 上面那条 grep | 0.5d | 三个日志文件的 `cachedTokens` 分布已知 |
+| **P0 探针** ✅ | `Option` 化 + 三平台落 `cachedTokens` + 上面那条 grep | 0.5d | 三个日志文件的 `cachedTokens` 分布已知 |
 | **P1 客户端** | `token_stats` 三桶 + 越界守卫 + API | 1d | WB 窗口命中率 = 96.3%±，与手算一致 |
-| **P2 网关账本** | `token_daily` + `gateway_ledger` + 迁移播种 | 1.5d | 三平台账本逐日可出数；旧库升级不报错、不倒退 |
+| **P2 网关账本** ✅ | `token_daily` + `gateway_ledger` + 迁移播种 | 1.5d | 三平台账本逐日可出数；旧库升级不报错、不倒退 —— **已落地**（#169）：`cached` 进账号桶与四条维度桶，出口 `null`≠`0`，**刻意不回填历史**（见 §6） |
 | **P3 UI** | 三平台卡 + 模型表 + 会话列 + 原型 + i18n | 1d | 空态显示「—」，有数据与手算一致 |
 | **P4（已否决）** | 「省了多少积分」：**前置条件不满足** —— `gateway_models.*.json` 只有 `credits: "x0.11 credits"` 倍率文案，没有 per-token 单价，上游也只给总积分（见 §13.4） | — | 不做，避免编数 |
 

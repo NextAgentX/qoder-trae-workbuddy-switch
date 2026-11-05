@@ -52,12 +52,27 @@ impl TokenUsage {
     }
 
     /// 转成 OpenAI `usage` 对象。
+    ///
+    /// ★ issue #154：`prompt_tokens_details.cached_tokens` **只在真有命中量时才写**。
+    ///
+    /// 为什么不是「恒发射、没命中写 0」：这是**对外 wire 形状**，多一个键会让
+    /// 严格校验的客户端（把 `usage` 当封闭结构的那种）拒绝整帧。而命中量恰恰是
+    /// 「上游报了才有」的信息 —— 没有就整个键不出现，与 `cached` 的
+    /// 「0 = 没观测到」在本函数里收敛成同一种表现（缺键）。
+    ///
+    /// 有命中量时**必须**写：否则 Trae 这条线的客户端（dsh 等）看到的
+    /// `prompt_tokens` 含命中、却没有任何命中量可读 ⇒ 表现为「缓存从不命中」，
+    /// 与 WB 线（`/v1/messages` 已给 `cache_read_input_tokens`）口径不一致。
     pub fn to_openai(self) -> Value {
-        json!({
+        let mut usage = json!({
             "prompt_tokens": self.prompt,
             "completion_tokens": self.completion,
             "total_tokens": self.total,
-        })
+        });
+        if self.cached > 0 {
+            usage["prompt_tokens_details"] = json!({ "cached_tokens": self.cached });
+        }
+        usage
     }
 
     /// 是否拿到了有效数据（全 0 视为没拿到）。
@@ -814,6 +829,36 @@ mod tests {
         assert_eq!(openai["total_tokens"], 3);
         // reasoning_tokens 不是 OpenAI 标准字段，不外发。
         assert!(openai.get("reasoning_tokens").is_none());
+        // ★ issue #154：没有命中量时**整个键不出现**（不是写 0）—— 见 `to_openai` 注释。
+        assert!(
+            openai.get("prompt_tokens_details").is_none(),
+            "没命中量时不得写 prompt_tokens_details（对外 wire 形状要最小）"
+        );
+    }
+
+    /// ★ issue #154：Trae 线的客户端也必须能读到命中量。
+    ///
+    /// 为什么钉这条：`to_openai()` 是 Trae 对客户端输出 `usage` 的**唯一构造点**
+    /// （流式末帧 + 非流式响应各一处）。它原来只有三个键 ⇒ 客户端看到的
+    /// `prompt_tokens` 含命中、却没有任何命中量可读，表现为「缓存从不命中」，
+    /// 与 WB 线（`/v1/messages` 给 `cache_read_input_tokens`）口径不一致 ——
+    /// 这正是 issue #154 里「同一个账号、同一个模型，两个客户端显示不同命中率」的
+    /// 另一半原因。
+    #[test]
+    fn to_openai_carries_cached_tokens_when_observed() {
+        let usage = TokenUsage {
+            prompt: 1000,
+            completion: 20,
+            total: 1020,
+            reasoning: 0,
+            cached: 900,
+        }
+        .to_openai();
+        assert_eq!(
+            usage["prompt_tokens_details"]["cached_tokens"], 900,
+            "命中量必须能被客户端读到"
+        );
+        assert_eq!(usage["prompt_tokens"], 1000, "prompt 仍是原值（含命中）");
     }
 
     #[test]
