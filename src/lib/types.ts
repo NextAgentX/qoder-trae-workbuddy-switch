@@ -64,6 +64,13 @@ export interface AccountTokenTodayEntry {
   gatewayIn: number;
   /** 经本网关的输出 token 数。 */
   gatewayOut: number;
+  /**
+   * 经本网关的输入里**命中上游前缀缓存**的部分（`gatewayIn` 的子集）。
+   *
+   * `null` = 今日还没观测到命中量（老条目 / 上游没报）——**不是「命中为 0」**。
+   * 判命中率用 `gatewayCached / gatewayIn`，别把 null 当分母。
+   */
+  gatewayCached?: number | null;
 }
 
 /**
@@ -153,6 +160,13 @@ export interface GatewayDimEntry {
   input: number;
   output: number;
   total: number;
+  /**
+   * 命中上游前缀缓存的输入 token（`input` 的**子集**，不参与 `total`）。
+   *
+   * `null` = 这天没观测到命中（老账本无此列 / 上游没报），**不是「命中为 0」**。
+   * 命中率 = `cached / input`，与后端 `token_stats::cacheHitRate` 同口径。
+   */
+  cached?: number | null;
   requests: number;
   /** HTTP `>= 400` 的条数（429 也在内）。 */
   failed: number;

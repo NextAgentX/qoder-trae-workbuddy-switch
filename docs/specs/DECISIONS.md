@@ -829,6 +829,14 @@ is_content_blocked(...) || (status == 400 && sanitized && is_channel_invalid(...
   把命中量算两遍：输入总量翻倍、命中率恒被腰斩到 **50%**（现场：面板 50%，
   网关日志同一时段 99%）。换算收在 `anthropic_input_tokens`（`saturating_sub` 兜底），
   流式与非流式共用一个点。
+- ★ **账本补 `cached` 维度**（2026-11-06，同一次改动收口）：请求日志的 `cachedTokens`
+  只有环形窗口（`log_keep` 缺省 200 ≈ 几分钟）⇒ **按日 / 按账号的命中率算不出来**。
+  `token_daily` 与 `gateway_ledger` 的账号桶 + 四条维度桶都加 `cached`
+  （`serde(default)` ⇒ 老文件读成 0 = 「没观测到」，**不回填历史**：回填只能拿到几分钟
+  样本，那份数字比「没有」更容易被误读）。出口 `null` ≠ `0`：`null` 是「没观测到」。
+  前端换算收在 `usage-ledger.ts::gatewayCacheHit`，**分母只取 `input`**（含输出会把
+  命中率算成 9% 而不是 90%），**只对一条维度求和**（四条维度的合计相同，混着加会把
+  同一个请求算四遍）。门禁 `scripts/check-cache-hit.mjs` 钉这三条。
 
 ---
 

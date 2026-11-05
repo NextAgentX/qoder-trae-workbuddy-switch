@@ -25,6 +25,11 @@ pub struct TokenUsage {
     pub completion: u64,
     pub total: u64,
     pub reasoning: u64,
+    /// 命中上游前缀缓存的输入 token（`prompt` 的**子集**；0 = 上游没报）。
+    ///
+    /// ★ issue #154：进请求日志的 `cachedTokens`，账本再按账号 / 模型 / 密钥分桶
+    /// ⇒ 「命中率掉了」与「换号了」终于能在同一本账里 join。
+    pub cached: u64,
 }
 
 impl TokenUsage {
@@ -42,6 +47,7 @@ impl TokenUsage {
             completion,
             total,
             reasoning: read("reasoning_tokens"),
+            cached: cached_tokens_of(value),
         }
     }
 
@@ -58,6 +64,33 @@ impl TokenUsage {
     pub fn is_meaningful(self) -> bool {
         self.total > 0 || self.prompt > 0 || self.completion > 0
     }
+}
+
+/// 从上游 `usage` 里取缓存命中 token（宽口径：四种写法）。
+///
+/// | 上游 | 字段 |
+/// |:--|:--|
+/// | DeepSeek | `prompt_cache_hit_tokens` |
+/// | OpenAI | `prompt_tokens_details.cached_tokens` |
+/// | Anthropic | `cache_read_input_tokens` |
+/// | 裸字段 | `cached_tokens` |
+///
+/// **上限钳到 `prompt_tokens`**：命中量在语义上是输入的子集，脏数据（上游报大）
+/// 会让下游的命中率 > 100%。与 `usage_tap::extract_usage` 同一处置。
+fn cached_tokens_of(usage: &Value) -> u64 {
+    let read = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let hit = read("prompt_cache_hit_tokens")
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| read("cache_read_input_tokens"))
+        .or_else(|| read("cached_tokens"))
+        .unwrap_or(0);
+    let prompt = read("prompt_tokens").unwrap_or(0);
+    hit.min(prompt)
 }
 
 /// 一个解析完成的 SOLO 事件。
@@ -666,6 +699,57 @@ mod tests {
         assert_eq!(flushed[0].response, "tail");
     }
 
+    /// ★ issue #154：命中量必须能被解析出来（Trae 侧四种上游写法都认），
+    /// 且脏数据（命中 > prompt）钳到 prompt —— 否则下游命中率会 > 100%。
+    #[test]
+    fn cached_tokens_are_read_from_all_four_upstream_shapes() {
+        // DeepSeek
+        assert_eq!(
+            TokenUsage::from_value(&json!({
+                "prompt_tokens": 100, "completion_tokens": 1, "prompt_cache_hit_tokens": 90
+            }))
+            .cached,
+            90
+        );
+        // OpenAI 明细
+        assert_eq!(
+            TokenUsage::from_value(&json!({
+                "prompt_tokens": 100, "completion_tokens": 1,
+                "prompt_tokens_details": { "cached_tokens": 70 }
+            }))
+            .cached,
+            70
+        );
+        // Anthropic
+        assert_eq!(
+            TokenUsage::from_value(&json!({
+                "prompt_tokens": 100, "completion_tokens": 1, "cache_read_input_tokens": 60
+            }))
+            .cached,
+            60
+        );
+        // 裸字段 + 缺字段（= 0 = 上游没报）
+        assert_eq!(
+            TokenUsage::from_value(&json!({
+                "prompt_tokens": 100, "completion_tokens": 1, "cached_tokens": 50
+            }))
+            .cached,
+            50
+        );
+        assert_eq!(
+            TokenUsage::from_value(&json!({"prompt_tokens": 100, "completion_tokens": 1})).cached,
+            0
+        );
+        // 脏数：命中量报得比 prompt 还大 ⇒ 钳到 prompt
+        assert_eq!(
+            TokenUsage::from_value(&json!({
+                "prompt_tokens": 10, "completion_tokens": 1, "prompt_cache_hit_tokens": 999
+            }))
+            .cached,
+            10
+        );
+    }
+
     #[test]
     fn parse_event_reads_every_documented_solo_event() {
         let output = parse_event(
@@ -686,7 +770,8 @@ mod tests {
                 prompt: 10,
                 completion: 2,
                 total: 12,
-                reasoning: 1
+                reasoning: 1,
+                ..Default::default()
             })
         );
 
@@ -722,6 +807,7 @@ mod tests {
             completion: 2,
             total: 3,
             reasoning: 0,
+            ..Default::default()
         }
         .to_openai();
         assert_eq!(openai["prompt_tokens"], 1);
@@ -771,6 +857,7 @@ mod tests {
                 completion: 2,
                 total: 3,
                 reasoning: 0,
+                ..Default::default()
             }),
         );
         let parsed: Value =

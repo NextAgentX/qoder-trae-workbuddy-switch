@@ -197,7 +197,19 @@ export function LedgerModelTable({
   failed,
 }: {
   book: "client" | "gateway";
-  rows: { name: string; tokens: number; requests: number; failed?: number }[];
+  rows: {
+    name: string;
+    tokens: number;
+    requests: number;
+    failed?: number;
+    /**
+     * 该行的缓存命中率（0–1；`null` = 没观测到）。
+     *
+     * ★ issue #154：只在**网关账本**出现 —— 客户端会话日志的命中量走另一套口径
+     * （`token_stats::cacheHitRate`），两个数字不可放在同一列比较。
+     */
+    hitRate?: number | null;
+  }[];
   total: number;
   caption: string;
   /** 网关账本：失败条数是否逐行给出（当前后端只到模型级）。 */
@@ -226,7 +238,10 @@ export function LedgerModelTable({
               <th className="px-3 py-2 text-right font-medium">{t("wbStats.usage.models.colShare")}</th>
               <th className="px-3 py-2 text-right font-medium">{t("wbStats.usage.models.colRequests")}</th>
               {client ? null : (
-                <th className="px-4 py-2 text-right font-medium">{t("wbStats.usage.models.colFailed")}</th>
+                <>
+                  <th className="px-3 py-2 text-right font-medium">{t("wbStats.usage.models.colCacheHit")}</th>
+                  <th className="px-4 py-2 text-right font-medium">{t("wbStats.usage.models.colFailed")}</th>
+                </>
               )}
             </tr>
           </thead>
@@ -250,9 +265,15 @@ export function LedgerModelTable({
                   {exactTokens(row.requests)}
                 </td>
                 {client ? null : (
-                  <td className="px-4 py-2 text-right tabular-nums text-warning">
-                    {row.failed == null ? "—" : exactTokens(row.failed)}
-                  </td>
+                  <>
+                    {/* 「—」= 这个模型没观测到命中量（上游没报 / 老账本），不是 0% 命中。 */}
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {row.hitRate == null ? "—" : `${Math.round(row.hitRate * 100)}%`}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums text-warning">
+                      {row.failed == null ? "—" : exactTokens(row.failed)}
+                    </td>
+                  </>
                 )}
               </tr>
             ))}

@@ -1468,6 +1468,9 @@ function ledgerWindow(L, win, days) {
     labels: days.map((d) => d.label),
     client: cut(L.client.days),
     gateway: cut(L.gateway.days),
+    /* ★ issue #154：命中量与输入量与 `gateway` 同窗口同长（缺字段的老数据给全 0）。 */
+    cached: cut(L.gateway.cached || L.gateway.days.map(() => 0)),
+    input: cut(L.gateway.input || L.gateway.days.map(() => 0)),
     creditsClient: cut(L.credits.dailyClient),
     creditsGateway: cut(L.credits.dailyGateway),
   };
@@ -1524,8 +1527,20 @@ function ledgerTiles(L, book, w, rangeName) {
     ].join("");
   }
   if (book === "gateway") {
+    /* ★ issue #154：网关账本多一张「缓存命中」卡 —— 命中只在网关侧可观测
+       （客户端会话日志的命中量走另一套口径），所以不进「合计」那组。
+       口径：`sum(cached) / sum(input)`，**只看有观测的窗口**；
+       一句都没观测到时显示「—」而不是 0%（0% 会让人去查并不存在的缓存问题）。 */
+    const cachedInWindow = w.cached.reduce((a, b) => a + b, 0);
+    const inputInWindow = w.input.reduce((a, b) => a + b, 0);
+    const hasCacheData = w.cached.some((v) => v > 0);
+    /* 分母是**输入侧**，不是 `gT`（含输出）—— 见 `demo-data.js` 里同一处注释。 */
+    const hitRate = hasCacheData && inputInWindow > 0
+      ? `命中率 ${Math.round((cachedInWindow / inputInWindow) * 100)}%`
+      : "未观测到";
     return [
       statTile("网关 Token", fmtTok(gT), rangeName),
+      statTile("缓存命中", hasCacheData ? fmtTok(cachedInWindow) : "—", hitRate),
       statTile("日均", fmtTok(Math.round(gT / n)), "按自然日平均"),
       statTile("峰值", fmtTok(peakG), "区间内最高一天"),
       statTile("请求数", fmt(L.recon.gatewayRows), `含 ${fmt(L.gateway.failed)} 次失败`),

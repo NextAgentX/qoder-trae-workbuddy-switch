@@ -505,6 +505,9 @@ impl QoderGatewayState {
         stream: bool,
         prompt_tokens: i64,
         completion_tokens: i64,
+        // ★ issue #154：命中上游前缀缓存的输入 token（`prompt_tokens` 的子集；
+        //   0 = 上游没报）。进日志后账本按账号 / 模型 / 密钥分桶。
+        cached_tokens: i64,
         // 上游 `usage.credits`（浮点；`0` = 未取到）：G3 的计数来源，也进日志。
         credits: f64,
         error: Option<String>,
@@ -526,6 +529,7 @@ impl QoderGatewayState {
             "latencyMs": latency_ms,
             "promptTokens": prompt_tokens,
             "completionTokens": completion_tokens,
+            "cachedTokens": cached_tokens,
             // credit 成本（上游按请求给；进日志后「这一发花了多少」不必再猜）。
             "credits": credits,
             "stream": stream,

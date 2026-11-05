@@ -472,6 +472,14 @@ function buildLedger(scopeId, u, modelDays) {
     accGw += out;
     return Math.max(0, out);
   });
+  /* ★ issue #154：网关的缓存命中量。真实值通常 95%+（同一会话连续请求命中前缀缓存），
+     这里取 0.62 让「命中率」这一列在原型里**可辨认**（99% 会看成一片满格，看不出对比）。
+     命中量是 `input` 的**子集**，`total`/`tokens` 一律不因此变化 —— 见账本模块注释。
+     ⚠️ 分母是**输入侧**（`input`），不是 `total`（含输出）：拿 total 当分母会随输出变长
+     系统性低估命中率，正是 issue #154 抱怨的那种「百分比对不上」。 */
+  const hitRatio = 0.62;
+  const gatewayInput = gatewayDays.map((v) => Math.round(v * 0.94));
+  const gatewayCached = gatewayInput.map((v) => Math.round(v * hitRatio));
 
   /* 网关模型：客户端模型放大 + 一个「仅网关」的 auto（真实网关里 auto 路由会出现） */
   const rawModels = u.models.length
@@ -563,6 +571,8 @@ function buildLedger(scopeId, u, modelDays) {
       tokens: gatewayTokens, requests: gatewayRows, failed,
       days: gatewayDays, models: gatewayModels, modelDays: gwModelDays,
       accounts: gatewayAccounts, endpoints: gatewayEndpoints,
+      /* issue #154：命中量与逐日值同长；命中率 = `sum(cached) / sum(input)`。 */
+      cached: gatewayCached, input: gatewayInput, hitRatio,
       coverage: `${u.days.length}/${u.days.length} 天`,
     },
     recon: { clientRows, gatewayRows, matched, matchedTokens, ratio: matchedRatio },

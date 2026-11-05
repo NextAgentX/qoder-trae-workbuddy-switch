@@ -99,7 +99,13 @@ pub const TOKEN_DAILY_MAX_DAYS: usize = 400;
 /// 为什么必须落盘：降级事件原本只存在网关**进程内的 50 条环形缓冲**里
 /// （见 `buddy_switch_gateway::model_fallback`）⇒ 重启即失、且只覆盖最近几十秒。
 /// 「近 7 天降级了多少次 / 成功率多少」这种**窗口统计**只能来自逐日落库的计数。
-pub const TOKEN_DAILY_VERSION: u32 = 5;
+///
+/// v6（2026-11-05，issue #154）：网关侧新增 `cached`（命中上游前缀缓存的输入 token）
+/// —— 账号桶与四条维度桶都带。**老文件不需要迁移**：`serde(default)` 读成 0，
+/// 而 0 的语义正是「没观测到」（不是「没命中」）⇒ 升级当天只会显示「无命中数据」，
+/// 第二天起自动齐全。**不做历史回填**：日志是环形窗口，回填只能拿到几分钟的样本，
+/// 那份数字比「没有」更容易被误读成「历史命中率就是这么低」。
+pub const TOKEN_DAILY_VERSION: u32 = 6;
 
 /// 网关日志条数上限的缺省值（与 `GatewayConfig::default().log_keep` 同值）。
 const DEFAULT_GATEWAY_LOG_KEEP: usize = 200;
@@ -140,12 +146,28 @@ static TOKEN_DAILY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 // ---------------------------------------------------------------------------
 
 /// 一个来源（client / gateway）的输入 / 输出累计。
+///
+/// ★ **`cached` 只在网关侧有值**（issue #154 的观测缺口）：客户端会话日志里的
+/// `cache_read_input_tokens` 是另一个模块（`token_stats`）在算，本模块的 client 桶
+/// 从不填它 ⇒ 恒 0。判「命中率」时必须只对 gateway 桶求值，别把两本账混在一起。
+///
+/// `cached` 的语义是「`input` 里**命中**的部分」，**不从 `input` 里扣**
+/// （`input` 保持上游 `prompt_tokens` 原值）：命中率 = `cached / input`，
+/// 与 `token_stats` 的 `cacheHitRate` 同一口径。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Bucket {
     #[serde(default)]
     input: u64,
     #[serde(default)]
     output: u64,
+    /// 命中上游前缀缓存的输入 token（`input` 的**子集**；0 = 上游没报，不是「没命中」）。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    cached: u64,
+}
+
+/// `skip_serializing_if` 的谓词：0 不落盘（老读码器读到缺字段也是 0，语义不变）。
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// 网关的**维度桶**：模型 / 账号 / 端点共用一套形状。
@@ -162,6 +184,12 @@ struct DimBucket {
     input: u64,
     #[serde(default)]
     output: u64,
+    /// 命中上游前缀缓存的输入 token（`input` 的**子集**；0 = 上游没报，不是「没命中」）。
+    ///
+    /// ★ issue #154：只有这一列能让「按日 / 按账号 / 按密钥的命中率」从环形日志
+    /// （`log_keep` 缺省 200 ≈ 几分钟）升级成账本级统计。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    cached: u64,
     #[serde(default)]
     requests: u64,
     #[serde(default)]
@@ -508,6 +536,8 @@ struct GatewayRow {
     day: String,
     input: u64,
     output: u64,
+    /// 命中上游前缀缓存的输入 token（`input` 的子集；缺字段 = 0 = 上游没报）。
+    cached: u64,
     /// 模型名（空 ⇒ [`UNKNOWN_MODEL`]）。
     model: String,
     /// 端点（`/v1/chat/completions` 等）。
@@ -555,6 +585,11 @@ fn parse_gateway_rows(entries: &[Value]) -> Vec<GatewayRow> {
                     .get("completionTokens")
                     .and_then(number_u64)
                     .unwrap_or(0),
+                /* ★ 与上游 `input` 一样是「原值」：`cachedTokens` 是 `promptTokens` 的
+                **子集**，不需要也不应该在这里做减法 —— 减法只发生在 Anthropic 出口
+                的协议换算（`protocol/anthropic.rs::anthropic_input_tokens`）。
+                缺字段 / 老条目 = 0 = 上游没报（不是「没命中」）。 */
+                cached: value.get("cachedTokens").and_then(number_u64).unwrap_or(0),
                 model: value
                     .get("model")
                     .and_then(Value::as_str)
@@ -612,6 +647,7 @@ fn bucket_gateway(
         let bucket = out.entry(key).or_default();
         bucket.input = bucket.input.saturating_add(row.input);
         bucket.output = bucket.output.saturating_add(row.output);
+        bucket.cached = bucket.cached.saturating_add(row.cached);
     }
     out
 }
@@ -638,6 +674,7 @@ fn bucket_dim(
         let bucket = out.entry(key_of(row)).or_default();
         bucket.input = bucket.input.saturating_add(row.input);
         bucket.output = bucket.output.saturating_add(row.output);
+        bucket.cached = bucket.cached.saturating_add(row.cached);
         bucket.requests = bucket.requests.saturating_add(1);
         if row.status >= 400 {
             bucket.failed = bucket.failed.saturating_add(1);
@@ -1352,6 +1389,7 @@ pub fn record_gateway_today(region: Region) -> Value {
                     let entry = record.accounts.entry(account).or_default();
                     entry.gateway.input = entry.gateway.input.saturating_add(bucket.input);
                     entry.gateway.output = entry.gateway.output.saturating_add(bucket.output);
+                    entry.gateway.cached = entry.gateway.cached.saturating_add(bucket.cached);
                 }
             }
             GatewayWrite::Correct(snapshot) => {
@@ -1360,6 +1398,7 @@ pub fn record_gateway_today(region: Region) -> Value {
                     // 逐字段取大：不倒退、不双计（两个读数都只是今天的**子集**）。
                     entry.gateway.input = entry.gateway.input.max(bucket.input);
                     entry.gateway.output = entry.gateway.output.max(bucket.output);
+                    entry.gateway.cached = entry.gateway.cached.max(bucket.cached);
                 }
             }
         }
@@ -1399,6 +1438,7 @@ fn apply_dim_write(target: &mut BTreeMap<String, DimBucket>, write: DimWrite) {
                 let entry = target.entry(key).or_default();
                 entry.input = entry.input.saturating_add(bucket.input);
                 entry.output = entry.output.saturating_add(bucket.output);
+                entry.cached = entry.cached.saturating_add(bucket.cached);
                 entry.requests = entry.requests.saturating_add(bucket.requests);
                 entry.failed = entry.failed.saturating_add(bucket.failed);
                 entry.credit += bucket.credit;
@@ -1409,6 +1449,7 @@ fn apply_dim_write(target: &mut BTreeMap<String, DimBucket>, write: DimWrite) {
                 let entry = target.entry(key).or_default();
                 entry.input = entry.input.max(bucket.input);
                 entry.output = entry.output.max(bucket.output);
+                entry.cached = entry.cached.max(bucket.cached);
                 entry.requests = entry.requests.max(bucket.requests);
                 entry.failed = entry.failed.max(bucket.failed);
                 if bucket.credit > entry.credit {
@@ -1508,6 +1549,10 @@ fn build_response(day: &str, record: Option<&DayRecord>) -> Value {
                         "clientOut": account.client.output,
                         "gatewayIn": account.gateway.input,
                         "gatewayOut": account.gateway.output,
+                        /* ★ issue #154：本轮命中上游前缀缓存的输入 token（`gatewayIn` 的**子集**）。
+                        `null`（不是 0）= 该账号今日还没观测到命中量（老条目 / 上游没报）
+                        —— 与 `gatewayIn` 写 0 的诚实口径一致：**没报 ≠ 没命中**。 */
+                        "gatewayCached": (account.gateway.cached > 0).then_some(account.gateway.cached),
                     })
                 })
                 .collect()
@@ -1638,6 +1683,10 @@ fn dim_groups(map: &BTreeMap<String, DimBucket>, key_name: &str) -> Vec<Value> {
                 "input": bucket.input,
                 "output": bucket.output,
                 "total": total,
+                /* ★ issue #154：命中上游前缀缓存的输入 token（`input` 的子集）。
+                `null` = 这一天没观测到命中（老账本无此列 / 上游没报），**不是 0 命中**
+                —— 前端据此区分「没数据」与「确实全 miss」。 */
+                "cached": (bucket.cached > 0).then_some(bucket.cached),
                 "requests": bucket.requests,
                 "failed": bucket.failed,
                 "credit": (bucket.credit * 1000.0).round() / 1000.0,
@@ -2176,6 +2225,125 @@ mod tests {
         assert_eq!(keys.len(), 2, "一把 Key + 一次无 Key 调用");
     }
 
+    /// ★★ issue #154：**命中量必须与 token 同源同步进账本**，且五个位置口径一致。
+    ///
+    /// 为什么单独立一条：`cached` 是**新加的一列**，而累加点有五处（账号桶 + 四条维度）。
+    /// 少接一处不会编译失败，只会让「按模型的命中率」与「按账号的命中率」安静地分叉
+    /// —— 那种不一致在页面上表现为「两个百分比都不像对的」，最难排查。
+    ///
+    /// 可证伪：把 `bucket_dim` 里那行 `bucket.cached += row.cached` 删掉 ⇒
+    /// 维度侧的 cached 变 0，本用例在 `dim_cached == account_cached` 上变红。
+    #[test]
+    fn gateway_cached_tokens_are_aggregated_into_every_bucket() {
+        let day = local_date_string(at_local_date(0, 12)).expect("today");
+        let base = at_local_date(0, 12);
+        let entries = vec![
+            // 命中 90 / 输入 100（DeepSeek 形状：prompt 已含命中）
+            json!({ "ts": base, "region": "cn", "account": "uid-a", "accountUid": "uid-a",
+                    "endpoint": "/v1/chat/completions", "model": "m-1", "status": 200,
+                    "keyId": "k-1", "keyScope": "wb",
+                    "promptTokens": 100, "completionTokens": 10, "cachedTokens": 90 }),
+            // **老条目**：没有 `cachedTokens` 键 ⇒ 0（不是「没命中」）
+            json!({ "ts": base + 1, "region": "cn", "account": "uid-b", "accountUid": "uid-b",
+                    "endpoint": "/v1/chat/completions", "model": "m-1", "status": 200,
+                    "keyId": null,
+                    "promptTokens": 40, "completionTokens": 2 }),
+        ];
+        let round = gateway_round(
+            None,
+            true,
+            true,
+            &parse_gateway_rows(&entries),
+            Region::Cn,
+            &day,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let accounts = match round.accounts {
+            GatewayWrite::Add(map) | GatewayWrite::Correct(map) => map,
+        };
+        let account_cached: u64 = accounts.values().map(|bucket| bucket.cached).sum();
+        assert_eq!(account_cached, 90, "账号桶必须累加命中量（老条目贡献 0）");
+
+        for (label, map) in [
+            ("模型", dim_map(round.models)),
+            ("账号", dim_map(round.accounts_dim)),
+            ("端点", dim_map(round.endpoints)),
+            ("密钥", dim_map(round.keys)),
+        ] {
+            let dim_cached: u64 = map.values().map(|bucket| bucket.cached).sum();
+            assert_eq!(
+                dim_cached, account_cached,
+                "{label}维度的命中量合计必须等于账号桶 —— 五处累加点同源同步"
+            );
+        }
+    }
+
+    /// ★ issue #154：`cached` 是 `input` 的**子集**，不得参与 `total` 的计算。
+    ///
+    /// 为什么钉这条：P0 那份 bug（命中率腰斩 50%）的本质就是「命中量被算了两次」。
+    /// 若 `dim_groups` / `gateway_trend_points` 把 `cached` 加进 `total`，同一个错误
+    /// 会从协议层搬进账本层，而且这次连客户端都不需要参与 —— 页面自己就会翻倍。
+    #[test]
+    fn gateway_cached_tokens_do_not_inflate_totals() {
+        let day = local_date_string(at_local_date(0, 12)).expect("today");
+        let base = at_local_date(0, 12);
+        let entries = vec![json!({
+            "ts": base, "region": "cn", "account": "uid-a", "accountUid": "uid-a",
+            "endpoint": "/v1/chat/completions", "model": "m-1", "status": 200,
+            "keyId": "k-1", "keyScope": "wb",
+            "promptTokens": 1000, "completionTokens": 20, "cachedTokens": 900,
+        })];
+        let round = gateway_round(
+            None,
+            true,
+            true,
+            &parse_gateway_rows(&entries),
+            Region::Cn,
+            &day,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let models = dim_groups(&dim_map(round.models), "model");
+        assert_eq!(
+            models[0]["total"], 1020,
+            "total 只能是 input + output（1000 + 20）；把 cached 加进去就是同一个 bug 换个层"
+        );
+        assert_eq!(models[0]["cached"], 900, "命中量单列");
+    }
+
+    /// ★ issue #154：`cached == 0` 时出口给 **`null`**，不是 `0`。
+    ///
+    /// 语义：`0` 会被前端读成「确实一次都没命中」，而真相通常是「上游没报 / 老账本
+    /// 没这一列」。两者在 UI 上必须分开 —— 与 `gatewayIn` 写 0 的诚实口径同源。
+    #[test]
+    fn gateway_cached_is_null_when_unobserved() {
+        let day = local_date_string(at_local_date(0, 12)).expect("today");
+        let base = at_local_date(0, 12);
+        let entries = vec![json!({
+            "ts": base, "region": "cn", "account": "uid-a", "accountUid": "uid-a",
+            "endpoint": "/v1/chat/completions", "model": "m-1", "status": 200,
+            "keyId": "k-1", "keyScope": "wb",
+            "promptTokens": 100, "completionTokens": 10,
+        })];
+        let round = gateway_round(
+            None,
+            true,
+            true,
+            &parse_gateway_rows(&entries),
+            Region::Cn,
+            &day,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        let groups = dim_groups(&dim_map(round.models), "model");
+        assert!(
+            groups[0]["cached"].is_null(),
+            "没观测到命中必须是 null（0 会被读成「确实全 miss」）"
+        );
+        assert_eq!(groups[0]["input"], 100, "输入侧照旧");
+    }
+
     /// 密钥维度的三种「没有 Key」判据（与前端 `key-usage.ts` 逐字对齐）。
     ///
     /// ⚠️ 老条目（**没有 `keyId` 键**）与无 Key 调用（`keyId: null`）**不得合并**：
@@ -2322,6 +2490,7 @@ mod tests {
         let mut bucket = Bucket {
             input: 30,
             output: 3,
+            ..Default::default()
         };
 
         // 第 2 轮：t1 被裁、t3 新增 ⇒ 走增量。
@@ -2567,6 +2736,7 @@ mod tests {
                 gateway: Bucket {
                     input: 10,
                     output: 2,
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2577,6 +2747,7 @@ mod tests {
                 gateway: Bucket {
                     input: 5,
                     output: 1,
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2592,6 +2763,7 @@ mod tests {
                 client: Bucket {
                     input: 999,
                     output: 0,
+                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2629,10 +2801,12 @@ mod tests {
                 client: Bucket {
                     input: 7,
                     output: 7,
+                    ..Default::default()
                 },
                 gateway: Bucket {
                     input: 1,
                     output: 1,
+                    ..Default::default()
                 },
             },
         );
