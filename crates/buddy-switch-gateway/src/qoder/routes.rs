@@ -803,6 +803,7 @@ pub async fn chat_for_region_once(
                         wants_stream,
                         0,
                         0,
+                        0,
                         0.0,
                         Some(detail.clone()),
                         key.as_deref().map(|actor| actor.key_id.as_str()),
@@ -888,6 +889,7 @@ pub async fn chat_for_region_once(
             wants_stream,
             0,
             0,
+            0,
             0.0,
             Some(message.clone()),
             key.as_deref().map(|actor| actor.key_id.as_str()),
@@ -966,6 +968,31 @@ fn usage_counts(usage: &Value) -> (u64, u64) {
         .and_then(Value::as_u64)
         .unwrap_or(0);
     (prompt, completion)
+}
+
+/// 从上游 `usage` 里取缓存命中 token（宽口径：四种写法）。
+///
+/// | 上游 | 字段 |
+/// |:--|:--|
+/// | DeepSeek | `prompt_cache_hit_tokens` |
+/// | OpenAI | `prompt_tokens_details.cached_tokens` |
+/// | Anthropic | `cache_read_input_tokens` |
+/// | 裸字段 | `cached_tokens` |
+///
+/// **上限钳到 `prompt_tokens`**：命中量是输入的子集，脏数据会让下游命中率 > 100%。
+fn usage_cached(usage: &Value) -> u64 {
+    let read = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let hit = read("prompt_cache_hit_tokens")
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| read("cache_read_input_tokens"))
+        .or_else(|| read("cached_tokens"))
+        .unwrap_or(0);
+    hit.min(read("prompt_tokens").unwrap_or(0))
 }
 
 /// 本发消耗的 **credit**（上游 `usage.credits`，浮点；缺 `credits` 时回落
@@ -1080,12 +1107,17 @@ async fn stream_relay(
         }
         // ★ 账本在**流结束**之后落（usage 只在末帧到达；提前写会记成 0）。
         let usage = usage_slot.lock().ok().and_then(|guard| guard.clone());
-        let (prompt_tokens, completion_tokens, credits) = match &usage {
+        let (prompt_tokens, completion_tokens, credits, cached_tokens) = match &usage {
             Some(usage) => {
                 let (prompt, completion) = usage_counts(usage);
-                (prompt, completion, usage_credits(usage))
+                (
+                    prompt,
+                    completion,
+                    usage_credits(usage),
+                    usage_cached(usage),
+                )
             }
-            None => (0, 0, 0.0),
+            None => (0, 0, 0.0, 0),
         };
         // 上游中途发过错误帧 ⇒ 记 502 + 详情，别写成「200 / 0 token / 无错误」
         // （那正是 issue #46 里最难排查的形态）。
@@ -1138,6 +1170,7 @@ async fn stream_relay(
                 true,
                 prompt_tokens as i64,
                 completion_tokens as i64,
+                cached_tokens as i64,
                 credits,
                 error,
                 key_for_task.as_ref().map(|actor| actor.key_id.as_str()),
@@ -1169,12 +1202,17 @@ async fn aggregate_relay(
 ) -> Response {
     let aggregated = sse::aggregate(response.bytes_stream(), allowed_tools.as_ref()).await;
     let usage = aggregated.usage.clone();
-    let (prompt_tokens, completion_tokens, credits) = match &usage {
+    let (prompt_tokens, completion_tokens, credits, cached_tokens) = match &usage {
         Some(usage) => {
             let (prompt, completion) = usage_counts(usage);
-            (prompt, completion, usage_credits(usage))
+            (
+                prompt,
+                completion,
+                usage_credits(usage),
+                usage_cached(usage),
+            )
         }
-        None => (0, 0, 0.0),
+        None => (0, 0, 0.0, 0),
     };
     // ★ 账本先定「这一请求到底成没成」再落：上游只要给过错误帧就不是 200，
     //   否则日志会显示「200 + 0 token + error:null」（issue #46 的隐身故障）。
@@ -1211,6 +1249,7 @@ async fn aggregate_relay(
             false,
             prompt_tokens as i64,
             completion_tokens as i64,
+            cached_tokens as i64,
             credits,
             log_error,
             key.as_ref().map(|actor| actor.key_id.as_str()),

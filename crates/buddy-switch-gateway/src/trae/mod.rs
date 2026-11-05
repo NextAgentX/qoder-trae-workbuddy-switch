@@ -505,6 +505,9 @@ impl TraeGatewayState {
         stream: bool,
         prompt_tokens: u64,
         completion_tokens: u64,
+        // ★ issue #154：命中上游前缀缓存的输入 token（`prompt_tokens` 的子集；
+        //   0 = 上游没报）。进日志后账本按账号 / 模型 / 密钥分桶。
+        cached_tokens: u64,
         error: Option<String>,
         variant: TraeVariant,
         // ★ issue #76：调用方的 Key id（`None` = 无 Key 的调用 / 老条目）。
@@ -525,6 +528,7 @@ impl TraeGatewayState {
             "latencyMs": latency_ms,
             "promptTokens": prompt_tokens,
             "completionTokens": completion_tokens,
+            "cachedTokens": cached_tokens,
             "stream": stream,
             "error": error,
             // 归属产品线：Token 统计页据此出「变体范围条」（筛选维度）。

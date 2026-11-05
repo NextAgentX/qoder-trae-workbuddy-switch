@@ -2547,6 +2547,14 @@ function buildLedger(scopeId, u, modelDays) {
     accGw += out;
     return Math.max(0, out);
   });
+  /* ★ issue #154：网关的缓存命中量。真实值通常 95%+（同一会话连续请求命中前缀缓存），
+     这里取 0.62 让「命中率」这一列在原型里**可辨认**（99% 会看成一片满格，看不出对比）。
+     命中量是 `input` 的**子集**，`total`/`tokens` 一律不因此变化 —— 见账本模块注释。
+     ⚠️ 分母是**输入侧**（`input`），不是 `total`（含输出）：拿 total 当分母会随输出变长
+     系统性低估命中率，正是 issue #154 抱怨的那种「百分比对不上」。 */
+  const hitRatio = 0.62;
+  const gatewayInput = gatewayDays.map((v) => Math.round(v * 0.94));
+  const gatewayCached = gatewayInput.map((v) => Math.round(v * hitRatio));
 
   /* 网关模型：客户端模型放大 + 一个「仅网关」的 auto（真实网关里 auto 路由会出现） */
   const rawModels = u.models.length
@@ -2638,6 +2646,8 @@ function buildLedger(scopeId, u, modelDays) {
       tokens: gatewayTokens, requests: gatewayRows, failed,
       days: gatewayDays, models: gatewayModels, modelDays: gwModelDays,
       accounts: gatewayAccounts, endpoints: gatewayEndpoints,
+      /* issue #154：命中量与逐日值同长；命中率 = `sum(cached) / sum(input)`。 */
+      cached: gatewayCached, input: gatewayInput, hitRatio,
       coverage: `${u.days.length}/${u.days.length} 天`,
     },
     recon: { clientRows, gatewayRows, matched, matchedTokens, ratio: matchedRatio },
@@ -4947,6 +4957,9 @@ function ledgerWindow(L, win, days) {
     labels: days.map((d) => d.label),
     client: cut(L.client.days),
     gateway: cut(L.gateway.days),
+    /* ★ issue #154：命中量与输入量与 `gateway` 同窗口同长（缺字段的老数据给全 0）。 */
+    cached: cut(L.gateway.cached || L.gateway.days.map(() => 0)),
+    input: cut(L.gateway.input || L.gateway.days.map(() => 0)),
     creditsClient: cut(L.credits.dailyClient),
     creditsGateway: cut(L.credits.dailyGateway),
   };
@@ -5003,8 +5016,20 @@ function ledgerTiles(L, book, w, rangeName) {
     ].join("");
   }
   if (book === "gateway") {
+    /* ★ issue #154：网关账本多一张「缓存命中」卡 —— 命中只在网关侧可观测
+       （客户端会话日志的命中量走另一套口径），所以不进「合计」那组。
+       口径：`sum(cached) / sum(input)`，**只看有观测的窗口**；
+       一句都没观测到时显示「—」而不是 0%（0% 会让人去查并不存在的缓存问题）。 */
+    const cachedInWindow = w.cached.reduce((a, b) => a + b, 0);
+    const inputInWindow = w.input.reduce((a, b) => a + b, 0);
+    const hasCacheData = w.cached.some((v) => v > 0);
+    /* 分母是**输入侧**，不是 `gT`（含输出）—— 见 `demo-data.js` 里同一处注释。 */
+    const hitRate = hasCacheData && inputInWindow > 0
+      ? `命中率 ${Math.round((cachedInWindow / inputInWindow) * 100)}%`
+      : "未观测到";
     return [
       statTile("网关 Token", fmtTok(gT), rangeName),
+      statTile("缓存命中", hasCacheData ? fmtTok(cachedInWindow) : "—", hitRate),
       statTile("日均", fmtTok(Math.round(gT / n)), "按自然日平均"),
       statTile("峰值", fmtTok(peakG), "区间内最高一天"),
       statTile("请求数", fmt(L.recon.gatewayRows), `含 ${fmt(L.gateway.failed)} 次失败`),

@@ -61,18 +61,24 @@ export function dimTotals(
   dim: GatewayUsageDim | null,
   window: UsageWindow,
   keyOf: (entry: GatewayDimEntry) => string | undefined,
-): { key: string; tokens: number; requests: number; failed: number; credit: number }[] {
+): DimTotal[] {
   if (!dim) return [];
   const inWindow = windowKeySet(window);
-  const map = new Map<string, { key: string; tokens: number; requests: number; failed: number; credit: number }>();
+  const map = new Map<string, DimTotal>();
   for (const day of dim.days) {
     if (!inWindow.has(day.key)) continue;
     for (const entry of day.models.concat(day.accounts, day.endpoints, day.keys)) {
       // 四个数组共用形状，但每个数组只该被读一次：用 keyOf 的 undefined 过滤掉别的维度。
       const key = keyOf(entry);
       if (key === undefined) continue;
-      const current = map.get(key) ?? { key, tokens: 0, requests: 0, failed: 0, credit: 0 };
+      const current =
+        map.get(key) ?? { key, tokens: 0, input: 0, cached: 0, requests: 0, failed: 0, credit: 0 };
       current.tokens += entry.total;
+      current.input += entry.input;
+      /* ★ issue #154：`null`（没观测到）不参与求和 —— 把 null 当 0 求和与
+         「确实一次没命中」在结果上无法区分，而后者会让命中率被错误地算低。
+         只要窗口内有一天给出过值，这个按钮聚合就有值。 */
+      current.cached += entry.cached ?? 0;
       current.requests += entry.requests;
       current.failed += entry.failed;
       current.credit += entry.credit;
@@ -80,6 +86,65 @@ export function dimTotals(
     }
   }
   return [...map.values()].sort((left, right) => right.tokens - left.tokens);
+}
+
+/** `dimTotals` 的一行（某维度键在窗口内的合计）。 */
+export interface DimTotal {
+  key: string;
+  /** 输入 + 输出（与「网关总量」同口径）。 */
+  tokens: number;
+  /** 输入侧合计 —— 命中率的分母。 */
+  input: number;
+  /** 命中上游前缀缓存的输入 token 合计（`input` 的子集；0 = 窗口内没观测到）。 */
+  cached: number;
+  requests: number;
+  failed: number;
+  credit: number;
+}
+
+/**
+ * 网关在窗口内的**命中率**（`cached / input`）。
+ *
+ * ## 三条口径
+ *
+ * 1. **分母是 `input` 不是 `total`**：命中只发生在输入侧，拿 input+output 当分母
+ *    会随输出变长而系统性低估命中率；
+ * 2. **`cached` 是 `input` 的子集，绝不相加**（issue #154 的原始 bug 就是重复计入）；
+ * 3. `input === 0` ⇒ 返回 `null`（**不是 0%**）：那天没有可判定的输入。
+ *
+ * `observed` 为 `false` 表示窗口内**一条命中数据都没有**（老账本 / 上游从不报）——
+ * 与「命中率 0%」必须分开表述，否则用户会去查一个不存在的缓存问题。
+ */
+export function gatewayCacheHit(
+  dim: GatewayUsageDim | null,
+  window: UsageWindow,
+): { hitRate: number | null; input: number; cached: number; observed: boolean } {
+  const empty = { hitRate: null, input: 0, cached: 0, observed: false };
+  if (!dim) return empty;
+  const inWindow = windowKeySet(window);
+  let input = 0;
+  let cached = 0;
+  let observed = false;
+  for (const day of dim.days) {
+    if (!inWindow.has(day.key)) continue;
+    /* ⚠️ **只选一条维度**求和：四条维度由同一次扫描产出、合计相同，混着加会把
+       同一个请求算四遍（命中率会翻成 4 倍这种离谱值）。
+       选 `models` 而不是 `endpoints`：端点维度的 `input` 在部分历史数据里是 0
+       （它当初只为「请求数分布」而生），拿它当分母会把命中率算成 null。 */
+    for (const entry of day.models) {
+      input += entry.input;
+      if (entry.cached != null) {
+        cached += entry.cached;
+        observed = true;
+      }
+    }
+  }
+  if (input === 0) return { ...empty, observed };
+  /* ★ 一条命中数据都没有时**必须**给 null：此时 `cached` 恒为 0，
+    直接除会得到「0% 命中」—— 与「确实全 miss」在界面上无法区分，
+    而那两句提示会把用户送去查一个并不存在的缓存问题（issue #154 的教训）。 */
+  if (!observed) return { hitRate: null, input, cached: 0, observed };
+  return { hitRate: cached / input, input, cached, observed };
 }
 
 /** 模型维度（`models[]` 的键）。 */

@@ -1140,28 +1140,40 @@ function demoGatewayUsageDim(): GatewayUsageDim {
       const accountTokens = spread(day.total, accountWeights);
       const endpointRequests = spread(Math.max(1, Math.round(day.total / 148000)), endpointWeights);
       const failed = index % 7 === 3 ? 5 : index % 5 === 0 ? 2 : 0;
+      /* ★ issue #154：演示命中量。真实值 95%+，这里取 0.86 让「命中率」列**可辨认**
+         （满格 99% 看不出对比）。命中量是 `input` 的子集，`total` 不因它变化。
+         每个模型给不同比例 —— 命中率那一列的用处正是「哪个模型没命中」。 */
+      const hitRatios = [0.94, 0.72, 0.55, 0.9];
       return {
         key: day.key,
         truncated: day.truncated,
         partial: index === 0,
-        models: modelTokens.map((total, i) => ({
-          model: models[i],
-          input: Math.round(total * 0.9),
-          output: total - Math.round(total * 0.9),
-          total,
-          requests: Math.max(1, Math.round(total / 148000)),
-          failed: i === 0 ? failed : 0,
-          credit: Math.round((total / 34000) * 1000) / 1000,
-        })),
-        accounts: accountTokens.map((total, i) => ({
-          account: accounts[i],
-          input: Math.round(total * 0.9),
-          output: total - Math.round(total * 0.9),
-          total,
-          requests: Math.max(1, Math.round(total / 148000)),
-          failed: i === 0 ? failed : 0,
-          credit: Math.round((total / 34000) * 1000) / 1000,
-        })),
+        models: modelTokens.map((total, i) => {
+          const input = Math.round(total * 0.9);
+          return {
+            model: models[i],
+            input,
+            output: total - input,
+            total,
+            cached: Math.round(input * (hitRatios[i] ?? 0.8)),
+            requests: Math.max(1, Math.round(total / 148000)),
+            failed: i === 0 ? failed : 0,
+            credit: Math.round((total / 34000) * 1000) / 1000,
+          };
+        }),
+        accounts: accountTokens.map((total, i) => {
+          const input = Math.round(total * 0.9);
+          return {
+            account: accounts[i],
+            input,
+            output: total - input,
+            total,
+            cached: Math.round(input * (hitRatios[i] ?? 0.8)),
+            requests: Math.max(1, Math.round(total / 148000)),
+            failed: i === 0 ? failed : 0,
+            credit: Math.round((total / 34000) * 1000) / 1000,
+          };
+        }),
         endpoints: endpointRequests.map((requests, i) => ({
           endpoint: endpoints[i],
           input: 0,
@@ -1171,15 +1183,19 @@ function demoGatewayUsageDim(): GatewayUsageDim {
           failed: i === 0 ? failed : 0,
           credit: 0,
         })),
-        keys: keyTokens.map((total, i) => ({
-          key: keyBuckets[i],
-          input: Math.round(total * 0.9),
-          output: total - Math.round(total * 0.9),
-          total,
-          requests: Math.max(1, Math.round(total / 148000)),
-          failed: i === 0 ? failed : 0,
-          credit: Math.round((total / 34000) * 1000) / 1000,
-        })),
+        keys: keyTokens.map((total, i) => {
+          const input = Math.round(total * 0.9);
+          return {
+            key: keyBuckets[i],
+            input,
+            output: total - input,
+            total,
+            cached: Math.round(input * (hitRatios[i] ?? 0.8)),
+            requests: Math.max(1, Math.round(total / 148000)),
+            failed: i === 0 ? failed : 0,
+            credit: Math.round((total / 34000) * 1000) / 1000,
+          };
+        }),
         /* 首日只是下界（v4 之前没有 key 维度）—— 演示「覆盖披露」那一行。 */
         keysPartial: index === 0,
       };

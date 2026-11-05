@@ -46,7 +46,18 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { CircleAlert, Gauge, Info, Loader2, MessagesSquare, RefreshCw, Server, TrendingUp, Users } from "lucide-react";
+import {
+  CircleAlert,
+  DatabaseZap,
+  Gauge,
+  Info,
+  Loader2,
+  MessagesSquare,
+  RefreshCw,
+  Server,
+  TrendingUp,
+  Users,
+} from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -99,6 +110,7 @@ import {
   dimCoverage,
   dimTotals,
   endpointKey,
+  gatewayCacheHit,
   gatewayDailyInWindow,
   ledgerDailySeries,
   mergeDims,
@@ -314,8 +326,28 @@ function TrendView({
 
   const modelCount =
     ledger === "gateway" ? gatewaySlices.length : ledger === "client" ? clientSlices.length : clientSlices.length + gatewaySlices.length;
+  /* ★ issue #154：网关账本下的「缓存命中」—— 命中只在网关侧可观测，所以这张卡
+     只随 `ledger === "gateway"` 出现（合计 / 客户端两档都没有这份数据）。
+     分母是**输入侧**，不是 `gatewayTokens`（含输出）—— 后者会随输出变长系统性低估。 */
+  const cacheHit = gatewayCacheHit(dim, viewWindow);
+  const cacheTile: StatTile | null =
+    ledger === "gateway"
+      ? {
+          icon: DatabaseZap,
+          label: t("wbStats.usage.trend.cacheHit"),
+          value: cacheHit.observed ? compactTokens(cacheHit.cached) : "—",
+          hint: cacheHit.observed
+            ? t("wbStats.usage.trend.cacheHitHint", {
+                rate: `${Math.round((cacheHit.hitRate ?? 0) * 100)}%`,
+                input: compactTokens(cacheHit.input),
+              })
+            : t("wbStats.usage.trend.cacheHitUnobserved"),
+          title: t("wbStats.usage.trend.cacheHitTitle"),
+        }
+      : null;
   const tiles: StatTile[] = [
     totalTile,
+    ...(cacheTile ? [cacheTile] : []),
     { icon: TrendingUp, label: t("wbStats.usage.trend.avg"), value: compactTokens(average), hint: t("wbStats.usage.trend.avgHint") },
     { icon: Gauge, label: t("wbStats.usage.trend.peak"), value: compactTokens(peak) },
     /* 决策 #4：WB 的第四张卡是「模型数」，不是「活跃账号」—— 账号维度在账号页，
@@ -439,6 +471,9 @@ function ModelsView({
         tokens: model.tokens,
         requests: model.requests,
         failed: model.failed,
+        /* ★ issue #154：命中率 = `cached / input`（分母是**输入侧**，不含输出）。
+           `cached === 0 && input === 0` ⇒ null（没观测到），别写成 0%。 */
+        hitRate: model.input > 0 && model.cached > 0 ? model.cached / model.input : null,
       })),
     [dim, viewWindow, t],
   );
