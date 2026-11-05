@@ -4,8 +4,10 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DemoAction } from "@/components/demo-action";
 import * as api from "@/lib/api";
+import { formatCredit } from "@/lib/gateway";
 import { useT } from "@/lib/i18n";
 import { regionDescriptor } from "@/lib/region";
 import { cn } from "@/lib/utils";
@@ -41,8 +43,11 @@ function statusTone(status: number): string {
  * 而 Trae 侧 `trae-request-log.tsx` 是 `<table>` + sticky 表头 + `EmptyState`。
  * 同一件事（看最近请求）在两个页面长得不一样 ⇒ 统一到 table 形态：
  *
- * - **列集** = 时间 / 版本 / 账号 / 模型 / 状态 / 耗时 / Token（Trae 无「版本」列 ——
- *   它的日志没有 region 维度，属**数据差异**，不是形态差异）；
+ * - **列集** = 时间 / 版本 / 账号 / 模型 / 状态 / 耗时 / **积分** / Token（Trae 无「版本」列 ——
+ *   它的日志没有 region 维度，属**数据差异**，不是形态差异；积分列同样是数据差异：
+ *   WB 与 Qoder 的上游逐请求回报 `credit` / `credits`（字段分别写在 `logging.rs` 与
+ *   `qoder/mod.rs` 的 `record_request` 里），Trae 上游的 `token_usage` 事件只带 token、
+ *   不带积分，故 Trae 页不显示该列 —— 免得整列恒 0 被误读成「免费」）；
  * - **空态**用全应用唯一的 `EmptyState`（§3.6），不再是「一行灰字」；
  * - **耗时统一用 `ms`**（原始单位，`1.2s` 会把 1,240ms 与 1,199ms 显示成同一个值）；
  * - **条数上限 50** 提到常量，与 Trae 侧同值。
@@ -108,6 +113,29 @@ export function RequestLog({ className }: { className?: string }) {
                 <th className="px-3 py-2 text-left font-medium">{t("wbStats.gateway.log.col.model")}</th>
                 <th className="px-3 py-2 text-right font-medium">{t("wbStats.gateway.log.col.status")}</th>
                 <th className="px-3 py-2 text-right font-medium">{t("wbStats.gateway.log.col.latency")}</th>
+                {/* 积分：表头挂「0 ≠ 免费」的提示 —— 该语义对整列成立，
+                    逐行挂提示会在 200 行里重复同一句话。
+                    用共用的 `Tooltip`（浮层，不给纯裸表加可见说明段）而不是原生 `title`：
+                    `title` 在触屏 / 纯键盘下读不到，而这条语义最不能漏读。
+                    Trigger 用可聚焦的 `button`，键盘 focus 即可唤出浮层；
+                    `cursor-help` 让「这里有说明」在悬停前就可预期。 */}
+                <th className="px-3 py-2 text-right font-medium">
+                  <TooltipProvider delayDuration={250}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+                        >
+                          {t("wbStats.gateway.log.col.credit")}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-80 text-xs leading-relaxed">
+                        {t("wbStats.gateway.log.col.creditHint")}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </th>
                 <th className="px-5 py-2 text-right font-medium">{t("wbStats.gateway.log.col.tokens")}</th>
               </tr>
             </thead>
@@ -144,6 +172,9 @@ function LogRow({ entry }: { entry: GatewayLogEntry }) {
       {/* 耗时用 `ms`（原始单位）—— `toFixed(1)s` 会把相邻两档显示成同一个值。 */}
       <td className="px-3 py-2 text-right font-mono text-xs text-muted-foreground">
         {entry.latencyMs ? `${entry.latencyMs}ms` : "—"}
+      </td>
+      <td className="px-3 py-2 text-right font-mono text-xs text-muted-foreground">
+        {formatCredit(entry.credit)}
       </td>
       <td className="px-5 py-2 text-right font-mono text-xs text-muted-foreground">
         {entry.promptTokens != null || entry.completionTokens != null

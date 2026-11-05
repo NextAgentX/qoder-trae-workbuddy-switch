@@ -733,7 +733,14 @@ export default function QoderApiServicePage() {
 
           {/* ---- 请求日志 ---- */}
           {section === "logs" && (
-            <TraeRequestLog logs={logs} clearing={clearing} onClear={() => void onClearLogs()} />
+            <TraeRequestLog
+              logs={logs}
+              clearing={clearing}
+              onClear={() => void onClearLogs()}
+              /* Qoder 上游逐请求回报 `usage.credits` ⇒ 多显示一列「积分」。
+                 Trae 页不传这个取值函数（它的上游不回报，恒 0 会被误读成免费）。 */
+              credit={(entry) => entry.credits}
+            />
           )}
           {section === "u-overview" && <UnifiedGatewayView section="overview" onGoSection={goUnified} />}
           {section === "u-namespaces" && <UnifiedGatewayView section="namespaces" onGoSection={goUnified} />}

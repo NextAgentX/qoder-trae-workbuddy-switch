@@ -249,10 +249,16 @@ export interface QoderApiKeyRecord {
  * 见 Rust 侧三处 `record_request` 的注释）⇒ 直接复用 Trae 侧的类型与归一化，
  * 不另立第二份（第二份必然漂移）。
  *
- * ⚠️ Qoder 的日志条目**多一个 `region`**（一个监听记两个区域的请求）：
- * 这里用交叉类型附加，不放进共用形状（Trae / WB 的归一化不产出它）。
+ * ⚠️ Qoder 的日志条目**多两个字段**（都用交叉类型附加，不放进共用形状：
+ * Trae / WB 的归一化不产出它们）：
+ * - `region`：一个监听记两个区域的请求；
+ * - `credits`：上游 `usage.credits`（复数，Rust 侧 `record_request` 写的就是这个键）。
+ *   `0` = 上游没上报（**不是免费**）；键不存在 = 升级前的老条目 ⇒ `undefined`。
  */
-export type QoderGatewayLogEntry = TraeGatewayLogEntry & { region?: string };
+export type QoderGatewayLogEntry = TraeGatewayLogEntry & {
+  region?: string;
+  credits?: number | null;
+};
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -526,16 +532,48 @@ export function normalizeQoderApiKeys(raw: unknown): QoderApiKeyRecord[] {
     .filter((item): item is QoderApiKeyRecord => item !== null);
 }
 
-/** 归一化 `get_qoder_gateway_logs` 的返回（复用 Trae 侧同一实现 + 附加 `region`）。 */
+/**
+ * 归一化 `get_qoder_gateway_logs` 的返回（复用 Trae 侧同一实现 + 附加 `region` / `credits`）。
+ *
+ * ## 为什么不能直接用 `list[index]` 对齐（旧实现的坑）
+ *
+ * `normalizeTraeGatewayLogs` 内部会 `.filter` 掉非对象项 ⇒ 旧实现拿**未过滤**的
+ * `list[index]` 取附加字段，一旦原始数组里混进一项脏值，`entries` 比 `list` 短，
+ * 之后**每一条的 `region` / `credits` 都会错挂到前一行**。
+ * `region` 错挂只是标签错；`credits` 错挂会让日志显示成「这一发花了别人那发的钱」——
+ * 是**编数据**，比显示 `—` 糟得多。所以这里按**同一个过滤条件**重建一份可对齐的数组，
+ * 并在长度对不上时**整体放弃附加**（宁可整列显示「不知道」，也不猜）。
+ */
 export function normalizeQoderGatewayLogs(raw: unknown): QoderGatewayLogEntry[] {
   const entries = normalizeTraeGatewayLogs(raw);
-  const list = (raw && typeof raw === "object" && Array.isArray((raw as { logs?: unknown[] }).logs)
-    ? (raw as { logs: unknown[] }).logs
-    : []) as unknown[];
+  /* 列表推导必须与 `normalizeTraeGatewayLogs` **逐字相同**，包括「裸数组」那条回落 ——
+     少写回落，`raw` 是数组时 `objects` 恒空、长度必然对不上，`credits` 会被静默全丢
+     （fail-closed 不撒谎，但数据也没了）。 */
+  const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const list = Array.isArray(record.logs)
+    ? record.logs
+    : Array.isArray(raw)
+      ? (raw as unknown[])
+      : [];
+  const objects = list.filter(
+    (item): item is Record<string, unknown> => !!item && typeof item === "object",
+  );
+  /* 当前两侧过滤条件相同 ⇒ 这个长度兜底**恒不触发**；它防的是
+     `normalizeTraeGatewayLogs` 将来改变过滤规则而我们没同步（那时宁可整列显示「—」，
+     也不要错位的数字）。改 trae 侧过滤时必须同步上面的 `objects`。 */
+  if (objects.length !== entries.length) return entries;
   return entries.map((entry, index) => {
-    const item = list[index];
-    const region =
-      item && typeof item === "object" ? asString((item as Record<string, unknown>).region) : undefined;
-    return region ? { ...entry, region } : entry;
+    const record = objects[index];
+    const extra: Pick<QoderGatewayLogEntry, "region" | "credits"> = {};
+    const region = asString(record.region);
+    if (region) extra.region = region;
+    /* ★ 与 `keyId` 同一纪律：**必须保留「键不存在」与「值为 0」的区别** ——
+       `0` 是上游明确写下的「这次没拿到积分」，`undefined` 是升级前的老条目
+       （那时 `record_request` 还没有 `credits` 参数）。把两者都归一成 0，
+       日志页会凭空多出一批「0 积分」的假账。 */
+    if (Object.prototype.hasOwnProperty.call(record, "credits")) {
+      extra.credits = asNumber(record.credits) ?? null;
+    }
+    return Object.keys(extra).length > 0 ? { ...entry, ...extra } : entry;
   });
 }

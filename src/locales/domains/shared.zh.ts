@@ -39,6 +39,15 @@ export const zh = {
   "shared.gateway.keys.customHint":
     "留空：按本产品线的规则自动生成（带该线自己的前缀）。填写：原样使用你输入的密钥，仅去掉首尾空格、不补前缀、不改大小写 —— 适合沿用你已有的密钥。不能与本产品线已创建过的密钥重复（重复会被拒绝创建）。",
   // ---- 版本区域（region.ts / trae-types.ts / trae-variant-status.ts） ----
+  /* 请求日志的「积分」列 —— 只有 `trae-request-log.tsx`（Trae / Qoder **共用**）
+     需要它：Qoder 传 `credit` 取值函数（上游逐请求回报 `usage.credits`），Trae 不传
+     （它的上游 `token_usage` 事件不回报积分，实测抓包确认）。WB 侧另有自己的
+     `wbStats.gateway.log.col.credit*`（与其它列同一命名空间）。
+     ⚠️ 两条 `creditHint` 是同一句提示的两份副本（只差 `usage.credits` / `usage.credit`），
+        刻意分属两个域以贴合各自列集；改口径时**必须同步改两处**。 */
+  "shared.gateway.log.col.credit": "积分",
+  "shared.gateway.log.col.creditHint":
+    "本次请求消耗的积分（上游 usage.credits）；0 表示上游未上报，不等于免费。逐条相加是请求口径，与「积分」页的余额口径可能不同（重试 / 多设备会重复计入）",
   "shared.region.version.cn": "国内版",
   "shared.region.version.global": "国际版",
   "shared.region.gateway.cn": "国内版 (WorkBuddy)",
