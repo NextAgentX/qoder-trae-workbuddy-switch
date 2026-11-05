@@ -1450,6 +1450,22 @@ function bookLabel(book) {
 function fmtCredit(n) {
   return Number(n || 0).toLocaleString("zh-CN", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
+
+/** 请求日志「积分」单元格 —— **逐请求口径**，与上面 `fmtCredit` 的余额口径**刻意不同**。
+ *
+ * 三态不许合并（与真实实现的 `lib/gateway.ts::formatCredit` 同一条规则）：
+ * - `null` / `undefined` ⇒ `—` —— 键不存在（升级前写入的老条目）或值读不出来；
+ * - `0`                  ⇒ `0` —— 上游**确实没上报**（**不是免费**，表头带提示）；
+ * - `0 < v < 0.001`      ⇒ `<0.001` —— 极小但非零，绝不能落成 `0`，否则与上一条撞语义。
+ *
+ * ★ 所以**不能**复用 `fmtCredit`：那支是 `n || 0` + 1 位小数，会把 `null` 抹成 `0.0`、
+ * 把 `0.0005` 抹成 `0.0` —— 两种「没有」正好被它合成一个假数字。 */
+function fmtLogCredit(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  if (v === 0) return "0";
+  if (v > 0 && v < 0.001) return "<0.001";
+  return Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 3 });
+}
 const sumArr = (arr) => (arr || []).reduce((a, b) => a + b, 0);
 
 /** 当前视图的账本（只有 WorkBuddy 有；Trae / Qoder 各自的数据源形状不同，见 UsagePage 的平台映射）。 */
@@ -3988,12 +4004,31 @@ function viewGateway() {
   } else if (sub === "proxy") {
     main = proxyPanelHtml();
   } else {
+    /* 列集按平台分化 —— 这是**数据差异**，不是形态差异（与真实
+       `components/gateway/request-log.tsx` / `trae-request-log.tsx` 同一口径）：
+       · WB：有「版本」（每条日志带 `region`）+「积分」（上游 `usage.credit`）；
+       · Qoder：只有「积分」（上游逐请求回报 `usage.credits`，**复数**，无 region 维度）；
+       · Trae：两者都没有 —— 它的上游不回报积分，画一列恒 0 等于宣称「Trae 免费」。 */
+    const platform = curScope().platform;
+    /* 平台标识是 `workbuddy`（不是 `wb`）—— 见 `PLATFORMS` 的键。 */
+    const showRegion = platform === "workbuddy";
+    const showCredit = platform !== "trae";
+    /* 键名不同：WB 单数 `credit`、Qoder 复数 `credits`（Rust `record_request` 写的就是这个）。 */
+    const creditOf = (l) => (platform === "qoder" ? l.credits : l.credit);
+    const creditHint =
+      "本次请求消耗的积分；0 表示上游未上报，不等于免费。逐条相加是请求口径，与「积分」页的余额口径可能不同（重试 / 多设备会重复计入）";
     main = `<div class="tbl-wrap"><table class="tbl">
-      <thead><tr><th>时间</th><th>模型</th><th>上游账号</th><th>状态</th><th>耗时</th><th>Token</th></tr></thead>
+      <thead><tr><th>时间</th>${showRegion ? "<th>版本</th>" : ""}<th>模型</th><th>上游账号</th><th>状态</th><th>耗时</th>${
+        showCredit ? `<th class="num" title="${creditHint}">积分</th>` : ""
+      }<th>Token</th></tr></thead>
       <tbody>${g.logs.map((l) => `<tr>
-        <td class="mono muted nowrap">${l.time}</td><td class="mono">${esc(l.model)}</td><td>${esc(l.account)}</td>
+        <td class="mono muted nowrap">${l.time}</td>${
+          showRegion ? `<td>${esc(l.region || "—")}</td>` : ""
+        }<td class="mono">${esc(l.model)}</td><td>${esc(l.account)}</td>
         <td>${l.status === 200 ? `<span class="badge ok">200</span>` : l.status === 429 ? `<span class="badge warn">429</span>` : `<span class="badge bad">${l.status}</span>`}</td>
-        <td class="num">${l.ms} ms</td><td class="num">${l.tokens ? fmt(l.tokens) : "—"}</td>
+        <td class="num">${l.ms} ms</td>${
+          showCredit ? `<td class="num">${fmtLogCredit(creditOf(l))}</td>` : ""
+        }<td class="num">${l.tokens ? fmt(l.tokens) : "—"}</td>
       </tr>`).join("")}</tbody></table></div>`;
   }
 

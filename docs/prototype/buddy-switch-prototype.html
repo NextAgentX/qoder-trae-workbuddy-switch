@@ -2938,13 +2938,19 @@ const GATEWAY = {
         { time: "13:41:20", from: "claude-sonnet-4.5", path: ["gpt-5-codex", "gemini-2.5-pro"], reason: "server", reasonText: "5xx", account: "主号 B", ms: 2100, result: "failed" },
       ],
     },
+    /* 请求日志夹具（与真实表列集一致：WB 有「版本」+「积分」，Trae 两者都没有）。
+       ★ `credit` 的三种「没有」在夹具里各留一条，否则原型会把三态演成一种：
+         · `0`     = 上游没上报（**不是免费**，表头带提示）；
+         · `0.0005` = 极小非零 ⇒ 表格显示 `<0.001`（不能落成 `0`，那会与上一条撞语义）；
+         · 缺 `credit` 键 = 升级前的老条目 ⇒ 显示 `—`（与「没上报」刻意区分）。
+       取值与 `tokens` 大致同量级（约 1k token ≈ 0.001~0.002 积分），别在这里编「1k token = 0.06」。 */
     logs: [
-      { time: "10:38:12", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 842, tokens: 1284 },
-      { time: "10:37:44", model: "gpt-5-codex", account: "team-shared", status: 200, ms: 610, tokens: 402 },
-      { time: "10:36:02", model: "claude-opus-4.1", account: "jackey", status: 200, ms: 1420, tokens: 3105 },
-      { time: "10:34:51", model: "gpt-5-codex", account: "qa-bot", status: 429, ms: 121, tokens: 0 },
-      { time: "10:33:19", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 733, tokens: 918 },
-      { time: "10:31:07", model: "gemini-2.5-pro", account: "team-shared", status: 200, ms: 980, tokens: 1642 },
+      { time: "10:38:12", region: "国内版", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 842, tokens: 1284, credit: 0.002 },
+      { time: "10:37:44", region: "国际版", model: "gpt-5-codex", account: "team-shared", status: 200, ms: 610, tokens: 402, credit: 0.0005 },
+      { time: "10:36:02", region: "国内版", model: "claude-opus-4.1", account: "jackey", status: 200, ms: 1420, tokens: 3105, credit: 0.004 },
+      { time: "10:34:51", region: "国内版", model: "gpt-5-codex", account: "qa-bot", status: 429, ms: 121, tokens: 0, credit: 0 },
+      { time: "10:33:19", region: "国际版", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 733, tokens: 918 },
+      { time: "10:31:07", region: "国内版", model: "gemini-2.5-pro", account: "team-shared", status: 200, ms: 980, tokens: 1642, credit: 0.002 },
     ],
   },
   "wb-global": {
@@ -2953,7 +2959,7 @@ const GATEWAY = {
     models: [{ name: "claude-sonnet-4.5", provider: "anthropic", scope: "国际版", available: true, efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high", credits: 1.33 }],
     catalog: { source: "cached", fetchedAt: "昨天 21:04", fetchedAbs: "2026-10-02 21:04", note: "本次探测超时（8s），使用上次成功的结果" },
     pool: [{ account: "jackey-global", credits: 720, weight: 100, state: "可用", sticky: true, tier: "free", inFlight: 0, maxInFlight: 2 }],
-    logs: [{ time: "09:12:30", model: "claude-sonnet-4.5", account: "jackey-global", status: 200, ms: 1120, tokens: 640 }],
+    logs: [{ time: "09:12:30", region: "国际版", model: "claude-sonnet-4.5", account: "jackey-global", status: 200, ms: 1120, tokens: 640, credit: 0.0008 }],
   },
   "trae-cn": {
     enabled: true, port: 57892, baseUrl: "http://127.0.0.1:57892",
@@ -3042,12 +3048,14 @@ const GATEWAY = {
           creditsRemaining: 0, parkedUntil: "明天 10:00" },
       ],
     },
+    /* Qoder 的日志键是**复数** `credits`（Rust `qoder/mod.rs` 的 `record_request` 写的就是它）；
+       与 WB 的单数 `credit` 不同名，别在这里「统一」。`0` = 上游没上报（与 status 无关）。 */
     logs: [
-      { time: "10:41:07", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 764, tokens: 1120 },
-      { time: "10:39:52", model: "GLM-5.1", account: "team-qoder", status: 200, ms: 588, tokens: 486 },
-      { time: "10:38:20", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 1310, tokens: 2874 },
-      { time: "10:36:44", model: "MiniMax-M3", account: "trial-01", status: 429, ms: 96, tokens: 0 },
-      { time: "10:35:11", model: "GLM-5.1", account: "jackey", status: 200, ms: 702, tokens: 934 },
+      { time: "10:41:07", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 764, tokens: 1120, credits: 0.05 },
+      { time: "10:39:52", model: "GLM-5.1", account: "team-qoder", status: 200, ms: 588, tokens: 486, credits: 0.04 },
+      { time: "10:38:20", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 1310, tokens: 2874, credits: 0.11 },
+      { time: "10:36:44", model: "MiniMax-M3", account: "trial-01", status: 429, ms: 96, tokens: 0, credits: 0 },
+      { time: "10:35:11", model: "GLM-5.1", account: "jackey", status: 200, ms: 702, tokens: 934, credits: 0 },
     ],
   },
   "qoder-global": {
@@ -3074,9 +3082,12 @@ const GATEWAY = {
           perModel: [], blocked: null, blockedReason: null, creditsRemaining: 240 },
       ],
     },
+    /* Qoder 的日志键是**复数** `credits`（Rust `qoder/mod.rs` 写的就是它），与 WB 的单数
+       `credit` 不同名。Trae 上游**不回报**积分 ⇒ `trae-cn` / `trae-global` 的夹具刻意不带该字段，
+       页面也就不画那一列（整列恒 0 会被读成「Trae 免费」）。 */
     logs: [
-      { time: "11:05:33", model: "Ultimate", account: "jackey-global", status: 200, ms: 918, tokens: 1416 },
-      { time: "11:02:07", model: "Qwen3.8-Max", account: "jackey-global", status: 200, ms: 655, tokens: 522 },
+      { time: "11:05:33", model: "Ultimate", account: "jackey-global", status: 200, ms: 918, tokens: 1416, credits: 0.11 },
+      { time: "11:02:07", model: "Qwen3.8-Max", account: "jackey-global", status: 200, ms: 655, tokens: 522, credits: 0.05 },
     ],
   },
 };
@@ -4938,6 +4949,22 @@ function bookLabel(book) {
 /** 积分保留一位小数 + 千分位（`4280.5` → `4,280.5`）。 */
 function fmtCredit(n) {
   return Number(n || 0).toLocaleString("zh-CN", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+
+/** 请求日志「积分」单元格 —— **逐请求口径**，与上面 `fmtCredit` 的余额口径**刻意不同**。
+ *
+ * 三态不许合并（与真实实现的 `lib/gateway.ts::formatCredit` 同一条规则）：
+ * - `null` / `undefined` ⇒ `—` —— 键不存在（升级前写入的老条目）或值读不出来；
+ * - `0`                  ⇒ `0` —— 上游**确实没上报**（**不是免费**，表头带提示）；
+ * - `0 < v < 0.001`      ⇒ `<0.001` —— 极小但非零，绝不能落成 `0`，否则与上一条撞语义。
+ *
+ * ★ 所以**不能**复用 `fmtCredit`：那支是 `n || 0` + 1 位小数，会把 `null` 抹成 `0.0`、
+ * 把 `0.0005` 抹成 `0.0` —— 两种「没有」正好被它合成一个假数字。 */
+function fmtLogCredit(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "—";
+  if (v === 0) return "0";
+  if (v > 0 && v < 0.001) return "<0.001";
+  return Number(v).toLocaleString("zh-CN", { maximumFractionDigits: 3 });
 }
 const sumArr = (arr) => (arr || []).reduce((a, b) => a + b, 0);
 
@@ -7477,12 +7504,31 @@ function viewGateway() {
   } else if (sub === "proxy") {
     main = proxyPanelHtml();
   } else {
+    /* 列集按平台分化 —— 这是**数据差异**，不是形态差异（与真实
+       `components/gateway/request-log.tsx` / `trae-request-log.tsx` 同一口径）：
+       · WB：有「版本」（每条日志带 `region`）+「积分」（上游 `usage.credit`）；
+       · Qoder：只有「积分」（上游逐请求回报 `usage.credits`，**复数**，无 region 维度）；
+       · Trae：两者都没有 —— 它的上游不回报积分，画一列恒 0 等于宣称「Trae 免费」。 */
+    const platform = curScope().platform;
+    /* 平台标识是 `workbuddy`（不是 `wb`）—— 见 `PLATFORMS` 的键。 */
+    const showRegion = platform === "workbuddy";
+    const showCredit = platform !== "trae";
+    /* 键名不同：WB 单数 `credit`、Qoder 复数 `credits`（Rust `record_request` 写的就是这个）。 */
+    const creditOf = (l) => (platform === "qoder" ? l.credits : l.credit);
+    const creditHint =
+      "本次请求消耗的积分；0 表示上游未上报，不等于免费。逐条相加是请求口径，与「积分」页的余额口径可能不同（重试 / 多设备会重复计入）";
     main = `<div class="tbl-wrap"><table class="tbl">
-      <thead><tr><th>时间</th><th>模型</th><th>上游账号</th><th>状态</th><th>耗时</th><th>Token</th></tr></thead>
+      <thead><tr><th>时间</th>${showRegion ? "<th>版本</th>" : ""}<th>模型</th><th>上游账号</th><th>状态</th><th>耗时</th>${
+        showCredit ? `<th class="num" title="${creditHint}">积分</th>` : ""
+      }<th>Token</th></tr></thead>
       <tbody>${g.logs.map((l) => `<tr>
-        <td class="mono muted nowrap">${l.time}</td><td class="mono">${esc(l.model)}</td><td>${esc(l.account)}</td>
+        <td class="mono muted nowrap">${l.time}</td>${
+          showRegion ? `<td>${esc(l.region || "—")}</td>` : ""
+        }<td class="mono">${esc(l.model)}</td><td>${esc(l.account)}</td>
         <td>${l.status === 200 ? `<span class="badge ok">200</span>` : l.status === 429 ? `<span class="badge warn">429</span>` : `<span class="badge bad">${l.status}</span>`}</td>
-        <td class="num">${l.ms} ms</td><td class="num">${l.tokens ? fmt(l.tokens) : "—"}</td>
+        <td class="num">${l.ms} ms</td>${
+          showCredit ? `<td class="num">${fmtLogCredit(creditOf(l))}</td>` : ""
+        }<td class="num">${l.tokens ? fmt(l.tokens) : "—"}</td>
       </tr>`).join("")}</tbody></table></div>`;
   }
 

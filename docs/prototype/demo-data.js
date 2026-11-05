@@ -863,13 +863,19 @@ const GATEWAY = {
         { time: "13:41:20", from: "claude-sonnet-4.5", path: ["gpt-5-codex", "gemini-2.5-pro"], reason: "server", reasonText: "5xx", account: "主号 B", ms: 2100, result: "failed" },
       ],
     },
+    /* 请求日志夹具（与真实表列集一致：WB 有「版本」+「积分」，Trae 两者都没有）。
+       ★ `credit` 的三种「没有」在夹具里各留一条，否则原型会把三态演成一种：
+         · `0`     = 上游没上报（**不是免费**，表头带提示）；
+         · `0.0005` = 极小非零 ⇒ 表格显示 `<0.001`（不能落成 `0`，那会与上一条撞语义）；
+         · 缺 `credit` 键 = 升级前的老条目 ⇒ 显示 `—`（与「没上报」刻意区分）。
+       取值与 `tokens` 大致同量级（约 1k token ≈ 0.001~0.002 积分），别在这里编「1k token = 0.06」。 */
     logs: [
-      { time: "10:38:12", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 842, tokens: 1284 },
-      { time: "10:37:44", model: "gpt-5-codex", account: "team-shared", status: 200, ms: 610, tokens: 402 },
-      { time: "10:36:02", model: "claude-opus-4.1", account: "jackey", status: 200, ms: 1420, tokens: 3105 },
-      { time: "10:34:51", model: "gpt-5-codex", account: "qa-bot", status: 429, ms: 121, tokens: 0 },
-      { time: "10:33:19", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 733, tokens: 918 },
-      { time: "10:31:07", model: "gemini-2.5-pro", account: "team-shared", status: 200, ms: 980, tokens: 1642 },
+      { time: "10:38:12", region: "国内版", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 842, tokens: 1284, credit: 0.002 },
+      { time: "10:37:44", region: "国际版", model: "gpt-5-codex", account: "team-shared", status: 200, ms: 610, tokens: 402, credit: 0.0005 },
+      { time: "10:36:02", region: "国内版", model: "claude-opus-4.1", account: "jackey", status: 200, ms: 1420, tokens: 3105, credit: 0.004 },
+      { time: "10:34:51", region: "国内版", model: "gpt-5-codex", account: "qa-bot", status: 429, ms: 121, tokens: 0, credit: 0 },
+      { time: "10:33:19", region: "国际版", model: "claude-sonnet-4.5", account: "jackey", status: 200, ms: 733, tokens: 918 },
+      { time: "10:31:07", region: "国内版", model: "gemini-2.5-pro", account: "team-shared", status: 200, ms: 980, tokens: 1642, credit: 0.002 },
     ],
   },
   "wb-global": {
@@ -878,7 +884,7 @@ const GATEWAY = {
     models: [{ name: "claude-sonnet-4.5", provider: "anthropic", scope: "国际版", available: true, efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "high", credits: 1.33 }],
     catalog: { source: "cached", fetchedAt: "昨天 21:04", fetchedAbs: "2026-10-02 21:04", note: "本次探测超时（8s），使用上次成功的结果" },
     pool: [{ account: "jackey-global", credits: 720, weight: 100, state: "可用", sticky: true, tier: "free", inFlight: 0, maxInFlight: 2 }],
-    logs: [{ time: "09:12:30", model: "claude-sonnet-4.5", account: "jackey-global", status: 200, ms: 1120, tokens: 640 }],
+    logs: [{ time: "09:12:30", region: "国际版", model: "claude-sonnet-4.5", account: "jackey-global", status: 200, ms: 1120, tokens: 640, credit: 0.0008 }],
   },
   "trae-cn": {
     enabled: true, port: 57892, baseUrl: "http://127.0.0.1:57892",
@@ -967,12 +973,14 @@ const GATEWAY = {
           creditsRemaining: 0, parkedUntil: "明天 10:00" },
       ],
     },
+    /* Qoder 的日志键是**复数** `credits`（Rust `qoder/mod.rs` 的 `record_request` 写的就是它）；
+       与 WB 的单数 `credit` 不同名，别在这里「统一」。`0` = 上游没上报（与 status 无关）。 */
     logs: [
-      { time: "10:41:07", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 764, tokens: 1120 },
-      { time: "10:39:52", model: "GLM-5.1", account: "team-qoder", status: 200, ms: 588, tokens: 486 },
-      { time: "10:38:20", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 1310, tokens: 2874 },
-      { time: "10:36:44", model: "MiniMax-M3", account: "trial-01", status: 429, ms: 96, tokens: 0 },
-      { time: "10:35:11", model: "GLM-5.1", account: "jackey", status: 200, ms: 702, tokens: 934 },
+      { time: "10:41:07", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 764, tokens: 1120, credits: 0.05 },
+      { time: "10:39:52", model: "GLM-5.1", account: "team-qoder", status: 200, ms: 588, tokens: 486, credits: 0.04 },
+      { time: "10:38:20", model: "Qwen3.8-Max", account: "jackey", status: 200, ms: 1310, tokens: 2874, credits: 0.11 },
+      { time: "10:36:44", model: "MiniMax-M3", account: "trial-01", status: 429, ms: 96, tokens: 0, credits: 0 },
+      { time: "10:35:11", model: "GLM-5.1", account: "jackey", status: 200, ms: 702, tokens: 934, credits: 0 },
     ],
   },
   "qoder-global": {
@@ -999,9 +1007,12 @@ const GATEWAY = {
           perModel: [], blocked: null, blockedReason: null, creditsRemaining: 240 },
       ],
     },
+    /* Qoder 的日志键是**复数** `credits`（Rust `qoder/mod.rs` 写的就是它），与 WB 的单数
+       `credit` 不同名。Trae 上游**不回报**积分 ⇒ `trae-cn` / `trae-global` 的夹具刻意不带该字段，
+       页面也就不画那一列（整列恒 0 会被读成「Trae 免费」）。 */
     logs: [
-      { time: "11:05:33", model: "Ultimate", account: "jackey-global", status: 200, ms: 918, tokens: 1416 },
-      { time: "11:02:07", model: "Qwen3.8-Max", account: "jackey-global", status: 200, ms: 655, tokens: 522 },
+      { time: "11:05:33", model: "Ultimate", account: "jackey-global", status: 200, ms: 918, tokens: 1416, credits: 0.11 },
+      { time: "11:02:07", model: "Qwen3.8-Max", account: "jackey-global", status: 200, ms: 655, tokens: 522, credits: 0.05 },
     ],
   },
 };
