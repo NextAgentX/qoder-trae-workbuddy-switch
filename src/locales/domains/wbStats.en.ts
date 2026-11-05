@@ -173,6 +173,15 @@ export const en = {
   "wbStats.gateway.log.col.model": "Model",
   "wbStats.gateway.log.col.status": "Status",
   "wbStats.gateway.log.col.latency": "Latency",
+  "wbStats.gateway.log.col.credit": "Credits",
+  /* Header hint for the credits column: 0 means the upstream reported nothing,
+     not that the request was free (`usage.credit` is absent either way).
+     Second sentence: summing these rows (per-request view) is NOT the same as the
+     Credits page (balance view) — retries / other devices double-count here.
+     NOTE: twin of `shared.gateway.log.col.creditHint` (only the upstream field
+     name differs); keep both in sync. */
+  "wbStats.gateway.log.col.creditHint":
+    "Credits consumed by this request (upstream usage.credit); 0 means the upstream reported none — not the same as free. Summing these rows is the per-request view, which can differ from the balance-based view on the Credits page (retries and other devices double-count)",
   "wbStats.gateway.log.col.tokens": "Tokens",
   // The old "account strategy" card was replaced by the **shared** account pool card
   // (the three strategy modes folded into its "preferred account" dropdown); only the

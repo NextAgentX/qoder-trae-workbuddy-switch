@@ -23,6 +23,17 @@ export const en = {
   "shared.gateway.keys.customHint":
     "Empty: generate one following this product line's own prefix. Filled: use your key verbatim — only surrounding spaces are trimmed; no prefix is added and case is kept. It must not equal a key that already exists on this product line (duplicates are rejected).",
   // ---- Version regions (region.ts / trae-types.ts / trae-variant-status.ts) ----
+  /* Request-log "Credits" column — only used by `trae-request-log.tsx` (shared by
+     Trae / Qoder): Qoder passes a `credit` accessor (its upstream reports
+     `usage.credits` per request), Trae does not (its `token_usage` event carries no
+     credits — verified by capture). WB keeps its own
+     `wbStats.gateway.log.col.credit*` keys alongside its other columns.
+     NOTE: the two `creditHint` strings are twins (only `usage.credits` vs
+     `usage.credit`); kept in separate domains on purpose — update BOTH when the
+     wording changes. */
+  "shared.gateway.log.col.credit": "Credits",
+  "shared.gateway.log.col.creditHint":
+    "Credits consumed by this request (upstream usage.credits); 0 means the upstream reported none — not the same as free. Summing these rows is the per-request view, which can differ from the balance-based view on the Credits page (retries and other devices double-count)",
   "shared.region.version.cn": "CN version",
   "shared.region.version.global": "Global version",
   "shared.region.gateway.cn": "CN version (WorkBuddy)",

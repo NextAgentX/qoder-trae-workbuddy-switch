@@ -931,12 +931,27 @@ function demoStrategyMap(): AccountStrategyMap {
   };
 }
 
+/** 请求日志夹具 —— 带 `credit`，与真实日志同形（上游报 `usage.credit`）。
+ *
+ * ## 为什么 token 是十万级
+ *
+ * 真实日志的 prompt 动辄 12 万（长上下文 + 缓存命中）；一次本机抽样的每 1k token
+ * 约 0.0003 ~ 0.0105 积分（中位 0.0013）—— **只用来给夹具取量级，不是计价口径**
+ * （无持久化样本，上游改价即失效）。夹具若沿用「800 token / 0.06 积分」这种
+ * 组合，两列放在一起就不成立 —— 那等于教读者「1k token = 0.06 积分」，差 40 倍。
+ * 所以这里 token 取真实量级、`credit` 按同比例给。
+ *
+ * `credit: 0` 表示上游没带 usage（后端写 0.0），**与 status 无关**：失败行没有 usage，
+ * 成功行也可能缺。真实数据里 `0` 主要来自 status 200 的上报缺失 —— 夹具因此特意放
+ * 一条「200 且 0」的行，免得截图把「0」教成「失败专属」（那正是表头提示
+ * 「0 ≠ 免费」要防的误解）。 */
 function demoGatewayLogs(): GatewayLogEntry[] {
   return [
-    { ts: atLocalTime(0, 17, 10), endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: t("shared.demo.account.a"), model: "GLM-5.3", status: 200, latencyMs: 1200, promptTokens: 800, completionTokens: 434, stream: true },
-    { ts: atLocalTime(0, 17, 9), endpoint: "/v1/messages", method: "POST", region: "global", account: t("shared.demo.account.b"), model: "GPT-5.6", status: 402, latencyMs: 800, promptTokens: null, completionTokens: null, stream: true },
-    { ts: atLocalTime(0, 17, 7), endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: t("shared.demo.account.a"), model: "DeepSeek-V4-Pro", status: 200, latencyMs: 2400, promptTokens: 2100, completionTokens: 900, stream: true },
-    { ts: atLocalTime(0, 17, 2), endpoint: "/v1/messages", method: "POST", region: "global", account: t("shared.demo.account.b"), model: "Claude-Sonnet-4.5", status: 429, latencyMs: 300, promptTokens: null, completionTokens: null, stream: true },
+    { ts: atLocalTime(0, 17, 10), endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: t("shared.demo.account.a"), model: "GLM-5.3", status: 200, latencyMs: 1200, promptTokens: 121400, completionTokens: 1380, credit: 0.05, stream: true },
+    { ts: atLocalTime(0, 17, 9), endpoint: "/v1/messages", method: "POST", region: "global", account: t("shared.demo.account.b"), model: "GPT-5.6", status: 402, latencyMs: 800, promptTokens: null, completionTokens: null, credit: 0, stream: true },
+    { ts: atLocalTime(0, 17, 7), endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: t("shared.demo.account.a"), model: "DeepSeek-V4-Pro", status: 200, latencyMs: 2400, promptTokens: 142000, completionTokens: 2100, credit: 0.13, stream: true },
+    { ts: atLocalTime(0, 17, 5), endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: t("shared.demo.account.a"), model: "DeepSeek-V4-Pro", status: 200, latencyMs: 1900, promptTokens: 98000, completionTokens: 760, credit: 0, stream: true },
+    { ts: atLocalTime(0, 17, 2), endpoint: "/v1/messages", method: "POST", region: "global", account: t("shared.demo.account.b"), model: "Claude-Sonnet-4.5", status: 429, latencyMs: 300, promptTokens: null, completionTokens: null, credit: 0, stream: true },
   ];
 }
 
@@ -2511,14 +2526,24 @@ function demoQoderApiKeys(): { keys: unknown[] } {
   };
 }
 
-/** Qoder 请求日志（元数据；条目带 `region` —— 一本日志记两个区域的请求）。 */
+/** Qoder 请求日志（元数据；条目带 `region` —— 一本日志记两个区域的请求）。
+ *
+ * `credits` 是**复数**：Rust 侧 `qoder/mod.rs` 的 `record_request` 写的就是这个键，
+ * 与 WB 的单数 `credit` 不同名（前端由 `QoderGatewayLogEntry` 区分，别在这里"统一"）。
+ * `0` 来自 `usage_credits` 的兜底（usage 没有可用 credits 就返回 0.0），**与 status 无关**：
+ * 成功行也可能写 0，故夹具特意放一条「200 且 0」，与 WB 侧同一口径。
+ *
+ * ⚠️ 这里**不声称** token 与 credits 有可换算关系：本机没有任何 Qoder 历史日志可对照，
+ * Qoder 的计价是上游按 credits 结算（可能含按次/模型倍率），不像 WB 那样近似线性于 token。
+ * 取值只求与 WB 同数量级、看着不荒谬，别拿它当换算样例。 */
 function demoQoderGatewayLogs(): unknown {
   const now = Math.floor(Date.now() / 1000);
   const logs = [
-    { ts: (now - 70) * 1000, endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: "q1", model: "Qwen3.8-Max", status: 200, latencyMs: 764, promptTokens: 1420, completionTokens: 386, stream: true, error: null },
-    { ts: (now - 620) * 1000, endpoint: "/v1/messages", method: "POST", region: "cn", account: "q1", model: "GLM-5.1", status: 200, latencyMs: 588, promptTokens: 986, completionTokens: 254, stream: false, error: null },
-    { ts: (now - 1800) * 1000, endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: "q3", model: "MiniMax-M3", status: 429, latencyMs: 96, promptTokens: 0, completionTokens: 0, stream: true, error: t("shared.demo.qoder.gateway.modelRateLimited") },
-    { ts: (now - 4200) * 1000, endpoint: "/v1/chat/completions", method: "POST", region: "global", account: "qg1", model: "Ultimate", status: 200, latencyMs: 918, promptTokens: 1104, completionTokens: 312, stream: true, error: null },
+    { ts: (now - 70) * 1000, endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: "q1", model: "Qwen3.8-Max", status: 200, latencyMs: 764, promptTokens: 1420, completionTokens: 386, credits: 0.05, stream: true, error: null },
+    { ts: (now - 620) * 1000, endpoint: "/v1/messages", method: "POST", region: "cn", account: "q1", model: "GLM-5.1", status: 200, latencyMs: 588, promptTokens: 986, completionTokens: 254, credits: 0.04, stream: false, error: null },
+    { ts: (now - 1800) * 1000, endpoint: "/v1/chat/completions", method: "POST", region: "cn", account: "q3", model: "MiniMax-M3", status: 429, latencyMs: 96, promptTokens: 0, completionTokens: 0, credits: 0, stream: true, error: t("shared.demo.qoder.gateway.modelRateLimited") },
+    { ts: (now - 2600) * 1000, endpoint: "/v1/messages", method: "POST", region: "cn", account: "q1", model: "GLM-5.1", status: 200, latencyMs: 612, promptTokens: 1208, completionTokens: 288, credits: 0, stream: false, error: null },
+    { ts: (now - 4200) * 1000, endpoint: "/v1/chat/completions", method: "POST", region: "global", account: "qg1", model: "Ultimate", status: 200, latencyMs: 918, promptTokens: 1104, completionTokens: 312, credits: 0.11, stream: true, error: null },
   ];
   return { logs };
 }

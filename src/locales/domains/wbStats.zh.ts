@@ -194,6 +194,14 @@ export const zh = {
   "wbStats.gateway.log.col.model": "模型",
   "wbStats.gateway.log.col.status": "状态",
   "wbStats.gateway.log.col.latency": "耗时",
+  "wbStats.gateway.log.col.credit": "积分",
+  /* 「积分」列的表头提示：0 是**上游没上报**，不是免费 —— 后端日志里
+     `credit: 0` 与「这次真没花积分」不可区分，只能如实标注来源缺失。
+     第二句防的是另一个误解：**逐条相加 ≠ 「积分」页的数字**（那边是余额口径，
+     权威但不重复；这边是请求口径，重试 / 多设备会重复计入）。
+     ⚠️ 与 `shared.gateway.log.col.creditHint` 成对维护（只差上游字段名），改一处要同步另一处。 */
+  "wbStats.gateway.log.col.creditHint":
+    "本次请求消耗的积分（上游 usage.credit）；0 表示上游未上报，不等于免费。逐条相加是请求口径，与「积分」页的余额口径可能不同（重试 / 多设备会重复计入）",
   "wbStats.gateway.log.col.tokens": "Token",
   // 「账号策略」卡已被**两侧共用的账号池卡**取代（策略三档并入卡上的「指定账号」
   // 下拉），下列键随之作废并删除；保存结果的两条仍在使用。
