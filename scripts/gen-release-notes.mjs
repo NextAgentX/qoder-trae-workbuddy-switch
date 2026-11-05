@@ -189,11 +189,26 @@ function customNotes(tag) {
   for (const name of [tag, tag.replace(/^v/, "")]) {
     const path = resolve(CUSTOM_NOTES_DIR, `${name}.md`);
     if (existsSync(path)) {
-      const body = readFileSync(path, "utf8").trim();
+      /* ⚠️ 必须去掉**开头**的 HTML 注释块：那是写给维护者的编辑提示
+         （「本文件存在时整篇采用、续行会被丢弃」），不是给安装用户看的。
+         以前直接 `readFileSync().trim()` ⇒ 这段提示原样出现在 Release 页面上
+         （2026-11-05 的 v2026.11.51155 就发出去过一版，事后 `gh release edit` 才修掉）。
+         只剥开头：正文中间偶尔会有注释（如隐藏旧条目），那些保持原样。 */
+      const body = stripLeadingHtmlComments(readFileSync(path, "utf8")).trim();
       if (body) return { path, body };
     }
   }
   return null;
+}
+
+/** 去掉文本**开头**连续出现的 `<!-- ... -->` 块（含块之间的空行）。 */
+function stripLeadingHtmlComments(text) {
+  let out = text.replace(/^\uFEFF/, "");
+  for (;;) {
+    const match = out.match(/^\s*<!--[\s\S]*?-->\s*/);
+    if (!match) return out;
+    out = out.slice(match[0].length);
+  }
 }
 
 function render({ tag, prev, commits, repo }) {
