@@ -489,6 +489,26 @@ fn cached_tokens_of(usage: &Value) -> Option<u64> {
         .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
 }
 
+/// `input_tokens` 的**唯一换算点**：上游 `prompt_tokens` → Anthropic `input_tokens`。
+///
+/// ## 为什么必须减一次（issue #154）
+///
+/// 两套协议的**分母口径不同**：
+/// - 上游（OpenAI / DeepSeek）：`prompt_tokens` **已包含**命中量
+///   （DeepSeek 是 `hit + miss`，OpenAI 是 `cached_tokens ⊆ prompt_tokens`）；
+/// - Anthropic：`input_tokens` **不含**缓存命中，命中量单列在
+///   `cache_read_input_tokens`，**两者相加才是总输入**。
+///
+/// 直接把 `prompt_tokens` 抄进 `input_tokens`、又同时给出 `cache_read_input_tokens`
+/// ⇒ 客户端按 Anthropic 语义相加就把命中量算了**两遍**：输入总量翻倍、命中率恒被
+/// 腰斩到 50%（#154 的现场：dsh 面板「缓存命中 50%」，而网关日志同一时段是 99%）。
+///
+/// `saturating_sub` 兜底：上游若把命中量报得比 prompt 还大（脏数），宁可退化成 0
+/// 也不让 `input_tokens` 下溢成天文数字。
+fn anthropic_input_tokens(prompt_tokens: u64, cached_tokens: u64) -> u64 {
+    prompt_tokens.saturating_sub(cached_tokens)
+}
+
 /// Anthropic `message` 对象的**唯一构造点**（见上面两个入口）。
 fn message_from_accumulator(accumulator: &CompletionAccumulator, fallback_model: &str) -> Value {
     let id = accumulator
@@ -515,6 +535,15 @@ fn message_from_accumulator(accumulator: &CompletionAccumulator, fallback_model:
         }));
     }
 
+    // ★ issue #154：命中量必须先取出再算 —— `prompt_tokens` 含命中量，而 Anthropic
+    //   的 `input_tokens` 不含（见 [`anthropic_input_tokens`]）。两处用同一个值，
+    //   绝不能一边抄原值、一边单列命中量。
+    let cached_tokens = accumulator
+        .raw_usage
+        .as_ref()
+        .and_then(cached_tokens_of)
+        .unwrap_or(0);
+
     json!({
         "id": id,
         "type": "message",
@@ -524,13 +553,12 @@ fn message_from_accumulator(accumulator: &CompletionAccumulator, fallback_model:
         "stop_reason": map_stop_reason(accumulator.finish_reason.as_deref()),
         "stop_sequence": Value::Null,
         "usage": {
-            "input_tokens": accumulator.prompt_tokens.unwrap_or(0),
+            "input_tokens": anthropic_input_tokens(
+                accumulator.prompt_tokens.unwrap_or(0),
+                cached_tokens,
+            ),
             "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": accumulator
-                .raw_usage
-                .as_ref()
-                .and_then(cached_tokens_of)
-                .unwrap_or(0),
+            "cache_read_input_tokens": cached_tokens,
             "output_tokens": accumulator.completion_tokens.unwrap_or(0),
         },
     })
@@ -552,6 +580,10 @@ pub struct AnthropicSseStream<S> {
     tool_index: HashMap<i64, i64>,
     open_tools: Vec<i64>,
     /// 上游在流里报的 `prompt_tokens`（**真实值**，通常到末帧才有）。
+    ///
+    /// ⚠️ **含缓存命中量**（上游口径）。对外的 Anthropic `input_tokens` 必须经
+    /// [`Self::effective_input_tokens`] 换算后再发 —— 直接抄这个字段会让客户端把
+    /// 命中量算两遍（issue #154）。
     input_tokens: u64,
     output_tokens: u64,
     /// ★ issue #139：`message_start` 用的**估算**输入 token（见 [`estimate_input_tokens`]）。
@@ -611,11 +643,15 @@ impl<S> AnthropicSseStream<S> {
 
     /// 对外报的输入 token：**真实值优先**，没到就退回估算。
     fn effective_input_tokens(&self) -> u64 {
-        if self.input_tokens > 0 {
+        let prompt = if self.input_tokens > 0 {
             self.input_tokens
         } else {
             self.estimated_input
-        }
+        };
+        // ★ issue #154：`message_start` / `message_delta` 两处都从这里取值 ⇒ 换算收在
+        //   这一处，避免「一个出口减了、另一个忘了」。估算分支此时命中量必为 0
+        //   （`capture_usage` 与它同源），减法对它无副作用。
+        anthropic_input_tokens(prompt, self.cache_read_tokens)
     }
 
     /// ★ issue #129：接入失败信号（`None` = 保持原行为）。
@@ -1581,6 +1617,10 @@ mod tests {
     }
 
     /// ★ issue #139：缓存命中量必须映射到 `cache_read_input_tokens`（dsh 单列一行显示）。
+    ///
+    /// ★ issue #154：`input_tokens` 必须**减去**命中量（Anthropic 语义是「相加」）。
+    /// 可证伪：把 `effective_input_tokens` 里的 `anthropic_input_tokens` 换回裸 prompt
+    /// ⇒ 第二条断言红（900 而不是 260），客户端的命中率会被腰斩到 50%。
     #[tokio::test]
     async fn cache_hit_tokens_are_mapped_to_cache_read_input_tokens() {
         let chunks = vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
@@ -1594,6 +1634,43 @@ mod tests {
         let stream = AnthropicSseStream::new(futures_util::stream::iter(chunks), "m".to_string());
         let text = collect_text(&stream.map(|item| item.unwrap()).collect::<Vec<_>>().await);
         assert!(text.contains("\"cache_read_input_tokens\":640"), "{text}");
+        // 900 - 640 = 260：末帧的 input_tokens 必须是**未命中**部分。
+        assert!(text.contains("\"input_tokens\":260"), "{text}");
+    }
+
+    /// ★ issue #154：非流式出口同样要减 —— 与流式共用 `message_from_accumulator`，
+    /// 但 `raw_usage` 的来源不同（一次性响应体），两边必须给出同一组数。
+    #[test]
+    fn message_from_response_subtracts_cache_hits_from_input_tokens() {
+        let response = json!({
+            "choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 900,
+            },
+        });
+
+        let usage = &message_from_response(&response, "m")["usage"];
+        assert_eq!(
+            usage["input_tokens"], 100,
+            "命中量必须从 input_tokens 里扣掉"
+        );
+        assert_eq!(usage["cache_read_input_tokens"], 900);
+        assert_eq!(
+            usage["input_tokens"].as_u64().unwrap()
+                + usage["cache_read_input_tokens"].as_u64().unwrap(),
+            1000,
+            "Anthropic 语义：input_tokens + cache_read == 上游 prompt_tokens"
+        );
+    }
+
+    /// 脏数兜底：上游把命中量报得比 prompt 还大时，`input_tokens` 退化成 0，不得下溢。
+    #[test]
+    fn anthropic_input_tokens_saturates_on_dirty_upstream_numbers() {
+        assert_eq!(anthropic_input_tokens(100, 640), 0);
+        assert_eq!(anthropic_input_tokens(640, 640), 0);
+        assert_eq!(anthropic_input_tokens(640, 0), 640);
     }
 
     /// 估算：中文 ≈ 1 token/字、英文 ≈ 3 字符/token，且图片按固定值（不是 base64 长度）。

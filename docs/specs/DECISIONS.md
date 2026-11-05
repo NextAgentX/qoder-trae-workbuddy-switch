@@ -822,6 +822,13 @@ is_content_blocked(...) || (status == 400 && sanitized && is_channel_invalid(...
   与「确实没命中」长得一模一样（都是 0）；四种上游写法
   （`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` /
   `cache_read_input_tokens` / `cached_tokens`）收在 `cached_tokens_of` 一处。
+- ★ **`input_tokens` 必须减去命中量**（2026-11-05 修正，issue #154）：上游
+  `prompt_tokens` **已含**命中量（DeepSeek 是 `hit + miss`，OpenAI 是
+  `cached_tokens ⊆ prompt_tokens`），而 Anthropic 的 `input_tokens` **不含** ——
+  两者是**相加**关系。第一版直接抄 `prompt_tokens` 又单列命中量 ⇒ 客户端（dsh）
+  把命中量算两遍：输入总量翻倍、命中率恒被腰斩到 **50%**（现场：面板 50%，
+  网关日志同一时段 99%）。换算收在 `anthropic_input_tokens`（`saturating_sub` 兜底），
+  流式与非流式共用一个点。
 
 ---
 

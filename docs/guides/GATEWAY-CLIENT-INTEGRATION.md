@@ -461,6 +461,8 @@ DSH 判断一个模型能不能收图**只看配置里声明的输入模态**，
   `usage.input_tokens` 由网关按请求体**估算**占位（上游的真实 `prompt_tokens` 要到流末
   才到），末帧 `message_delta` 用真实值覆盖。所以占用率是「先估后校」——同一轮里可能
   先看到估算值，流结束即变成真实值；`cache_read_input_tokens` 只在上游报了缓存命中时非 0。
+  **`input_tokens` 不含命中量**（上游 `prompt_tokens` 减掉命中量后才发出）：Anthropic 语义里
+  两者是相加关系，客户端按 `input_tokens + cache_read_input_tokens` 算总输入与命中率才对。
 
 ### 3.5 WorkBuddy 侧客户端
 
