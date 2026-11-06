@@ -281,12 +281,28 @@ pub async fn run_keepalive_cycle_for(region: Region) -> Value {
             let reason = envelope
                 .clone()
                 .unwrap_or_else(|| "缺少 refresh token，无法保活，需重新登录".to_string());
-            acc["needs_relogin"] = json!(true);
-            acc["needs_relogin_reason"] = json!(reason.clone());
-            let _ = upsert_account_for(region, &acc);
+            // ★ 已带同一条标记的账号：链条没变，别每晚重写一次 accounts.json、
+            //   也别往排程日志里塞一条长得一模一样的失败。标记与原因都没变才跳过；
+            //   原因变了（例如「刷新失败」变成「信封解不开」）仍要落盘更新。
+            //   有明文 refresh_token 的账号不在此列 —— 那类失败可能只是上游临时抖动，
+            //   保活继续试，刷新成功时 `refresh_account_token_for` 会清掉标记。
+            let already_flagged = acc.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true)
+                && acc.get("needs_relogin_reason").and_then(|v| v.as_str())
+                    == Some(reason.as_str());
+            if !already_flagged {
+                acc["needs_relogin"] = json!(true);
+                acc["needs_relogin_reason"] = json!(reason.clone());
+                let _ = upsert_account_for(region, &acc);
+            }
             results.push(json!({
                 "email": crate::modules::account::account_display_name(&acc),
-                "status": if envelope.is_some() { "envelope_rt" } else { "missing_rt" },
+                "status": if already_flagged {
+                    "skipped"
+                } else if envelope.is_some() {
+                    "envelope_rt"
+                } else {
+                    "missing_rt"
+                },
                 // 带上原因：排程日志里只看到 `envelope_rt` 是没法排障的，
                 // 且这条与上面 `failed` 分支的字段形状保持一致。
                 "error": reason,
@@ -540,6 +556,20 @@ mod tests {
             .as_str()
             .unwrap_or_default();
         assert!(saved_reason.contains("加密信封"), "{saved_reason}");
+
+        // 第二轮：标记与原因都没变 ⇒ 不再重复落盘，排程日志记 `skipped`。
+        // 保活每天跑一次，同一个死账号不该每晚重写一遍 accounts.json。
+        let out2 = run_keepalive_cycle_for(Region::Cn).await;
+        let entry2 = out2["refreshed"]
+            .as_array()
+            .and_then(|list| list.first())
+            .cloned()
+            .expect("应有第二轮保活结果");
+        assert_eq!(
+            entry2["status"],
+            json!("skipped"),
+            "已标记的账号不该每晚重写一轮：{entry2}"
+        );
 
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);

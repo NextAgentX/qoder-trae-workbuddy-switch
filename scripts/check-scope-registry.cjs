@@ -9279,6 +9279,20 @@ check("★ 聚合页的「需处理」按平台分开判（一个字段套三处
   return "WB needsRelogin · Trae jwtStatus · Qoder hasCredential";
 });
 
+check("★ 「需重新登录」语义跨平台只有一个装配点", () => {
+  const lib = readCode("src/lib/aggregate-accounts.ts");
+  if (!/export function credentialNeedsRelogin/.test(lib)) {
+    throw new Error("缺跨平台的凭据判定函数 credentialNeedsRelogin");
+  }
+  if (!/aggregateNeedsAttention[\s\S]*?credentialNeedsRelogin\(account\)/.test(lib)) {
+    throw new Error("需处理判定没有复用 credentialNeedsRelogin");
+  }
+  for (const marker of ["needsRelogin", "jwtStatus", "hasCredential", "credential.unrecognized"]) {
+    if (!lib.includes(marker)) throw new Error(`凭据判定缺平台字段：${marker}`);
+  }
+  return "WB needsRelogin · Trae jwtStatus+cooldownType · Qoder hasCredential+unrecognized";
+});
+
 check("★ 聚合详情抽屉的装配按平台分开（一个字段套三处必有一处错）", () => {
   const detail = readCode("src/lib/aggregate-detail.ts");
   for (const marker of ['account.platform === "workbuddy"', 'account.platform === "trae"', "} else {"]) {

@@ -148,15 +148,19 @@ function expiredAt(expiresAt: number | null | undefined, now: number): boolean {
 }
 
 /**
- * 该账号是否需要人处理。
+ * 凭据链条是否断了、必须人工重新登录 / 导入。
  *
- * ⚠️ 与侧栏徽章的 `attentionCount`（只数凭据问题）**不是同一个口径**：
- * 那个说的是「凭据待处理」，这里说的是「今天有事要做」。两者不能互相冒充。
+ * ⚠️ 三平台的凭据字段**刻意不同名**（WB `needsRelogin`；Trae `jwtStatus` + `cooldownType`；
+ * Qoder `hasCredential` + `credential.unrecognized`），拿一个字段硬套三处必有一处错。
+ * 但「需要人动手」这一语义只在这里装配一次 —— 卡片 / 菜单 / 聚合页不许各写一套。
+ *
+ * 会自愈的状态一律不算：Trae 只有 `SessionDead`（上游真的作废了会话）算，
+ * `AuthRejected` / 限流 / 上游抖动都等保活自己好（见 `cooldownNeedsAttention`）。
  */
-export function aggregateNeedsAttention(account: AggregateAccount, now: number = Date.now()): boolean {
+export function credentialNeedsRelogin(account: AggregateAccount): boolean {
   if (account.platform === "workbuddy") {
     const a = account.data;
-    return Boolean(a.needsRelogin) || expiredAt(a.expiresAt, now);
+    return Boolean(a.needsRelogin);
   }
   if (account.platform === "trae") {
     const a = account.data;
@@ -165,12 +169,26 @@ export function aggregateNeedsAttention(account: AggregateAccount, now: number =
     // ★ issue #108 §P1-A：改造前聚合页**完全不看** `cooldownType`，于是同一个账号
     //   在渠道页显示「需重新登录」、在这里显示「一切正常」。会话作废是需要人动手的，
     //   必须进「待处理」；其余冷却会自己到期，算进来会让这个数字永不为 0。
-    if (cooldownNeedsAttention(a.cooldownType)) return true;
-    return expiredAt(a.jwtExpTimestamp, now);
+    return cooldownNeedsAttention(a.cooldownType);
   }
   const a = account.data;
-  if (!a.hasCredential) return true;
-  return expiredAt(a.expiresAt, now);
+  // 与 `qoder-account-card` 的 `credentialDead` 同口径：`unrecognized` 是「有东西但认不出」，
+  // 一样只能重新登录 / 导入，漏掉它会让卡片显示「需先登录」而聚合页显示「一切正常」。
+  return !a.hasCredential || a.credential.unrecognized;
+}
+
+/**
+ * 该账号是否需要人处理。
+ *
+ * ⚠️ 与侧栏徽章的 `attentionCount`（只数凭据问题）**不是同一个口径**：
+ * 那个说的是「凭据待处理」，这里说的是「今天有事要做」。两者不能互相冒充。
+ */
+export function aggregateNeedsAttention(account: AggregateAccount, now: number = Date.now()): boolean {
+  if (credentialNeedsRelogin(account)) return true;
+  // 过期时间轴仍逐平台取，不合并成一个字段：WB/Qoder 用 `expiresAt`，Trae 用 `jwtExpTimestamp`。
+  if (account.platform === "workbuddy") return expiredAt(account.data.expiresAt, now);
+  if (account.platform === "trae") return expiredAt(account.data.jwtExpTimestamp, now);
+  return expiredAt(account.data.expiresAt, now);
 }
 
 /**
