@@ -508,7 +508,11 @@ jobs:
   release:
     name: Publish release assets
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # ★ `always()`：macOS runner 会被平台侧取消（无 runner 分配、0 step、conclusion=cancelled），
+    #   而 `needs: build` 默认会让整个 Release 被跳过 —— win/linux 都构建成功也发不出来
+    #   （v2026.11.61209 / v2026.11.61417 连续两版实测）。加 always() 后，只要还有平台
+    #   产物就照常发布；「一个平台都没成功」由下面的 Verify step 拦住，不会上传空壳。
+    if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       # ⚠️ `fetch-depth: 0` + `fetch-tags: true` 是**生成变更说明的硬前提**。
@@ -531,6 +535,21 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      # `always()` 的兜底：只要还有一个平台产出 updater 清单就允许发布。
+      # 缺 macOS 清单是**降级**（平台侧 runner 取消），不是事故；一个清单都没有
+      # 才是事故（build 全挂），必须响亮失败，不许上传空壳 Release。
+      - name: Verify required artifacts
+        run: |
+          shopt -s nullglob
+          manifests=(artifacts/latest-*.json)
+          if [ ${#manifests[@]} -eq 0 ]; then
+            echo "::error::没有任何平台产出 updater 清单，拒绝发布空壳 Release"
+            ls -la artifacts || true
+            exit 1
+          fi
+          echo "可用平台清单 ${#manifests[@]} 份："
+          printf '  %s\n' "${manifests[@]}"
 
       # artifact 里含一份 CLI 裸二进制（build job 的 `Stage CLI binary for npm` 放的）。
       # 它的归属取决于 npm 通道是否开启：
