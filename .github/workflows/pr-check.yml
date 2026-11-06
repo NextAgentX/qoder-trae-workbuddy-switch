@@ -212,7 +212,7 @@ jobs:
           done
 
   # ★ issue #37：macOS 侧的回归此前**无法由 CI 证明** ——
-  # `rust` job 只在 ubuntu 上跑，而 `build.yml` 的 `macos-14` 只产出 bundle、不跑
+  # `rust` job 只在 ubuntu 上跑，而 `build.yml` 的 mac 打包 job 只产出 bundle、不跑
   # `cargo test`。于是「Windows 全绿、macOS 仍有 6 条失败」只能靠人工在 mac 机器上
   # 复跑（那一条修复：`data_dir_base()` 不认 `home` 覆盖）才敢确认。
   #
@@ -225,7 +225,12 @@ jobs:
   # - 失败时抛**注解**而不是把结论留在需登录才能看的日志里（与 `rust` job 一致的取舍）。
   rust-macos:
     name: Rust tests on macOS (core)
-    runs-on: macos-14
+    # ★ `macos-14` 已于 2026-11-02 被 GitHub 全量退役（actions/runner-images#15226），
+    #   继续写它 ⇒ job 0 step 直接 `cancelled`，注解只有一句
+    #   "The configuration 'macos-14-arm64-us-default' is not supported"。
+    #   写 `macos-15` 而不是 `macos-latest`：后者会随 GitHub 把 latest 推到 macOS 26
+    #   而静默换系统（本项目桌面端的构建 OS 由 build.yml 钉死，这里保持同一代）。
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -337,10 +342,13 @@ jobs:
     steps:
       # `skipped` 视为通过：某个 job 因条件未触发而跳过时，不该把整轮门禁判成红。
       # `failure` 一律算不通过；`cancelled` 也一律算不通过 —— **除了 macOS**：
-      # `macos-14` runner 会被平台侧取消（0 step、conclusion=cancelled，与代码无关；
-      # build.yml 的 mac 打包 job 同样如此）。把它算红会让整轮 PR 校验在无人改代码时
-      # 无故变红（run 42175748365 / job 127754927803）。
+      # 平台侧的 runner 取消（0 step、conclusion=cancelled，与代码无关）在这个仓库上
+      # 反复出现过：先是 `macos-14` 镜像退役（2026-11-02，根因已修，标签换成
+      # `macos-15` / `macos-15-intel`），再往前还有容量不足导致的取消。
+      # 把它算红会让整轮 PR 校验在无人改代码时无故变红（run 42175748365 / job 127754927803）。
       # 这里只豁免 `rust-macos` 的 cancelled，真实的 `failure`（编译 / 测试失败）仍打红。
+      # ⚠️ 豁免**必须留 warning**：`0 step + cancelled` 就是「一条 mac 代码都没验」，
+      #   不是通过。连续几轮看到这条 warning ⇒ 去查 runner 标签是否又被退役。
       - name: Verdict
         run: |
           FAIL=""

@@ -34,9 +34,19 @@ jobs:
           python3 - <<'PY'
           import json, os
           all_platforms = [
+              # ★ mac 宿主标签只能写 macOS 15+：GitHub 已于 **2026-11-02 退役全部
+              #   macOS 14 镜像**（actions/runner-images#15226，Arm64 没有延期）。
+              #   保留 `macos-14` 的后果不是「跑旧系统」，而是 job 在 **0 step** 内被判
+              #   `cancelled`，唯一注解是
+              #     The configuration 'macos-14-arm64-us-default' is not supported
+              #   —— 读起来像标签拼错，实际是镜像下架（v2026.11.61209 / 61417 / 61459
+              #   三个 tag 连续因此丢掉 mac 产物）。
+              #   新命名：**不带后缀 = arm64**，Intel 才加 `-intel`
+              #     macos-15 / macos-latest → arm64      macos-15-intel → x64
+              #   ⇒ 两个 mac job 现在跑在**不同架构的宿主**上，cargo 缓存必须按架构分键。
               {
                   "name": "mac-arm64",
-                  "os": "macos-14",
+                  "os": "macos-15",
                   "target": "aarch64-apple-darwin",
                   "cli_bin": "buddy-switch-darwin-arm64",
                   "platform_tag": "darwin-arm64",
@@ -47,8 +57,11 @@ jobs:
                   "update_archive_name": "BuddySwitch-macos-aarch64.app.tar.gz",
               },
               {
+                  # 原生 Intel 宿主。**不要**图省事写 `macos-15` —— 那是 arm64，
+                  # 于是这个 job 变成在 arm64 上交叉编 x86_64（dmg / codesign 仍能跑通，
+                  # 但编出来的本机可执行产物与宿主架构不符，收益为零、排错成本翻倍）。
                   "name": "mac-x64",
-                  "os": "macos-14",
+                  "os": "macos-15-intel",
                   "target": "x86_64-apple-darwin",
                   "cli_bin": "buddy-switch-darwin-x64",
                   "platform_tag": "darwin-x64",
@@ -189,8 +202,14 @@ jobs:
           # 恢复出来的缓存里那些路径全部指向旧目录，tauri 的 build script 于是报
           #   failed to read plugin permissions: .../target/.../app_hide.toml: No such file or directory
           # 带仓库名之后，再改名会自动换 key，不必手工清缓存。
-          key: ${{ runner.os }}-${{ github.repository }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ github.repository }}-cargo-
+          # ★ 还带 `matrix.name`：两个 mac job 现在分别是 arm64 / x64 宿主，
+          #   `target/` 里除了按 triple 分的产物，还有**宿主侧**的东西（build script 编出的
+          #   可执行文件、`target/debug` 下的 host tools）。它们跨架构不通用 ⇒ 共用一个 key
+          #   时先完成的一方会把自己的缓存写进同一份，另一方恢复后报
+          #   `Bad CPU type in executable` / 链接到错误架构。其它平台 name 各不相同，
+          #   多这一层只是让 key 更精确，不改变命中率。
+          key: ${{ runner.os }}-${{ matrix.name }}-${{ github.repository }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.name }}-${{ github.repository }}-cargo-
 
       # `gcc-aarch64-linux-gnu` 是 linux-arm64 交叉编译的链接器/交叉 C 编译器
       # （配合上面的 job env）；其余几个是 Tauri 桌面端要的，linux-arm64 用不到但装了无害。
@@ -508,10 +527,13 @@ jobs:
   release:
     name: Publish release assets
     needs: build
-    # ★ `always()`：macOS runner 会被平台侧取消（无 runner 分配、0 step、conclusion=cancelled），
-    #   而 `needs: build` 默认会让整个 Release 被跳过 —— win/linux 都构建成功也发不出来
-    #   （v2026.11.61209 / v2026.11.61417 连续两版实测）。加 always() 后，只要还有平台
-    #   产物就照常发布；「一个平台都没成功」由下面的 Verify step 拦住，不会上传空壳。
+    # ★ `always()`：macOS runner 曾被平台侧取消（无 runner 分配、0 step、
+    #   conclusion=cancelled），而 `needs: build` 默认会让整个 Release 被跳过 ——
+    #   win/linux 都构建成功也发不出来（v2026.11.61209 / v2026.11.61417 连续两版实测）。
+    #   加 always() 后，只要还有平台产物就照常发布；「一个平台都没成功」由下面的
+    #   Verify step 拦住，不会上传空壳。2026-11-06 起 mac 的平台侧取消已定位为
+    #   `macos-14` 镜像退役（标签已换新），但这层兜底仍然保留：部分平台缺产物是降级，
+    #   整轮不发布才是事故。
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
