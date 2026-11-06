@@ -85,6 +85,21 @@ function gitOrEmpty(args) {
   }
 }
 
+/**
+ * `ref` 是否真的存在（tag 或提交）。
+ *
+ * 用在 range 的**终点**上：非 tag 触发的构建（`workflow_dispatch` / 本地）里，
+ * 版本号是 `stamp-version` 按时钟生成的（`2026.11.60720`），仓库里**根本没有**
+ * 同名 tag。把它拼进 `git log <prev>..v<时钟版本>` 会 exit 128，被 main 的 catch
+ * 吞掉后连 `--json` 都不写 ⇒ 打包内置说明停在上一版 ⇒ `check:scope` 的
+ * 「内置说明必须与当前版本一致」必然红 —— build.yml 的 workflow_dispatch 路径
+ * 因此长期产不出任何安装包（2026-11-06 实测：mac job 拿到 runner 后 87 秒即挂在此处）。
+ */
+function revExists(ref) {
+  if (!ref) return false;
+  return gitOrEmpty(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]) !== "";
+}
+
 function parseArgs(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -641,7 +656,16 @@ function main(argv) {
     }
 
     prev = opts.from !== undefined ? opts.from : previousTag(tag);
-    const range = prev ? `${prev}..${tag || "HEAD"}` : tag || "HEAD";
+    /* 终点不能无条件写 `tag`：见 `revExists()` 的注释 —— 非 tag 构建的版本号在
+       git 里不存在，`git log` 会 128。退到 HEAD 后内容变成「上一个 tag 之后的提交」，
+       版本号仍是当前版本，门禁语义（内置说明 = 当前版本）不受影响。 */
+    const tagIsRev = revExists(tag);
+    /* 版本号不是 git 里的 rev 时，`previousTag(tag)` 必然也是空（它就是拿 `${tag}^`
+       去查的）⇒ 不补这一步，说明内容会退化成「全部历史」（576 条提交全塞进弹窗）。
+       改从 HEAD 往回找最近的 tag；浅克隆（`fetch-depth: 1`）找不到就仍是空，无害。 */
+    if (!prev && !tagIsRev) prev = previousTag("HEAD");
+    const end = tagIsRev ? tag : "HEAD";
+    const range = prev ? `${prev}..${end}` : end;
     const commits = readCommits(range);
     console.log(
       `gen-release-notes: 范围 ${range}，解析出 ${commits.length} 条提交` +

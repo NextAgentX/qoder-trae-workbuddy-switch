@@ -260,6 +260,12 @@ jobs:
           # 打包内置的「本版说明」（离线兜底，`src/data/release-notes.json`）必须跟着版本走：
           # 它由 `docs/releases/<版本>.md` 或提交分组推导，**不重生成就是上一版的内容**
           # （门禁 `check:scope` 会比对版本号，不重生成直接红）。
+          #
+          # ⚠️ 非 tag 触发（workflow_dispatch / 本地）时，版本号是刚按**时钟**生成的，
+          #   git 里没有同名 tag。脚本会自己退到 `HEAD` 当区间终点（`revExists()`），
+          #   千万**不要**在这里补 `--from` / `--tag` 去「修」它 —— 那只会把真实 tag
+          #   与时钟版本混在一起，产出一份版本号对不上的说明（2026-11-06 之前就是这样：
+          #   dispatch 构建一律红在 Build frontend 的版本说明断言上，一个安装包都产不出）。
           node scripts/gen-release-notes.mjs --json src/data/release-notes.json
 
       # `tauri.conf.json` 的 `createUpdaterArtifacts: true` 使签名私钥成为**打包硬依赖**：
