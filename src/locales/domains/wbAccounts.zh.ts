@@ -393,6 +393,7 @@ export const zh = {
   "wbAccounts.toast.checkinFail": "签到失败",
   "wbAccounts.toast.tokenRefreshFail": "Token 刷新失败",
   "wbAccounts.toast.tokenRefreshed": "Token 已刷新",
+  "wbAccounts.toast.tokenRefreshRetry": "Token 刷新暂时失败，请稍后重试",
   "wbAccounts.toast.needRelogin": "需重新登录",
   "wbAccounts.toast.checkinBatchSuccess": "{n} 个签到成功",
   "wbAccounts.toast.checkinBatchAlready": "{n} 个已签到",

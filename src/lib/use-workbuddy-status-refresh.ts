@@ -40,6 +40,10 @@ export function useWorkbuddyStatusRefresh() {
       // 必须同时刷新国内版与国际版：`status.current` 是卡片「当前账号」标记的唯一来源，
       // 只轮询国内版会让国际版的状态永远停在首屏快照上——切换国际账号后标记不跟着走。
       void useAccountsStore.getState().refreshAllStatus(abortControllerRef.current?.signal);
+      // ★ issue #171：`needsRelogin` 只存在于账号列表响应，光刷 status 会让后台清除
+      //   标记后开着的页面徽章一直滞留。同 tick 补一次两 region 的账号列表
+      //   （走 reconcile，不碰 loading，不会闪骨架屏）。
+      void useAccountsStore.getState().reconcileAllAccounts();
     }
 
     function startTimer() {

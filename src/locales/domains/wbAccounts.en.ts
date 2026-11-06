@@ -357,6 +357,7 @@ export const en = {
   "wbAccounts.toast.checkinFail": "Check-in failed",
   "wbAccounts.toast.tokenRefreshFail": "Token refresh failed",
   "wbAccounts.toast.tokenRefreshed": "Token refreshed",
+  "wbAccounts.toast.tokenRefreshRetry": "Token refresh failed temporarily, please retry",
   "wbAccounts.toast.needRelogin": "Needs re-login",
   "wbAccounts.toast.checkinBatchSuccess": "{n} checked in",
   "wbAccounts.toast.checkinBatchAlready": "{n} already checked in",

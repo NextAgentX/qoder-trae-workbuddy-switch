@@ -1128,7 +1128,13 @@ function RegionPanel({ region }: { region: Region }) {
     try {
       const res = await api.refreshAccountToken(a.id, region);
       const label = accountDisplayName(a);
-      if (res.needsRelogin) {
+      if (res.refreshTransientError) {
+        // issue #171：断网 / 5xx 不代表凭据坏了，更不是「刷新成功」。
+        // 给 warning，既不冒充成功、也不复用「需重新登录」的 error 文案。
+        toast.warning(t("wbAccounts.toast.tokenRefreshRetry"), {
+          description: `${label}${t("shared.punct.colon")}${res.refreshTransientError}`,
+        });
+      } else if (res.needsRelogin) {
         // `needsReloginReason` 是后端给出的**自足**原因（自带「需重新登录…」这一步），
         // 旧实现把它塞进「需重新登录（…）」的括号里 ⇒ 同一句话在一条 toast 里出现两遍
         //（2026-09-24 用户截图：「Andev：需重新登录（缺少 refresh token，无法刷新，需重新登录）」）。

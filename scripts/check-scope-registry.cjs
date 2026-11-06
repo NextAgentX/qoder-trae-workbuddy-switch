@@ -9293,6 +9293,28 @@ check("★ 「需重新登录」语义跨平台只有一个装配点", () => {
   return "WB needsRelogin · Trae jwtStatus+cooldownType · Qoder hasCredential+unrecognized";
 });
 
+check("★ issue #171：暂时性刷新失败不误标 + 轮询补账号列表", () => {
+  const rust = readCode("crates/buddy-switch-core/src/modules/refresh.rs");
+  for (const marker of ["is_transient_refresh_failure", "apply_refresh_failure", "refresh_result_status", "refresh_transient_error"]) {
+    if (!rust.includes(marker)) throw new Error(`后端缺分流判据：${marker}`);
+  }
+  if (!rust.includes("code < 0") || !rust.includes("500..=599")) {
+    throw new Error("暂时性判据不是「网络 -1 / HTTP 5xx」");
+  }
+  const hook = readCode("src/lib/use-workbuddy-status-refresh.ts");
+  if (!hook.includes("reconcileAllAccounts()")) throw new Error("60s 轮询没补账号列表");
+  const store = readCode("src/stores/accounts.ts");
+  if (!store.includes("reconcileAllAccounts()")) throw new Error("store 缺两 region 合体入口");
+  const page = readCode("src/pages/AccountsPage.tsx");
+  if (!/toast\.warning\(t\("wbAccounts\.toast\.tokenRefreshRetry"\)/.test(page)) {
+    throw new Error("手动刷新暂时性失败没给 warning");
+  }
+  for (const rel of ["src/locales/domains/wbAccounts.zh.ts", "src/locales/domains/wbAccounts.en.ts"]) {
+    if (!readCode(rel).includes("wbAccounts.toast.tokenRefreshRetry")) throw new Error(`${rel} 缺词条`);
+  }
+  return "后端三态分流 · 轮询 reconcileAllAccounts · warning toast · zh/en 词条";
+});
+
 check("★ 聚合详情抽屉的装配按平台分开（一个字段套三处必有一处错）", () => {
   const detail = readCode("src/lib/aggregate-detail.ts");
   for (const marker of ['account.platform === "workbuddy"', 'account.platform === "trae"', "} else {"]) {

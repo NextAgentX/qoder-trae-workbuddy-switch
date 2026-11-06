@@ -32,6 +32,11 @@ export interface AccountMeta {
   needsRelogin: boolean;
   needsReloginReason: string | null;
   /**
+   * 最近一次刷新因断网 / HTTP 5xx 暂时失败的可读原因（issue #171）。
+   * 只挂在刷新返回值上，不落账号库；账号列表读不到时为 null / 缺失。
+   */
+  refreshTransientError?: string | null;
+  /**
    * 用户自填备注（例如「DS4.1 额度 · 10/03 解禁」）。
    *
    * 后端**原样透传**：未设置时为 `null` 或缺失，前端按「有值才渲染」处理。

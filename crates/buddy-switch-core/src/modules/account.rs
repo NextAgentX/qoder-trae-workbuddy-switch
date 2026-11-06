@@ -282,6 +282,9 @@ pub fn account_meta(acc: &Value) -> Value {
         "lastUsedAt": acc.get("lastUsedAt"),
         "needsRelogin": acc.get("needs_relogin").and_then(|v| v.as_bool()) == Some(true),
         "needsReloginReason": display_str(acc, "needs_relogin_reason"),
+        // 暂时性刷新失败（断网 / 5xx）：**只挂在刷新返回值上**，不落账号库（issue #171）。
+        // 账号列表读不到时为 null；webui 侧下发 raw Value，前端 `normalizeAccountMeta` 兼容两种键。
+        "refreshTransientError": display_str(acc, "refresh_transient_error"),
         // 用户备注：自由文本，可能缺失或为 null。前端按「有值才渲染」处理。
         //
         // ⚠️ 这里**没有**「凭据是否加密信封」这个字段：那条判据挂在**失败结果**上
