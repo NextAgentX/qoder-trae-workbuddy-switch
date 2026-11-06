@@ -336,13 +336,21 @@ jobs:
     needs: [frontend, rust, rust-macos, rust-windows]
     steps:
       # `skipped` 视为通过：某个 job 因条件未触发而跳过时，不该把整轮门禁判成红。
-      # 只有 failure / cancelled 才算不通过。
+      # `failure` 一律算不通过；`cancelled` 也一律算不通过 —— **除了 macOS**：
+      # `macos-14` runner 会被平台侧取消（0 step、conclusion=cancelled，与代码无关；
+      # build.yml 的 mac 打包 job 同样如此）。把它算红会让整轮 PR 校验在无人改代码时
+      # 无故变红（run 42175748365 / job 127754927803）。
+      # 这里只豁免 `rust-macos` 的 cancelled，真实的 `failure`（编译 / 测试失败）仍打红。
       - name: Verdict
         run: |
           FAIL=""
-          for r in "${{ needs.frontend.result }}" "${{ needs.rust.result }}" "${{ needs.rust-macos.result }}" "${{ needs.rust-windows.result }}"; do
+          for r in "${{ needs.frontend.result }}" "${{ needs.rust.result }}" "${{ needs.rust-windows.result }}"; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then FAIL=1; fi
           done
+          if [ "${{ needs.rust-macos.result }}" = "failure" ]; then FAIL=1; fi
+          if [ "${{ needs.rust-macos.result }}" = "cancelled" ]; then
+            echo "::warning::macOS runner 被平台侧取消，本轮跳过 macOS 校验（其余平台结果仍严格判定）"
+          fi
           if [ -n "$FAIL" ]; then
             echo "::error::PR 校验未通过（frontend=${{ needs.frontend.result }}, rust=${{ needs.rust.result }}, rust-macos=${{ needs.rust-macos.result }}, rust-windows=${{ needs.rust-windows.result }}）"
             exit 1
