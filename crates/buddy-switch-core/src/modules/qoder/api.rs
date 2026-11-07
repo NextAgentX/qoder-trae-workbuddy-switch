@@ -2328,7 +2328,111 @@ fn apply_headers(
     request
 }
 
-/// 刷新令牌：按 `kind` 路由到 device / job 刷新端点（普通 JSON POST，不签名）。
+/// 刷新请求的编码方式。
+///
+/// ## 为什么会有两种（issue #182）
+///
+/// 本仓与参考实现（`reference/agent2api-main` 的 `refresh_via_open_api`）都是
+/// **JSON body**（`{"refresh_token": "..."}`），而 2026-11-07 的报障现场拿到了
+/// 上游的 `code=415, message=Unsupported Media Type`（`drt-` 路由，两次不同 requestId）。
+/// 415 的语义只有一个：**媒体类型不被接受**。
+///
+/// 两种可能：① 上游把这条端点改成了 form；② 我们发的头/体组合现在不被认。
+/// 手头没有能直接判别的样本，所以这里做**一次退避重试**：先按 JSON 发（与既有行为一致），
+/// 只有 415 才改发 form；哪个成功就记住哪个（进程内），之后不再重试。
+///
+/// ⚠️ 这不是「随便试试」：415 是**确定性**的媒体类型拒绝，换编码是标准下一步；
+/// 而 401/403/400 一律**不重试**（那说明凭据或参数有问题，重试只会多打一次上游）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshEncoding {
+    Json,
+    Form,
+}
+
+/// 进程内记忆：上次成功的编码（`None` = 还不知道，先试 JSON）。
+///
+/// 只记成功、不记失败：一次 415 可能是上游抖动，记成「用 form」会把正常路径也改掉。
+static REFRESH_ENCODING: std::sync::OnceLock<std::sync::Mutex<Option<RefreshEncoding>>> =
+    std::sync::OnceLock::new();
+
+fn remember_encoding(encoding: RefreshEncoding) {
+    let slot = REFRESH_ENCODING.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(encoding);
+    }
+}
+
+fn preferred_encoding() -> RefreshEncoding {
+    REFRESH_ENCODING
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+        .unwrap_or(RefreshEncoding::Json)
+}
+
+/// 发一次刷新请求，返回 `(状态码, 响应体)`。网络失败转成 `Err`。
+async fn post_refresh(
+    spec: &region::RealmSpec,
+    path: &str,
+    refresh_token: &str,
+    encoding: RefreshEncoding,
+) -> Result<(u16, String), String> {
+    let client = shared_client()?;
+    let builder = client.post(format!("{}{path}", spec.openapi_base));
+    let builder = match encoding {
+        RefreshEncoding::Json => builder
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "refresh_token": refresh_token })),
+        RefreshEncoding::Form => builder
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            // 手工拼而不是 `.form()`：`.form()` 会自己再写一次 Content-Type，
+            // 两处都设容易和下面 `apply_headers` 冲突（先设的会被覆盖）。
+            .body(format!(
+                "refresh_token={}",
+                urlencoding_encode(refresh_token)
+            )),
+    };
+    let response = apply_headers(
+        builder,
+        &[
+            ("Accept".into(), "application/json".into()),
+            ("User-Agent".into(), spec.user_agent.to_string()),
+        ],
+    )
+    .timeout(std::time::Duration::from_secs(30))
+    .send()
+    .await
+    .map_err(|error| format!("刷新令牌请求失败: {error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("读取刷新响应失败: {error}"))?;
+    Ok((status, body))
+}
+
+/// form 值的最小编码：只转义会破坏 `k=v` 结构的字符。
+///
+/// 不用 `url::form_urlencoded`：令牌是 `[A-Za-z0-9._~-]` 这个集合，这里只需要挡住
+/// `&` / `=` / `+` / `%` 和空白，多转义几个字节没有代价，少一层依赖才是收益。
+fn urlencoding_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// 刷新令牌：按 `kind` 路由到 device / job 刷新端点（无签名 POST）。
+///
+/// **编码退避**见 [`RefreshEncoding`]：先发 JSON；只有 `415` 才改发 form，
+/// 成功后记住。其余状态码**不重试**。
 pub async fn refresh_token(
     region: QoderRegion,
     kind: RefreshKind,
@@ -2339,29 +2443,36 @@ pub async fn refresh_token(
         RefreshKind::Device => super::PATH_DEVICE_TOKEN_REFRESH,
         RefreshKind::Job => super::PATH_JOB_TOKEN_REFRESH,
     };
-    let client = shared_client()?;
-    let response = apply_headers(
-        client
-            .post(format!("{}{path}", spec.openapi_base))
-            .json(&serde_json::json!({ "refresh_token": refresh_token })),
-        &[
-            ("Content-Type".into(), "application/json".into()),
-            ("Accept".into(), "application/json".into()),
-            ("User-Agent".into(), spec.user_agent.to_string()),
-        ],
-    )
-    .timeout(std::time::Duration::from_secs(30))
-    .send()
-    .await
-    .map_err(|error| format!("刷新令牌请求失败: {error}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("读取刷新响应失败: {error}"))?;
-    if !status.is_success() {
+
+    let first = preferred_encoding();
+    let (status, body) = post_refresh(&spec, path, refresh_token, first).await?;
+    let (status, body) = if status == 415 {
+        let other = match first {
+            RefreshEncoding::Json => RefreshEncoding::Form,
+            RefreshEncoding::Form => RefreshEncoding::Json,
+        };
+        let (retry_status, retry_body) = post_refresh(&spec, path, refresh_token, other).await?;
+        if retry_status < 400 {
+            remember_encoding(other);
+            (retry_status, retry_body)
+        } else {
+            // 两种编码都被拒：把**两次**的原文都带上 —— 否则用户只看到一句 415，
+            // 我们下一轮还得再问「你发的是哪种」。
+            return Err(format!(
+                "刷新令牌失败：JSON 与 form 两种编码都被拒（{:?} 先试，{:?} 重试）—— HTTP {status} {}；重试 HTTP {retry_status} {}",
+                first,
+                other,
+                body.chars().take(160).collect::<String>(),
+                retry_body.chars().take(160).collect::<String>(),
+            ));
+        }
+    } else {
+        (status, body)
+    };
+
+    if status >= 400 {
         let detail = body.chars().take(160).collect::<String>();
-        return Err(format!("刷新令牌失败: HTTP {} {detail}", status.as_u16()));
+        return Err(format!("刷新令牌失败: HTTP {status} {detail}"));
     }
     let data: Value =
         serde_json::from_str(&body).map_err(|error| format!("刷新响应不是 JSON: {error}"))?;
@@ -2608,6 +2719,29 @@ pub async fn fetch_model_list_at(
 
 #[cfg(test)]
 mod tests {
+    /// ★ issue #182：form 编码只做最小转义 —— 令牌里的 `+/=&%` 必须被转义，
+    /// 其余保持原样（令牌是 `[A-Za-z0-9._~-]` 集合，过度转义只会让日志难读）。
+    #[test]
+    fn urlencoding_escapes_only_structure_breaking_bytes() {
+        assert_eq!(
+            super::urlencoding_encode("drt-abc_123.X~y"),
+            "drt-abc_123.X~y"
+        );
+        assert_eq!(super::urlencoding_encode("a+b"), "a%2Bb");
+        assert_eq!(super::urlencoding_encode("a/b="), "a%2Fb%3D");
+        assert_eq!(super::urlencoding_encode("a&b"), "a%26b");
+        assert_eq!(super::urlencoding_encode("a%20b"), "a%2520b");
+    }
+
+    /// 默认先走 JSON（与 #182 之前的既有行为一致）；只有 415 才换编码。
+    #[test]
+    fn refresh_prefers_json_until_a_form_success_is_remembered() {
+        // 注意：这条断言只验证「默认值」，**不**去改全局记忆（并发测试会互相干扰）。
+        if super::REFRESH_ENCODING.get().is_none() {
+            assert_eq!(super::preferred_encoding(), super::RefreshEncoding::Json);
+        }
+    }
+
     use super::*;
 
     /// ★★ issue #130 §5.3：兜底寿命必须按**令牌家族**取。
