@@ -601,7 +601,13 @@ function buildReleaseNotes({ tag, commits, customMarkdown }) {
 function writeNotesJson(opts, source) {
   try {
     const payload = buildReleaseNotes(source);
-    if (!payload.sections.length && !payload.breaking.length) {
+    /* ⚠️ 这里必须 `?? []`：`buildReleaseNotes` 在空数组时**根本不产出** `sections` /
+       `breaking` 两个键（见它最后的展开写法），直接 `.length` 会抛「undefined 的 length」，
+       于是「写成功但内容为空」被报成「生成失败」—— 2026-11-07 用人稿（纯散文、
+       没有 `## ` 分组）发布时实测踩到。 */
+    const sectionCount = (payload.sections ?? []).length;
+    const breakingCount = (payload.breaking ?? []).length;
+    if (!sectionCount && !breakingCount) {
       console.log("::warning title=结构化版本说明为空::本次没有可用的分组内容（人工稿与提交都没给出）");
     }
     const outPath = resolve(REPO_ROOT, opts.json);
