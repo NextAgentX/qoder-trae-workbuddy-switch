@@ -424,6 +424,12 @@ Trae 侧已补齐 `/v1/responses`（入站 Responses → chat、出站 chat SSE 
 - **开关**：`BUDDY_SWITCH_ANTHROPIC_FORWARD_IMAGES=1`（`on` / `true` / `yes`）让 WB / Trae 的 `/v1/messages` 改走带图分支。**先实测再开** —— 打开而上游不认，只是把「静默丢图」换成「上游 400」。
 - **入站体积**：请求体上限 `max_body_mb` 默认 `0` ⇒ 回落 8MB，且 `DefaultBodyLimit` 在 router 构建期固化（**改值要重启网关**）。它比上游 30MB 更早撞上：手机原图转 base64 轻易超 8MB。
 
+### 4.5 思考档位（Trae 出口 · issue #127）
+
+- **`/v1/models` 现在透出档位**：Trae 出口的每个模型条目多了 `thinking`（`supported` / `unsupported` / `unknown`）与 `reasoning_effort: { options, default }`。数据来自客户端清单里**该模型自己声明**的 `reasoning_effort_config.options`；没声明就**省略** `reasoning_effort` 键（写 `[]` 会被客户端读成「支持 0 个档位」）。`unknown` ≠ 不支持 —— 那是「这一版清单没下发」。
+- **出站默认不注入**：顶层 `reasoning_effort` 是 OpenAI 兼容客户端的写法，Trae 上游按未知字段忽略 ⇒「配了不生效」。`BUDDY_SWITCH_TRAE_REASONING_EFFORT=1`（`on` / `true` / `yes`）后才按模型声明的档位做一次映射，补 `model_info.reasoning_effort_level`（原生客户端的字段位置），顶层字段原样留着。
+- **为什么默认关**：上游收不收这个字段、收错了是忽略还是 `4001`，尚无实测。**先实测再开** —— 与图片转发的纪律同一条。映射规则见 `crates/buddy-switch-gateway/src/trae/effort.rs`：先在声明词表里精确命中，否则按强度序（`light`≈`low`、`extra_high`≈`xhigh`）取「不高于请求档的最高档」，全高于则退最低；认不出的取值一律不处理。
+
 ---
 
 ## 5. 客户端接入配置例子

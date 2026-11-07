@@ -28,6 +28,8 @@
 pub mod apikey;
 pub mod capture;
 pub mod catalog;
+/// 思考档位（`reasoning_effort`）的映射与注入 —— issue #127（默认关，见模块头）。
+pub mod effort;
 pub mod payload;
 pub mod pool;
 pub mod routes;
