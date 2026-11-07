@@ -13,7 +13,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { copyExtSessions, listExtSessions } from "@/lib/api";
+import { copyExtSessions, listExtSessions, migrateCodebuddyIdeMemory } from "@/lib/api";
 import { displayText } from "@/lib/display-text";
 import { useT } from "@/lib/i18n";
 import type { AccountMeta, ExtClientId, ExtSession, ExtSessionsResponse } from "@/lib/types";
@@ -123,36 +123,67 @@ export function ExtSessionDrawer({
   const target = targets.find((item) => item.id === targetId) ?? null;
   const allPicked = sessions.length > 0 && picked.size === sessions.length;
 
+  /**
+   * ★ issue #86：是否同时合并**长期记忆**。
+   *
+   * 只有 CodeBuddy IDE 有这份记忆（`~/.codebuddy/memery/`）；VS Code 插件没有，故不显示。
+   * 默认勾选：与「复制会话默认全选」同一条理由 —— 合并是加法（逐行去重、不覆盖目标已有内容）。
+   */
+  const [mergeMemory, setMergeMemory] = useState(true);
+  const canMergeMemory = client === "codebuddy-ide";
+  const wantMemory = canMergeMemory && mergeMemory;
+
   const runCopy = async () => {
-    if (!target || picked.size === 0) return;
+    if (!target || (picked.size === 0 && !wantMemory)) return;
     setBusy(true);
     setFailures([]);
     try {
-      const report = await copyExtSessions(
-        client,
-        account.id,
-        target.id,
-        sessions.filter((session) => picked.has(session.id)).map((session) => ({
-          workspaceHash: session.workspaceHash,
-          conversationId: session.id,
-        })),
-      );
-      const titleOf = (id: string) => sessions.find((session) => session.id === id)?.title ?? id;
-      setFailures(
-        report.errors.map((item) => ({
-          title: titleOf(item.conversationId),
-          error: item.error,
-        })),
-      );
-      if (report.copiedCount > 0) {
-        toast.success(
-          t("sessions.ext.copied", { count: report.copiedCount, target: accountLabel(target) }),
+      /* 会话与记忆是两件事：一条失败**不中止**另一条。会话为 0 条时仍可只合并记忆
+         （用户可能只是想把记忆搬过去）。 */
+      if (picked.size > 0) {
+        const report = await copyExtSessions(
+          client,
+          account.id,
+          target.id,
+          sessions.filter((session) => picked.has(session.id)).map((session) => ({
+            workspaceHash: session.workspaceHash,
+            conversationId: session.id,
+          })),
         );
-        onCopied?.();
+        const titleOf = (id: string) => sessions.find((session) => session.id === id)?.title ?? id;
+        setFailures(
+          report.errors.map((item) => ({
+            title: titleOf(item.conversationId),
+            error: item.error,
+          })),
+        );
+        if (report.copiedCount > 0) {
+          toast.success(
+            t("sessions.ext.copied", { count: report.copiedCount, target: accountLabel(target) }),
+          );
+          onCopied?.();
+        }
+        if (report.failCount > 0) {
+          // ★ 部分失败**不当成功报**：逐条如实列出（§3.6）。
+          toast.warning(t("sessions.ext.partial", { count: report.failCount }));
+        }
       }
-      if (report.failCount > 0) {
-        // ★ 部分失败**不当成功报**：逐条如实列出（§3.6）。
-        toast.warning(t("sessions.ext.partial", { count: report.failCount }));
+      if (wantMemory) {
+        /* 记忆合并的失败**不影响**会话复制的结果：这里单独报，并把后端的原话带上
+           （「没有记忆文件」/「结构认不出：现有键 foo, bar」都是可行动的信息）。 */
+        try {
+          const merged = await migrateCodebuddyIdeMemory(account.id, target.id);
+          toast.success(
+            t("sessions.ext.memoryMerged", {
+              count: merged.appended,
+              target: accountLabel(target),
+            }),
+          );
+        } catch (cause) {
+          toast.warning(t("sessions.ext.memorySkipped"), {
+            description: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
       }
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : String(cause));
@@ -292,16 +323,36 @@ export function ExtSessionDrawer({
                 {t("sessions.ext.additiveNote")}
               </p>
 
+              {/* ★ issue #86：长期记忆与会话语义相同（加法、不覆盖），放在同一个动作里最省事；
+                  但它是**另一份文件**，所以失败只警告、不连累会话复制的结果。 */}
+              {canMergeMemory ? (
+                <label className="mt-2.5 flex items-start gap-2 text-[11.5px] text-muted-foreground">
+                  <Checkbox
+                    checked={mergeMemory}
+                    onCheckedChange={(checked) => setMergeMemory(checked === true)}
+                    disabled={busy || !target}
+                    aria-label={t("sessions.ext.mergeMemory")}
+                    className="mt-[1px]"
+                  />
+                  <span>
+                    {t("sessions.ext.mergeMemory")}
+                    <span className="ml-1 text-muted-foreground/80">
+                      {t("sessions.ext.mergeMemoryHint")}
+                    </span>
+                  </span>
+                </label>
+              ) : null}
+
               <Button
                 type="button"
                 className="mt-2.5 w-full"
-                disabled={busy || picked.size === 0 || !target}
+                disabled={busy || (picked.size === 0 && !wantMemory) || !target}
                 onClick={() => void runCopy()}
               >
                 {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
                 {t("sessions.ext.copy", { count: picked.size, target: target ? accountLabel(target) : "" })}
               </Button>
-              {picked.size === 0 ? (
+              {picked.size === 0 && !wantMemory ? (
                 <p className="mt-1.5 text-[11.5px] text-muted-foreground">
                   {t("sessions.ext.pickFirst")}
                 </p>

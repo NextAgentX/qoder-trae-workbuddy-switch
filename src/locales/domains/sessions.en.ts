@@ -60,6 +60,11 @@ export const en = {
   "sessions.ext.noTarget": "No other account in this region can be a target.",
   "sessions.ext.additiveNote": "Copies are new sessions (new ids) — nothing already in the target account is touched.",
   "sessions.ext.copy": "Copy {count} session(s) to {target}",
+  /* issue #86: CodeBuddy IDE long-term memory can move along with the sessions (additive). */
+  "sessions.ext.mergeMemory": "Also merge long-term memory",
+  "sessions.ext.mergeMemoryHint": "(additive, never overwrites; CodeBuddy IDE only)",
+  "sessions.ext.memoryMerged": "Merged long-term memory into {target} ({count} new lines)",
+  "sessions.ext.memorySkipped": "Long-term memory was not merged",
   "sessions.ext.pickFirst": "Select the sessions to copy first.",
   "sessions.ext.copied": "Copied {count} session(s) to {target}",
   "sessions.ext.partial": "{count} session(s) could not be copied (see per-item reasons below)",

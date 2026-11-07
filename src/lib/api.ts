@@ -75,6 +75,7 @@ import type {
   UnifySessionReplicaItem,
   UnifySessionReplicaResponse,
   ExtClientId,
+  MemeryMergeReport,
   ExtCopyItem,
   ExtCopyResponse,
   SessionBundleExportReport,
@@ -395,6 +396,9 @@ const ROUTES: Record<string, Route> = {
   // 所以单开路由而不是往 `/api/sessions` 塞 `client` 参数）。
   list_vscode_sessions: { method: "GET", path: "/api/vscode-sessions" },
   copy_vscode_sessions: { method: "POST", path: "/api/vscode-sessions/copy" },
+  // ★ issue #86 · CodeBuddy IDE **长期记忆**合并（`~/.codebuddy/memery/`）：
+  //   与「复制会话」并列但**不是同一份存储**，所以单开路由。
+  migrate_codebuddy_ide_memory: { method: "POST", path: "/api/codebuddy-ide/memory/merge" },
   // P14 S4b · 记录级 diff（只读）+ 增量追加（只有 `appendable` 才真写）。
   diff_vscode_sessions: { method: "GET", path: "/api/vscode-sessions/diff" },
   sync_vscode_sessions: { method: "POST", path: "/api/vscode-sessions/sync" },
@@ -1575,6 +1579,27 @@ export function copyExtSessions(
   items: ExtCopyItem[],
 ): Promise<ExtCopyResponse> {
   return call("copy_vscode_sessions", { client, sourceUid, targetUid, items });
+}
+
+/**
+ * ★ issue #86 · 把源账号的 CodeBuddy IDE **长期记忆**合并给目标账号。
+ *
+ * ## 三条口径
+ *
+ * 1. **加法**：逐行去重，不覆盖目标已有内容（与「复制会话」同一条纪律）；
+ * 2. **只碰正文**：`user-memery-state.json` 的版本语义未知，一律不动 ——
+ *    乱改等于告诉客户端「记忆是脏的」；
+ * 3. **认不出就拒绝**：记忆文件结构未经取证（本机没有样本），所以纯 markdown 走逐行合并、
+ *    JSON 信封只替换识别到的正文键；两者都不是时返回错误并**列出实际键名**，
+ *    而不是猜着写坏一份长期记忆。
+ *
+ * ⚠️ **写操作**：不进演示站的只读命令表。
+ */
+export function migrateCodebuddyIdeMemory(
+  sourceUid: string,
+  targetUid: string,
+): Promise<MemeryMergeReport> {
+  return call("migrate_codebuddy_ide_memory", { sourceUid, targetUid });
 }
 
 /**

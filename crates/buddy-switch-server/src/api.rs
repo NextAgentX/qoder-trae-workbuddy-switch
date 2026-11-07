@@ -17,11 +17,11 @@ use rust_embed::RustEmbed;
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::{
-    account, auth_file, backup, checkin, client_limits, client_settings, codebuddy_cli, config,
-    credit_usage, credits, diagnostics, export_import, gateway_ledger, migrate, oauth, process,
-    programs, qoder, refresh, region::Region, region::RegionFilter, rotate, schedule, scheduler,
-    session, session_bundle, skill, switch, token_daily, token_stats, trae, travel, update,
-    vscode_session,
+    account, auth_file, backup, checkin, client_limits, client_settings, codebuddy_cli,
+    codebuddy_memory, config, credit_usage, credits, diagnostics, export_import, gateway_ledger,
+    migrate, oauth, process, programs, qoder, refresh, region::Region, region::RegionFilter,
+    rotate, schedule, scheduler, session, session_bundle, skill, switch, token_daily, token_stats,
+    trae, travel, update, vscode_session,
 };
 use buddy_switch_gateway::unified::UnifiedGatewayConfig;
 use buddy_switch_gateway::GatewayProduct;
@@ -265,6 +265,11 @@ fn api_routes() -> Router {
         // P14 S4a · VS Code 插件 / CodeBuddy IDE 的会话仓（只读枚举 + 加法复制）。
         .route("/api/vscode-sessions", get(api_vscode_sessions))
         .route("/api/vscode-sessions/copy", post(api_copy_vscode_sessions))
+        // issue #86 · CodeBuddy IDE 长期记忆合并（加法；结构认不出时拒绝并列出键名）。
+        .route(
+            "/api/codebuddy-ide/memory/merge",
+            post(api_merge_codebuddy_ide_memory),
+        )
         // P14 S4b · 记录级 diff（只读）+ 增量追加。
         .route("/api/vscode-sessions/diff", get(api_diff_vscode_sessions))
         .route("/api/vscode-sessions/sync", post(api_sync_vscode_sessions))
@@ -2717,6 +2722,34 @@ async fn api_vscode_sessions(RawQuery(query): RawQuery) -> Response {
         return json_err("缺少 uid".to_string(), StatusCode::BAD_REQUEST);
     };
     json_ok(vscode_session::list_sessions_for(client, uid.trim()))
+}
+
+/// POST /api/codebuddy-ide/memory/merge —— 合并 CodeBuddy IDE 长期记忆（issue #86）。
+///
+/// 与 Tauri 侧 `commands::migrate_codebuddy_ide_memory` **同契约**（两宿主同步）。
+/// **加法**：逐行去重，不覆盖目标已有内容；结构认不出时返回 400 + 实际键名
+/// （见 core 的 `codebuddy_memory` 模块头：没有样本时「认清才写」）。
+async fn api_merge_codebuddy_ide_memory(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let source_uid = body
+        .get("sourceUid")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let target_uid = body
+        .get("targetUid")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    match codebuddy_memory::merge_memery(&source_uid, &target_uid) {
+        Ok(report) => json_ok(serde_json::to_value(report).unwrap_or(Value::Null)),
+        // 400 而不是 500：「没有记忆文件」「结构认不出」都是**可解释的业务结论**，
+        // 不是服务端故障 —— 状态码错了会让前端按「重试」处理。
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 /// POST /api/vscode-sessions/copy —— 把插件侧会话复制给另一个账号（**加法**，绝不覆盖）。

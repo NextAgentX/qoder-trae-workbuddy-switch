@@ -471,6 +471,31 @@ export interface ExtCopyResponse {
 }
 
 /**
+ * ★ issue #86 · CodeBuddy IDE **长期记忆**合并报告（`~/.codebuddy/memery/`）。
+ *
+ * `shape` 是后端识别到的文件形态：`markdown` 或 `envelope:<正文键名>`。它出现在报告里
+ * 而不是只在日志里，是因为**这份结构未经取证** —— 用户贴一句 `envelope:memoryBlock`
+ * 就能让维护者确认「客户端用的到底是哪个键」。
+ */
+export interface MemeryMergeReport {
+  sourceUid: string;
+  targetUid: string;
+  /** 源记忆文件所在目录（两代目录并存时能看出用的是哪一个）。 */
+  sourceDir: string;
+  /** 目标记忆文件路径（合并后）。 */
+  targetPath: string;
+  shape: string;
+  targetLines: number;
+  sourceLines: number;
+  /** 实际追加的新行数。 */
+  appended: number;
+  skippedDuplicate: number;
+  changed: boolean;
+  /** 改前原文的备份路径；未改写时为 `null`。 */
+  backup?: string | null;
+}
+
+/**
  * issue #87 · **会话导出**报告。
  *
  * `skipped` 里的每一条都有原因 —— 导出不做「静默少几条」：用户勾了 10 个、只出去 8 个，
