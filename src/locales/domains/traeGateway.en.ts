@@ -21,6 +21,13 @@ export const en = {
      the mechanism differs, and unifying would make the UI lie; see P10 open item #3). */
   "trae.gateway.models.sourceCache": "Client cache",
   "trae.gateway.models.sourceMissing": "Not loaded",
+  /* issue #173: third source = fetched straight from upstream with an account credential. */
+  "trae.gateway.models.sourceUpstream": "Direct upstream",
+  "trae.gateway.models.fetchUpstream": "Fetch from upstream",
+  "trae.gateway.models.fetchUpstreamHint": "Sends one request to the Trae IDE API using a pooled account credential (hits upstream); failures leave existing data untouched",
+  "trae.gateway.models.fetchUpstreamBusy": "Fetching from upstream…",
+  "trae.gateway.models.fetchUpstreamDone": "Fetched {n} models from upstream",
+  "trae.gateway.models.fetchUpstreamFail": "Could not fetch the list from upstream",
   /* Fallback reasons (used when the backend `note` is missing) — contract: reason is always non-empty. */
   "trae.gateway.models.reasonCache": "Read from the client's local cache (pushed by upstream), not live from upstream",
   "trae.gateway.models.reasonMissing": "No list has been read from the client yet",

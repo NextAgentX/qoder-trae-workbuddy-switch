@@ -691,6 +691,11 @@ fn api_routes() -> Router {
             "/api/trae/gateway/client-models",
             get(api_trae_client_models),
         )
+        // ★ issue #173 opt-in：用账号池凭据直连上游抓一次清单（**用户点击**才走这里）。
+        .route(
+            "/api/trae/gateway/client-models/refresh",
+            post(api_trae_refresh_client_models),
+        )
         // 多 Key 管理（含归属产品线）：GET 列表 / POST 创建，同一路径两种方法。
         .route(
             "/api/trae/gateway/keys",
@@ -5021,6 +5026,43 @@ async fn api_trae_client_models(RawQuery(query): RawQuery) -> Response {
         serde_json::to_value(trae::model_list::read_client_model_list(variant))
             .unwrap_or_else(|error| json!({ "source": "missing", "note": error.to_string() })),
     )
+}
+
+/// POST /api/trae/gateway/client-models/refresh —— 直连上游抓一次清单（issue #173）。
+///
+/// ## opt-in，不是后台轮询
+///
+/// 每次调用都是**一次带账号凭据的上游请求**，所以只由用户的显式动作触发
+/// （管理面模型卡的「从上游拉取」）。挂到渲染路径或定时器上 = 替用户花上游成本，
+/// 与本仓「打上游默认关」的纪律冲突（见 `credit-refresh-pref`）。
+///
+/// ## 返回形状与 GET 一致
+///
+/// 成功返回抓完后的清单（`source = "upstream"`）；失败返回 `source = "missing"` +
+/// 可读原因 —— 前端一次渲染即可，不必为两条通道各写一套错误处理。
+///
+/// 失败**不影响**已有数据：抓取只是给缓存换新，客户端缓存仍然照读。
+async fn api_trae_refresh_client_models(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Trae, capability::Capability::Gateway) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let variant = parse_trae_variant(body.get("variant").and_then(Value::as_str));
+    match trae::model_list_upstream::refresh(variant).await {
+        Ok(_) => json_ok(
+            serde_json::to_value(trae::model_list::read_client_model_list(variant))
+                .unwrap_or_else(|error| json!({ "source": "missing", "note": error.to_string() })),
+        ),
+        // 抓取失败的**唯一出口**：把原因原样交给界面（含「缺请求头 / 版本过期」的提示），
+        // 不把「上游没回」包装成「没有模型」。
+        Err(error) => json_ok(json!({
+            "variant": variant.as_str(),
+            "variantLabel": variant.display_name(),
+            "source": "missing",
+            "readAt": buddy_switch_core::modules::config::now_ms(),
+            "groups": [],
+            "note": error,
+        })),
+    }
 }
 
 /// GET /api/trae/gateway/keys —— 多 Key 列表（形状与 Tauri 命令逐字一致）。

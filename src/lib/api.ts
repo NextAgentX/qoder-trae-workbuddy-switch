@@ -599,6 +599,9 @@ const ROUTES: Record<string, Route> = {
   get_trae_gateway_models: { method: "GET", path: "/api/trae/gateway/models" },
   // 客户端（上游下发）的模型清单：读客户端 state.vscdb 的缓存，随客户端刷新而变。
   get_trae_client_models: { method: "GET", path: "/api/trae/gateway/client-models" },
+  // ★ issue #173（opt-in）：用账号池凭据直连上游抓一次清单。**每次都是一次上游请求**，
+  // 只能由用户显式点击触发（`DemoAction` 包裹），不进演示站只读清单。
+  refresh_trae_client_models: { method: "POST", path: "/api/trae/gateway/client-models/refresh" },
   // 多 Key 管理（含归属产品线）：GET 列表 / POST 创建同一路径。
   list_trae_api_keys: { method: "GET", path: "/api/trae/gateway/keys" },
   create_trae_api_key: { method: "POST", path: "/api/trae/gateway/keys" },
@@ -3651,6 +3654,28 @@ export function getTraeClientModels(
   variant?: TraeVariantId | null,
 ): Promise<TraeClientModelList> {
   return call("get_trae_client_models", variantArgs(variant));
+}
+
+/**
+ * 直连上游抓一次客户端模型清单（issue #173，**opt-in**）。
+ *
+ * ## 为什么会存在这条
+ *
+ * 上面那条读的是客户端 `state.vscdb` —— headless / Docker 部署里没有客户端，清单永远
+ * `missing`，只能退回内置兜底表（模型一多就过时）。这条用**账号池凭据**直接请求
+ * Trae IDE 接口拿全量清单。
+ *
+ * ## 三条纪律
+ *
+ * 1. **每次调用都是一次带账号 JWT 的上游请求** ⇒ 只由用户显式点击触发，
+ *    不进任何自动刷新 / 轮询（与本仓「打上游默认关」一致）；
+ * 2. 失败**不改变**已有数据：返回 `source = "missing"` + 可读原因，客户端缓存照读；
+ * 3. 只有国内版有实测证据（国际版没有抓包），国际调用会直接返回原因而不是猜域名。
+ */
+export function refreshTraeClientModels(
+  variant?: TraeVariantId | null,
+): Promise<TraeClientModelList> {
+  return call("refresh_trae_client_models", variantArgs(variant));
 }
 
 /** 多 Key 列表（含归属产品线；不含 hash 与明文）。 */

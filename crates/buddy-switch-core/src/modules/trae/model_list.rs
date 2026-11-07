@@ -173,6 +173,32 @@ impl ClientModelList {
             note: Some(note.into()),
         }
     }
+
+    /// 直连上游的来源出口（issue #173）：`source = upstream`。
+    ///
+    /// **分组名固定 `chat_v3`**：直连路径只请求了这一个 function（实测它已含界面需要的
+    /// 全部可见模型），而上游响应里没有「本地客户端那套程序位分组」。编一个看起来像
+    /// `solo_work_lite` 的分组名就是造假 —— 界面按原样显示这个上游 function 名。
+    fn from_upstream(
+        variant: TraeVariant,
+        models: Vec<ClientModel>,
+        read_at: i64,
+        note: String,
+    ) -> Self {
+        Self {
+            variant: variant.as_str().to_string(),
+            variant_label: variant.display_name().to_string(),
+            source: super::model_list_upstream::SOURCE_UPSTREAM.to_string(),
+            read_at,
+            data_dir: None,
+            uid: None,
+            groups: vec![ClientModelGroup {
+                function: "chat_v3".to_string(),
+                models,
+            }],
+            note: Some(note),
+        }
+    }
 }
 
 /// 该变体「客户端此刻在用的」userData 目录候选（去重，**只读、不建目录**）。
@@ -201,9 +227,31 @@ fn state_db_candidates(root: &Path) -> [PathBuf; 2] {
 }
 
 /// 读取该变体的客户端模型清单（**永不失败**，读不到时 `source = missing`）。
+///
+/// ## 三档来源（优先级即顺序）
+///
+/// 1. **直连上游缓存**（issue #173，`source = upstream`）：新鲜期内优先 —— 它是用户
+///    **显式点过刷新**才有的，比客户端缓存更新；
+/// 2. **客户端 `state.vscdb`**（`source = client-cache`）：随客户端启动/刷新更新；
+/// 3. **过期的直连缓存**：前两者都没有时的兜底（headless 部署的常见形态），
+///    文案里必须写明「抓取于何时」，否则用户会以为是当天的。
 pub fn read_client_model_list(variant: TraeVariant) -> ClientModelList {
+    let now = now_ms();
+    if let Some(models) = super::model_list_upstream::fresh_models(variant, now) {
+        return ClientModelList::from_upstream(
+            variant,
+            models,
+            now,
+            "清单来自直连上游（不是客户端缓存）".to_string(),
+        );
+    }
+
     let dirs = candidate_dirs(variant);
     if dirs.is_empty() {
+        // headless 部署的典型形态：没有客户端目录，但用户点过一次「从上游拉取」。
+        if let Some(list) = stale_upstream_models(variant, now) {
+            return list;
+        }
         return ClientModelList::missing(
             variant,
             None,
@@ -240,6 +288,11 @@ pub fn read_client_model_list(variant: TraeVariant) -> ClientModelList {
     }
 
     // 全试完了：有「真的读失败」就报它，否则报「还没缓存」—— 后者是可操作的那条。
+    // ★ issue #173：两条出口都先看一眼**过期的**直连缓存 —— 比「什么都没有」有用，
+    //   但文案必须写明抓取时间（把陈旧数据说成当天的是谎报）。
+    if let Some(list) = stale_upstream_models(variant, now) {
+        return list;
+    }
     if let Some((dir, error)) = last_error {
         return ClientModelList::missing(
             variant,
@@ -255,6 +308,23 @@ pub fn read_client_model_list(variant: TraeVariant) -> ClientModelList {
             variant.display_name()
         ),
     )
+}
+
+/// 过期的直连缓存 → 清单（带「抓取于 N 小时前」的说明）；没有缓存 ⇒ `None`。
+fn stale_upstream_models(variant: TraeVariant, now: i64) -> Option<ClientModelList> {
+    let (fetched_at, models) = super::model_list_upstream::stale_models(variant)?;
+    let hours = now.saturating_sub(fetched_at) / 3_600_000;
+    let age = if hours <= 0 {
+        "不到 1 小时前".to_string()
+    } else {
+        format!("约 {hours} 小时前")
+    };
+    Some(ClientModelList::from_upstream(
+        variant,
+        models,
+        now,
+        format!("客户端缓存不可用，展示的是 {age}从上游直连抓取的清单"),
+    ))
 }
 
 /// 从**指定** userData 目录读清单。

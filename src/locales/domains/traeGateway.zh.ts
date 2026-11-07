@@ -31,6 +31,15 @@ export const zh = {
      徽标前的「来源」标签走 `shared.gateway.sourceBar.sourceLabel`。 */
   "trae.gateway.models.sourceCache": "客户端缓存",
   "trae.gateway.models.sourceMissing": "未读取",
+  /* ★ issue #173：第三条来源 = **直连上游**（用账号凭据请求 IDE 接口）。它确实比客户端
+     缓存更新，所以按「实时」呈现；但与 WB 的「实时探测」不是同一件事，因此徽标文案要写清。 */
+  "trae.gateway.models.sourceUpstream": "直连上游",
+  /* 空态里的第二条来源入口（**opt-in**）：文案必须把成本说出来 —— 这是一次上游请求。 */
+  "trae.gateway.models.fetchUpstream": "从上游拉取清单",
+  "trae.gateway.models.fetchUpstreamHint": "用账号池里的凭据请求一次 Trae IDE 接口（会打上游）；失败不影响已有数据",
+  "trae.gateway.models.fetchUpstreamBusy": "正在从上游拉取…",
+  "trae.gateway.models.fetchUpstreamDone": "已从上游拉到 {n} 个模型",
+  "trae.gateway.models.fetchUpstreamFail": "没能从上游拉到清单",
   /* 兜底原因（后端 `note` 缺失时用）：契约 `kind !== "live"` ⇒ 原因恒非空。
      「客户端缓存」也**不是**实时，故同样要说明它读自哪里。 */
   "trae.gateway.models.reasonCache": "读取自客户端本地缓存（上游下发），非上游实时",

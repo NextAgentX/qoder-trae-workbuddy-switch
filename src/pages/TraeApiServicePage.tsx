@@ -56,7 +56,7 @@ import {
   toTraeGatewayConfigRaw,
 } from "@/lib/trae-gateway";
 import { regionPrograms } from "@/lib/trae-variant-status";
-import type { TraeGatewayConfig, TraeGatewayLogEntry, TraeGatewayStatus, TraeModelSource } from "@/lib/trae-types";
+import type { TraeGatewayConfig, TraeGatewayLogEntry, TraeGatewayStatus, TraeModelSource, TraeVariantId } from "@/lib/trae-types";
 import { traeRegionOf } from "@/lib/trae-types";
 import { cn } from "@/lib/utils";
 import { useCachedResource } from "@/lib/use-cached-resource";
@@ -285,6 +285,45 @@ export default function TraeApiServicePage() {
       setRefreshingModels(false);
     }
   }, [loadAll]);
+
+  /**
+   * ★ issue #173（opt-in）：用**账号池凭据**直连上游抓一次清单。
+   *
+   * 只由用户在空态里显式点击触发 —— 每次点击都是一次带账号 JWT 的上游请求，
+   * 不做自动刷新、不做轮询（与本仓「打上游默认关」的纪律一致）。
+   * 抓完无论成败都重取快照：失败时后端返回的原因会通过 `note` 出现在来源条上。
+   */
+  const [fetchingUpstream, setFetchingUpstream] = useState(false);
+  const onFetchUpstreamModels = useCallback(
+    async (target: TraeVariantId) => {
+      setFetchingUpstream(true);
+      const toastId = toast.loading(t("trae.gateway.models.fetchUpstreamBusy"));
+      try {
+        const data = await api.refreshTraeClientModels(target);
+        if (data.source === "upstream") {
+          const count = data.groups.reduce((sum, group) => sum + group.models.length, 0);
+          toast.success(t("trae.gateway.models.fetchUpstreamDone", { n: count }), {
+            id: toastId,
+          });
+        } else {
+          // 失败不谎报成功：后端把「没有凭据 / HTTP 状态 / 版本闸门」的原文放在 note 里。
+          toast.error(t("trae.gateway.models.fetchUpstreamFail"), {
+            id: toastId,
+            description: data.note ?? undefined,
+          });
+        }
+        await loadAll();
+      } catch (error) {
+        toast.error(t("trae.gateway.models.fetchUpstreamFail"), {
+          id: toastId,
+          description: api.asError(error),
+        });
+      } finally {
+        setFetchingUpstream(false);
+      }
+    },
+    [loadAll, t],
+  );
 
   /**
    * 端口输入框的草稿值。
@@ -761,6 +800,8 @@ export default function TraeApiServicePage() {
                 defaultModel={config.defaultModel}
                 refreshing={refreshingModels}
                 onRefresh={() => onRefreshModels()}
+                onFetchUpstream={onFetchUpstreamModels}
+                fetchingUpstream={fetchingUpstream}
                 maxMode={config.maxMode}
                 onToggleMaxMode={(checked) => void persist({ maxMode: checked })}
               />

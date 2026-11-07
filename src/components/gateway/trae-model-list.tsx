@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Cpu, Loader2, RefreshCw } from "lucide-react";
+import { CloudDownload, Cpu, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -95,6 +95,8 @@ export function TraeModelList({
   onRefresh,
   maxMode,
   onToggleMaxMode,
+  onFetchUpstream,
+  fetchingUpstream = false,
   className,
 }: {
   /**
@@ -113,6 +115,15 @@ export function TraeModelList({
   /** Max Mode 是否开启（与网关配置同源）。 */
   maxMode: boolean;
   onToggleMaxMode: (checked: boolean) => void;
+  /**
+   * ★ issue #173（**opt-in**）：用账号池凭据直连上游抓一次清单。
+   *
+   * 只在**客户端缓存读不到**的空态里出现 —— 那不是「少一个按钮」，而是把
+   * 「headless 部署永远拿不到清单」这条死路打开：每次点击都是一次带账号 JWT 的
+   * 上游请求，所以必须由用户显式触发，绝不自动跑。
+   */
+  onFetchUpstream?: (variant: TraeVariantId) => void | Promise<void>;
+  fetchingUpstream?: boolean;
   className?: string;
 }) {
   const t = useT();
@@ -204,7 +215,10 @@ export function TraeModelList({
   }, [data, servableNames, active, disabledSet, scope, maxMode]);
 
   const { served, total } = servedCount(rows);
-  const loaded = data?.source === "client-cache" && total > 0;
+  /* ★ issue #173：直连上游抓到的清单也是「有数据」—— 此前只认 `client-cache`，
+     于是 headless 部署里明明抓到了清单，界面仍显示空态（数据被界面判死）。 */
+  const upstream = data?.source === "upstream";
+  const loaded = (data?.source === "client-cache" || upstream) && total > 0;
   const gatewayCount = active?.gatewayNames?.length ?? null;
 
   const labels = {
@@ -229,13 +243,20 @@ export function TraeModelList({
    * - `reason` 恒非空（契约）：后端 `note` 优先，缺失时按「客户端缓存 / 未读取」兜底。
    */
   const view: CatalogSourceView = {
-    kind: loaded ? "cached" : "builtin",
-    badgeLabel: t(loaded ? "trae.gateway.models.sourceCache" : "trae.gateway.models.sourceMissing"),
-    badgeVariant: loaded ? "secondary" : "warning",
+    kind: upstream ? "live" : loaded ? "cached" : "builtin",
+    badgeLabel: t(
+      upstream
+        ? "trae.gateway.models.sourceUpstream"
+        : loaded
+          ? "trae.gateway.models.sourceCache"
+          : "trae.gateway.models.sourceMissing",
+    ),
+    badgeVariant: upstream ? "success" : loaded ? "secondary" : "warning",
     identifiedAt: data?.readAt ?? null,
-    reason:
-      displayText(data?.note) ??
-      t(loaded ? "trae.gateway.models.reasonCache" : "trae.gateway.models.reasonMissing"),
+    reason: upstream
+      ? null
+      : (displayText(data?.note) ??
+        t(loaded ? "trae.gateway.models.reasonCache" : "trae.gateway.models.reasonMissing")),
     identifiedCount: total,
   };
 
@@ -352,17 +373,37 @@ export function TraeModelList({
           title={t("trae.gateway.models.empty")}
           description={t("trae.gateway.models.emptyDesc")}
           action={
-            <DemoAction>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={refreshing || busy}
-                onClick={() => void run(() => onRefresh())}
-              >
-                {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                {t("trae.gateway.models.refresh")}
-              </Button>
-            </DemoAction>
+            <>
+              <DemoAction>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={refreshing || busy || fetchingUpstream}
+                  onClick={() => void run(() => onRefresh())}
+                >
+                  {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                  {t("trae.gateway.models.refresh")}
+                </Button>
+              </DemoAction>
+              {/* ★ issue #173：客户端缓存读不到时的**第二条来源**（headless / Docker 常见）。
+                  明说「用账号凭据请求上游」，因为它确实会打一次上游 —— 不藏成本。 */}
+              {onFetchUpstream && active ? (
+                <DemoAction>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={refreshing || busy || fetchingUpstream}
+                    title={t("trae.gateway.models.fetchUpstreamHint")}
+                    onClick={() => void onFetchUpstream(active.variant)}
+                  >
+                    {fetchingUpstream ? <Loader2 className="animate-spin" /> : <CloudDownload />}
+                    {fetchingUpstream
+                      ? t("trae.gateway.models.fetchUpstreamBusy")
+                      : t("trae.gateway.models.fetchUpstream")}
+                  </Button>
+                </DemoAction>
+              ) : null}
+            </>
           }
           className="py-4"
         />
