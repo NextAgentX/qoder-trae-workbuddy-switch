@@ -356,7 +356,12 @@ pub fn account_view(
         "groupId": group_id,
         "jwt": account.jwt,
         "jwtExpHours": info.exp_hours,
-        "jwtExpTimestamp": info.exp_timestamp,
+        // ★ issue #181：JWT 的 `exp` 是**秒**（10 位），而前端所有时间字段的契约是
+        // **毫秒**（WB / Qoder 的 `expiresAt` 都是 13 位）。此前把秒直接发出去，
+        // 卡片按毫秒格式化 ⇒ 显示「1970-01-22 并即将过期」。
+        // 只在这个**视图出口**换算：内部（冷却匹配、快照、账号池）仍用秒，
+        // 那是与上游 `exp` 直接对照的地方，换算过去会让「同一份凭据」判不出来。
+        "jwtExpTimestamp": info.exp_timestamp.map(|seconds| seconds * 1000),
         "jwtStatus": info.status(),
         "checkedToday": checked_today,
         "credits": latest_credits,
@@ -2189,6 +2194,37 @@ mod tests {
             .expect("空数组")
             .accounts
             .is_empty());
+    }
+
+    /// ★ issue #181：`jwtExpTimestamp` 必须是**毫秒**（前端所有时间字段的契约）。
+    ///
+    /// 反例（改坏会红）：原样发出 JWT 的秒级 `exp` ⇒ 卡片按毫秒格式化显示
+    /// 「1970-01-22 02:21 并即将过期」，而 `jwtStatus` 明明是 `ok`。
+    #[test]
+    fn jwt_exp_timestamp_is_exposed_in_milliseconds() {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let jwt = format!(
+            "{}.{}.sig",
+            engine.encode(br#"{"alg":"none"}"#),
+            // exp = 1_800_000_000 秒（2027-01-15 附近），10 位 = 秒级特征。
+            engine.encode(br#"{"exp":1800000000,"data":{"id":"42"}}"#),
+        );
+        let account = RawAccount {
+            name: "毫秒断言".into(),
+            user_id: Some("42".into()),
+            jwt,
+            refresh_token: None,
+            added_at: None,
+            updated_at: None,
+            remark: None,
+        };
+        let view = account_view(&account, "42", None, None, None, None, None, false, None);
+        assert_eq!(
+            view["jwtExpTimestamp"].as_i64(),
+            Some(1_800_000_000_000),
+            "秒必须换成毫秒再出门（否则前端按毫秒格式化会得到 1970）"
+        );
     }
 
     #[test]

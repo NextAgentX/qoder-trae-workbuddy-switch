@@ -551,7 +551,8 @@ pub async fn refresh_jwt_for(variant: TraeVariant, user_id: &str) -> Result<Valu
     Ok(json!({
         "userId": user_id,
         "jwt": jwt_value,
-        "jwtExpTimestamp": info.exp_timestamp,
+        // ★ issue #181：同 `account::account_view` —— 出口统一毫秒，内部仍是秒。
+        "jwtExpTimestamp": info.exp_timestamp.map(|seconds| seconds * 1000),
         "jwtExpHours": info.exp_hours,
         "accounts": account::list_account_views_for(variant),
     }))
