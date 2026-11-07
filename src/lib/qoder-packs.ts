@@ -6,6 +6,14 @@
  */
 
 import type { QoderCreditPack } from "@/lib/api";
+import {
+  nearestExpiringBatch,
+  summarizeExpiring,
+  upcomingExpiries,
+  type ExpiringItem,
+  type ExpiringSummary,
+  type UpcomingBatch,
+} from "@/lib/credit-expiry";
 import type { Translate } from "@/lib/i18n";
 
 /**
@@ -64,4 +72,76 @@ export function packSourceLabel(
       // 上游可能新增取值：给通用名，别把 `SOME_NEW_ENUM` 直接怼到用户脸上。
       return t("qoder.page.accounts.web.sourceOther");
   }
+}
+
+/* ══════════════════════ 到期汇总（issue #166）══════════════════════
+ *
+ * ## 为什么放在这里而不是卡片里
+ *
+ * 「临期」与「最近到期」是**同一份逐包数据的两种问法**，而逐包的清洗（无到期时刻 /
+ * 剩余 ≤ 0 / 已过期）已经有 `credit-expiry` 的纯函数在做。卡片里再写一遍过滤与合并，
+ * 就会出现「卡片说 300，浮层列出来 450」这种同一件事两个数字的老毛病。
+ *
+ * ## 与 WorkBuddy 的口径关系
+ *
+ * WB 卡的黄徽章（`N 积分 M 天内过期`）用**后端 `expiringSoon`**；Qoder 的逐包响应里
+ * **没有这个标记**，所以这里用 `EXPIRING_SOON_MS`（14 天）自己判 —— 它是后端窗口的
+ * 镜像常量，不是第二个口径（`packState()` 判每行状态用的就是它）。
+ * 中性徽章（`最近 N 积分 · X 天后过期`）与 WB 完全同源：不设窗口，只看「下一批什么时候到期」。
+ */
+
+/**
+ * 逐包 → `credit-expiry` 的统一入参。
+ *
+ * ★ `expiresAtMs` 已经是**毫秒**（后端 `expires_at` 秒值只在上游归一过一次，见 #144），
+ *   这里再 `* 1000` 会把 2026 年显示成 1970 年。
+ */
+function expiringItems(
+  packs: readonly QoderCreditPack[] | null | undefined,
+  now: number,
+): ExpiringItem[] {
+  if (!packs) return [];
+  const items: ExpiringItem[] = [];
+  for (const pack of packs) {
+    if (typeof pack.expiresAtMs !== "number" || !Number.isFinite(pack.expiresAtMs)) continue;
+    if (!Number.isFinite(pack.remaining) || pack.remaining <= 0) continue;
+    items.push({
+      remaining: pack.remaining,
+      expireAt: pack.expiresAtMs,
+      expired: pack.expiresAtMs <= now,
+      expiringSoon: pack.expiresAtMs - now <= EXPIRING_SOON_MS,
+    });
+  }
+  return items;
+}
+
+/**
+ * 临期批次汇总（14 天窗口内）。
+ *
+ * 没有可渲染的批次时返回 `null` —— 调用方据此**整条不渲染**，绝不写一个猜出来的「N 天」。
+ */
+export function qoderExpiringSummary(
+  packs: readonly QoderCreditPack[] | null | undefined,
+  now: number = Date.now(),
+): ExpiringSummary | null {
+  return summarizeExpiring(expiringItems(packs, now), { now });
+}
+
+/**
+ * 最近一批未来到期（**不限窗口**）—— 「我先用哪个号」要的是相对顺序，不是一个窗口。
+ * 没有未来到期返回 `null`。
+ */
+export function qoderNearestExpiry(
+  packs: readonly QoderCreditPack[] | null | undefined,
+  now: number = Date.now(),
+): UpcomingBatch | null {
+  return nearestExpiringBatch(expiringItems(packs, now), { now });
+}
+
+/** 未来全部到期批次（按到期升序，同一时刻合并）—— 徽章 tooltip 的明细。 */
+export function qoderUpcomingExpiries(
+  packs: readonly QoderCreditPack[] | null | undefined,
+  now: number = Date.now(),
+): UpcomingBatch[] {
+  return upcomingExpiries(expiringItems(packs, now), { now });
 }

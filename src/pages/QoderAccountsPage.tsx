@@ -1048,6 +1048,25 @@ export default function QoderAccountsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.uid]);
 
+  /**
+   * 卡片到期徽章（issue #166）需要逐包数据，而逐包原先只在「点开浮层 / 抽屉」时才拉 ——
+   * 于是徽章永远要用户先点一次才出现（等于没做）。
+   *
+   * 这里在账号列表**首次到达后按账号预取一次**（控制器自带 TTL 60s 与并发去重）：
+   * · 没有网页会话的账号：`credit-packs` 直接回 `no_session`，**不打上游**；
+   * · 已认领会话的账号：一次上游请求换卡片上那句话。
+   *
+   * ⚠️ 用 ref 保证「一次」：这个 effect 的依赖会随 store 更新变化，
+   *    不加锁就会变成隐式轮询上游（逐包接口带会话 Cookie，打多了会被判异常）。
+   */
+  const packsPrefetched = useRef(false);
+  useEffect(() => {
+    if (packsPrefetched.current || rows.length === 0) return;
+    packsPrefetched.current = true;
+    for (const row of rows) void qoderWebPacks.load(scope, row.uid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows.length, scope]);
+
   /** 打开抽屉时查一次 Pro 升级包资格（活动下线/接口不可用 ⇒ 静默不渲染）。 */
   useEffect(() => {
     const uid = detail?.uid;

@@ -222,6 +222,11 @@ export const zh = {
   "qoder.page.accounts.chip.checkinUnavailable": "签到不可用",
   "qoder.page.accounts.metric.credits": "积分",
   "qoder.page.accounts.metric.creditsValue": "{remaining} / {total}",
+  // 到期徽章（issue #166）：黄=临期警告，中性=最近一批（与 WB 卡同一口径）。
+  "qoder.page.accounts.metric.expiringChip": "{amount} 积分 {days} 天内过期",
+  "qoder.page.accounts.metric.nearestExpiringChip": "最近 {amount} 积分 · {days} 天后过期",
+  "qoder.page.accounts.metric.expiringTipTitle": "按到期时间分批（共 {n} 批）",
+  "qoder.page.accounts.metric.expiringTipLine": "{time} · {amount} 积分",
 
   // ---- 网页端逐包明细（issue #111）----
   "qoder.page.accounts.web.loginMenu": "登录 Qoder 网页端（看逐包明细）",
