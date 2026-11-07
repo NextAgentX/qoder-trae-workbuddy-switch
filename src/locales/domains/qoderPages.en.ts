@@ -215,6 +215,11 @@ export const en = {
   "qoder.page.accounts.chip.checkinUnavailable": "Check-in unavailable",
   "qoder.page.accounts.metric.credits": "Credits",
   "qoder.page.accounts.metric.creditsValue": "{remaining} / {total}",
+  // Expiry badges (issue #166): warning = expiring soon, secondary = nearest batch.
+  "qoder.page.accounts.metric.expiringChip": "{amount} credits expire within {days} days",
+  "qoder.page.accounts.metric.nearestExpiringChip": "nearest {amount} credits · expire in {days} days",
+  "qoder.page.accounts.metric.expiringTipTitle": "Expiring batches ({n})",
+  "qoder.page.accounts.metric.expiringTipLine": "{time} · {amount} credits",
 
   // ---- Web-session credit packs (issue #111) ----
   "qoder.page.accounts.web.loginMenu": "Sign in to Qoder web (per-pack detail)",

@@ -16,7 +16,7 @@
  * | 块 | WB / Trae | Qoder（本文件） |
  * |:--|:--|:--|
  * | header | 头像 + 昵称 + 身份 + 「当前登录」徽章 | 同形；**无**「当前登录」（程序位尚未落地） |
- * | chips | 使用中 N 工具 / 状态 / 临期 / 优先 | 状态槽（凭据可用 / 凭据未识别 / 无可用凭据）+ 归属异常 + 来源徽章 |
+ * | chips | 使用中 N 工具 / 状态 / 临期 / 优先 | 状态槽（凭据可用 / 凭据未识别 / 无可用凭据）+ 归属异常 + 到期徽章 + 来源徽章 |
  * | body | 指标行（积分 / 今日 Token / 最后使用） | 凭据摘要 + 访问令牌掩码（积分与用量**没有数据源**，不摆空指标） |
  * | footer | 程序位行 + 更多菜单 | 仅更多菜单（程序位未落地 ⇒ 不渲染，落地后按原型补 `.progs` 行） |
  *
@@ -28,8 +28,10 @@
  * 2. **不渲染程序位胶囊**：Qoder 的两处官方凭据存储（桌面版 `auth.v1.dat` / CLI
  *    `~/.qoder/.auth/user`）对应的切换能力**尚未落地**（没有命令、没有写盘实现）——
  *    按「缺的就不渲染」纪律留空，绝不摆点不动的灰胶囊。
- * 3. **不渲染 `expiresAt`**：该字段单位未取证（见 `QoderAccountsView` 的说明），
+ * 3. **不渲染 `account.expiresAt`**：该字段单位未取证（见 `QoderAccountsView` 的说明），
  *    按毫秒渲染会把秒值显示成 1970 = 谎报。
+ *    ⚠️ 到期徽章用的是**逐包**的 `expiresAtMs`（后端已把上游秒值归一成毫秒，见 #144），
+ *    与 `account.expiresAt` 不是同一个字段 —— 别把这条纪律套到徽章上，也别反过来。
  */
 
 import {
@@ -46,7 +48,12 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { AVATAR_TEXT_CLASS, accountInitials, avatarTone } from "@/components/account-card";
+import {
+  AVATAR_TEXT_CLASS,
+  accountInitials,
+  avatarTone,
+  formatCredits,
+} from "@/components/account-card";
 import { Badge } from "@/components/ui/badge";
 import { QoderPacksPopover } from "@/components/qoder/qoder-packs-popover";
 import { Button } from "@/components/ui/button";
@@ -66,12 +73,20 @@ import {
   MenuStateItem,
   RefreshMenuGroup,
 } from "@/components/account-menu-parts";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import type { AccountRefreshKind } from "@/lib/account-refresh";
 import { shouldOpenAccountDetail } from "@/lib/account-open-guard";
 import type { QoderAccountView, QoderProgramStatus, QoderWebCreditPacks } from "@/lib/api";
+import { EXPIRY_TIP_MAX_HEIGHT, daysUntil } from "@/lib/credit-expiry";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
+import {
+  qoderExpiringSummary,
+  qoderNearestExpiry,
+  qoderUpcomingExpiries,
+} from "@/lib/qoder-packs";
+import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { cn } from "@/lib/utils";
 import type { TranslationKey } from "@/locales/zh";
 
@@ -478,6 +493,70 @@ export function QoderAccountCard({
   const currentPrograms = (programs ?? []).filter((program) => program.currentUid === account.uid);
   const isCurrent = currentPrograms.length > 0;
 
+  /* ── 到期汇总（issue #166）───────────────────────────────────────────────
+   *
+   * 与 WB 卡**同一口径**（`lib/qoder-packs.ts` 的「到期汇总」段）：
+   * · 黄徽章 = 临期警告，14 天窗口（`EXPIRING_SOON_MS`，镜像后端窗口）；
+   * · 中性徽章 = 最近一批，**不限窗口**（「我这个号先用哪个」要的是相对顺序）；
+   * · 两枚**互斥** —— 同一张卡不出两个到期数字。
+   *
+   * ⚠️ 判据是 `packs.available` 而不是 `packs != null`：未登录网页端 / 会话过期 /
+   * 上游失败时 `packs` 有值但 `available=false`，这时**整条不渲染**，
+   * 绝不写一个猜出来的「N 天」（与卡片头「不渲染 `expiresAt`」同一纪律）。
+   */
+  const packsNow = Date.now();
+  const packList = packs?.available ? packs.packs : null;
+  const expiring = qoderExpiringSummary(packList, packsNow);
+  const nearest = expiring ? null : qoderNearestExpiry(packList, packsNow);
+  const upcoming = nearest ? qoderUpcomingExpiries(packList, packsNow) : [];
+
+  /** 逐批明细（最急的在前）；`sticky` 标题在 40+ 批时仍能钉住「共 N 批」。 */
+  const expiryTipBody = (batches: readonly { expireAt: number; amount: number }[]) => (
+    <>
+      <div className="sticky -top-2 -mx-3 -mt-2 bg-popover px-3 pb-1 pt-2 font-medium">
+        {t("qoder.page.accounts.metric.expiringTipTitle", { n: batches.length })}
+      </div>
+      {batches.map((batch) => (
+        <div key={batch.expireAt} className="whitespace-nowrap tabular-nums">
+          {t("qoder.page.accounts.metric.expiringTipLine", {
+            time: formatAbsoluteTime(batch.expireAt),
+            amount: formatCredits(batch.amount),
+          })}
+        </div>
+      ))}
+    </>
+  );
+
+  const expiryChip = expiring ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="warning" className={CHIP_CLASS}>
+          {t("qoder.page.accounts.metric.expiringChip", {
+            amount: formatCredits(expiring.total),
+            days: expiring.days,
+          })}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
+        {expiryTipBody(expiring.batches)}
+      </TooltipContent>
+    </Tooltip>
+  ) : nearest ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge variant="secondary" className={cn(CHIP_CLASS, "text-muted-foreground")}>
+          {t("qoder.page.accounts.metric.nearestExpiringChip", {
+            amount: formatCredits(nearest.amount),
+            days: daysUntil(nearest.expireAt, packsNow),
+          })}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
+        {expiryTipBody(upcoming)}
+      </TooltipContent>
+    </Tooltip>
+  ) : null;
+
   const menu = demoModeEnabled ? (
     <DemoAction>
       <Button
@@ -565,10 +644,11 @@ export function QoderAccountCard({
         </div>
       </header>
 
-      {/* chips：状态槽（恒一枚） + 归属异常（正交） + 来源徽章。 */}
+      {/* chips：状态槽（恒一枚） + 归属异常（正交） + 到期徽章（正交） + 来源徽章。 */}
       <div className="flex min-w-0 flex-wrap items-center gap-[5px]">
         <QoderStatusChips account={account} checkinToday={checkinToday} />
         <QoderForeignBadge account={account} />
+        {expiryChip}
         {isCurrent ? (
           <Badge variant="info" className={CHIP_CLASS}>
             {t("qoder.page.accounts.program.current")}

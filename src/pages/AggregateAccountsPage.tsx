@@ -994,6 +994,9 @@ export default function AggregateAccountsPage() {
           }
           checkinToday={checkinToday}
           programs={qoderPrograms.length ? qoderPrograms : null}
+          /* ★ issue #166：到期徽章要逐包数据。聚合页**不预取** —— 跨 6 个作用域 × N 个账号
+             就是 N 串带会话 Cookie 的上游请求；这里只复用抽屉/浮层已经读过的缓存。 */
+          packs={qoderWebPacks.packs[qoderPackKey(item.scope, item.data.uid)]}
           /* ★ issue #89 · D1：不传就回落四项 ⇒ 菜单里多出「刷新今日 Token」，
              Qoder 没有 token 概念，点了什么也不发生。 */
           refreshKinds={QODER_REFRESH_KINDS}
