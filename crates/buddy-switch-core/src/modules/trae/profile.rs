@@ -1547,17 +1547,48 @@ fn missing_snapshot_reason(variant: TraeVariant, target: &str, can_save: bool) -
     // 见 [`super::snapshot_migrate`]）、也可能属于**另一个区域**（国内版账号被建到国际版）。
     // 把磁盘上的真实位置报出来，下一次报告就能一次定死，而不是再来一轮问答。
     let elsewhere = snapshot_locations_for(target);
-    if elsewhere.is_empty() {
+    if !elsewhere.is_empty() {
+        return format!(
+            "{base}（该账号的快照实际在：{} —— 可能属于另一条产品线/另一个区域，切到对应区域再试）",
+            elsewhere
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        );
+    }
+    /* ★ issue #152 第二轮（报障截图复现）：**合并池与历史池都查过、确实没有**时，光说
+       「请先保存」会让人对着同一个按钮反复点 —— 因为他以为自己早就存过了。
+
+       这里补三件他真正缺的信息：
+       ① 保存拷的是**客户端此刻**的登录态，不是账号库里的凭据（这是最容易误解的一步）；
+       ② 我们把哪些池都查过了（否则「找不到」像是工具没找对地方）；
+       ③ 客户端此刻登着的账号是谁（若那个账号已有快照 ⇒ 说明之前存给了另一个号）。
+    */
+    if !can_save {
         return base;
     }
-    format!(
-        "{base}（该账号的快照实际在：{} —— 可能属于另一条产品线/另一个区域，切到对应区域再试）",
-        elsewhere
-            .iter()
-            .map(|dir| dir.display().to_string())
-            .collect::<Vec<_>>()
-            .join("、")
-    )
+    let mut message = format!(
+        "{base}（合并池与历史池里都没有它的快照）。\
+         注意「保存登录态」拷的是**客户端此刻**的登录态：需要先把 {target} 登录到 Trae 客户端里，再点保存"
+    );
+    if let Some(current) = client_login_uid_for(variant) {
+        if current != target {
+            message.push_str(&format!("；客户端此刻登录的是 {current}"));
+        }
+    }
+    let searched = paths::profile_dirs_for_region(variant.region(), target);
+    if !searched.is_empty() {
+        message.push_str(&format!(
+            "。已查过的池：{}",
+            searched
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    }
+    message
 }
 
 /// 这个账号的快照**实际**躺在哪些池里（跨区域、含历史池）—— **只用于诊断文案**。
@@ -3462,6 +3493,34 @@ mod tests {
         );
         // 两支必须**真的不同** —— 否则「分两支」是假的。
         assert_ne!(saved_able, cannot_save);
+    }
+
+    /// ★ issue #152 第二轮：**哪里都没有**该账号的快照时（报障截图的形态），文案必须
+    /// 交代「保存拷的是客户端此刻的登录态」+「查过哪些池」。
+    ///
+    /// 反例（改坏会红）：只留一句「请先保存该账号的登录态」—— 用户以为自己早就存过，
+    /// 只会对着同一个按钮反复点，而每次都得到同一句话。
+    #[test]
+    fn missing_snapshot_reason_explains_what_saving_actually_copies() {
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-missing-prereq-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&home).expect("临时 home 应能创建");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        let message = missing_snapshot_reason(TraeVariant::default(), "u-absent", true);
+        assert!(message.contains("u-absent"), "{message}");
+        assert!(
+            message.contains("客户端此刻"),
+            "必须点明「保存」拷的是客户端当前的登录态，不是账号库里的凭据: {message}"
+        );
+        assert!(
+            message.contains("已查过的池"),
+            "必须列出查过的池（否则用户以为工具没找对地方）: {message}"
+        );
+        // 空池上也**不许**编一个位置出来。
+        assert!(!message.contains("实际在"), "{message}");
     }
 
     #[test]
