@@ -4315,6 +4315,45 @@ pub async fn get_trae_client_models(variant: Option<String>) -> Value {
     }
 }
 
+/// POST /api/trae/gateway/client-models/refresh —— 直连上游抓一次清单（issue #173）。
+///
+/// ## opt-in
+///
+/// 每次调用都是**一次带账号凭据的上游请求** ⇒ 只由用户的显式动作触发（模型卡上的
+/// 「从上游拉取」）。**不要**挂到渲染路径 / 定时器上：那是替用户花上游成本。
+///
+/// ## 失败不改变已有数据
+///
+/// 抓取只是给缓存换新；失败时返回 `source = "missing"` + 可读原因，客户端缓存仍照读。
+/// 返回形状与 [`get_trae_client_models`] 逐字同形 —— 前端不必为两条通道各写一套错误处理。
+///
+/// `async`：网络是 async，抓完后的清单读取走 `spawn_blocking`（要开 SQLite）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn refresh_trae_client_models(variant: Option<String>) -> Value {
+    let variant = parse_trae_variant(variant.as_deref());
+    if let Err(error) = trae::model_list_upstream::refresh(variant).await {
+        return json!({
+            "variant": variant.as_str(),
+            "variantLabel": variant.display_name(),
+            "source": "missing",
+            "readAt": buddy_switch_core::modules::config::now_ms(),
+            "groups": [],
+            "note": error,
+        });
+    }
+    match tauri::async_runtime::spawn_blocking(move || {
+        build_trae_client_models(Some(variant.as_str().to_string()))
+    })
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => json!({
+            "source": "missing",
+            "note": format!("直连已成功，但回读清单失败: {error}"),
+        }),
+    }
+}
+
 fn build_trae_client_models(variant: Option<String>) -> Value {
     let variant = parse_trae_variant(variant.as_deref());
     match serde_json::to_value(trae::model_list::read_client_model_list(variant)) {

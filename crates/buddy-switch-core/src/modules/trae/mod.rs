@@ -102,6 +102,8 @@ pub mod jwt;
 pub mod logs;
 /// 客户端模型清单（读 `state.vscdb` 里上游下发的 `model_list_map`，见模块头）。
 pub mod model_list;
+/// 直连上游取清单（issue #173）：headless 部署的第二来源，opt-in、失败回落客户端缓存。
+pub mod model_list_upstream;
 pub mod oauth;
 pub mod oauth_client;
 /// OAuth 回调结果页（浏览器里那一页的 HTML 渲染，见模块头）。
