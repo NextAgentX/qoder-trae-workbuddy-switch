@@ -9,10 +9,10 @@ use std::sync::Mutex;
 
 use buddy_switch_core::modules::{
     account, app_prefs, auth_file, backup, cache, capability, checkin, client_limits,
-    client_settings, codebuddy_cli, config, credit_usage, credits, diagnostics, export_import,
-    gateway_ledger, migrate, oauth, process, programs, qoder, refresh, region::Region,
-    region::RegionFilter, rotate, runtime_log, session, session_bundle, skill, switch, token_daily,
-    token_stats, trae, travel, update, vscode_session,
+    client_settings, codebuddy_cli, codebuddy_memory, config, credit_usage, credits, diagnostics,
+    export_import, gateway_ledger, migrate, oauth, process, programs, qoder, refresh,
+    region::Region, region::RegionFilter, rotate, runtime_log, session, session_bundle, skill,
+    switch, token_daily, token_stats, trae, travel, update, vscode_session,
 };
 use tauri::{Emitter, Manager};
 // P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
@@ -1772,6 +1772,30 @@ pub async fn list_vscode_sessions(client: String, uid: String) -> Result<Value, 
     tauri::async_runtime::spawn_blocking(move || vscode_session::list_sessions_for(client, &uid))
         .await
         .map_err(|error| format!("读取插件会话列表失败: {error}"))
+}
+
+/// POST /api/codebuddy-ide/memory/merge —— 把源账号的 CodeBuddy IDE 长期记忆合并给目标账号
+/// （issue #86，**加法**：逐行去重，不覆盖目标已有内容）。
+///
+/// ## 为什么可能返回「拒绝合并」
+///
+/// IDE 的记忆文件结构**未取证**（本机没有样本）。模块按「认清形态才写」处理：
+/// 纯 markdown 走逐行合并；JSON 信封只替换识别到的正文键；**认不出就拒绝**，
+/// 并在报错里列出实际键名。拒绝比写坏安全 —— 那份文件是用户的长期记忆。
+///
+/// `async` + `spawn_blocking`：要读写用户主目录里的文件，不能跑在 IPC 线程上。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn migrate_codebuddy_ide_memory(
+    source_uid: String,
+    target_uid: String,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        codebuddy_memory::merge_memery(&source_uid, &target_uid)
+            .and_then(|report| serde_json::to_value(report).map_err(|e| e.to_string()))
+    })
+    .await
+    .map_err(|error| format!("合并 CodeBuddy IDE 记忆失败: {error}"))?
 }
 
 /// POST /api/vscode-sessions/copy —— 把插件侧会话复制给另一个账号（**加法**，绝不覆盖）。

@@ -31,7 +31,9 @@ pub mod client_limits;
 // 覆盖 WorkBuddy/Trae 的 CN/Global 全部程序位，**外科式文本编辑**保留原排版。
 pub mod client_settings;
 pub mod codebuddy_cli;
+// issue #86：CodeBuddy IDE 长期记忆（`~/.codebuddy/memery/`）的合并 —— **认清结构才写**。
 pub mod codebuddy_cn_ide;
+pub mod codebuddy_memory;
 // P9 · 桌面悬浮窗的**只读**数据模型 + provider（跨来源的会话 / 任务状态）。
 pub mod companion;
 pub mod config;

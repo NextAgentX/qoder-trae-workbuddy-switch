@@ -73,6 +73,11 @@ export const zh = {
   "sessions.ext.noTarget": "本区域没有其它账号可作为目标。",
   "sessions.ext.additiveNote": "副本会新建会话（新 id）—— 目标账号原有的会话一个字都不会被动。",
   "sessions.ext.copy": "复制 {count} 个会话到 {target}",
+  /* ★ issue #86：CodeBuddy IDE 的长期记忆可以跟着会话一起搬（加法、只碰正文）。 */
+  "sessions.ext.mergeMemory": "同时合并长期记忆",
+  "sessions.ext.mergeMemoryHint": "（加法、不覆盖；只在 CodeBuddy IDE 有）",
+  "sessions.ext.memoryMerged": "已把长期记忆合并给 {target}（新增 {count} 行）",
+  "sessions.ext.memorySkipped": "长期记忆没有合并",
   "sessions.ext.pickFirst": "先勾选要复制的会话。",
   "sessions.ext.copied": "已复制 {count} 个会话到 {target}",
   "sessions.ext.partial": "有 {count} 个会话没能复制（见下方逐条原因）",
