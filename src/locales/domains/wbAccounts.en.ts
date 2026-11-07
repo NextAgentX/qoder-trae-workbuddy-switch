@@ -375,6 +375,8 @@ export const en = {
   "wbAccounts.toast.switchCliFail": "Failed to switch CodeBuddy CLI",
   "wbAccounts.toast.switchIdeLoading": "Switching CodeBuddy IDE…",
   "wbAccounts.toast.switchIdeLoadingDesc": "Will inject credentials and restart CodeBuddy IDE",
+  /* issue #86: entry point to copy sessions after a successful switch (never automatic). */
+  "wbAccounts.toast.switchIdeCopySessions": "Copy sessions",
   "wbAccounts.toast.switchIdeUpdated": "CodeBuddy IDE switched",
   "wbAccounts.toast.switchIdeFail": "Failed to switch CodeBuddy IDE",
   // CodeBuddy extensions inside editors (VS Code / JetBrains): one set of copy for both slots.

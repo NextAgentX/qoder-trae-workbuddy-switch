@@ -411,6 +411,8 @@ export const zh = {
   "wbAccounts.toast.switchCliFail": "CodeBuddy CLI 切换失败",
   "wbAccounts.toast.switchIdeLoading": "正在切换 CodeBuddy IDE…",
   "wbAccounts.toast.switchIdeLoadingDesc": "将注入凭证并重启 CodeBuddy IDE",
+  /* ★ issue #86：切换成功后给「复制会话」入口（**不自动复制** —— 写数据必须用户点）。 */
+  "wbAccounts.toast.switchIdeCopySessions": "复制会话",
   "wbAccounts.toast.switchIdeUpdated": "CodeBuddy IDE 已切换",
   "wbAccounts.toast.switchIdeFail": "CodeBuddy IDE 切换失败",
   // 编辑器内 CodeBuddy 插件（VS Code / JetBrains）：四个程序位共用一套文案（`{client}` 插值）。

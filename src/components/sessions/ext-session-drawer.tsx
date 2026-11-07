@@ -62,11 +62,26 @@ interface Props {
   account: AccountMeta;
   /** 目标候选（调用方已排除源账号）。 */
   targets: AccountMeta[];
+  /**
+   * 预选的目标账号 id。
+   *
+   * ★ issue #86：从「切换成功」的 toast 进来时，用户要的**就是**刚切到的那个账号 ——
+   * 不预选的话默认落到 `targets[0]`（可能是另一个号），用户点了复制才发现复制到了别处。
+   */
+  initialTargetId?: string;
   /** 复制成功后的回调（供列表页刷新）。 */
   onCopied?: () => void;
 }
 
-export function ExtSessionDrawer({ open, onOpenChange, client, account, targets, onCopied }: Props) {
+export function ExtSessionDrawer({
+  open,
+  onOpenChange,
+  client,
+  account,
+  targets,
+  initialTargetId,
+  onCopied,
+}: Props) {
   const t = useT();
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<ExtSessionsResponse | null>(null);
@@ -87,14 +102,18 @@ export function ExtSessionDrawer({ open, onOpenChange, client, account, targets,
       setResponse(res);
       // 默认**全选**：复制是加法（新 id、不覆盖）⇒ 默认带走全部是安全且省事的。
       setPicked(new Set(res.sessions.map((session) => session.id)));
-      setTargetId(targets[0]?.id ?? null);
+      // 预选目标（见 `initialTargetId`）；没有预选值时才回落第一个候选。
+      const preferred = initialTargetId
+        ? targets.find((item) => item.id === initialTargetId)
+        : undefined;
+      setTargetId(preferred?.id ?? targets[0]?.id ?? null);
     } catch (cause) {
       setResponse(null);
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
-  }, [client, account.id, targets]);
+  }, [client, account.id, targets, initialTargetId]);
 
   useEffect(() => {
     if (open) void reload();
