@@ -1,6 +1,6 @@
 {
   "name": "@nextagentx/buddy-switch-win32-x64",
-  "version": "2026.11.71219",
+  "version": "2026.11.71314",
   "description": "Buddy Switch platform binary (win32-x64)",
   "os": [
     "win32"
