@@ -4602,6 +4602,35 @@ pub async fn clear_trae_gateway_logs() -> Value {
     .unwrap_or_else(|_| json!({ "ok": false }))
 }
 
+/// POST /api/trae/gateway/credits/refresh —— **立即催一轮**积分回填。
+///
+/// 平时由后台任务每 60 秒跑一次（`TaskKind::CreditBackfill`）。本命令只是把那一轮
+/// 提前到现在 —— 用户点了「刷新」就不该再等下一个 tick。
+///
+/// ⚠️ **不发就是不发**：手动入口的最小间隔 `PER_ACCOUNT_COOLDOWN_MS`（120 秒）
+/// 与失败退避都在 `run_once` 内部生效，因此「同一账号 2 分钟内只允许一次上游查询」
+/// 这条约束**不需要在本命令里再实现一遍** —— 重复实现只会两套阈值互相打架。
+/// 被冷却挡下时 `requests` 为 0、`cooled` > 0，由前端据此提示「刚刚已查过」。
+///
+/// 返回扁平计数（不用 serde 派生）：前端只读几个数字，`Report` 保持内部结构。
+#[tauri::command]
+pub async fn refresh_trae_request_credits() -> Value {
+    let state = trae_gateway::shared_state();
+    let report = buddy_switch_gateway::trae::credit_backfill::run_once(
+        &state,
+        buddy_switch_gateway::trae::credit_backfill::Trigger::Manual,
+    )
+    .await;
+    json!({
+        "pending": report.pending,
+        "requests": report.requests,
+        "matched": report.matched,
+        "cooled": report.cooled,
+        "tooFresh": report.too_fresh,
+        "written": report.written,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // 桌面悬浮窗（P9 · T02 只读数据层）
 // ---------------------------------------------------------------------------

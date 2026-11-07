@@ -225,6 +225,29 @@ pub struct RequestLog {
     keep: Mutex<usize>,
     log_bodies: AtomicBool,
     entries: Mutex<Vec<Value>>,
+    /// **落盘串行锁**：`record` / `apply_credits` / `clear` 是三个并发写者
+    /// （请求线程、后台回填、用户清空）。
+    ///
+    /// 三者的既有模式都是「锁内取快照 → 锁外整份重写」；两个写者交错时，
+    /// 后写者可能用**更旧的快照**覆盖先写者刚落的盘（lost update）。
+    /// 这把锁只串行化「取快照 + 写盘」，不改变各自修改 `entries` 的锁；
+    /// 锁顺序统一为 `write_lock → keep → entries`，无反向获取。
+    write_lock: Mutex<()>,
+}
+
+/// 一次积分回填的结果（**批量**写回时用，见 [`RequestLog::apply_credits`]）。
+///
+/// ## 为什么是 `Unmatched` 而不是「填 0」
+///
+/// `0.0` 在日志里的既定语义是「上游没带积分」（不是免费）。回填失败若也写 0，
+/// 事后**无法区分**「真的 0 积分」和「账单里没有这一行」，账本也会把两者当成同一件事。
+/// 因此失败只改状态、**不动 `credit`**（保持 `null`），让「未知」继续是未知。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CreditFill {
+    /// 账单里匹配到了这一条请求。
+    Matched(f64),
+    /// 放弃回填（上游没有对应账单 / 超过重试窗口）。
+    Unmatched,
 }
 
 impl RequestLog {
@@ -239,6 +262,7 @@ impl RequestLog {
             keep: Mutex::new(keep.max(1)),
             log_bodies: AtomicBool::new(log_bodies),
             entries: Mutex::new(entries),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -274,11 +298,83 @@ impl RequestLog {
 
     /// 清空日志（内存 + 落盘）。
     pub fn clear(&self) {
+        let _write = self.write_lock.lock().unwrap();
         self.entries.lock().unwrap().clear();
         self.save(&[]);
     }
 
+    /// **批量**回填积分：一次加锁改多条、**只落盘一次**。
+    ///
+    /// ## 为什么必须是批量 + 单次落盘
+    ///
+    /// 日志的落盘是「整份数组原子重写」（见 [`Self::save`]）。按条调用会在一次回填
+    /// （常常 10~50 条）时产生同等次数的全量重写 —— 每次都是几百 KB 的
+    /// 序列化 + 临时文件 + rename。批量写回把这一轮压成 1 次。
+    ///
+    /// ## 定位键与状态机
+    ///
+    /// 只改 `id` 命中、且 `creditState == "pending"` 的条目：
+    /// - 命中 ⇒ `credit = 数值`、`creditState = "matched"`；
+    /// - 放弃 ⇒ 只写 `creditState = "unmatched"`，**不动 `credit`**（保持 `null`，
+    ///   见 [`CreditFill`] 的说明）。
+    ///
+    /// 老条目（升级前写入）没有 `id` / `creditState` ⇒ **一个都不会被改**。
+    /// 这是刻意的：那些请求的账单早已过期，按 token 反猜只会写进错误数字。
+    ///
+    /// 返回真正被修改的条目数。`0` 时不落盘。
+    pub fn apply_credits(&self, updates: &[(String, CreditFill)]) -> usize {
+        if updates.is_empty() {
+            return 0;
+        }
+        use std::collections::HashMap;
+        let index: HashMap<&str, CreditFill> = updates
+            .iter()
+            .map(|(id, fill)| (id.as_str(), *fill))
+            .collect();
+
+        /* 从取快照到写盘全程持写锁：否则并发的 `record` 可能先在磁盘写下
+        含新条目的快照，再被这次回填的旧快照覆盖（反之亦然）。 */
+        let _write = self.write_lock.lock().unwrap();
+        let (snapshot, changed) = {
+            let mut entries = self.entries.lock().unwrap();
+            let mut changed = 0usize;
+            for entry in entries.iter_mut() {
+                // 只处理显式标记为待回填的条目：老条目没有这个键 ⇒ 跳过。
+                if entry.get("creditState").and_then(Value::as_str) != Some("pending") {
+                    continue;
+                }
+                // 先取出 `id`（拷贝）再改，避免与 `as_object_mut` 的借用冲突。
+                let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
+                    continue;
+                };
+                let Some(fill) = index.get(id.as_str()).copied() else {
+                    continue;
+                };
+                let Some(object) = entry.as_object_mut() else {
+                    continue;
+                };
+                match fill {
+                    CreditFill::Matched(credit) => {
+                        object.insert("credit".to_string(), json!(credit));
+                        object.insert("creditState".to_string(), json!("matched"));
+                    }
+                    CreditFill::Unmatched => {
+                        object.insert("creditState".to_string(), json!("unmatched"));
+                    }
+                }
+                changed += 1;
+            }
+            (entries.clone(), changed)
+        };
+
+        if changed > 0 {
+            self.save(&snapshot);
+        }
+        changed
+    }
+
     fn trim_and_save(&self) {
+        let _write = self.write_lock.lock().unwrap();
         let keep = *self.keep.lock().unwrap();
         let snapshot = {
             let mut entries = self.entries.lock().unwrap();
@@ -376,6 +472,58 @@ mod tests {
             ]),
             "键集合变了就要同步前端 GatewayLogEntry 与 token_daily 的读法"
         );
+    }
+
+    /// ★ 批量回填：一次加锁改多条、**只落盘一次**，且**绝不碰老条目**。
+    ///
+    /// 三条纪律各对应一个真实风险：
+    /// 1. 老条目（没有 `id` / `creditState`）被改 ⇒ 按 token 反猜的积分写进历史 →
+    ///    账本数字凭空变化，且无法追溯；
+    /// 2. `unmatched` 写入 `0` ⇒ 把「上游没这一行」伪装成「免费」；
+    /// 3. 逐条落盘 ⇒ 一次回填几十条就是几十次全量重写（每条几百 KB）。
+    #[test]
+    fn apply_credits_is_batch_and_never_touches_legacy_entries() {
+        let (log, dir) = temp_log("apply-credits");
+        let legacy = json!({"ts": 1, "model": "m", "promptTokens": 5, "completionTokens": 1});
+        log.record(legacy.clone());
+        for index in 0..3 {
+            log.record(json!({
+                "id": format!("e{index}"),
+                "ts": 100 + index,
+                "credit": Value::Null,
+                "creditState": "pending",
+            }));
+        }
+
+        let updates = vec![
+            ("e0".to_string(), CreditFill::Matched(0.25)),
+            ("e1".to_string(), CreditFill::Unmatched),
+            ("e2".to_string(), CreditFill::Matched(0.5)),
+            // 不存在的 id：静默忽略，不得 panic。
+            ("missing".to_string(), CreditFill::Matched(9.9)),
+        ];
+        assert_eq!(log.apply_credits(&updates), 3, "三条 pending 都应被处理");
+
+        let entries = log.list();
+        assert_eq!(entries[0], legacy, "老条目必须逐字不变");
+        assert_eq!(entries[1]["credit"], 0.25);
+        assert_eq!(entries[1]["creditState"], "matched");
+        assert_eq!(entries[2]["creditState"], "unmatched");
+        assert!(
+            entries[2]["credit"].is_null(),
+            "放弃回填不得把 credit 写成 0（0 = 免费，未知是另一回事）"
+        );
+        assert_eq!(entries[3]["credit"], 0.5);
+
+        // 落盘的内容与内存一致（前端读的是同一份文件；日志页刷新靠它）。
+        let text = std::fs::read_to_string(dir.join("gateway_logs.json")).expect("应从磁盘读回");
+        assert!(text.contains("\"matched\""), "回填结果必须落盘：{text}");
+        assert!(text.contains("0.25"), "积分必须落盘：{text}");
+
+        // 幂等：同一批再来一次，已不是 pending ⇒ 一个都不改。
+        assert_eq!(log.apply_credits(&updates), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 造一个「流式请求」的日志模板。

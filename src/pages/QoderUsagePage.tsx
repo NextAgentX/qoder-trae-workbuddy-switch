@@ -160,8 +160,10 @@ export default function QoderUsagePage({ viewWindow, view = "trend", ledger = "a
    * - 网关：经本工具转发的每一笔（`record_request` 写下的 `credits`）。
    * 两者**重叠且各有**口径 ⇒ 绝不跨账本混算占比（见 `lib/usage-ledger.ts` 模块头）。
    *
-   * 账本里的 `credits` 只有 Qoder 网关会写（Trae 的日志没有这个字段）——
+   * 账本里的 `credits` 只有 Qoder 网关会写（它的 SSE 直接带 `credits`）——
    * 所以这一层是这个平台独有的能力，不是从 WB 照搬。
+   * （Trae 的积分走另一条路：SSE 不回报，由后台从上游账单**回填**到 `credit`，
+   *   展示在 Trae 自己的用量页，不在本页混算。）
    */
   const [dim, setDim] = useState<GatewayUsageDim | null>(null);
   useEffect(() => {

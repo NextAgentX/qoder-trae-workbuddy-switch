@@ -59,6 +59,7 @@ export const en = {
   // ---- Request log (the log card is shared with Trae; only these two toasts are Qoder's) ----
   "qoder.gateway.logsCleared": "Logs cleared",
   "qoder.gateway.logsClearFailed": "Failed to clear logs",
+  "qoder.gateway.logsRefreshFailed": "Failed to refresh request logs",
 
   // ---- Model list (qoder-model-list.tsx) ----
   "qoder.gateway.quota.title": "Quota guard",

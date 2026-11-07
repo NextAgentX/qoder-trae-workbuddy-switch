@@ -67,6 +67,7 @@ export const zh = {
   // ---- 请求日志（日志卡与 Trae 共用；只有这两条 toast 是 Qoder 侧自己的）----
   "qoder.gateway.logsCleared": "日志已清空",
   "qoder.gateway.logsClearFailed": "清空日志失败",
+  "qoder.gateway.logsRefreshFailed": "刷新请求日志失败",
 
   // ---- 模型清单（qoder-model-list.tsx）----
   "qoder.gateway.quota.title": "限额护栏",

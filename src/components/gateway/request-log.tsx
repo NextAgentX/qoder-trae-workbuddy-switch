@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Eraser, Loader2, ScrollText } from "lucide-react";
+import { Eraser, Loader2, RefreshCw, ScrollText } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -67,6 +67,24 @@ export function RequestLog({ className }: { className?: string }) {
   const clearLogs = useGatewayStore((s) => s.clearLogs);
   const loadLogs = useGatewayStore((s) => s.loadLogs);
   const [clearing, setClearing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  /**
+   * 重新读取请求日志（只读操作）。
+   *
+   * 与 Trae 侧的「刷新」不同：WB 的积分由上游逐请求回报、在**写入日志时**就已就位，
+   * 不需要事后回填 ⇒ 这里只重读这一份列表，不打上游、不跑整页快照。
+   */
+  async function onRefresh() {
+    setRefreshing(true);
+    try {
+      await loadLogs();
+    } catch (e) {
+      toast.error(t("wbStats.gateway.refreshFail"), { description: api.asError(e) });
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function onClear() {
     setClearing(true);
@@ -87,9 +105,20 @@ export function RequestLog({ className }: { className?: string }) {
   return (
     <div className={cn(className)}>
       {/* 清空出口独占一行（分区名由左栏导航承担，不再有标题）。 */}
-      <div className="mb-3 flex items-center justify-end">
+      <div className="mb-3 flex items-center justify-end gap-1">
         <DemoAction>
-          <Button variant="ghost" size="sm" onClick={() => void onClear()} disabled={clearing || logs.length === 0}>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || clearing}
+          >
+            {refreshing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("wbStats.gateway.refresh")}
+          </Button>
+        </DemoAction>
+        <DemoAction>
+          <Button variant="ghost" size="sm" onClick={() => void onClear()} disabled={clearing || refreshing || logs.length === 0}>
             {clearing ? <Loader2 className="animate-spin" /> : <Eraser />}
             {t("wbStats.gateway.clear")}
           </Button>

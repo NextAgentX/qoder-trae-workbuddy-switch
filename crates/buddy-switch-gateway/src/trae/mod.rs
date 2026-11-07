@@ -28,6 +28,8 @@
 pub mod apikey;
 pub mod capture;
 pub mod catalog;
+/// 积分回填：从上游账单把**逐请求积分**写回日志（SSE 不回报积分，见模块文档）。
+pub mod credit_backfill;
 /// 思考档位（`reasoning_effort`）的映射与注入 —— issue #127（默认关，见模块头）。
 pub mod effort;
 pub mod payload;
@@ -495,6 +497,10 @@ impl TraeGatewayState {
     /// 「`account`=展示名、`accountUid`=uid」的形状对齐，供 `token_daily` 统一精确归属）。
     /// 这样「Token 统计」页可以用同一套归一化逻辑聚合两侧日志，且能按变体过滤。
     ///
+    /// ★ 另有三个**只属于 Trae 侧**的键（积分回填用，WB 侧没有）：
+    /// `id`（回填定位键）、`credit`（写入时恒 `null`，由回填写实）、
+    /// `creditState`（`pending` / `matched` / `unmatched`）。
+    ///
     /// [`RequestMeta::to_value`]: crate::logging::RequestMeta::to_value
     #[allow(clippy::too_many_arguments)]
     pub async fn record_request(
@@ -519,8 +525,18 @@ impl TraeGatewayState {
         key_scope: Option<&'static str>,
     ) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        // ★ 积分回填的两个前提字段：
+        //   - `id`：回填时精确定位这一条（见 `LOG_ENTRY_SEQ`）；
+        //   - `creditState`：`pending` = 等上游账单、`unmatched` = 上游不会有账单。
+        //     **失败请求与零 token 的请求直接判 `unmatched`** —— 它们在上游没有对应
+        //     账单行，标成 pending 只会让回填循环白等到超时。
+        let ts = core_config::now_ms();
+        let seq = LOG_ENTRY_SEQ.fetch_add(1, Ordering::Relaxed);
+        let backfillable = status == 200 && (prompt_tokens > 0 || completion_tokens > 0);
         self.log.record(serde_json::json!({
-            "ts": core_config::now_ms(),
+            // ★ 回填定位键（老条目没有这个键 ⇒ 不回填，见 `RequestLog::apply_credits`）。
+            "id": format!("{ts}-{seq}"),
+            "ts": ts,
             "endpoint": endpoint,
             "method": "POST",
             "account": uid,
@@ -531,6 +547,11 @@ impl TraeGatewayState {
             "promptTokens": prompt_tokens,
             "completionTokens": completion_tokens,
             "cachedTokens": cached_tokens,
+            // ★ 积分：上游 SSE 不回报，因此写入时**恒为 `null`**（= 未知，不是免费），
+            //   由后台回填循环从上游账单写实。`null` 也让账本知道「这条还没结算」。
+            "credit": serde_json::Value::Null,
+            // ★ `pending` = 等账单；`unmatched` = 上游不会有这一行（失败 / 零 token）。
+            "creditState": if backfillable { "pending" } else { "unmatched" },
             "stream": stream,
             "error": error,
             // 归属产品线：Token 统计页据此出「变体范围条」（筛选维度）。
@@ -817,6 +838,17 @@ pub async fn spawn_listener(state: TraeGatewayState) -> anyhow::Result<GatewayHa
 pub struct TraeGateway;
 
 /// Trae 网关的进程内共享状态（惰性初始化，读一次配置）。
+/// 日志条目 `id` 的进程内序号（形状：`<ts>-<seq>`）。
+///
+/// ## 为什么日志条目必须有 `id`
+///
+/// Trae 的 SSE **不回报积分**，积分只能事后从上游账单回填（见
+/// [`crate::trae::credit_backfill`]）。回填要**精确定位**一条已写入的日志条目，
+/// 而 `ts`（同毫秒）、`(model, tokens)`（同一段对话连续两轮）都可能相同 ——
+/// 只有「进程内单调序号」能保证唯一。`id` 与 `ts` 同时写，还顺带保证跨重启后
+/// 仍不会与上一进程的条目撞键（时间戳部分不同）。
+static LOG_ENTRY_SEQ: AtomicU64 = AtomicU64::new(0);
+
 static TRAE_SHARED_STATE: OnceLock<TraeGatewayState> = OnceLock::new();
 
 impl crate::GatewayProduct for TraeGateway {
