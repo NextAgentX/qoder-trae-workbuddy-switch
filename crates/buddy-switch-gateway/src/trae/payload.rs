@@ -275,12 +275,25 @@ pub fn models_response_for(
         return models_response_filtered(disabled, Some(variant), max_mode);
     }
 
-    models_response_from(
+    let mut response = models_response_from(
         servable_entries(&list, variant),
         Some(disabled),
         Some(variant),
         max_mode,
-    )
+    );
+    /* ★ issue #127：把**模型自己声明的思考档位**一起透出来。
+    此前 `/v1/models` 只有 `context_length` / `max_mode` 这类字段，客户端不知道
+    某个模型支持哪些档 ⇒ 只能瞎填 `reasoning_effort`，或者干脆不敢填。
+    只用**客户端清单里真有**的数据，没声明就整个键省略（写 `[]` 会被读成「支持 0 个档」）。 */
+    if let Some(data) = response.get_mut("data").and_then(Value::as_array_mut) {
+        for entry in data.iter_mut() {
+            let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
+                continue;
+            };
+            crate::trae::effort::annotate_model_entry(entry, &id, &list);
+        }
+    }
+    response
 }
 
 /// 取**本变体真能调**的模型：该程序位 `function` 对应的那个分组。
@@ -608,6 +621,14 @@ pub fn prepare_llm_chat_body(
     if max_mode {
         object.insert("is_max_mode".into(), json!(true));
     }
+
+    /* ★ issue #127：思考档位（**默认不注入**）。
+    顶层 `reasoning_effort` 是 OpenAI 兼容客户端的写法，Trae 上游不认这个字段
+    （按未知字段忽略 ⇒「配了不生效」）。打开 `BUDDY_SWITCH_TRAE_REASONING_EFFORT=1`
+    后，这里按**该模型自己声明的档位**做一次映射，补 `model_info.reasoning_effort_level`。
+    为什么默认关：上游收不收这个字段、收错了是忽略还是 `4001`，尚无实测 —— 见
+    `crate::trae::effort` 模块头。 */
+    crate::trae::effort::inject_effort_level(object, variant, &model);
 
     serde_json::to_vec(&body).unwrap_or_else(|_| src.to_vec())
 }
