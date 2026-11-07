@@ -95,6 +95,20 @@ pub const GATEWAY_USAGE_RECORD_INTERVAL: Duration = Duration::from_secs(2 * 60);
 /// 「client 数字不动」）。服务端常驻进程**从不打开账号页**，在它上面这条尤其致命。
 pub const CLIENT_USAGE_RECORD_INTERVAL: Duration = Duration::from_secs(2 * 60);
 
+/// Trae **逐请求积分回填**的巡检周期（60 秒）。
+///
+/// ## 为什么是 60 秒，而不是更短 / 更长
+///
+/// 这个周期**只是「扫一遍内存日志」的节奏**（≤ `log_keep` 条），不等于上游请求频率：
+/// 没有待回填条目时，一轮**一次上游调用都没有**。真正的上游节流在
+/// `buddy_switch_gateway::trae::credit_backfill` 里（单账号 120 秒冷却 + 20 秒静置 +
+/// 失败退避）。
+///
+/// 60 秒的依据：上游出账比请求结束晚 **6–8 秒**（实测），积分是展示数据，晚一分钟
+/// 完全可接受；而更短的周期只会让「轮询内存」变密，不会让数值更早出现
+/// （单账号冷却 120 秒挡着）。
+pub const CREDIT_BACKFILL_INTERVAL: Duration = Duration::from_secs(60);
+
 /// 后台任务的**种类**（L2）—— 与产品线（[`TaskSpec::product`]）**正交**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
@@ -157,6 +171,22 @@ pub enum TaskKind {
     /// `api_account_token_today`）⇒ 不进账号页就没人写 gateway 桶，
     /// `token_daily` 的 90 天保留窗里大片空洞，「网关用量进趋势图」永远缺原始素材。
     GatewayUsageRecord,
+    /// **Trae 逐请求积分回填**（2026-11-07 新增）。
+    ///
+    /// ## 为什么需要它
+    ///
+    /// Trae 的 SSE 只回报 token，**没有任何积分字段**；而请求日志要显示「这次请求花了
+    /// 多少积分」。上游账单接口有这张表，但是**事后**才出账（实测晚 6–8 秒），
+    /// 因此只能由后台循环回填。
+    ///
+    /// ## 为什么是**独立**任务，而不是塞进 `CreditsRefresh`
+    ///
+    /// 两者语义完全不同：`CreditsRefresh` 刷的是「账号还剩多少积分」（10 分钟一次，
+    /// 供选号权重），本任务补的是「**每一条请求**花了多少积分」（60 秒一次，供日志与账本）。
+    /// 合成一个循环只会让其中一个被迫接受另一个的节奏。
+    ///
+    /// 实现见 `buddy_switch_gateway::trae::credit_backfill`。
+    CreditBackfill,
     /// **客户端（登录态）用量「今日」快照**（2026-10-15 新增，用户报障修复）。
     ///
     /// 周期调用 `token_daily::record_client_today(region, false)`，把客户端会话日志
@@ -203,6 +233,7 @@ impl TaskKind {
             TaskKind::AutoBackup => "auto_backup".to_string(),
             TaskKind::GatewayCatalogProbe => "gateway_catalog_probe".to_string(),
             TaskKind::GatewayUsageRecord => "gateway_usage_record".to_string(),
+            TaskKind::CreditBackfill => "credit_backfill".to_string(),
             TaskKind::ClientUsageRecord => "client_usage_record".to_string(),
             TaskKind::Scheduled(task) => format!("scheduled:{}", task.as_str()),
         }
@@ -316,6 +347,17 @@ pub const TASKS: &[TaskSpec] = &[
         product: Product::Trae,
         kind: TaskKind::GatewayUsageRecord,
         interval: GATEWAY_USAGE_RECORD_INTERVAL,
+    },
+    // ★ Trae 逐请求积分回填（2026-11-07 新增）。
+    //
+    // 与上面的 `GatewayUsageRecord` **有顺序依赖**：账本摄入时会跳过
+    // `creditState == "pending"` 的行（等回填结算），因此本任务必须真的跑起来，
+    // 否则那些行会一直卡在「未结算」、账本的积分永远补不上。登记在这里是
+    // 「函数存在但没人调用」这类事故的防线（见模块头）。
+    TaskSpec {
+        product: Product::Trae,
+        kind: TaskKind::CreditBackfill,
+        interval: CREDIT_BACKFILL_INTERVAL,
     },
     TaskSpec {
         product: Product::Qoder,
@@ -436,6 +478,7 @@ mod tests {
             TaskKind::AutoBackup => "TaskKind::AutoBackup =>",
             TaskKind::GatewayCatalogProbe => "TaskKind::GatewayCatalogProbe =>",
             TaskKind::GatewayUsageRecord => "TaskKind::GatewayUsageRecord =>",
+            TaskKind::CreditBackfill => "TaskKind::CreditBackfill =>",
             TaskKind::ClientUsageRecord => "TaskKind::ClientUsageRecord =>",
             TaskKind::Scheduled(_) => "TaskKind::Scheduled(",
         }
@@ -730,6 +773,7 @@ mod tests {
             TaskKind::AutoBackup,
             TaskKind::GatewayCatalogProbe,
             TaskKind::GatewayUsageRecord,
+            TaskKind::CreditBackfill,
             TaskKind::ClientUsageRecord,
             TaskKind::Scheduled(ScheduleTask::Checkin),
         ] {

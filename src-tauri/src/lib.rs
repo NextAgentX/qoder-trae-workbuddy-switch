@@ -186,6 +186,25 @@ fn spawn_background_task(spec: TaskSpec) {
                 );
             }
         },
+        // ★ Trae 逐请求积分回填（与服务端**同一实现、同一节奏**）：60 秒巡检一次日志。
+        //
+        // 没有 pending 条目时一轮上游请求都不发；单账号冷却 60 秒（与 tick 同频）。
+        TaskKind::CreditBackfill => {
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    let state = trae_gateway::shared_state();
+                    let _ = buddy_switch_gateway::trae::credit_backfill::run_once(
+                        &state,
+                        buddy_switch_gateway::trae::credit_backfill::Trigger::Auto,
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(
+                        buddy_switch_gateway::trae::credit_backfill::TICK_INTERVAL_MS,
+                    ))
+                    .await;
+                }
+            });
+        }
         // WorkBuddy 账号池治理状态落盘（只在有改动时真正写盘）。
         TaskKind::PoolPersist => {
             tauri::async_runtime::spawn(async move {
@@ -843,6 +862,8 @@ pub fn run() {
             commands::trae_launch_client,
             commands::get_trae_gateway_logs,
             commands::clear_trae_gateway_logs,
+            // 立即催一轮积分回填（后台另有 60 秒周期任务；这里是用户点「刷新」的入口）。
+            commands::refresh_trae_request_credits,
             // Qoder API 网关（管理面）—— 与上面两套网关命令平行（**一个监听两个区域**）。
             commands::get_qoder_gateway_config,
             commands::save_qoder_gateway_config,

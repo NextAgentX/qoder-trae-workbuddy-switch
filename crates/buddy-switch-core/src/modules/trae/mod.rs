@@ -126,6 +126,11 @@ pub mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod token_stats;
+/// 上游**逐请求用量明细**（积分回填的数据源）：请求、解析、批量匹配。
+///
+/// 只做「取数与匹配」，何时调用由网关侧
+/// `buddy_switch_gateway::trae::credit_backfill` 的后台循环决定。
+pub mod usage_detail;
 pub mod variant;
 
 /// Trae 上游：签到与积分接口基址（**CN 默认值**）。

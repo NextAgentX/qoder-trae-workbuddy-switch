@@ -250,6 +250,16 @@ export function normalizeTraeGatewayLogs(raw: unknown): TraeGatewayLogEntry[] {
         keyScope: Object.prototype.hasOwnProperty.call(entry, "keyScope")
           ? (asString(entry.keyScope) ?? null)
           : undefined,
+        /* ★ 积分回填三件套（2026-11-07）。与上面同一纪律：**保留「键不存在」**——
+           升级前的老条目既没有 `credit` 也没有 `creditState`，它们**不是**「待回填」，
+           而是「永远不会回填」（账单早已过期），前端不能把它们画成 `…`（那会让人一直等）。 */
+        id: asString(entry.id) ?? undefined,
+        credit: Object.prototype.hasOwnProperty.call(entry, "credit")
+          ? (asNumber(entry.credit) ?? null)
+          : undefined,
+        creditState: Object.prototype.hasOwnProperty.call(entry, "creditState")
+          ? (asString(entry.creditState) ?? null)
+          : undefined,
       };
     })
     .filter((item): item is TraeGatewayLogEntry => item !== null);

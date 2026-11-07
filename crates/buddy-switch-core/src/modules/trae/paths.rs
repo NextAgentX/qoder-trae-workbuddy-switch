@@ -425,6 +425,18 @@ pub fn api_gateway_log_file() -> PathBuf {
     trae_dir().join("api_gateway_logs.json")
 }
 
+/// 积分回填状态：**已消费的账单行键**（去重环）+ 每账号退避。
+///
+/// 与请求日志**分文件**：日志是「一条请求一行」的业务数据，本文件是回填器的
+/// 内部状态（可丢、可重建，丢了最多重复消费一行账单），混在一起会让日志页的
+/// 数据形状变得不可信。
+///
+/// **刻意不分变体**：与 [`api_gateway_log_file`] 同理 —— 网关单进程单端口，
+/// 状态按 `(variant, uid)` 键控，不由文件区分。
+pub fn credit_backfill_file() -> PathBuf {
+    trae_dir().join("credit_backfill.json")
+}
+
 /// API 网关的多 Key 库（数组；**只存 sha256 哈希 + 前缀**，明文仅创建时返回一次）。
 ///
 /// **刻意不分变体**：网关是单一进程、单一监听端口（57894），

@@ -201,6 +201,32 @@ export default function QoderApiServicePage() {
   };
   const logs = snapshot?.logs ?? [];
 
+  /** 手动「刷新请求日志」进行中（只重读列表，不打上游）。 */
+  const [refreshingLogs, setRefreshingLogs] = useState(false);
+
+  /**
+   * 只重取请求日志，`patch` 进快照。
+   *
+   * Qoder 的积分由上游在每次响应里直接回报（写入日志时已就位），不需要像 Trae
+   * 那样事后回填 ⇒ 刷新就是单纯重读；不重跑整份快照（配置 / 池 / 清单都不变）。
+   */
+  const refreshLogsOnly = useCallback(async () => {
+    const raw = await api.getQoderGatewayLogs();
+    patch((current) => ({ ...current, logs: normalizeQoderGatewayLogs(raw) }));
+  }, [patch]);
+
+  async function onRefreshLogs() {
+    if (refreshingLogs) return;
+    setRefreshingLogs(true);
+    try {
+      await refreshLogsOnly();
+    } catch (e) {
+      toast.error(t("qoder.gateway.logsRefreshFailed"), { description: api.asError(e) });
+    } finally {
+      setRefreshingLogs(false);
+    }
+  }
+
   /**
    * 限流探测卡（与 WB 网关页**同一个组件**）要的**账号轴 / 模型轴**。
    *
@@ -737,6 +763,9 @@ export default function QoderApiServicePage() {
               logs={logs}
               clearing={clearing}
               onClear={() => void onClearLogs()}
+              /* 只重读日志：Qoder 的积分随响应写入，不涉及上游回填。 */
+              onRefresh={() => void onRefreshLogs()}
+              refreshing={refreshingLogs}
               /* Qoder 上游逐请求回报 `usage.credits` ⇒ 多显示一列「积分」。
                  Trae 页不传这个取值函数（它的上游不回报，恒 0 会被误读成免费）。 */
               credit={(entry) => entry.credits}
