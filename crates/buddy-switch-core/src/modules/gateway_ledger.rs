@@ -67,6 +67,20 @@ const DEFAULT_LOG_KEEP: usize = 200;
 /// 账本里的 `model` 为空时的哨兵（前端翻成「未标注模型」，**不丢量**）。
 pub const UNKNOWN_MODEL: &str = "__unknown__";
 
+/// 未结算（`creditState == "pending"`）条目的**宽限期**：超过它就按已结算处理。
+///
+/// ## 为什么账本要自己有一条兜底时限
+///
+/// 正常路径上，回填器最迟 **15 分钟**就会把一条 pending 判成 `unmatched`
+/// （见 `buddy_switch_gateway::trae::credit_backfill::MAX_BACKFILL_AGE_MS`），
+/// 账本这才把被推迟的行补进来。但**账本不能把「增长」寄托在另一个模块永远正常**：
+/// 只要出现一条回填器解析不了的记录（例如新的 `variant` 字符串），它会一直是
+/// `pending`，而水位线卡在它前面 ⇒ 当天账本**永久停止增长**，且没有任何报错。
+///
+/// 取 30 分钟 = 回填器放弃时限的 2 倍：正常路径上永远轮不到它生效（不会抢在回填前
+/// 把积分记成 0），异常路径上最多让账本晚 30 分钟、而不是永远不动。
+pub const PENDING_GRACE_MS: i64 = 30 * 60_000;
+
 static LEDGER_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
@@ -385,6 +399,17 @@ struct Row {
     /// 命中上游前缀缓存的输入 token（`input` 的子集；缺字段 = 0 = 上游没报）。
     cached: u64,
     credit: f64,
+    /// 这一条的积分是否**已结算**（`false` = 等上游账单回填，见 `trae::credit_backfill`）。
+    ///
+    /// ## 为什么账本必须等它
+    ///
+    /// 账本是 `ts > watermark` 的**增量累加**：一条日志在回填前被摄入，它的积分就永远
+    /// 是当时的 `0`，之后再回填也补不回来（账本不会重读已过水位线的行）。
+    /// 所以未结算的行**整段推迟**摄入 —— 见 [`round`] 的 `floor`。
+    ///
+    /// 只有 Trae 的条目会是 `false`（`creditState == "pending"`）；WorkBuddy / Qoder
+    /// 的日志没有这个键 ⇒ 永远是 `true`，行为与改造前逐字一致。
+    settled: bool,
 }
 
 fn number_u64(value: &Value) -> Option<u64> {
@@ -432,8 +457,12 @@ fn scope_of(product: LedgerProduct, value: &Value) -> LedgerScope {
 
 /// 行的积分：`credit`（WB 口径）与 `credits`（Qoder 网关口径）都认。
 ///
-/// 两个键**都缺** ⇒ `0.0`（= 不知道，不是免费）。Trae 的网关日志目前不记 credit
-/// ⇒ 那张账本只有 token 维度，积分视图不会拿它冒充「网关积分消耗」。
+/// 两个键**都缺** ⇒ `0.0`（= 不知道，不是免费）。
+///
+/// Trae 的 `credit` 由后台**回填**（SSE 不回报积分，见 `trae::credit_backfill`）：
+/// 回填前该键是 `null`（`as_f64()` 得 `None` ⇒ 0），而这一行会被
+/// [`parse_rows`] 标成「未结算」、整段推迟摄入 —— 所以账本不会把「还不知道」
+/// 记成「0 积分」。
 fn row_credit(value: &Value) -> f64 {
     ["credit", "credits"]
         .iter()
@@ -442,7 +471,7 @@ fn row_credit(value: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn parse_rows(product: LedgerProduct, entries: &[Value]) -> Vec<Row> {
+fn parse_rows(product: LedgerProduct, entries: &[Value], now_ms: i64) -> Vec<Row> {
     entries
         .iter()
         .filter_map(|value| {
@@ -497,6 +526,18 @@ fn parse_rows(product: LedgerProduct, entries: &[Value]) -> Vec<Row> {
                 //   Anthropic 出口的协议换算里做。缺字段 / 老条目 = 0 = 没观测到。
                 cached: value.get("cachedTokens").and_then(number_u64).unwrap_or(0),
                 credit: row_credit(value),
+                // 只有显式 `pending` 才算未结算：**老条目没有这个键 ⇒ 已结算**，
+                // 否则升级后第一天整本账都会被「等一个永远不会来的回填」卡住。
+                //
+                // ⚠️ 再加一道**时间兜底**：`pending` 超过 [`PENDING_GRACE_MS`] 一律按
+                // 已结算处理。原因不是「应该放弃」（回填器自己在 15 分钟时就放弃了），
+                // 而是**账本绝不能因为一条异常条目永久停摆** —— 例如某天出现一个
+                // 回填器解析不了的 `variant`，那条记录会一直是 `pending`，而水位线
+                // 卡在它前面 ⇒ 当天的账本从此不再增长（静默、无报错）。
+                settled: match value.get("creditState").and_then(Value::as_str) {
+                    Some("pending") => ts + PENDING_GRACE_MS <= now_ms,
+                    _ => true,
+                },
             })
         })
         .collect()
@@ -530,12 +571,21 @@ struct Round {
     next_watermark: Option<i64>,
 }
 
-/// 只保留「本 scope + 本日 + `ts > since`」的行，并按 `key_of` 分桶。
+/// 只保留「本 scope + 本日 + `ts > since` + 未越过 `floor`」的行，并按 `key_of` 分桶。
+///
+/// `floor` = **最老一条未结算条目的 ts**（没有则为 `None`）。它是一条**硬上界**：
+/// 比它新的行（含它自身）一律不摄入，等回填结算后下一轮再从 `floor` 之前续上。
+///
+/// 为什么是「整段推迟」而不是「只跳过那一条」：账本是单水位线增量，若跳过中间一条
+/// 却把水位线推过它，那条记录**永远**进不了账（`ts > watermark` 再也命中不了）；
+/// 若水位线停在它前面却摄入它后面的行，下一轮那些行会被**重复累加**。整段推迟是
+/// 唯一既不会漏、也不会双计的形态，代价只是「回填延迟多少，账本就延迟多少」。
 fn bucket_rows(
     rows: &[Row],
     scope: LedgerScope,
     day: &str,
     since: Option<i64>,
+    floor: Option<i64>,
     key_of: impl Fn(&Row) -> String,
 ) -> BTreeMap<String, DimBucket> {
     let mut out: BTreeMap<String, DimBucket> = BTreeMap::new();
@@ -544,6 +594,9 @@ fn bucket_rows(
             continue;
         }
         if since.is_some_and(|watermark| row.ts <= watermark) {
+            continue;
+        }
+        if !row.settled || floor.is_some_and(|floor| row.ts >= floor) {
             continue;
         }
         let bucket = out.entry(key_of(row)).or_default();
@@ -565,20 +618,33 @@ fn round(rows: &[Row], scope: LedgerScope, day: &str, watermark: Option<i64>) ->
         None => Write::Correct,
     };
     let since = watermark;
-    let total = bucket_rows(rows, scope, day, since, |_| String::new())
+    // ★ 未结算（等积分回填）的最老一条：它是一条**硬上界**，见 `bucket_rows`。
+    let floor = rows
+        .iter()
+        .filter(|row| row.scope == scope && row.day == day && !row.settled)
+        .map(|row| row.ts)
+        .min();
+    let total = bucket_rows(rows, scope, day, since, floor, |_| String::new())
         .remove("")
         .unwrap_or_default();
     Round {
         write,
         total,
-        models: bucket_rows(rows, scope, day, since, |row| row.model.clone()),
-        accounts: bucket_rows(rows, scope, day, since, |row| row.account.clone()),
-        endpoints: bucket_rows(rows, scope, day, since, |row| row.endpoint.clone()),
-        keys: bucket_rows(rows, scope, day, since, |row| row.key.clone()),
+        models: bucket_rows(rows, scope, day, since, floor, |row| row.model.clone()),
+        accounts: bucket_rows(rows, scope, day, since, floor, |row| row.account.clone()),
+        endpoints: bucket_rows(rows, scope, day, since, floor, |row| row.endpoint.clone()),
+        keys: bucket_rows(rows, scope, day, since, floor, |row| row.key.clone()),
         next_watermark: match (
             watermark,
+            // 只拿**本 scope + 本日 + 已结算 + 未越过 floor** 的最大 ts ——
+            // 越过 floor 的行没被摄入，水位线也绝不能爬过它们。
             rows.iter()
-                .filter(|row| row.scope == scope && row.day == day)
+                .filter(|row| {
+                    row.scope == scope
+                        && row.day == day
+                        && row.settled
+                        && floor.is_none_or(|floor| row.ts < floor)
+                })
                 .map(|row| row.ts)
                 .max(),
         ) {
@@ -630,7 +696,7 @@ pub fn record(product: LedgerProduct, scope: LedgerScope) -> Value {
         oldest_day.as_deref(),
         &day,
     );
-    let rows = parse_rows(product, &entries);
+    let rows = parse_rows(product, &entries, at);
 
     let _guard = LEDGER_WRITE_LOCK.lock().unwrap();
     let mut store = load_store(product, scope);
@@ -884,6 +950,7 @@ mod tests {
                 output: 2,
                 cached: 9,
                 credit: 0.5,
+                settled: true,
             },
             Row {
                 ts: at_today(10),
@@ -898,6 +965,7 @@ mod tests {
                 output: 1,
                 cached: 0,
                 credit: 0.0,
+                settled: true,
             },
         ];
         let day = local_date_string(at_today(9)).unwrap();
@@ -952,12 +1020,106 @@ mod tests {
             output: 2,
             cached: 0,
             credit: 0.0,
+            settled: true,
         }];
         let first = round(&rows, LedgerScope::Cn, &day, None);
         assert_eq!(first.total.total(), 12);
         // 第二轮：水位线 = 上一轮最大 ts ⇒ 同一条不再计入。
         let second = round(&rows, LedgerScope::Cn, &day, first.next_watermark);
         assert_eq!(second.total.total(), 0, "已记账的条目不许重复加");
+    }
+
+    /// ★ 未结算（等积分回填）的行：**整段推迟**摄入，结算后**一次且仅一次**补上。
+    ///
+    /// 缺陷现场：Trae 的积分是事后回填的（上游出账晚 6–8 秒），若账本先把这条日志
+    /// 以 `credit=0` 摄入，积分就**永远**补不回来（单水位线增量不会重读旧行）。
+    ///
+    /// 本用例钉死三条：① pending 之前的行照常入账；② pending 之后的行不提前入账、
+    /// 且**不重复**入账；③ pending 结算后，补上的正好是那两条、一条不多。
+    ///
+    /// 可证伪：把 `bucket_rows` 里的 `floor` 判断删掉 ⇒ 第二轮会把 pending 之后的行
+    /// 先加一遍，第三轮再加一遍（`requests` 变 4 而不是 3）。
+    #[test]
+    fn pending_rows_defer_ingest_and_are_counted_once_after_settle() {
+        let base = at_today(9);
+        let day = local_date_string(base).unwrap();
+        let row = |ts: i64, credit: f64, settled: bool| Row {
+            ts,
+            day: day.clone(),
+            scope: LedgerScope::Cn,
+            account: "u1".into(),
+            model: "m1".into(),
+            endpoint: "/v1/chat/completions".into(),
+            key: "trae:k1".into(),
+            status: 200,
+            input: 10,
+            output: 2,
+            cached: 0,
+            credit,
+            settled,
+        };
+
+        let rows = vec![
+            row(base, 1.0, true),
+            row(base + 60_000, 0.0, false),
+            row(base + 120_000, 2.0, true),
+        ];
+
+        let first = round(&rows, LedgerScope::Cn, &day, None);
+        assert_eq!(first.total.requests, 1, "只摄入 pending 之前的那一条");
+        assert_eq!(first.total.credit, 1.0);
+        assert_eq!(
+            first.next_watermark,
+            Some(base),
+            "水位线不得爬过 pending（爬过去 = 那条账单永远进不了账）"
+        );
+
+        // pending 仍在：不得把后面的行先加一遍（否则下一轮会双计）。
+        let second = round(&rows, LedgerScope::Cn, &day, first.next_watermark);
+        assert_eq!(second.total.requests, 0, "pending 之后的行必须原地等待");
+        assert_eq!(second.next_watermark, first.next_watermark);
+
+        // 回填完成：后两条一次补上，第一条不重复。
+        let settled = vec![
+            row(base, 1.0, true),
+            row(base + 60_000, 0.5, true),
+            row(base + 120_000, 2.0, true),
+        ];
+        let third = round(&settled, LedgerScope::Cn, &day, second.next_watermark);
+        assert_eq!(third.total.requests, 2, "补的是被推迟的两条");
+        assert_eq!(third.total.credit, 2.5);
+        assert_eq!(third.next_watermark, Some(base + 120_000));
+    }
+
+    /// ★ 宽限期兜底：超过 [`PENDING_GRACE_MS`] 的 pending 按已结算处理。
+    ///
+    /// 没有这条兜底 → 一条回填器解析不了的记录会让水位线**永久**停在它前面，
+    /// 当天账本从此不再增长（静默、无报错）。这是「账本不能依赖另一个模块永远正常」
+    /// 的最小保险。
+    #[test]
+    fn stale_pending_rows_never_stall_the_ledger() {
+        let now = at_today(12);
+        let entry = |ts: i64| {
+            serde_json::json!({
+                "ts": ts,
+                "accountUid": "u1",
+                "model": "m1",
+                "status": 200,
+                "promptTokens": 1,
+                "completionTokens": 1,
+                "creditState": "pending",
+            })
+        };
+        let rows = parse_rows(
+            LedgerProduct::Trae,
+            &[entry(now - 60_000), entry(now - PENDING_GRACE_MS - 1)],
+            now,
+        );
+        assert!(!rows[0].settled, "宽限期内的 pending 必须等回填");
+        assert!(
+            rows[1].settled,
+            "超过宽限期的 pending 必须放行 —— 否则一条异常记录会把当天账本永久卡死"
+        );
     }
 
     /// 环形裁剪：窗口滚过去之后，已记的量不能倒退（`Correct` 只对缺失水位线的首次记录使用）。
@@ -979,6 +1141,7 @@ mod tests {
             output: 0,
             cached: 0,
             credit: 0.0,
+            settled: true,
         };
         let first = round(&[row(ts_early, 100)], LedgerScope::Cn, &day, None);
         let mut record = DayRecord::default();
