@@ -11,6 +11,7 @@
 //! 2. **`stream: false` 也要走这里**：上游只支持流式，非流式请求由 [`aggregate`]
 //!    在本地把事件流拼成单个 `chat.completion`。
 
+use std::collections::HashMap;
 use std::io;
 
 use axum::body::{Body, Bytes};
@@ -254,31 +255,239 @@ fn parse_event(event: &str, data: &str) -> SoloEvent {
     parsed
 }
 
-/// SOLO 的 `tool_calls` 转 OpenAI 形态：`function_call` → `function`，并去掉上游私有字段。
-fn convert_tool_calls(value: &Value) -> Vec<Value> {
-    let Some(calls) = value.as_array() else {
-        return Vec::new();
-    };
-    calls
-        .iter()
-        .map(|call| {
-            let mut call = call.clone();
-            let Some(object) = call.as_object_mut() else {
-                return call;
+/// 上游 `tool_calls` 的**增量累加器**（issue #172）。
+///
+/// SOLO 的 `tool_calls` 是**逐帧增量**：第一帧给 `id` + `function.name`，后续帧只给
+/// `function.arguments`（`id` / `name` 缺省或为空串）。改造前每一帧各自转换后
+/// **直接输出 / 追加**，同一个调用就落成两条残缺记录 —— 「有名无参」+「无名有参」。
+/// 客户端会把两条都判成非法调用（`arguments: ""` 解析失败、`name: ""` 找不到函数），
+/// 于是 Trae 线只能当纯对话用，agent 的工具链完全跑不动。
+///
+/// 槽位号是**对客户端稳定**的 `index`（按首次出现顺序分配），与上游 `index` 解耦：
+/// 上游可以不给 `index`，但 OpenAI / Anthropic 的流式分片必须靠 `index` 才能拼回一条。
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    slots: Vec<ToolCallSlot>,
+    /// 上游 `index` → 槽位号。
+    by_upstream: HashMap<i64, usize>,
+    /// 上游 `id` → 槽位号（重放同一帧时不能新开一条调用）。
+    by_id: HashMap<String, usize>,
+    /// 最近落位的槽位：上游既不给 `index` 也不给 `id` 的帧视为**续写**它。
+    last: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallSlot {
+    id: String,
+    name: String,
+    arguments: String,
+    /// 是否已经向客户端开过帧（流式路径只在首帧发 `id` / `type`）。
+    announced: bool,
+}
+
+/// 一条上游调用**在本帧新增**的字段（已去重：重复帧不会重复下发）。
+#[derive(Debug, Default)]
+struct Absorbed {
+    slot: usize,
+    id: Option<String>,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn push_slot(&mut self) -> usize {
+        self.slots.push(ToolCallSlot::default());
+        self.slots.len() - 1
+    }
+
+    /// 定位这条上游调用该落在哪个槽位。
+    fn slot_of(&mut self, call: &Value) -> usize {
+        if let Some(index) = call.get("index").and_then(Value::as_i64) {
+            let slot = match self.by_upstream.get(&index) {
+                Some(&slot) => slot,
+                None => {
+                    let slot = self.push_slot();
+                    self.by_upstream.insert(index, slot);
+                    slot
+                }
             };
-            if let Some(function) = object.remove("function_call") {
-                object.insert("function".into(), function);
+            self.last = Some(slot);
+            return slot;
+        }
+        /* 没有 `index`：带非空 `id` 的是**新**调用（除非这个 id 已经出现过 ——
+        那是整帧重放），否则是在续写上一次的调用（实测上游第二帧只给 `arguments`）。
+        这条判据是「不给 index 也不给 id 就无法区分并行调用」的已知边界，比按帧
+        新建槽位安全得多。 */
+        let id = call.get("id").and_then(Value::as_str).unwrap_or("");
+        if !id.is_empty() {
+            if let Some(&slot) = self.by_id.get(id) {
+                self.last = Some(slot);
+                return slot;
             }
-            if let Some(function) = object.get("function").and_then(Value::as_object).cloned() {
-                let mut clean = function;
-                // 这两个字段是上游内部的流式增量，OpenAI 客户端不认识。
-                clean.remove("namespace");
-                clean.remove("partial_arguments");
-                object.insert("function".into(), Value::Object(clean));
+        } else if let Some(slot) = self.last {
+            return slot;
+        }
+        let slot = self.push_slot();
+        self.last = Some(slot);
+        slot
+    }
+
+    /// 吸收一帧里的一条上游调用，返回本帧新增的字段。
+    fn absorb(&mut self, call: &Value) -> Absorbed {
+        let slot = self.slot_of(call);
+        // 上游两种键名都出现过（`function_call` 是 SOLO 原生的）。
+        let function = call
+            .get("function")
+            .or_else(|| call.get("function_call"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let mut absorbed = Absorbed {
+            slot,
+            ..Absorbed::default()
+        };
+
+        let id = call.get("id").and_then(Value::as_str).unwrap_or("");
+        if !id.is_empty() && self.slots[slot].id.is_empty() {
+            self.slots[slot].id = id.to_string();
+            self.by_id.insert(id.to_string(), slot);
+            absorbed.id = Some(id.to_string());
+        }
+
+        let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+        if !name.is_empty() {
+            /* 名字可能分帧发（少见）也可能整帧重复发（常见）：只下发**真正新增**
+            的那一段，否则客户端会把名字拼成 `get_weatherget_weather`。 */
+            let known = self.slots[slot].name.clone();
+            if let Some(tail) = name.strip_prefix(known.as_str()) {
+                absorbed.name = tail.to_string();
+                self.slots[slot].name = name.to_string();
+            } else if !known.starts_with(name) {
+                absorbed.name = name.to_string();
+                self.slots[slot].name.push_str(name);
             }
-            call
-        })
-        .collect()
+        }
+
+        if let Some(arguments) = function.get("arguments") {
+            // 上游偶尔把参数直接给成对象，统一成字符串再累加（参数必须逐段拼接）。
+            let text = match arguments {
+                Value::String(text) => text.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            /* 整帧重放（同 id 同 name 同参数）不能重复拼接 —— 否则参数会变成
+            `{}{}`，客户端解析必然失败。逐段增量不会与已累积值完全相等，所以这条
+            判据只吃掉重放，不吃正常拼接。 */
+            if !text.is_empty() && self.slots[slot].arguments != text {
+                self.slots[slot].arguments.push_str(&text);
+                absorbed.arguments = text;
+            }
+        }
+
+        absorbed
+    }
+
+    /// 非流式用：把一帧里的调用全部吸收（不关心「本帧新增」，收尾时统一取 [`merged`]）。
+    ///
+    /// [`merged`]: ToolCallAccumulator::merged
+    fn absorb_all(&mut self, value: &Value) {
+        if let Some(calls) = value.as_array() {
+            for call in calls {
+                self.absorb(call);
+            }
+        }
+    }
+
+    /// 是否真的产出过调用（空帧不算）。
+    fn has_calls(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| !slot.id.is_empty() || !slot.name.is_empty() || !slot.arguments.is_empty())
+    }
+
+    /// 流式：把一帧上游 `tool_calls` 转成 OpenAI `delta.tool_calls` 分片。
+    ///
+    /// 每个槽位只在**首帧**带 `id` / `type`，之后只带 `function` 里新增的部分 ——
+    /// 与 OpenAI 官方的增量形状一致，客户端按 `index` 拼接。
+    fn streaming_deltas(&mut self, value: &Value) -> Vec<Value> {
+        let Some(calls) = value.as_array() else {
+            return Vec::new();
+        };
+        let mut entries = Vec::with_capacity(calls.len());
+        for call in calls {
+            let absorbed = self.absorb(call);
+            let slot = &mut self.slots[absorbed.slot];
+            let has_payload = absorbed.id.is_some()
+                || !absorbed.name.is_empty()
+                || !absorbed.arguments.is_empty();
+            // 纯重复帧不下发空分片（否则客户端会看到一串空 tool_calls 增量）。
+            if slot.announced && !has_payload {
+                continue;
+            }
+            let mut entry = Map::new();
+            entry.insert("index".into(), json!(absorbed.slot));
+            if !slot.announced {
+                slot.announced = true;
+                entry.insert("type".into(), json!("function"));
+                /* `id` 是 Anthropic `tool_use` 块的必要字段：上游首帧通常带，
+                缺省时补一个稳定值，不能让客户端拿到空 id（那正是 #172 的第二条残缺记录）。 */
+                let id = if slot.id.is_empty() {
+                    format!("call_{}", absorbed.slot)
+                } else {
+                    slot.id.clone()
+                };
+                entry.insert("id".into(), json!(id));
+            } else if let Some(id) = absorbed.id {
+                // 晚到的真 id 补发一次；已开的块不会被重命名，但非流式客户端会读到它。
+                entry.insert("id".into(), json!(id));
+            }
+            let mut function = Map::new();
+            if !absorbed.name.is_empty() {
+                function.insert("name".into(), json!(absorbed.name));
+            }
+            if !absorbed.arguments.is_empty() {
+                function.insert("arguments".into(), json!(absorbed.arguments));
+            }
+            if !function.is_empty() {
+                entry.insert("function".into(), Value::Object(function));
+            }
+            entries.push(Value::Object(entry));
+        }
+        entries
+    }
+
+    /// 非流式：把累加结果拼成 `message.tool_calls`（每条都是**完整**调用）。
+    fn merged(&self) -> Vec<Value> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                !slot.id.is_empty() || !slot.name.is_empty() || !slot.arguments.is_empty()
+            })
+            .map(|(index, slot)| {
+                let id = if slot.id.is_empty() {
+                    format!("call_{index}")
+                } else {
+                    slot.id.clone()
+                };
+                json!({
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": slot.name, "arguments": slot.arguments },
+                })
+            })
+            .collect()
+    }
+}
+
+/// 工具调用存在时，`finish_reason` 必须是 `tool_calls`。
+///
+/// 上游 `done` 事件固定报 `stop`，于是客户端拿到 `stop_reason=end_turn` 就把工具结果
+/// 丢弃（issue #172 的 Anthropic 侧症状）。`length` / `content_filter` 等其它原因不覆盖。
+fn promote_tool_finish(finish: &str, has_calls: bool) -> String {
+    if has_calls && (finish.is_empty() || finish == "stop") {
+        return "tool_calls".to_string();
+    }
+    finish.to_string()
 }
 
 /// 构造一个 OpenAI `chat.completion.chunk` 的 `data:` 行。
@@ -352,6 +561,8 @@ pub async fn stream_convert(
     let mut parser = SoloParser::new();
     let mut outcome = StreamOutcome::default();
     let mut pending_usage: Option<TokenUsage> = None;
+    // ★ issue #172：工具调用必须**跨帧累加**，按帧各自输出会被拆成残缺条目。
+    let mut tools = ToolCallAccumulator::default();
     let mut stream = response.bytes_stream();
 
     while let Some(item) = stream.next().await {
@@ -379,6 +590,7 @@ pub async fn stream_convert(
                 chat_id,
                 model,
                 &mut pending_usage,
+                &mut tools,
                 &mut outcome,
             )
             .await
@@ -397,6 +609,7 @@ pub async fn stream_convert(
             chat_id,
             model,
             &mut pending_usage,
+            &mut tools,
             &mut outcome,
         )
         .await
@@ -443,6 +656,7 @@ async fn emit(
     chat_id: &str,
     model: &str,
     pending_usage: &mut Option<TokenUsage>,
+    tools: &mut ToolCallAccumulator,
     outcome: &mut StreamOutcome,
 ) -> Result<(), ()> {
     match event.event.as_str() {
@@ -455,7 +669,7 @@ async fn emit(
                 delta.insert("reasoning_content".into(), json!(event.reasoning));
             }
             if let Some(calls) = &event.tool_calls {
-                let converted = convert_tool_calls(calls);
+                let converted = tools.streaming_deltas(calls);
                 if !converted.is_empty() {
                     delta.insert("tool_calls".into(), json!(converted));
                 }
@@ -480,7 +694,9 @@ async fn emit(
             } else {
                 event.finish_reason.as_str()
             };
-            let line = chunk_line(chat_id, model, json!({}), finish, *pending_usage);
+            // ★ issue #172：上游固定报 `stop`，有工具调用时必须改口成 `tool_calls`。
+            let finish = promote_tool_finish(finish, tools.has_calls());
+            let line = chunk_line(chat_id, model, json!({}), &finish, *pending_usage);
             sender.send(Ok(Bytes::from(line))).await.map_err(|_| ())?;
             sender
                 .send(Ok(Bytes::from(done_line().to_string())))
@@ -538,7 +754,8 @@ pub async fn aggregate(
     let mut finish_reason = "stop".to_string();
     let mut usage = TokenUsage::default();
     let mut error: Option<(i64, String)> = None;
-    let mut tool_calls: Vec<Value> = Vec::new();
+    // ★ issue #172：同一条调用会被拆到多帧 ⇒ 非流式也必须累加后再输出。
+    let mut tools = ToolCallAccumulator::default();
     let mut stream = response.bytes_stream();
 
     let consume = |event: SoloEvent,
@@ -547,13 +764,13 @@ pub async fn aggregate(
                    finish_reason: &mut String,
                    usage: &mut TokenUsage,
                    error: &mut Option<(i64, String)>,
-                   tool_calls: &mut Vec<Value>| {
+                   tools: &mut ToolCallAccumulator| {
         match event.event.as_str() {
             "output" | "thought" => {
                 content.push_str(&event.response);
                 reasoning.push_str(&event.reasoning);
                 if let Some(calls) = &event.tool_calls {
-                    tool_calls.extend(convert_tool_calls(calls));
+                    tools.absorb_all(calls);
                 }
             }
             "token_usage" => {
@@ -595,7 +812,7 @@ pub async fn aggregate(
                 &mut finish_reason,
                 &mut usage,
                 &mut error,
-                &mut tool_calls,
+                &mut tools,
             );
         }
     }
@@ -607,13 +824,16 @@ pub async fn aggregate(
             &mut finish_reason,
             &mut usage,
             &mut error,
-            &mut tool_calls,
+            &mut tools,
         );
     }
 
     if let Some((code, message)) = error {
         return (None, Some((code, message)), usage);
     }
+
+    let tool_calls = tools.merged();
+    let finish_reason = promote_tool_finish(&finish_reason, !tool_calls.is_empty());
 
     let mut message = Map::new();
     message.insert("role".into(), json!("assistant"));
@@ -861,16 +1081,168 @@ mod tests {
         assert_eq!(usage["prompt_tokens"], 1000, "prompt 仍是原值（含命中）");
     }
 
+    /// ★ issue #172：上游把一次调用拆到两帧（先 `name`、后 `arguments`），
+    /// 累加后必须只剩**一条完整**调用 —— 改造前会落成「有名无参」+「无名有参」两条。
     #[test]
-    fn tool_call_conversion_strips_private_fields() {
-        let converted = convert_tool_calls(&json!([
-            {"id": "1", "function_call": {"name": "f", "arguments": "{}", "namespace": "x", "partial_arguments": "y"}}
+    fn tool_calls_merge_when_upstream_splits_them_across_frames() {
+        let mut tools = ToolCallAccumulator::default();
+        let first = tools.streaming_deltas(&json!([
+            {"id": "call_00_a", "type": "function", "function_call": {"name": "get_weather"}}
         ]));
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0]["function"]["name"], "f");
-        assert!(converted[0]["function"].get("namespace").is_none());
-        assert!(converted[0]["function"].get("partial_arguments").is_none());
-        assert!(converted[0].get("function_call").is_none());
+        assert_eq!(first.len(), 1, "首帧只有一条增量");
+        assert_eq!(first[0]["index"], 0);
+        assert_eq!(first[0]["id"], "call_00_a");
+        assert_eq!(first[0]["type"], "function");
+        assert_eq!(first[0]["function"]["name"], "get_weather");
+        assert!(
+            first[0]["function"].get("arguments").is_none(),
+            "首帧没有参数，不得写空串"
+        );
+
+        // 第二帧：没 id、没 name、没 index，只有参数 —— 必须续写到同一个槽位。
+        let second = tools.streaming_deltas(&json!([
+            {"function_call": {"arguments": "{\"city\": \"北京\"}"}}
+        ]));
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0]["index"], 0, "同一个调用必须是同一个 index");
+        assert_eq!(second[0]["function"]["arguments"], "{\"city\": \"北京\"}");
+        assert!(second[0].get("id").is_none(), "id 只在首帧下发");
+
+        let merged = tools.merged();
+        assert_eq!(merged.len(), 1, "一次调用只能是一条");
+        assert_eq!(merged[0]["id"], "call_00_a");
+        assert_eq!(merged[0]["function"]["name"], "get_weather");
+        assert_eq!(merged[0]["function"]["arguments"], "{\"city\": \"北京\"}");
+        assert!(merged[0].get("index").is_none(), "非流式不带 index");
+        // 上游私有字段不外泄（`function_call` 已归一成 `function`）。
+        assert!(merged[0].get("function_call").is_none());
+    }
+
+    /// 并行调用：上游带 `index` 时必须各归各位，不能因为「参数交替到达」串到一起。
+    #[test]
+    fn parallel_tool_calls_keep_their_own_slots() {
+        let mut tools = ToolCallAccumulator::default();
+        tools.streaming_deltas(&json!([
+            {"index": 0, "id": "call_a", "function_call": {"name": "get_weather"}},
+            {"index": 1, "id": "call_b", "function_call": {"name": "get_time"}},
+        ]));
+        tools.streaming_deltas(&json!([
+            {"index": 1, "function_call": {"arguments": "{\"tz\":\"UTC\"}"}}
+        ]));
+        let tail = tools.streaming_deltas(&json!([
+            {"index": 0, "function_call": {"arguments": "{\"city\":\"上海\"}"}}
+        ]));
+        assert_eq!(tail[0]["index"], 0);
+
+        let merged = tools.merged();
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0]["function"]["name"], "get_weather");
+        assert_eq!(merged[0]["function"]["arguments"], "{\"city\":\"上海\"}");
+        assert_eq!(merged[1]["function"]["name"], "get_time");
+        assert_eq!(merged[1]["function"]["arguments"], "{\"tz\":\"UTC\"}");
+    }
+
+    /// 上游整帧重复发（同 id / 同 name）时不得重复下发，也不得把名字拼两遍。
+    #[test]
+    fn repeated_tool_call_frames_are_idempotent() {
+        let mut tools = ToolCallAccumulator::default();
+        let frame = json!([
+            {"id": "call_x", "function_call": {"name": "f", "arguments": "{}"}}
+        ]);
+        assert_eq!(tools.streaming_deltas(&frame).len(), 1);
+        assert!(
+            tools.streaming_deltas(&frame).is_empty(),
+            "纯重复帧不得再下发空分片"
+        );
+        let merged = tools.merged();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["function"]["name"], "f");
+        assert_eq!(merged[0]["function"]["arguments"], "{}");
+    }
+
+    /// 缺 `id` 时必须补一个稳定值：Anthropic 的 `tool_use` 块没有 id 就无法回填结果。
+    #[test]
+    fn tool_call_without_id_gets_a_stable_placeholder() {
+        let mut tools = ToolCallAccumulator::default();
+        let delta = tools.streaming_deltas(&json!([
+            {"function_call": {"name": "f", "arguments": "{}"}}
+        ]));
+        assert_eq!(delta[0]["id"], "call_0");
+        assert_eq!(tools.merged()[0]["id"], "call_0");
+    }
+
+    /// ★ issue #172：有工具调用时 `finish_reason` 必须是 `tool_calls`，
+    /// 否则 Anthropic 侧映射成 `end_turn`，客户端直接丢弃工具结果。
+    #[test]
+    fn finish_reason_promotes_to_tool_calls_only_for_stop() {
+        assert_eq!(promote_tool_finish("stop", true), "tool_calls");
+        assert_eq!(promote_tool_finish("", true), "tool_calls");
+        assert_eq!(promote_tool_finish("stop", false), "stop");
+        assert_eq!(promote_tool_finish("length", true), "length");
+        assert_eq!(
+            promote_tool_finish("content_filter", true),
+            "content_filter"
+        );
+    }
+
+    /// 端到端（流式）：上游两帧 → 客户端分片按 `index` 能拼回一条完整调用，
+    /// 且结束帧的 `finish_reason` 是 `tool_calls`（不是上游报的 `stop`）。
+    #[tokio::test]
+    async fn stream_emits_indexed_tool_call_deltas() {
+        let body = concat!(
+            "id:1\nevent:output\ndata:{\"tool_calls\":[{\"id\":\"call_00_a\",\"function_call\":{\"name\":\"get_weather\"}}]}\n\n",
+            "id:2\nevent:output\ndata:{\"tool_calls\":[{\"function_call\":{\"arguments\":\"{}\"}}]}\n\n",
+            "id:3\nevent:done\ndata:{\"finish_reason\":\"stop\"}\n\n",
+        );
+        let mut parser = SoloParser::new();
+        let mut events = parser.feed(body.as_bytes());
+        events.extend(parser.finish());
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut tools = ToolCallAccumulator::default();
+        let mut outcome = StreamOutcome::default();
+        let mut pending: Option<TokenUsage> = None;
+        for event in &events {
+            emit(
+                event,
+                tx.clone(),
+                "id",
+                "m",
+                &mut pending,
+                &mut tools,
+                &mut outcome,
+            )
+            .await
+            .unwrap();
+        }
+        drop(tx);
+
+        let mut joined = String::new();
+        while let Some(item) = rx.recv().await {
+            joined.push_str(&String::from_utf8(item.unwrap().to_vec()).unwrap());
+        }
+
+        let chunks: Vec<Value> = joined
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter(|payload| *payload != "[DONE]")
+            .map(|payload| serde_json::from_str::<Value>(payload).unwrap())
+            .collect();
+        assert_eq!(chunks.len(), 3, "两帧工具增量 + 一帧结束");
+
+        let first = &chunks[0]["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(first["index"], 0);
+        assert_eq!(first["id"], "call_00_a");
+        assert_eq!(first["function"]["name"], "get_weather");
+
+        let second = &chunks[1]["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(second["index"], 0, "续写同一调用，index 必须一致");
+        assert_eq!(second["function"]["arguments"], "{}");
+
+        assert_eq!(
+            chunks[2]["choices"][0]["finish_reason"], "tool_calls",
+            "有工具调用时不得再报 stop"
+        );
     }
 
     #[test]
@@ -932,6 +1304,7 @@ mod tests {
             "id:3\nevent:token_usage\ndata:{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}\n\n",
             "id:4\nevent:done\ndata:{\"finish_reason\":\"stop\"}\n\n",
         );
+        let mut tools = ToolCallAccumulator::default();
         for event in parser.feed(raw.as_bytes()) {
             emit(
                 &event,
@@ -939,6 +1312,7 @@ mod tests {
                 "chatcmpl-1",
                 "glm-5.3",
                 &mut pending,
+                &mut tools,
                 &mut outcome,
             )
             .await
@@ -972,6 +1346,7 @@ mod tests {
         let mut pending: Option<TokenUsage> = None;
 
         let raw = "id:1\nevent:error\ndata:{\"code\":1005,\"message\":\"plan limit\"}\n\n";
+        let mut tools = ToolCallAccumulator::default();
         for event in parser.feed(raw.as_bytes()) {
             emit(
                 &event,
@@ -979,6 +1354,7 @@ mod tests {
                 "chatcmpl-2",
                 "m",
                 &mut pending,
+                &mut tools,
                 &mut outcome,
             )
             .await
