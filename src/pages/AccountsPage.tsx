@@ -299,9 +299,12 @@ function RegionPanel({ region }: { region: Region }) {
    * （切换向导是桌面版迁移；插件会话是一次性单向复制），共用一个状态会让
    * 「关掉一个却打开了另一个」这种缺陷无法表达。
    */
-  const [extDrawer, setExtDrawer] = useState<{ client: ExtClientId; account: AccountMeta } | null>(
-    null,
-  );
+  const [extDrawer, setExtDrawer] = useState<{
+    client: ExtClientId;
+    account: AccountMeta;
+    /** ★ issue #86：从「切换成功」的 toast 进来时预选刚切到的账号（见 `ExtSessionDrawer`）。 */
+    targetId?: string;
+  } | null>(null);
   /**
    * 待确认的客户端切换目标（P8 T03 / §3.15.3）。
    *
@@ -1244,6 +1247,13 @@ function RegionPanel({ region }: { region: Region }) {
   /** 用户在确认框里点了确认后，真正执行 IDE 切换（`restart` 由确认框决定）。 */
   async function doSwitchCodebuddyCnIde(account: AccountMeta, restart: boolean) {
     if (codebuddyCnIdeSwitchingId !== null) return;
+    /* ★ issue #86：切换**之后** IDE 的当前账号就变成目标账号，那时再回头找「切换前是谁」
+       已经找不到了 —— 所以先记下来，成功后用它作为「复制会话」的来源。
+       （只读状态，不参与任何写动作；拿不到就整条不给入口，不猜。） */
+    const previousId = codebuddyCnIde?.activeAccountId ?? null;
+    const previousAccount = previousId
+      ? (accounts.find((item) => item.id === previousId) ?? null)
+      : null;
     setCodebuddyCnIdeSwitchingId(account.id);
     const toastId = toast.loading(t("wbAccounts.toast.switchIdeLoading"), {
       // 取消勾选「自动重开」时**不得**说「并重启」—— 那是假承诺（§3.5）。
@@ -1256,9 +1266,23 @@ function RegionPanel({ region }: { region: Region }) {
     try {
       const result = await api.switchCodebuddyCnIdeAccount(account.id, restart);
       await refreshCodebuddyCnIdeStatus();
+      /* ★ issue #86 方案 B：**不自动复制**（写数据必须用户显式点），只在切换成功的提示里
+         给一个入口。来源是切换前的账号，目标预选刚切到的这个 —— 用户点开就能直接确认。 */
+      const canCopySessions = Boolean(previousAccount && previousAccount.id !== account.id);
       toast.success(t("wbAccounts.toast.switchIdeUpdated"), {
         id: toastId,
         description: result.message || result.account,
+        action: canCopySessions
+          ? {
+              label: t("wbAccounts.toast.switchIdeCopySessions"),
+              onClick: () =>
+                setExtDrawer({
+                  client: "codebuddy-ide",
+                  account: previousAccount!,
+                  targetId: account.id,
+                }),
+            }
+          : undefined,
       });
     } catch (error) {
       toast.error(t("wbAccounts.toast.switchIdeFail"), {
@@ -2653,6 +2677,7 @@ function RegionPanel({ region }: { region: Region }) {
           }}
           client={extDrawer.client}
           account={extDrawer.account}
+          initialTargetId={extDrawer.targetId}
           /* 目标候选 = 本区域**除源账号以外**的全部账号（不写死列表）。 */
           targets={accounts.filter((item) => item.id !== extDrawer.account.id)}
         />
