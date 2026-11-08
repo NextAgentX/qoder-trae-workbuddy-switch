@@ -204,7 +204,15 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
       icon: Coins,
       label: t("wbStats.usage.credits.available"),
       value: formatCredits(merged.total),
-      hint: t("wbStats.usage.credits.accountsHint", { count: merged.rows.length }),
+      /* ★ issue #186：`total` 是**部分和**（未知额度的账号不进），把未知数写进 hint，
+         否则「总计 0」会被读成「所有账号都没额度」。 */
+      hint:
+        merged.unknownCount > 0
+          ? t("trae.stats.credits.accountsHintPartial", {
+              count: merged.rows.length,
+              unknown: merged.unknownCount,
+            })
+          : t("wbStats.usage.credits.accountsHint", { count: merged.rows.length }),
     },
     {
       icon: TrendingUp,

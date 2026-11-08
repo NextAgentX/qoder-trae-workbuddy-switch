@@ -129,6 +129,8 @@ export const zh = {
   "trae.stats.credits.overviewAria": "积分总览",
 
   // ---- 统计卡的三条副标题（原型：签到奖励 / 净 ±Y / 最早 D+N 天后）----
+  /* ★ issue #186：`total` 是部分和（额度不可解析的账号不计入），必须把未知数说出来。 */
+  "trae.stats.credits.accountsHintPartial": "{count} 个账号 · 其中 {unknown} 个额度未知（未计入）",
   "trae.stats.credits.inHint": "签到入账",
   "trae.stats.credits.netHint": "净 {net}",
   "trae.stats.credits.soonestHint": "最早 {days} 天后",

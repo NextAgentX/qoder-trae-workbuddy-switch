@@ -1376,8 +1376,18 @@ export default function TraeAccountsPage() {
   const traeAccountName = (account: TraeAccount): string =>
     displayText(account.name) || `UID · ${displayText(account.userId) ?? "—"}`;
 
-  /** Trae 账号可用积分（`remainingCredits` 优先，回落 `credits`）。 */
-  const traeCredits = (account: TraeAccount): number => account.remainingCredits ?? account.credits ?? 0;
+  /**
+   * Trae 账号可用积分 —— **未知就是 `null`，不要回落成 0**（issue #186）。
+   *
+   * 后端在「额度不可解析」时会把缓存里的旧值清掉（Free / SOLO 账户的权益包里没有
+   * `credits_limit`），此时两个字段都是空。回落 0 会让表格显示「0 积分」——
+   * 与卡片刚修掉的那句谎报是同一个问题，只是换了个渲染位置。
+   */
+  const traeCreditsOrNull = (account: TraeAccount): number | null =>
+    account.remainingCredits ?? account.credits ?? null;
+
+  /** 排序用数值版（未知按 0 参与「积分优先」排序 ⇒ 落在最后，符合直觉）。 */
+  const traeCredits = (account: TraeAccount): number => traeCreditsOrNull(account) ?? 0;
 
   /**
    * 列表视图配置 —— 平台差异**全部以数据表达**（`P4-TOOLBAR-ARCH §3.1`）。
@@ -1583,7 +1593,15 @@ export default function TraeAccountsPage() {
       key: "credits",
       header: t("trae.page.accounts.table.credits"),
       align: "right",
-      render: (account) => <span className="tabular-nums">{formatCredits(traeCredits(account))}</span>,
+      // ★ issue #186：未知（后端清了缓存）显示「—」，不显示 0。
+      render: (account) => {
+        const value = traeCreditsOrNull(account);
+        return (
+          <span className="tabular-nums">
+            {value === null ? "—" : formatCredits(value)}
+          </span>
+        );
+      },
     },
     {
       key: "expiry",

@@ -125,6 +125,8 @@ export const en = {
   "trae.stats.credits.overviewAria": "Credits overview",
 
   // ---- Stat-tile captions (prototype: check-in reward / net ±Y / earliest in D+N days) ----
+  /* issue #186: `total` is a partial sum (unparseable balances are excluded). */
+  "trae.stats.credits.accountsHintPartial": "{count} accounts · {unknown} with unknown balance (excluded)",
   "trae.stats.credits.inHint": "Check-in rewards",
   "trae.stats.credits.netHint": "Net {net}",
   "trae.stats.credits.soonestHint": "Earliest in {days} days",

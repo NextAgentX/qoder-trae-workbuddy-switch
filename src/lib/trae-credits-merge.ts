@@ -81,8 +81,16 @@ export interface TraeCreditsRecord {
 
 export interface TraeCreditsMerged {
   rows: TraeCreditsRow[];
-  /** 各账号可用积分之和（`credits === null` 的行不计入）。 */
+  /** 各账号可用积分之和（`credits === null` 的行不计入 —— 见 `unknownCount`）。 */
   total: number;
+  /**
+   * 额度**未知**的账号数（`credits === null`）。
+   *
+   * 后端在「额度不可解析」时会清掉缓存（Free / SOLO 账户的权益包里没有 `credits_limit`，
+   * issue #186）。这些行不进 `total`，所以 `total` 是**部分和** —— 必须把这个数告诉界面，
+   * 否则「总计 0」会被读成「所有账号都没额度」。
+   */
+  unknownCount: number;
   /** 按日期升序的每日快照（两区同日相加）。 */
   daily: TraeCreditsDaily[];
   /** 积分流水（按日期**降序**，两区合并；行键带区域前缀）。 */
@@ -177,6 +185,7 @@ export function mergeTraeCredits(slices: TraeRegionSlice[]): TraeCreditsMerged {
   return {
     rows,
     total: rows.reduce((sum, row) => sum + (row.credits ?? 0), 0),
+    unknownCount: rows.filter((row) => row.credits === null).length,
     daily,
     records,
     updatedAt,
