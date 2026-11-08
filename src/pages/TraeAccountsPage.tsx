@@ -1549,6 +1549,8 @@ export default function TraeAccountsPage() {
 
   /** 表格「到期」列：积分到期（无到期时间 → 「长期有效」）。 */
   function formatAccountExpiry(account: TraeAccount): string {
+    // ★ issue #186：余额未知时不能说「长期有效」—— 那是断言，而我们没读到额度包。
+    if (traeCreditsOrNull(account) === null) return "—";
     return account.creditsExpireAt
       ? t("trae.comp.card.expiry.short", { date: shortTime(account.creditsExpireAt) })
       : t("trae.comp.card.expiry.permanent");

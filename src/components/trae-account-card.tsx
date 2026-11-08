@@ -635,7 +635,11 @@ export function TraeAccountCard({
       <span>
         {t("trae.comp.card.metric.expiry")}{" "}
         <b className="font-semibold tabular-nums text-foreground">
-          {formatExpiryDate(account.creditsExpireAt) ?? t("trae.comp.card.expiry.permanent")}
+          {/* ★ issue #186：余额未知时**不能**说「长期有效」——「没有到期时间」是一个断言，
+              而我们其实根本没读到额度包。未知就写未知。 */}
+          {hasCredits
+            ? (formatExpiryDate(account.creditsExpireAt) ?? t("trae.comp.card.expiry.permanent"))
+            : "—"}
         </b>
       </span>
       {todayTokens ? (
