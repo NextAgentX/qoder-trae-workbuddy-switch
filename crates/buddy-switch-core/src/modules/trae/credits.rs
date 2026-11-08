@@ -362,6 +362,50 @@ pub struct CreditPackage {
 /// （`trae.comp.card.chip.expiring` 写的是「N 天内过期」，由本窗口决定 N 的上界）。
 const EXPIRING_SOON_SECS: i64 = 14 * 24 * 3600;
 
+/// 「这份响应里**一个可解析的额度包都没有**」的原因前缀（issue #186）。
+///
+/// ## 为什么要能识别它
+///
+/// `credits_limit` 只描述**积分制**额度。Free / SOLO 这类账户的权益包里**根本没有**
+/// 这个字段（额度是「快请求/月」这类维度，在另一个接口里），旧实现把「读不到」当成
+/// 「0 积分」写进缓存 ⇒ 卡片显示「积分 0 / 长期有效」，用户以为额度被清空了。
+/// 缺失 ≠ 0（参考实现 `reference/agent2api-main` 的 `usage.rs` 专门修过同一个 bug）。
+///
+/// 因此这种响应**不写缓存**：把该账号的余额标成未知（卡片显示「—」），
+/// 并在应用日志里留下**结构特征**（键名，不含取值），下次报障一句就能定死。
+pub const NO_QUOTA_REASON: &str = "上游权益包里没有可解析的 credits_limit";
+
+/// 描述响应结构（**只给键名，不给取值**）：用于「为什么读不到额度」的诊断。
+pub fn quota_shape_hint(packs: &[Value]) -> String {
+    let pack_keys = packs
+        .first()
+        .and_then(Value::as_object)
+        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    let quota_keys = packs
+        .first()
+        .and_then(|pack| pack.get("entitlement_base_info"))
+        .and_then(|base| base.get("quota"))
+        .and_then(Value::as_object)
+        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    format!(
+        "包数={}，首个包的键=[{pack_keys}]，quota 键=[{quota_keys}]",
+        packs.len()
+    )
+}
+
+/// 这批包里**是否有**可解析的额度（`entitlement_base_info.quota.credits_limit` 存在）。
+pub fn has_parseable_quota(packs: &[Value]) -> bool {
+    packs.iter().any(|pack| {
+        pack.get("entitlement_base_info")
+            .and_then(|info| info.get("quota"))
+            .and_then(|quota| quota.get("credits_limit"))
+            .and_then(Value::as_f64)
+            .is_some()
+    })
+}
+
 /// 由一组 `user_entitlement_pack_list` 元素解析逐包明细（纯函数，便于单测）。
 ///
 /// 只统计 `entitlement_base_info.quota.credits_limit` 存在的包（与聚合口径一致）：
@@ -815,6 +859,18 @@ pub async fn calc_remaining_credits(
         .and_then(|value| value.as_array())
         .ok_or("响应中缺少 user_entitlement_pack_list")?;
 
+    // ★ issue #186：包里**一个额度字段都没有** ≠ 余额为 0。
+    //   典型是 Free / SOLO 账户：积分制额度不在这份响应里。此时**不写缓存**
+    //   （调用方据此把该账号标成「未知」），并把结构特征写进日志。
+    if !packs.is_empty() && !has_parseable_quota(packs) {
+        let hint = quota_shape_hint(packs);
+        store::append_log(
+            &paths::app_log_file(),
+            &format!("积分读数跳过：{NO_QUOTA_REASON}（{hint}）"),
+        );
+        return Err(format!("{NO_QUOTA_REASON}（{hint}）"));
+    }
+
     // 固定 UTC+8：上游时间戳按北京时间切日，若用本地时区，
     // 身处非 +08 时区的用户会算错「今日购买」。
     let cst = chrono::FixedOffset::east_opt(8 * 3600).expect("valid offset");
@@ -946,7 +1002,23 @@ pub async fn refresh_remaining_for_variant(
     user_id: &str,
 ) -> Result<f64, String> {
     let account = crate::modules::trae::account::find_for(variant, user_id).ok_or("账号不存在")?;
-    let (credits, expire_at, _purchased, packages) = calc_remaining_credits(&account.jwt).await?;
+    let (credits, expire_at, _purchased, packages) =
+        match calc_remaining_credits(&account.jwt).await {
+            Ok(values) => values,
+            Err(error) => {
+                // ★ issue #186：「额度不可解析」不是失败，是**这个账号不走积分口径**。
+                //   此时必须清掉旧值 —— 留着一个过期的 0 会让卡片继续撒谎（显示「积分 0」）。
+                if error.starts_with(NO_QUOTA_REASON) {
+                    let mut remaining = load_remaining_for(variant);
+                    remaining.credits.remove(user_id);
+                    remaining.expire_times.remove(user_id);
+                    remaining.packages.remove(user_id);
+                    remaining.updated_at = Some(store::now_iso());
+                    let _ = save_remaining_for(variant, &remaining);
+                }
+                return Err(error);
+            }
+        };
     let mut remaining = load_remaining_for(variant);
     remaining.credits.insert(user_id.to_string(), credits);
     if let Some(expire_at) = expire_at {
@@ -1014,6 +1086,12 @@ pub async fn refresh_all_remaining_for(variant: TraeVariant) -> usize {
                 }
             }
             Err(error) => {
+                // ★ issue #186：额度不可解析 ⇒ 清掉旧值（卡片显示「—」而不是「0」）。
+                if error.starts_with(NO_QUOTA_REASON) {
+                    remaining.credits.remove(uid);
+                    remaining.expire_times.remove(uid);
+                    remaining.packages.remove(uid);
+                }
                 store::append_log(
                     &paths::app_log_file(),
                     &format!(
@@ -1225,6 +1303,50 @@ pub fn clear_all_cooldowns_for(variant: TraeVariant) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    /// ★ issue #186：`credits_limit: 0`（真的是 0 积分）与**没有这个字段**（Free/SOLO
+    /// 不走积分口径）必须分开 —— 混为一谈就是把「不知道」写成「0」，卡片会撒谎。
+    #[test]
+    fn quota_detection_distinguishes_zero_from_missing() {
+        // 有字段、值为 0 ⇒ 可解析（真的是 0）。
+        assert!(super::has_parseable_quota(&[json!({
+            "entitlement_base_info": { "quota": { "credits_limit": 0 } }
+        })]));
+        // 有 quota 但没有 credits_limit（Free/SOLO 形态）⇒ 不可解析。
+        assert!(!super::has_parseable_quota(&[json!({
+            "entitlement_base_info": { "quota": { "fast_request_limit": 50 } }
+        })]));
+        // 连 entitlement_base_info 都没有 ⇒ 不可解析。
+        assert!(!super::has_parseable_quota(&[
+            json!({ "group_name": "free" })
+        ]));
+        // 空列表由调用方判（`packs.is_empty()` 不算这个错误）。
+        assert!(!super::has_parseable_quota(&[]));
+        // 多个包里只要有一个可解析就算有额度。
+        assert!(super::has_parseable_quota(&[
+            json!({ "group_name": "free" }),
+            json!({ "entitlement_base_info": { "quota": { "credits_limit": 100 } } }),
+        ]));
+    }
+
+    /// 诊断串**只给键名、不给取值** —— 它会进应用日志，不能泄漏任何额度数字。
+    #[test]
+    fn quota_shape_hint_lists_key_names_only() {
+        let packs = vec![json!({
+            "group_name": "g",
+            "usage": { "credits_amount": 3 },
+            "entitlement_base_info": { "quota": { "fast_request_limit": 50 } }
+        })];
+        let hint = super::quota_shape_hint(&packs);
+        assert!(hint.contains("包数=1"), "{hint}");
+        assert!(
+            hint.contains("fast_request_limit"),
+            "要报出 quota 的键名: {hint}"
+        );
+        assert!(!hint.contains("50"), "只给键名，不给取值: {hint}");
+    }
+
     use super::*;
     use crate::modules::trae::device::DeviceEntry;
 
