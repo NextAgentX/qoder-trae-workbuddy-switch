@@ -17,6 +17,12 @@
 | UI and UX | Frontend interaction, accessibility, dark-mode details (see [Frontend components](#frontend-components-shadcn-first)) |
 | New features | Please open an Issue first to align on the direction, so you do not finish something only to find the approach disagrees |
 
+## Before you open an issue
+
+1. **Search first** — search by the symptom (error text, field name, UI copy). If a matching issue exists, **comment there** with your version and logs instead of opening a new one.
+2. **One issue, one problem** — bundling three unrelated problems into one issue usually means none of them gets fixed.
+3. **Duplicates get merged** — the earliest issue stays, the rest are closed and linked back (label `duplicate`); their content is copied into the surviving issue, so nothing is lost. If you believe the root cause differs, say so and we will reopen it.
+
 ## Before you open a PR
 
 1. For larger changes, **open an Issue first** to discuss the direction; small fixes (typos, docs, clear-cut bugs) can go straight to a PR
