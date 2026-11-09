@@ -441,6 +441,12 @@ Full guide (what to work on, PR checklist, code conventions): **[CONTRIBUTING.en
 
 Each project follows its own license. This project is an independent implementation with no affiliation, partnership or endorsement relationship with them; all names and trademarks belong to their respective owners.
 
+## Related projects
+
+- **[NextAgentX/omni-game-studio-codex](https://github.com/NextAgentX/omni-game-studio-codex)** — a **game-development studio plugin for Codex**: 20 skills covering design, engine engineering (Cocos / Unity / Godot / Unreal), art and audio production, QA and release, plus a software-copyright filing pipeline; G1–G5 milestones and document gates push Codex towards a runnable build rather than a paper plan.
+
+These are independent projects in the same ecosystem. There is no affiliation, partnership or endorsement relationship, and each follows its own license.
+
 ## Support this project
 
 Buddy Switch is free, open source, and licensed for noncommercial use only. If it saves you a few minutes a day, you can buy the author a drink:
