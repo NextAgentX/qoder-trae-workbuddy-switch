@@ -180,6 +180,31 @@ export function remainingSpan(remainingMs: number): {
   return { unit: "days", value: Math.max(1, Math.ceil(remainingMs / DAY_MS)) };
 }
 
+/**
+ * 「7 天内到期 X 积分」副文本的**金额闸门**：只有 `> 0` 才给出数字。
+ *
+ * ## 为什么 0 也要挡掉
+ *
+ * 抽屉 / 聚合详情里这行是一句**警示**（「7 天内到期 X 积分」），不是读数。
+ * 0 是绝大多数账号的常态 —— 每张卡点开都写「7 天内到期 0 积分」，等于把「一切正常」
+ * 说成一条要看的提醒；看久了这一行就被当成背景噪音（与「红徽章天天亮 = 没人看」
+ * 是同一条道理）。
+ *
+ * ## 与「未知 ≠ 0」是**两条独立**的纪律，别混
+ *
+ * - 读不到（`null` / `undefined` / 非数）⇒ 不写 —— 绝不拿 0 冒充读数；
+ * - 读到了且确实是 0 ⇒ 也不写 —— 「没有要过期的」是常态，不是一条信息。
+ *
+ * 两种输入在同一个出口返回 `null`，调用方只需判 `== null` 决定「这一行渲不渲」，
+ * 不必各自记住两个分支（`#189` 曾让五个调用点各写一次，写法还不一样）。
+ *
+ * @param amount 后端 `expiringSoonRemaining` / `summarizeExpiring().total` / 逐包汇总
+ * @returns `> 0` 的原值；其余（含 0、负数、NaN、缺失）一律 `null`
+ */
+export function expiringSubtextAmount(amount: number | null | undefined): number | null {
+  return typeof amount === "number" && Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
 /* ══════════════════════ 「最近到期」（不限窗口）══════════════════════
  *
  * ## 为什么要有这一段（issue #69）
