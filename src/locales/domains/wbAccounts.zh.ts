@@ -469,7 +469,8 @@ export const zh = {
   "wbAccounts.table.expiry": "到期",
   /* issue #69：积分到期与 Token 到期是**两件事**，列名必须区分。 */
   "wbAccounts.table.creditExpiry": "积分到期",
-  "wbAccounts.table.creditExpiryDays": "{days} 天",
+  "wbAccounts.table.creditExpiryDays": "{value} 天",
+  "wbAccounts.table.creditExpiryHours": "{value} 小时",
   "wbAccounts.table.tokenExpiry": "Token 到期",
   "wbAccounts.table.programs": "程序位",
   "wbAccounts.table.current": "当前",

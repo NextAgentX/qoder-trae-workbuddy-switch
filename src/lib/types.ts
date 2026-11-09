@@ -1311,10 +1311,20 @@ export interface CreditExpiry {
   accountId?: string | null;
   accountName?: string;
   updatedAt?: number;
+  /** 可用口径：**已剔除已过期包**的总额度（后端 `credit_result`，2026-11-09 起）。 */
   totalCapacity?: number;
+  /** 可用口径：**已剔除已过期包**的剩余额度（同上）。浪费量见 `expiredRemaining`。 */
   totalRemaining?: number;
   expiringSoonRemaining?: number;
   expiredRemaining?: number;
+  /**
+   * 全部资源里最早的到期时刻 —— **不要拿它算「还有几天」**。
+   *
+   * 它**不过滤已过期资源**（后端取所有 `remaining > 0` 资源的最小 `expireAt`），
+   * 所以账号一旦有过期包，这个值永远是「过去」⇒ 差值负数 ⇒ 界面恒显示「1 天内到期」
+   * （issue #144 复核 B3 的真实成因）。要「最快到期的那一批」用
+   * `credit-expiry.ts::nearestExpiringBatch` / `summarizeExpiring`，它们会跳过过期批次。
+   */
   soonestExpireAt?: number | null;
   expiringSoon?: boolean;
   expired?: boolean;

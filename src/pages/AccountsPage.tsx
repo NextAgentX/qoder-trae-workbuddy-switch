@@ -97,7 +97,7 @@ import { useAccountsStore } from "@/stores/accounts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n";
 import type { Translate } from "@/lib/i18n";
-import { daysUntil, nearestExpiringBatch } from "@/lib/credit-expiry";
+import { nearestExpiringBatch, remainingSpan } from "@/lib/credit-expiry";
 import {
   compareCreditPriority,
   nearestCreditExpiry,
@@ -1784,7 +1784,11 @@ function RegionPanel({ region }: { region: Region }) {
     },
     {
       /**
-       * 「积分到期」列（issue #69）：**积分**最近到期（`{days} 天`），tooltip 给日期与金额。
+       * 「积分到期」列（issue #69）：**积分**最近到期，tooltip 给绝对时刻与金额。
+       *
+       * 粒度走 `remainingSpan()` —— 与卡片徽章**同一个判据**（≤ 48 小时说小时）。
+       * 此前这里用只到天的 `daysUntil()`：2 小时后到期显示「1 天」，而同一行的卡片
+       * 徽章说「2小时」—— 同一批积分在同一页两句话（2026-11-09 修）。
        *
        * ⚠️ 与下一列「Token 到期」是**两件事**：那列是 Token 有效期（所有账号差不多），
        * 这列才是用户要的「先用哪个账号」。同名会让用户以为看错了。
@@ -1794,11 +1798,17 @@ function RegionPanel({ region }: { region: Region }) {
       render: (account) => {
         const batch = nearestExpiringBatch(creditMap[account.id]?.resources);
         if (!batch) return <span className="tabular-nums text-muted-foreground">—</span>;
+        const span = remainingSpan(batch.expireAt - Date.now());
         return (
           <Tooltip>
             <TooltipTrigger asChild>
               <span className="tabular-nums text-muted-foreground">
-                {t("wbAccounts.table.creditExpiryDays", { days: daysUntil(batch.expireAt) })}
+                {t(
+                  span.unit === "hours"
+                    ? "wbAccounts.table.creditExpiryHours"
+                    : "wbAccounts.table.creditExpiryDays",
+                  { value: span.value },
+                )}
               </span>
             </TooltipTrigger>
             <TooltipContent side="top">

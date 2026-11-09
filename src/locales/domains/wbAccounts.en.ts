@@ -421,7 +421,8 @@ export const en = {
   "wbAccounts.table.expiry": "Expiry",
   /* issue #69: credit expiry and token expiry are **different things** — the column names must differ. */
   "wbAccounts.table.creditExpiry": "Credit expiry",
-  "wbAccounts.table.creditExpiryDays": "{days} days",
+  "wbAccounts.table.creditExpiryDays": "{value} days",
+  "wbAccounts.table.creditExpiryHours": "{value} hrs",
   "wbAccounts.table.tokenExpiry": "Token expiry",
   "wbAccounts.table.programs": "Programs",
   "wbAccounts.table.current": "Current",

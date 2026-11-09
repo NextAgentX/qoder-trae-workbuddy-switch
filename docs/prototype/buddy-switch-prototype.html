@@ -2315,8 +2315,9 @@ function makeAccount(id, name, email, o) {
   /* 「临期积分 / 最近到期」**从资源包派生**，不再手写在账号字面量里。
      真实后端的 `expiringSoonRemaining` 也是这么算的；手写会与包明细打架 ——
      a2 就出现过「指标块说无临期积分、积分页却摆着一个 10-20 到期的包」。
-       · expiring      = 7 天内到期的包里还剩多少（卡片徽章 + 指标块用）
-       · expireInDays  = 这些包里最早到期的天数（没有临期包时退回全部包里最近的） */
+       · expiring      = 7 天内到期的包里还剩多少（抽屉/菜单副文本用）
+       · expireInDays  = 这些包里最早到期的天数（没有临期包时退回全部包里最近的）
+       · soonestExpire = 最快到期的那**一批**（同刻合并）的时刻与金额（徽章/表格用） */
   const _now = Date.now();
   const _soon = a.packs.filter((p) => p.remaining > 0 && p.expireAt && p.expireAt - _now <= 7 * 86400000);
   a.expiring = _soon.reduce((sum, p) => sum + p.remaining, 0);
@@ -2324,6 +2325,15 @@ function makeAccount(id, name, email, o) {
   a.expireInDays = _soon.length
     ? Math.min(..._soon.map((p) => Math.ceil((p.expireAt - _now) / 86400000)))
     : (_live.length ? Math.min(..._live.map((p) => Math.ceil((p.expireAt - _now) / 86400000))) : null);
+  /* ★ 徽章金额必须与时间**同批**（产品侧 `summarizeExpiring.batches[0]`，issue #44 的原始 bug
+     就是「总量 + 最快天数」混搭）。这里按到期时刻合并同一批，取最早的那一批。 */
+  const _soonAt = _soon.length ? Math.min(..._soon.map((p) => p.expireAt)) : null;
+  a.soonestExpire = _soonAt === null
+    ? null
+    : {
+        ms: _soonAt,
+        amount: _soon.filter((p) => p.expireAt === _soonAt).reduce((sum, p) => sum + p.remaining, 0),
+      };
   a.checkinHistory = a.checkinHistory || makeCheckinHistory(id);
   return a;
 }
@@ -3678,6 +3688,36 @@ function fmtMonthDay(ts) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n || 0));
+
+/* ── 剩余时长的展示粒度（与产品 `lib/credit-expiry.ts::remainingSpan` 同规则）──
+ *
+ * ≤ 48 小时说小时（向上取整、≥1）：25 小时与 47 小时都能各自说准；
+ * > 48 小时才折算成天（向上取整，宁可说晚不说早 —— 49 小时算「3 天」）。
+ * ⚠️ 别在调用点另写 `<= 48` 的边界：产品侧就因为「徽章改了、表格没改」出过
+ *   「2 小时 / 1 天」同屏两句话（#189 后的回归，2026-11-09 修）。 */
+const expirySpan = (ms) => {
+  const HOUR = 3600000;
+  const DAY = 86400000;
+  return ms <= 48 * HOUR
+    ? { value: Math.max(1, Math.ceil(ms / HOUR)), unit: "hours" }
+    : { value: Math.max(1, Math.ceil(ms / DAY)), unit: "days" };
+};
+const spanUnitText = (unit) => (unit === "hours" ? "小时" : "天");
+
+/** 卡片徽章：「最近到期 {N天|N小时} · {金额} 积分」—— 数值与金额同批（`soonestExpire`）。 */
+function expiringChipText(a) {
+  if (!a.soonestExpire) return "";
+  const span = expirySpan(a.soonestExpire.ms - Date.now());
+  return `最近到期 ${span.value}${spanUnitText(span.unit)} · ${fmtQty(a.soonestExpire.amount)} 积分`;
+}
+
+/** 表格「积分到期」列：只给粒度 + 数值，没有最快到期批次时返回 null（调用方渲染「—」）。 */
+function accountExpiryCell(a) {
+  if (!a.soonestExpire) return null;
+  const span = expirySpan(a.soonestExpire.ms - Date.now());
+  return `${span.value} ${spanUnitText(span.unit)}`;
+}
+
 const curScope = () => SCOPES[state.scope];
 const curPlatform = () => PLATFORMS[curScope().platform];
 /* 展示名的拼装**只有一处实现**（`demo-data.js` 的 `scopeDisplayName`）——
@@ -4383,11 +4423,11 @@ function accountCard(a, opts) {
     <div class="acct-chips">
       ${activeN >= 2 ? `<span class="badge info">${ICON.check}使用中 ${activeN} 个工具</span>` : ""}
       ${st ? `<span class="badge ${st.tone}">${st.text}</span>` : `<span class="badge ok">${ICON.check}已签到</span>`}
-      ${a.expiring ? `<span class="badge warn">${fmt(a.expiring)} 积分 ${a.expireInDays} 天后过期</span>` : ""}
+      ${a.soonestExpire ? `<span class="badge warn">${expiringChipText(a)}</span>` : ""}
       ${a.priority ? `<span class="badge info">优先</span>` : ""}
     </div>
     <div class="acct-metrics">
-      <span>积分 <b>${fmt(a.credits)}</b>/${fmt(a.creditsTotal)}</span>
+      <span>积分 <b>${fmt(a.credits)}</b></span>
       <span>今日 <b>${fmtTok(a.todayTokens)}</b></span>
       <span class="muted">${esc(a.lastUsed)}</span>
     </div>
@@ -4433,7 +4473,10 @@ function tableView(list) {
         <td>${st ? `<span class="badge ${st.tone}">${st.text}</span>` : `<span class="badge ok">正常</span>`}</td>
         <td class="num">${fmt(a.credits)}</td>
         <td class="num">${fmtTok(a.todayTokens)}</td>
-        <td class="num">${a.expireInDays == null ? `<span class="muted tiny">—</span>` : `${a.expireInDays} 天`}</td>
+        <td class="num">${(() => {
+          const cell = accountExpiryCell(a);
+          return cell === null ? `<span class="muted tiny">—</span>` : cell;
+        })()}</td>
         <td>${p.programs.map((pg) => a.programs[pg.id] ? `<span class="badge info" style="margin-right:3px">${esc(pg.label)}</span>` : "").join("") || `<span class="muted tiny">未绑定</span>`}</td>
         <!-- ★ 表格行也必须有「更多」：与卡片同一个菜单（App 的 renderActions 同形）。
              此前表格没有行尾动作 ⇒ 用户在表格里除了点行就没别的出口 = 同一能力两种形态的分叉。 -->
@@ -8523,8 +8566,8 @@ function drawerStats(a) {
   const credSub = a.expired ? "先重新登录" : a.needsRelogin ? "会话已失效" : "可正常使用";
   return `<div class="acct-stats">
     ${drawerStatTile(a, "credits", "积分",
-      `${fmt(a.credits)}<em>/${fmt(a.creditsTotal)}</em>`,
-      a.expiring ? `${fmt(a.expiring)} 积分 ${a.expireInDays} 天内到期` : "无临期积分",
+      `${fmt(a.credits)}`,
+      a.expiring ? `7 天内到期 ${fmt(a.expiring)} 积分` : "无临期积分",
       a.expiring ? "warn" : "")}
     ${drawerStatTile(a, "tokens", "今日 Token", fmtTok(a.todayTokens), `累计 ${fmtTok(a.totalTokens)}`)}
     ${drawerStatTile(a, "checkin", "今日签到", a.checkedIn ? "已签到" : "未签到", `近 7 天 ${okDays}/${hist.length || 0}`)}
@@ -9733,7 +9776,7 @@ function refreshOutcome(a, kind) {
   if (kind === "credits") {
     return {
       ok: true,
-      desc: `积分 ${fmt(a.credits)}/${fmt(a.creditsTotal)}${a.expiring ? ` · ${fmt(a.expiring)} 积分 ${a.expireInDays} 天内到期` : ""}`,
+      desc: `积分 ${fmt(a.credits)}${a.expiring ? ` · 7 天内到期 ${fmt(a.expiring)} 积分` : ""}`,
     };
   }
   if (kind === "tokens") return { ok: true, desc: `今日 ${fmtTok(a.todayTokens)} · 累计 ${fmtTok(a.totalTokens)}` };
