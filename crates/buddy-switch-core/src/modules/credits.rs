@@ -672,11 +672,22 @@ fn normalized_new_resources(
 }
 
 fn credit_result(account: &Value, resources: Vec<Value>, now: i64) -> Value {
-    let total_remaining: f64 = resources
+    /* ★ 可用口径：已过期包的额度**不再计入** `totalRemaining` / `totalCapacity`。
+       过期积分不能再用，计进去会让「还剩多少」偏大，也会与逐包明细（前端剔掉过期包）
+       对不上 —— 同一屏的「共剩」和明细合计必须是同一个数。浪费掉的量仍单独由
+       `expiredRemaining` 报告，两者相加才是「原始总量」。
+
+       ⚠️ 快照落盘（下方 `record_snapshot`）用的是这两个值 ⇒ 2026-11-09 之前的历史快照
+       是旧口径（含过期）。跨这条边界时余额曲线会出现一个台阶，属于已知的预期代价。 */
+    let live_resources: Vec<&Value> = resources
+        .iter()
+        .filter(|resource| resource.get("expired").and_then(Value::as_bool) != Some(true))
+        .collect();
+    let total_remaining: f64 = live_resources
         .iter()
         .filter_map(|resource| resource.get("remaining").and_then(|value| value.as_f64()))
         .sum();
-    let total_capacity: f64 = resources
+    let total_capacity: f64 = live_resources
         .iter()
         .filter_map(|resource| resource.get("total").and_then(|value| value.as_f64()))
         .sum();
@@ -980,6 +991,29 @@ mod tests {
         assert_eq!(resource["used"], 25.25);
         assert_eq!(resource["expiringSoon"], true);
         assert_eq!(resource["expired"], false);
+    }
+
+    /// ★★ 可用口径：已过期包的额度**不计入** `totalRemaining` / `totalCapacity`，
+    /// 但仍计入 `expiredRemaining`。
+    ///
+    /// 变异：把 `live_resources` 的 `expired` 过滤器去掉 ⇒ 前两条断言变红（回到旧口径，
+    /// 「共剩」比逐包明细合计多出过期那部分）；把 `expired_remaining` 也一起滤掉 ⇒
+    /// 第三条变红（浪费量就没人报告了）。
+    #[test]
+    fn expired_packs_count_only_toward_expired_remaining() {
+        // `account` 不带 `id` ⇒ `record_snapshot` 不落盘，测试无副作用。
+        let result = credit_result(
+            &json!({}),
+            vec![
+                json!({"total": 100.0, "remaining": 80.0, "expired": false}),
+                json!({"total": 60.0, "remaining": 40.0, "expired": true}),
+            ],
+            1_800_000_000_000,
+        );
+
+        assert_eq!(result["totalRemaining"], json!(80.0));
+        assert_eq!(result["totalCapacity"], json!(100.0));
+        assert_eq!(result["expiredRemaining"], json!(40.0));
     }
 
     /// issue #51：`DeductionEndTime` 是包体生命周期（创建 + 8 年 3 个月），
