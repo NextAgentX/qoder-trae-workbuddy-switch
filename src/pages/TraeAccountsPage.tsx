@@ -245,6 +245,7 @@ export default function TraeAccountsPage() {
   const {
     data: snapshot,
     loading,
+    slow,
     error,
     refresh: loadAll,
     revalidate: revalidateSnapshot,
@@ -2167,6 +2168,8 @@ export default function TraeAccountsPage() {
            走结构化 prop 注入，几何与文案都留在工具栏壳里；其余入口仍在抽屉的「更多操作」。 */
         onOpenRecycleBin={() => setRecycleOpen(true)}
         loading={loading}
+        slow={slow}
+        onReload={() => void loadAll()}
         /* 首屏空态：与 WorkBuddy 的 `EmptyRegionCard` 同构（可能原因 + 期望产物 + 动作）。 */
         emptyState={
           accounts.length === 0 ? (

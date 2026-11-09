@@ -49,6 +49,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
@@ -89,6 +90,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useCachedResource } from "@/lib/use-cached-resource";
 import { useRefreshAction } from "@/lib/use-refresh-action";
+import { useSlowLoading } from "@/lib/use-slow-loading";
 import { useT } from "@/lib/i18n";
 import type { TranslationKey } from "@/locales/zh";
 
@@ -760,6 +762,8 @@ function ProfilesSection({
      `loading` 之外的 `pending` 由父组件叠进 `loading` prop（见挂载处注释），
      因此这里的判据同时覆盖「有旧值时的后台刷新」。 */
   const { busy: reloadBusy, run: runReload } = useRefreshAction();
+  /* ★ 慢加载提示（issue #188）：程序位清单是本页唯一会「整块空白」的区块。 */
+  const slowLoading = useSlowLoading(loading);
   const [backupSlot, setBackupSlot] = useState("");
   const [pendingDelete, setPendingDelete] = useState<TraeProfileInfo | null>(null);
   const [pendingRestore, setPendingRestore] = useState<TraeProfileInfo | null>(null);
@@ -880,6 +884,9 @@ function ProfilesSection({
 
       {loading && !data ? (
         <div className="space-y-2 p-4 sm:p-5">
+          {slowLoading ? (
+            <SlowLoadHint onRetry={() => void runReload(onReload)} retrying={reloadBusy} />
+          ) : null}
           <Skeleton className="h-14 w-full" />
           <Skeleton className="h-14 w-full" />
         </div>

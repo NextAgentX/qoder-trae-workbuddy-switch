@@ -74,6 +74,7 @@ import { Card } from "@/components/ui/card";
 import { CardHead } from "@/components/ui/card-head";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { scopeLabel } from "@/components/scope-chip";
 import { ChartFrame } from "@/components/usage/chart-frame";
 import { CumulativeArea } from "@/components/usage/cumulative-area";
@@ -185,6 +186,7 @@ export default function TraeTokenStatsPage({
   const {
     data: stats,
     loading,
+    slow,
     error,
     refresh,
   } = useCachedResource<TraeTokenStatistics>(`trae:token-stats:${spanDays}:${tokenScope}`, load);
@@ -415,6 +417,7 @@ export default function TraeTokenStatsPage({
   if (loading && !stats) {
     return (
       <div className="min-w-0 space-y-6" aria-busy="true">
+        {slow ? <SlowLoadHint onRetry={() => void run(() => refresh())} retrying={busy} /> : null}
         <Skeleton className="h-[74px] w-full" />
         <Skeleton className="h-64 w-full" />
         <Skeleton className="h-40 w-full" />

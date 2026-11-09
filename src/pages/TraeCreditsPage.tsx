@@ -47,6 +47,7 @@ import { Card } from "@/components/ui/card";
 import { CardHead } from "@/components/ui/card-head";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { ChartFrame } from "@/components/usage/chart-frame";
 import { CreditBalanceArea } from "@/components/usage/credit-balance-area";
 import { CreditDivergingBar } from "@/components/usage/credit-diverging-bar";
@@ -119,6 +120,7 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
   const {
     data: snapshot,
     loading,
+    slow,
     error,
     refresh: loadAll,
     revalidate: revalidateSnapshot,
@@ -285,6 +287,7 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
 
       {loading && !credits ? (
         <div className="space-y-6" aria-busy="true">
+          {slow ? <SlowLoadHint onRetry={() => void loadAll()} /> : null}
           <Skeleton className="h-[74px] w-full" />
           <Skeleton className="h-64 w-full" />
         </div>
