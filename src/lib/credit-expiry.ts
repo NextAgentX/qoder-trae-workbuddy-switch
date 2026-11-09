@@ -140,18 +140,44 @@ export function summarizeExpiring(
   if (total <= 0) return null;
 
   /* 徽章只看最快那批：单位、数值、金额必须来自同一批（见模块头）。
-     ≤ 48 小时用「小时」：25 小时与 47 小时都能各自说准；超过 48 小时才折算成「天」
-     （向上取整，宁可说晚不说早 —— 29 小时不能说成「1 天」）。 */
+     单位（小时 / 天）与数值一律取自 {@link remainingSpan}，不在本函数里再算一遍 ——
+     账号页表格的「积分到期」列也读它，两处判据分叉就会回到
+     「徽章说 2 小时、表格说 1 天」的老样子。 */
   const soonest = batches[0];
   const remaining = soonest.expireAt - now;
   return {
     total,
-    soonestUnit: remaining <= HOUR_DISPLAY_LIMIT_MS ? "hours" : "days",
+    soonestUnit: remainingSpan(remaining).unit,
     soonestDays: Math.max(1, Math.ceil(remaining / DAY_MS)),
     soonestHours: Math.max(1, Math.ceil(remaining / HOUR_MS)),
     soonestAmount: soonest.amount,
     batches,
   };
+}
+
+/**
+ * 一段**剩余时长**的展示粒度 —— 全仓唯一出口。
+ *
+ * - `≤ 48 小时` ⇒ 小时（向上取整、≥1）：25 小时与 47 小时都能各自说准；
+ * - `> 48 小时` ⇒ 天（向上取整、≥1）：宁可说晚不说早 —— 49 小时算「3 天」。
+ *
+ * ## 谁在读它
+ *
+ * - {@link summarizeExpiring}（卡片徽章的 `soonestUnit`）；
+ * - WB 账号页表格的「积分到期」列（`AccountsPage`）—— 同一批积分在徽章与表格里
+ *   **必须同一个粒度**。此前表格直接 `daysUntil()` 只到天 ⇒ 2 小时后到期的批
+ *   在徽章上是「2小时」、在表格上是「1 天」，同一屏两句话。
+ *
+ * ⚠️ 别在调用点重写 `<= 48` 这个边界：那正是这次要根除的「同一规则两处实现」。
+ */
+export function remainingSpan(remainingMs: number): {
+  unit: "hours" | "days";
+  value: number;
+} {
+  if (remainingMs <= HOUR_DISPLAY_LIMIT_MS) {
+    return { unit: "hours", value: Math.max(1, Math.ceil(remainingMs / HOUR_MS)) };
+  }
+  return { unit: "days", value: Math.max(1, Math.ceil(remainingMs / DAY_MS)) };
 }
 
 /* ══════════════════════ 「最近到期」（不限窗口）══════════════════════
@@ -226,11 +252,10 @@ export function nearestExpiringBatch(
   return upcomingExpiries(items, options)[0] ?? null;
 }
 
-/** 距到期还有几天（向上取整，≥1）。 */
-export function daysUntil(expireAt: number, now: number = Date.now()): number {
-  return Math.max(1, Math.ceil((expireAt - now) / DAY_MS));
-}
-
+/* 曾有一个 `daysUntil(expireAt)` 只返回「向上取整的天数」，WB 表格的「积分到期」列用它 ——
+   2 小时后到期的批被说成「1 天」，与本模块 {@link remainingSpan} 的「≤48 小时用小时」
+   直接矛盾。2026-11-09 已删：需要天数就 `remainingSpan(剩余毫秒).value`，
+   判据只有一处，别再长出第二个只到天的函数。 */
 
 /* ══════════════════════ 渲染约束 ══════════════════════ */
 

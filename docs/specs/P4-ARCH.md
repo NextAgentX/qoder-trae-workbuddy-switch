@@ -177,6 +177,17 @@ export interface DetailPack {
 > 临期窗口只认后端 `expiringSoon` 标记（Qoder 无此标记 ⇒ 由适配层用
 > `qoder-packs.ts::EXPIRING_SOON_MS` 算），前端不自设窗口。
 >
+> ★ **三平台窗口同值 7 天**（DECISIONS D57，2026-11-09）：WB `credits.rs::EXPIRING_SOON_DAYS`、
+> Trae `trae/credits.rs::EXPIRING_SOON_SECS`、前端两个镜像常量（`TRAE_EXPIRING_SOON_MS` /
+> `EXPIRING_SOON_MS`）四处必须相等 —— 跨语言不能共享常量，由 `check-credit-packs.mjs` 钉住。
+> 同一文件还钉住「剩余时长的粒度」只有一处判据 `credit-expiry.ts::remainingSpan`
+> （≤ 48 小时说小时；卡片徽章与账号表格列共用，别再长出只到天的第二个函数）。
+>
+> ★ **余额是可用口径**（同 D57）：`credit_result` 的 `totalRemaining` / `totalCapacity`
+> **剔除已过期包**，浪费量走 `expiredRemaining`；因此 WB 侧的资源包明细也必须剔过期包
+> （否则「顶部余额」与「明细合计」对不上）。Trae / Qoder 的账号级余额口径未改，
+> 它们的明细**保留**过期包 —— 两者刻意不同，不要「统一」掉。
+>
 > 门禁 `scripts/check-credit-packs.mjs` 对上述四条跑**行为断言**（esbuild 转译生产代码），
 > 不再靠「文件里有没有某个字符串」。
 >

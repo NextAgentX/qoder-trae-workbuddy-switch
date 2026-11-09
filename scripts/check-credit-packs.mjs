@@ -45,7 +45,9 @@ const { normalizePacks, toDetailPacks, packIsExpired, packRatio, secondsToMs } =
   "src/lib/credit-packs.ts",
 );
 /* 临期窗口的镜像常量（#144 复核 §3.3）：与后端 `EXPIRING_SOON_SECS` 必须同值。 */
-const { TRAE_EXPIRING_SOON_MS } = await loadTs("src/lib/credit-expiry.ts");
+const { TRAE_EXPIRING_SOON_MS, remainingSpan, summarizeExpiring } = await loadTs(
+  "src/lib/credit-expiry.ts",
+);
 
 /** 递归列出 `src/**` 的 ts/tsx（用法断言的扫描面）。 */
 function walkTs(dir, out = []) {
@@ -289,6 +291,50 @@ check("★ 临期窗口只剩两档：后端标记，或镜像后端的 7 天常
     throw new Error(
       `这些文件仍在自行写死临期窗口（应用后端标记或 TRAE_EXPIRING_SOON_MS / EXPIRING_SOON_MS）：${offenders.join("、")}`,
     );
+  }
+});
+
+/* ── 剩余时长的展示粒度：**只有一处判据** ─────────────────────────────────
+ *
+ * 2026-11-09：#189 把徽章改成「≤ 48 小时说小时」，但 WB 账号页表格的「积分到期」列
+ * 仍用只到天的 `daysUntil()` ⇒ 2 小时后到期的批在徽章上「2小时」、在同一行的表格里
+ * 「1 天」。这类分叉不会被 tsc 抓（两个函数都合法），只能靠行为断言把「同源」钉住。
+ *
+ * 可证伪点：
+ * ① 边界：48 小时（含等号）仍算小时，49 小时才是 3 天（向上取整、宁可说晚）；
+ * ② 同源：`summarizeExpiring().soonestUnit` 必须等于 `remainingSpan()` 对同一剩余时长的
+ *    结论 —— 变异：把 summarizeExpiring 里的 `remainingSpan(remaining).unit` 换回
+ *    内联三元 ⇒ 这一组仍可能过，所以还要 ③；
+ * ③ 用法：表格列读 `remainingSpan`，且 `daysUntil` 这个「只到天」的旧出口已删除
+ *    （留着它，下一个人一定会再用一次）。
+ */
+check("★ 剩余时长粒度只有一处判据（remainingSpan）：徽章与表格列同源", () => {
+  const HOUR = 3_600_000;
+  eq(remainingSpan(2 * HOUR), { unit: "hours", value: 2 }, "2 小时");
+  eq(remainingSpan(48 * HOUR), { unit: "hours", value: 48 }, "48 小时（边界含等号）");
+  eq(remainingSpan(49 * HOUR), { unit: "days", value: 3 }, "49 小时应向上取整成 3 天");
+  eq(remainingSpan(3 * DAY), { unit: "days", value: 3 }, "3 天");
+  const only = (hours) => [
+    { expireAt: NOW + hours * HOUR, remaining: 10, expired: false, expiringSoon: true },
+  ];
+  for (const hours of [1, 47, 48, 49, 72]) {
+    const summary = summarizeExpiring(only(hours), { now: NOW });
+    eq(summary.soonestUnit, remainingSpan(hours * HOUR).unit, `${hours} 小时后徽章的单位`);
+  }
+  const page = readFileSync(path.join(root, "src/pages/AccountsPage.tsx"), "utf8");
+  if (!/remainingSpan\(/.test(page)) {
+    throw new Error("AccountsPage 的「积分到期」列没读 remainingSpan —— 会与卡片徽章的粒度分叉");
+  }
+  const pageCode = page
+    .split("\n")
+    .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+    .join("\n");
+  if (/\bdaysUntil\s*\(/.test(pageCode)) {
+    throw new Error("AccountsPage 又出现 daysUntil —— 只到天的出口应改 remainingSpan");
+  }
+  const expirySource = readFileSync(path.join(root, "src/lib/credit-expiry.ts"), "utf8");
+  if (/export function daysUntil/.test(expirySource)) {
+    throw new Error("credit-expiry 又长回了 daysUntil —— 判据只允许 remainingSpan 一处");
   }
 });
 

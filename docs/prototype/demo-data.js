@@ -240,8 +240,9 @@ function makeAccount(id, name, email, o) {
   /* 「临期积分 / 最近到期」**从资源包派生**，不再手写在账号字面量里。
      真实后端的 `expiringSoonRemaining` 也是这么算的；手写会与包明细打架 ——
      a2 就出现过「指标块说无临期积分、积分页却摆着一个 10-20 到期的包」。
-       · expiring      = 7 天内到期的包里还剩多少（卡片徽章 + 指标块用）
-       · expireInDays  = 这些包里最早到期的天数（没有临期包时退回全部包里最近的） */
+       · expiring      = 7 天内到期的包里还剩多少（抽屉/菜单副文本用）
+       · expireInDays  = 这些包里最早到期的天数（没有临期包时退回全部包里最近的）
+       · soonestExpire = 最快到期的那**一批**（同刻合并）的时刻与金额（徽章/表格用） */
   const _now = Date.now();
   const _soon = a.packs.filter((p) => p.remaining > 0 && p.expireAt && p.expireAt - _now <= 7 * 86400000);
   a.expiring = _soon.reduce((sum, p) => sum + p.remaining, 0);
@@ -249,6 +250,15 @@ function makeAccount(id, name, email, o) {
   a.expireInDays = _soon.length
     ? Math.min(..._soon.map((p) => Math.ceil((p.expireAt - _now) / 86400000)))
     : (_live.length ? Math.min(..._live.map((p) => Math.ceil((p.expireAt - _now) / 86400000))) : null);
+  /* ★ 徽章金额必须与时间**同批**（产品侧 `summarizeExpiring.batches[0]`，issue #44 的原始 bug
+     就是「总量 + 最快天数」混搭）。这里按到期时刻合并同一批，取最早的那一批。 */
+  const _soonAt = _soon.length ? Math.min(..._soon.map((p) => p.expireAt)) : null;
+  a.soonestExpire = _soonAt === null
+    ? null
+    : {
+        ms: _soonAt,
+        amount: _soon.filter((p) => p.expireAt === _soonAt).reduce((sum, p) => sum + p.remaining, 0),
+      };
   a.checkinHistory = a.checkinHistory || makeCheckinHistory(id);
   return a;
 }
