@@ -5562,6 +5562,17 @@ pub async fn qoder_checkin_claim(scope: String, uid: String) -> Result<Value, St
     qoder::checkin::claim_for(region, &uid).await
 }
 
+/// GET /api/qoder/checkin/logs —— 自动签到台账（**只读**，零上游请求）。
+///
+/// 后台签到是静默执行的；没有这个出口，用户只能看到「今天签没签」，看不到
+/// 「排程跑没跑、为什么没领到」。读的是本地台账（有界，最近 30 条）。
+#[tauri::command]
+pub async fn qoder_checkin_logs(scope: String) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let region = require_qoder_region(scope)?;
+    Ok(qoder::checkin::logs_for(region))
+}
+
 /// GET /api/qoder/pro-pack/status —— Pro 升级包资格（**只读**；`available=false` = 活动下线）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_pro_pack_status(scope: String, uid: String) -> Result<Value, String> {

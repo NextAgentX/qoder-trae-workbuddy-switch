@@ -76,6 +76,15 @@ pub fn credits_daily_file_for(region: QoderRegion) -> PathBuf {
     scoped_file_for("credits_daily.json", region)
 }
 
+/// **自动签到**台账（每跑一轮一条，含「因窗口未刷新而推迟」的待办时刻）。
+///
+/// 与 [`checkin_ledger_file_for`] 刻意分开：那是「哪个 uid 今天签过」的**去重账本**，
+/// 本文件是「排程那一轮做了什么」的**过程记录** —— 合并会让「跑过但无事可做」与
+/// 「没跑」再次不可区分，而那正是用户报障「Qoder 总是没有自动签到」时最需要的信息。
+pub fn checkin_logs_file_for(region: QoderRegion) -> PathBuf {
+    scoped_file_for("checkin_logs.json", region)
+}
+
 /// 网关**逐账号当日用量**（限额护栏 G2/G4 的计数来源；按区域分家）。
 ///
 /// 归属网关（`buddy-switch-gateway::qoder::quota`）而不是账号库：它记的是**网关自己

@@ -339,9 +339,17 @@ pub struct ScheduleConfig {
 /// 应用没开在那个时点由**启动补跑**兜住（见 `scheduler::STARTUP_TASKS`）。
 /// 用户可用 `trae_jwt_refresh_enabled = false` 关掉。
 pub fn default_schedule() -> ScheduleConfig {
-    /// 整点 `h:00`（默认表全部是整点，故集中在这里构造，避免每行都写 `from_hm(..).expect`）。
+    /// 整点 `h:00`（除 Qoder 签到外，默认表全是整点，故集中在这里构造）。
     fn at(hour: u32) -> TimeOfDay {
         TimeOfDay::from_hm(hour, 0).expect("默认时点的时/分都是合法值")
+    }
+    /// 非整点 `h:mm`。
+    ///
+    /// 目前只有 Qoder 签到用得上：它的「每天领 100 Credits」在 **10:00（UTC+8）刷新**，
+    /// 实例窗口是 10:00 → 次日 09:59。排在 09:00 会**稳定地**签在上一个实例上
+    /// （上游回 `CLAIMED` ⇒ 什么也领不到），而用户看到的只是「每天都没签到」。
+    fn at_hm(hour: u32, minute: u32) -> TimeOfDay {
+        TimeOfDay::from_hm(hour, minute).expect("默认时点的时/分都是合法值")
     }
     ScheduleConfig {
         checkin_times: vec![at(9), at(21)],
@@ -352,7 +360,10 @@ pub fn default_schedule() -> ScheduleConfig {
         cat_times: vec![at(1)],
         trae_checkin_times: vec![at(9), at(21)],
         trae_jwt_refresh_times: vec![at(9), at(21)],
-        qoder_checkin_times: vec![at(9), at(21)],
+        // ★ 10:05 而不是 09:00：上游奖励在 10:00（UTC+8）刷新，09:00 那一轮必然
+        // 签在上一个实例上（`CLAIMED` ⇒ 领不到）。10:05 给上游切换留 5 分钟余量。
+        // 老配置（09:00）由 `qoder::checkin::retry_after_ms` 的「窗口感知补跑」兜住。
+        qoder_checkin_times: vec![at_hm(10, 5), at(21)],
         qoder_keepalive_times: vec![at(22)],
         // 抖动**默认全关**：它改变「几点触发」这一既有行为，不能替老用户默认打开。
         checkin_jitter_minutes: 0,
@@ -733,7 +744,9 @@ mod tests {
         assert_eq!(cfg.activity_report_count, 5);
         assert_eq!(cfg.trae_checkin_times, vec![t(9, 0), t(21, 0)]);
         assert_eq!(cfg.trae_jwt_refresh_times, vec![t(9, 0), t(21, 0)]);
-        assert_eq!(cfg.qoder_checkin_times, vec![t(9, 0), t(21, 0)]);
+        // ★ Qoder 签到默认排在 10:05（不是整点 09:00）：上游奖励 10:00 才刷新，
+        // 09:00 那一轮只能重复签昨天的实例（见 `default_schedule` 里的注释）。
+        assert_eq!(cfg.qoder_checkin_times, vec![t(10, 5), t(21, 0)]);
         assert_eq!(cfg.qoder_keepalive_times, vec![t(22, 0)]);
         // WorkBuddy 的六类默认全启用（与参考实现逐字一致，改了会让老用户的功能静默消失）。
         // Trae / Qoder 各两条**方向相反**，判据相同（见 `default_schedule` 的文档）：

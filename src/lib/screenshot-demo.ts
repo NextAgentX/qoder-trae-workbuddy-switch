@@ -39,6 +39,7 @@ import type { CompanionSnapshot } from "./companion";
 import type {
   AgentHookStatus,
   CheckinStatusEntry,
+  QoderCheckinLogView,
   QoderGatewayQuotaView,
   QoderWebProxyConfig,
   QoderWebWindowCookies,
@@ -2614,6 +2615,48 @@ function demoTraeCheckinStatusMap(ids: string[]): Record<string, CheckinStatusEn
 }
 
 /** 演示：Qoder 逐账号签到状态（`qoder_checkin_status_map`；issue #47）。 */
+function demoQoderCheckinLogs(): QoderCheckinLogView {
+  // 一轮「09:00 只重复签了昨天的实例、已排 10:05 补跑」的现实形态：截图里既能看到
+  // 结果，也能看到「为什么要补跑」那句话，不必读代码才知道机制。
+  const atMs = Date.parse("2026-11-09T09:00:00+08:00");
+  return {
+    region: "qoder-cn",
+    pendingRetryMs: Date.parse("2026-11-09T10:05:00+08:00"),
+    entries: [
+      {
+        atMs,
+        at: "2026-11-09 09:00:02",
+        total: 2,
+        okCount: 2,
+        earned: 0,
+        progress: false,
+        failures: 0,
+        retryAtMs: Date.parse("2026-11-09T10:05:00+08:00"),
+        accounts: [
+          {
+            uid: "demo-cn-a",
+            name: "AndevJack",
+            ok: true,
+            already: true,
+            earned: 0,
+            disabled: false,
+            error: null,
+          },
+          {
+            uid: "demo-cn-b",
+            name: "mryzj0716",
+            ok: true,
+            already: true,
+            earned: 0,
+            disabled: false,
+            error: null,
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function demoQoderCheckinStatusMap(ids: string[]): Record<string, CheckinStatusEntry> {
   const map: Record<string, CheckinStatusEntry> = {};
   for (const uid of ids) {
@@ -3391,7 +3434,8 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       cat_times: ["01:00"],
       trae_checkin_times: ["09:00", "21:00"],
       trae_jwt_refresh_times: ["09:00", "21:00"],
-      qoder_checkin_times: ["09:00", "21:00"],
+      // Qoder 的奖励 10:00 才刷新 ⇒ 默认排在 10:05（演示数据跟默认值保持一致）。
+      qoder_checkin_times: ["10:05", "21:00"],
       qoder_keepalive_times: ["22:00"],
       // 签到开 ±15 分钟抖动：截图要能自证「这个能力存在且真的在界内」，
       // 全为 0 的话控件看起来就只是个永远不动的下拉框。
@@ -3738,6 +3782,9 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     }
     /* issue #47：逐账号「今日签到状态」（只读；演示数据保留「缺席 / 未开放」两条边界）。 */
     case "qoder_checkin_status_map": return demoQoderCheckinStatusMap(demoAccountIds(args));
+    /* 自动签到台账（只读）：演示里给一轮「09:00 跑过、等 10:05 补跑」，把新文案也拍进去。 */
+    case "qoder_checkin_logs":
+      return demoQoderCheckinLogs();
     /* 限额护栏视图（只读）：演示里三条状态各占一个账号，截图能同时看到。 */
     case "qoder_gateway_quota":
       return demoQoderGatewayQuota();

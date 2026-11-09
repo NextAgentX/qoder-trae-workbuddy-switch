@@ -370,6 +370,12 @@ export const zh = {
   "qoder.page.settings.schedule.keepaliveTimesLabel": "保活时点",
   "qoder.page.settings.schedule.keepaliveTimesDesc": "每天在这些时刻检查一次是否临近到期。",
   "qoder.page.settings.schedule.saveFailed": "保存计划任务失败",
+  "qoder.page.settings.schedule.autoLogSummary":
+    "最近一次自动签到：{at} · 成功 {ok}/{total} · 领到 {earned}",
+  "qoder.page.settings.schedule.autoLogPending":
+    "已排 {at} 补跑 —— 上游每天 10:00 才刷新当天奖励，早于它的那一轮只能重复签昨天的实例。",
+  "qoder.page.settings.schedule.autoLogNever":
+    "还没有记录：排程还没跑过（应用启动时会补跑一次，之后按上面的时点执行）。",
   "qoder.page.settings.filtered":
     "这里只列已有内容的分区；签到 / 网关 / 权限诊断 / 日志等设置项会随对应功能落地后出现（不预先摆空壳）。",
 } as const;

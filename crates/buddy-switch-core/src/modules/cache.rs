@@ -86,6 +86,7 @@ fn category_targets(id: &str) -> Result<Vec<PathBuf>, String> {
     let store = config::store_dir();
     let backups = config::backup_dir();
     let trae = store.join("trae");
+    let qoder = store.join("qoder");
     let out = match id {
         CATEGORY_SESSION_BACKUPS => vec![
             backups.join("sessions"),
@@ -131,6 +132,9 @@ fn category_targets(id: &str) -> Result<Vec<PathBuf>, String> {
             store.join("gateway_logs.json"),
             store.join("auto_checkin_logs.json"),
             store.join("auto_rotate_logs.json"),
+            // Qoder 自动签到台账（诊断用；与 WB 的 `auto_checkin_logs` 分开落盘）。
+            qoder.join("checkin_logs.cn.json"),
+            qoder.join("checkin_logs.global.json"),
             trae.join("api_gateway_logs.json"),
             trae.join("logs"),
         ],

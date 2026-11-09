@@ -164,6 +164,32 @@ export default function QoderSettingsPage() {
   const [sources, setSources] = useState<QoderLocalSourcesView | null>(null);
   const [error, setError] = useState("");
 
+  /**
+   * 最近一次自动签到（**本地台账**，零上游请求）。
+   *
+   * ★ 为什么必须有它：后台排程是静默的 —— 签到失败 / 「只是重复签了昨天的实例」/
+   * 「压根没跑」在界面上三者无法区分，用户报「Qoder 总是没有自动签到」时连
+   * 「排程到底跑没跑」都无从判断。台账在 `qoder/checkin_logs.<region>.json`。
+   *
+   * 只在「计划任务」分区挂载时读：签到页已有逐账号状态，不必在这里再打一轮上游。
+   */
+  const [autoLog, setAutoLog] = useState<api.QoderCheckinLogView | null>(null);
+  useEffect(() => {
+    if (section !== "schedule") return;
+    let cancelled = false;
+    api
+      .qoderCheckinLogs(scope)
+      .then((view) => {
+        if (!cancelled) setAutoLog(view);
+      })
+      .catch(() => {
+        /* 读不到就保持空态：台账是诊断信息，不该阻塞排程编辑。 */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [section, scope]);
+
   useEffect(() => {
     let cancelled = false;
     setError("");
@@ -187,6 +213,17 @@ export default function QoderSettingsPage() {
     next.set("section", id);
     setSearchParams(next, { replace: true });
   }
+
+  /** 台账里最近一轮的派生视图（空台账 ⇒ 全部为 null，界面显示空态）。 */
+  const lastRun = autoLog?.entries?.[0] ?? null;
+  const lastRunError = lastRun?.accounts.find((row) => row.error)?.error ?? "";
+  const clockOf = (ms: number) =>
+    new Date(ms).toLocaleString(undefined, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
 
   return (
     <div className="mx-auto min-w-0 w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
@@ -289,6 +326,34 @@ export default function QoderSettingsPage() {
                       }
                     />
                   </SettingsFieldRow>
+                  {/* 最近一次自动签到（**本地台账**）：后台静默执行，不展示就等于让用户
+                      永远不知道「跑没跑 / 为什么没领到」。失败原因取第一个账号的错误原文。 */}
+                  <div className="border-t px-4 py-3 text-[11.5px] leading-relaxed text-muted-foreground">
+                    {lastRun ? (
+                      <>
+                        <div>
+                          {t("qoder.page.settings.schedule.autoLogSummary", {
+                            at: lastRun.at,
+                            ok: lastRun.okCount,
+                            total: lastRun.total,
+                            earned: lastRun.earned,
+                          })}
+                        </div>
+                        {lastRunError ? (
+                          <div className="mt-0.5 text-destructive">{lastRunError}</div>
+                        ) : null}
+                        {lastRun.retryAtMs ? (
+                          <div className="mt-0.5">
+                            {t("qoder.page.settings.schedule.autoLogPending", {
+                              at: clockOf(lastRun.retryAtMs),
+                            })}
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div>{t("qoder.page.settings.schedule.autoLogNever")}</div>
+                    )}
+                  </div>
                 </CardContent>
               </SettingsGroup>
 

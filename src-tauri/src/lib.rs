@@ -796,6 +796,8 @@ pub fn run() {
             // issue #47：逐账号「今日签到状态」只读重取（与 server 的同名路由一一对应）。
             commands::qoder_checkin_status_map,
             commands::qoder_checkin_claim,
+            // 自动签到台账（只读；与 server 的 /api/qoder/checkin/logs 一一对应）。
+            commands::qoder_checkin_logs,
             commands::qoder_pro_pack_status,
             commands::qoder_pro_pack_claim,
             commands::qoder_credits,

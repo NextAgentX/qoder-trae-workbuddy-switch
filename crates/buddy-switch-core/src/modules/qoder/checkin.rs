@@ -29,6 +29,16 @@
 //!
 //! ## 排程（`ScheduleTask::QoderCheckin`）
 //!
+//! ⚠️ **上游每日实例在 10:00（UTC+8）切换**（窗口 10:00 → 次日 09:59）。由此定下三件事，
+//! 改动其中任何一条前先读完：
+//!
+//! 1. 默认时点是 **10:05 / 21:00**，不是整点 09:00 —— 09:00 那一轮稳定地签在上一个
+//!    实例上（上游回 `CLAIMED`），用户看到的就是「天天自动签到、天天没领到」。
+//! 2. 老配置（已落盘 09:00）由**窗口感知补跑**兜住：`retry_after_ms` 判出「本轮只是
+//!    重复签旧实例」后给出下一个 10:05，`scheduler::schedule_loop` 到点补跑一次。
+//! 3. 每轮都写台账（`qoder/checkin_logs.<region>.json`）+ 一条运行日志 —— 后台是静默的，
+//!    没有它，「跑了但无事可做 / 失败 / 压根没跑」三态在界面上无法区分。
+//!
 //! [`run_cycle_for`] 逐账号**顺序**调用 [`claim_for`]（并发会踩风控）；
 //! 签到默认**关**（替用户去领东西，opt-in），保活默认**开**（维持用户交出来的
 //! `refresh_token`）。本地盖章只用于展示与去重提示，判据仍是上游 `claimStatus` ——
@@ -38,7 +48,22 @@ use serde_json::{json, Value};
 
 use super::account::{self, RawAccount};
 use super::region::QoderRegion;
-use super::{api, campaign, store};
+use super::{api, campaign, paths, store};
+use crate::modules::{config, runtime_log};
+
+/// 自动签到台账保留条数（每轮一条）。
+///
+/// 只留最近 30 轮：用户要看的是「最近到底跑没跑 / 为什么没领到」，
+/// 不是归档。无界增长会把一个诊断文件变成第二个日志系统。
+const LOG_KEEP: usize = 30;
+
+/// 每日刷新（10:00 UTC+8）之后的补跑宽限（秒）。
+///
+/// 上游「每天领 100 Credits」的实例窗口是 **10:00 → 次日 09:59**。排程定在 09:00
+/// 时签到的必然是**上一个实例**（上游回 `CLAIMED` ⇒ `already`），什么也领不到 ——
+/// 这是「自动签到天天跑、天天没有」的真正原因。因此判出「本轮只是重复签旧实例」
+/// 后，要等新实例出来再跑一轮；留 5 分钟余量，避开上游切换的那一秒。
+const RETRY_AFTER_RESET_SECS: i64 = 300;
 
 /// 领取决策（纯函数，可测）：由状态推出下一步。
 #[derive(Debug, Clone, PartialEq)]
@@ -541,43 +566,292 @@ pub async fn status_map_for(region: QoderRegion, uids: Vec<String>) -> Value {
 ///
 /// ⚠️ 为什么顺序而不是并发：签到是**写操作**且直接对应上游风控计数；`status_map_for`
 /// 那种只读查询才适合并发。这里沿用官方客户端「逐个来」的节奏。
+///
+/// ## ★ 为什么返回值里多了 `progress` / `retryAtMs`
+///
+/// 上游每日实例在 **10:00（UTC+8）** 切换，而排程的默认时点在这之前 —— 09:00 那一轮
+/// 签的必然是上一个实例（`claimStatus: CLAIMED`），于是「每轮都成功、每月都没领到」。
+/// 这里把「本轮是否真的领到东西」与「要不要等新实例再跑一轮」结构化地带出来，
+/// 由排程循环（`scheduler::schedule_loop`）决定是否补跑，**不在本函数里 sleep**
+/// （那会阻塞排程并让手动入口也跟着卡住）。
 pub async fn run_cycle_for(region: QoderRegion) -> Value {
     let file = account::load_accounts_for(region);
     let mut results = Vec::new();
     let mut ok_count = 0usize;
+    let mut failures = 0usize;
+    let mut already_count = 0usize;
     let mut earned = 0i64;
+    let mut progress = false;
     for account in &file.accounts {
         match claim_for(region, &account.uid).await {
             Ok(value) => {
-                if value.get("ok") == Some(&Value::Bool(true)) {
+                let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                if ok {
                     ok_count += 1;
                 }
-                earned += value.get("earned").and_then(Value::as_i64).unwrap_or(0);
+                // 「未开放」（列表里没有积分类活动 / 整区没有活动平台）不是失败：
+                // 记成失败会让台账每天一行红字，而它其实什么也没坏。
+                let disabled = value
+                    .get("disabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !ok && !disabled {
+                    failures += 1;
+                }
+                if value.get("already").and_then(Value::as_bool) == Some(true) {
+                    already_count += 1;
+                }
+                let row_earned = value.get("earned").and_then(api::as_num).unwrap_or(0);
+                earned += row_earned;
+                let claimed_count = value
+                    .get("claimed")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                // 「有进展」只认**真的领到**：`ok:true` 也可能只是「上游说今天已领」。
+                if row_earned > 0 || claimed_count > 0 {
+                    progress = true;
+                }
                 results.push(json!({
                     "uid": account.uid,
                     "name": account::display_name(account),
                     "result": value,
                 }));
             }
-            Err(error) => results.push(json!({
-                "uid": account.uid,
-                "name": account::display_name(account),
-                "result": { "ok": false, "error": error },
-            })),
+            Err(error) => {
+                failures += 1;
+                results.push(json!({
+                    "uid": account.uid,
+                    "name": account::display_name(account),
+                    "result": { "ok": false, "error": error },
+                }));
+            }
         }
     }
+
+    let now_ms = config::now_ms();
+    let retry_at_ms = retry_after_ms(now_ms / 1000, progress, failures, already_count);
+
+    let entry = json!({
+        "atMs": now_ms,
+        "at": store::timestamp(),
+        "total": file.accounts.len(),
+        "okCount": ok_count,
+        "earned": earned,
+        "progress": progress,
+        "failures": failures,
+        "retryAtMs": retry_at_ms.map_or(Value::Null, |at| json!(at)),
+        "accounts": results
+            .iter()
+            .map(|row| json!({
+                "uid": row["uid"],
+                "name": row["name"],
+                "ok": row["result"]["ok"],
+                "already": row["result"]["already"],
+                "earned": row["result"]["earned"],
+                "disabled": row["result"]["disabled"],
+                "error": row["result"]["error"],
+            }))
+            .collect::<Vec<_>>(),
+    });
+    record_cycle(region, entry, retry_at_ms);
+
     json!({
         "region": region.as_str(),
         "total": file.accounts.len(),
         "okCount": ok_count,
         "earned": earned,
+        "progress": progress,
+        "failures": failures,
+        "retryAtMs": retry_at_ms.map_or(Value::Null, |at| json!(at)),
         "results": results,
+    })
+}
+
+/// 「本轮只是重复签上一个实例」⇒ 给出新实例出来后的补跑时刻（纯函数，可测）。
+///
+/// 四个条件缺一不可：
+/// - **没有进展**：真领到东西就不需要补跑；
+/// - **没有失败**：失败是上游/网络问题，重试只会多打一次上游（真实故障留给下一轮排程）；
+/// - **至少一个账号报「已签」**：否则说明今天本来就领不到（未开放 / 无可领项）；
+/// - **当前在 10:00 之前**：此时「今天的实例」还没出来，已签的必然是昨天的那个。
+pub fn retry_after_ms(
+    now_secs: i64,
+    progress: bool,
+    failures: usize,
+    already: usize,
+) -> Option<i64> {
+    if progress || failures > 0 || already == 0 || !before_daily_reset(now_secs) {
+        return None;
+    }
+    let (next_at, _) = campaign::next_checkin_window(now_secs);
+    let at_ms = (next_at + RETRY_AFTER_RESET_SECS) * 1000;
+    (at_ms > now_secs * 1000).then_some(at_ms)
+}
+
+/// 当天 10:00（UTC+8）之前 —— 上游「今天的那个实例」尚未刷新。
+fn before_daily_reset(now_secs: i64) -> bool {
+    const DAY: i64 = 86_400;
+    const RESET: i64 = 10 * 3600;
+    (now_secs + 8 * 3600).rem_euclid(DAY) < RESET
+}
+
+/// 读本区域的签到台账（损坏 / 不存在 ⇒ 空台账，**不报错**）。
+fn load_cycle_log(region: QoderRegion) -> Value {
+    let value: Value = store::read_json(&paths::checkin_logs_file_for(region));
+    if value.is_object() {
+        value
+    } else {
+        json!({ "entries": [], "pendingRetryMs": Value::Null })
+    }
+}
+
+fn save_cycle_log(region: QoderRegion, value: &Value) {
+    if let Err(error) = store::write_json(&paths::checkin_logs_file_for(region), value) {
+        // 台账是**诊断**数据：写不进去不能影响签到本身，但必须留痕
+        //（否则「界面没有记录」会被误读成「后台没跑」）。
+        runtime_log::warn("qoder-checkin", format!("签到台账落盘失败: {error}"));
+    }
+}
+
+/// 追加一条台账（新的在前，最多 [`LOG_KEEP`] 条）+ 写运行日志。
+fn record_cycle(region: QoderRegion, entry: Value, retry_at_ms: Option<i64>) {
+    let mut log = load_cycle_log(region);
+    let mut entries = log
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    entries.insert(0, entry.clone());
+    entries.truncate(LOG_KEEP);
+    if let Some(map) = log.as_object_mut() {
+        map.insert("entries".to_string(), Value::Array(entries));
+        map.insert(
+            "pendingRetryMs".to_string(),
+            retry_at_ms.map_or(Value::Null, |at| json!(at)),
+        );
+    }
+    save_cycle_log(region, &log);
+
+    let total = entry["total"].as_u64().unwrap_or(0);
+    let ok_count = entry["okCount"].as_u64().unwrap_or(0);
+    let earned = entry["earned"].as_i64().unwrap_or(0);
+    let failures = entry["failures"].as_u64().unwrap_or(0);
+    let mut message = format!(
+        "{} 账号 {total} · 成功 {ok_count} · 领到 {earned}",
+        region.as_str()
+    );
+    if failures > 0 {
+        let first = entry["accounts"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["ok"] != Value::Bool(true))
+                    .and_then(|row| row["error"].as_str())
+            })
+            .unwrap_or("未知原因");
+        message.push_str(&format!(" · 失败 {failures}（首个: {first}）"));
+        runtime_log::warn("qoder-checkin", message);
+        return;
+    }
+    if entry["progress"] == Value::Bool(true) {
+        runtime_log::info("qoder-checkin", message);
+        return;
+    }
+    if let Some(at) = retry_at_ms {
+        let at_text = chrono::DateTime::from_timestamp(at / 1000, 0)
+            .map(|instant| {
+                instant
+                    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).expect("UTC+8 恒有效"))
+                    .format("%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        message.push_str(&format!(
+            " · 今日实例已领完（上游 10:00 才刷新），已排 {at_text} 补跑"
+        ));
+    } else {
+        message.push_str(" · 本轮无事可做");
+    }
+    runtime_log::info("qoder-checkin", message);
+}
+
+/// 该区域「等新实例刷新后再跑一轮」的待办时刻（epoch 毫秒）。
+pub fn pending_retry_ms(region: QoderRegion) -> Option<i64> {
+    load_cycle_log(region)
+        .get("pendingRetryMs")
+        .and_then(Value::as_i64)
+}
+
+/// 清掉待办时刻（已到点执行 / 任务被关闭时调用）。
+///
+/// 只在**确实有值**时才写盘：排程循环会周期性地查这个值，无待办时反复重写
+/// 一个文件既浪费，也会让文件的「最后修改时间」失去诊断意义。
+pub fn clear_pending_retry(region: QoderRegion) {
+    let mut log = load_cycle_log(region);
+    if log
+        .get("pendingRetryMs")
+        .map(Value::is_null)
+        .unwrap_or(true)
+    {
+        return;
+    }
+    if let Some(map) = log.as_object_mut() {
+        map.insert("pendingRetryMs".to_string(), Value::Null);
+    }
+    save_cycle_log(region, &log);
+}
+
+/// 台账的下发形态（只读命令 `qoder_checkin_logs` 用；不回任何令牌）。
+pub fn logs_for(region: QoderRegion) -> Value {
+    let log = load_cycle_log(region);
+    json!({
+        "region": region.as_str(),
+        "entries": log.get("entries").cloned().unwrap_or_else(|| json!([])),
+        "pendingRetryMs": log.get("pendingRetryMs").cloned().unwrap_or(Value::Null),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CST 时刻 → epoch 秒（测试里只用来钉窗口边界）。
+    fn cst_secs(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .expect("测试时刻必须合法")
+            .timestamp()
+    }
+
+    /// 上游每日实例 10:00（UTC+8）切换 ⇒ **10:00 之前那一轮签的必然是上一个实例**。
+    ///
+    /// 本用例钉住「什么时候该补跑」这张表：
+    /// - 09:00 且只有 `already` ⇒ 排到当天 10:05（这就是「Qoder 总是没有自动签到」的修复点）；
+    /// - 21:00 且只有 `already` ⇒ **不排**（今天真领过了，再补跑只是多打一次上游）；
+    /// - 有进展 / 有失败 / 没人报已签 ⇒ 都不排（失败留给下一轮排程，不做每小时重试）。
+    ///
+    /// 可证伪：去掉 `before_daily_reset` ⇒ 第二条变红；去掉 `already == 0` ⇒ 第四条变红。
+    #[test]
+    fn retry_is_scheduled_only_before_the_daily_reset() {
+        let at_nine = cst_secs("2026-11-09T09:00:00+08:00");
+        assert_eq!(
+            retry_after_ms(at_nine, false, 0, 2),
+            Some(cst_secs("2026-11-09T10:05:00+08:00") * 1000),
+            "09:00 只是重复签上一个实例 ⇒ 必须排到 10:00 刷新后补跑"
+        );
+        assert_eq!(
+            retry_after_ms(cst_secs("2026-11-09T21:00:00+08:00"), false, 0, 2),
+            None,
+            "21:00 的「已签」是当天实例，不该再排"
+        );
+        assert_eq!(retry_after_ms(at_nine, true, 0, 2), None, "真领到就不补跑");
+        assert_eq!(retry_after_ms(at_nine, false, 1, 2), None, "有失败不做补跑");
+        assert_eq!(
+            retry_after_ms(at_nine, false, 0, 0),
+            None,
+            "没人报已签 ⇒ 无从判断"
+        );
+    }
 
     fn status(status: &str, today: bool) -> api::CheckinStatus {
         api::CheckinStatus {
@@ -855,5 +1129,40 @@ mod tests {
             serde_json::to_string_pretty(&result).unwrap_or_default()
         );
         assert_eq!(result["source"], "campaign", "应走活动平台");
+    }
+
+    // ── 真机探针：跑**整轮**签到（会真的领取），并验证台账落盘与窗口判定 ──
+    //
+    //   cargo test -p buddy-switch-core --lib live_cycle_writes_ledger -- --ignored --nocapture
+    //
+    // 与上面的单账号探针分开：那条只验「一次 claim」，本探针验的是**排程那一轮**的
+    // 形状 —— `progress` / `already` / `retryAtMs` 与 `qoder/checkin_logs.<region>.json`。
+    // 今天已签时预期：`progress=false`；`retryAtMs` 只有在 10:00（UTC+8）之前才非空。
+    #[tokio::test]
+    #[ignore = "真机探针：会真的跑一轮签到（已签时幂等，未签时会领取）"]
+    async fn live_cycle_writes_ledger() {
+        let value = run_cycle_for(QoderRegion::Cn).await;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+        let ledger = logs_for(QoderRegion::Cn);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ledger).unwrap_or_default()
+        );
+        assert!(
+            ledger["entries"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "一轮签到必须落一条台账（否则界面上的「最近一次」永远是空的）"
+        );
+        assert!(
+            ledger["entries"][0]
+                .get("at")
+                .and_then(Value::as_str)
+                .is_some(),
+            "台账条目要带可读时间"
+        );
     }
 }

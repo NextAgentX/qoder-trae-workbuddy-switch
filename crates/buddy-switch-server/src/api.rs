@@ -565,6 +565,8 @@ fn api_routes() -> Router {
             get(api_qoder_checkin_status_map),
         )
         .route("/api/qoder/checkin/claim", post(api_qoder_checkin_claim))
+        // 自动签到台账（只读；回答「后台那几轮到底做了什么」）。
+        .route("/api/qoder/checkin/logs", get(api_qoder_checkin_logs))
         // 一次性 Pro 升级包（+1800）：资格查询（只读）/ 领取（幂等）。
         .route("/api/qoder/pro-pack/status", get(api_qoder_pro_pack_status))
         .route("/api/qoder/pro-pack/claim", post(api_qoder_pro_pack_claim))
@@ -8335,6 +8337,18 @@ async fn api_qoder_checkin_status_map(RawQuery(query): RawQuery) -> Response {
     };
     let ids = parse_id_list(query_value(query.as_deref(), "accountIds"));
     json_ok(qoder::checkin::status_map_for(region, ids).await)
+}
+
+/// GET /api/qoder/checkin/logs —— 自动签到台账（**只读**，零上游请求）。
+///
+/// 存在的理由：签到在后台静默执行，用户只能看到「今天签没签」，看不到「排程到底
+/// 跑没跑、为什么没领到」。本接口把最近若干轮的结论（成功 / 已有 / 未开放 / 失败，
+/// 以及「等 10:00 刷新后补跑」的待办时刻）原样下发。
+async fn api_qoder_checkin_logs(RawQuery(query): RawQuery) -> Response {
+    match qoder_region_from_query(query.as_deref()) {
+        Ok(region) => json_ok(qoder::checkin::logs_for(region)),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 /// POST /api/qoder/checkin/claim —— 单账号签到（状态驱动；见 checkin 模块头）。

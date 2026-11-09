@@ -258,6 +258,8 @@ const DEMO_READ_COMMANDS = new Set([
   "qoder_web_proxy_get",
   // issue #47：逐账号「今日签到状态」（**只读**）。
   "qoder_checkin_status_map",
+  // 自动签到台账（**只读**；演示站返回空台账即可，页面据此显示「还没有记录」）。
+  "qoder_checkin_logs",
   "get_qoder_gateway_config", "qoder_gateway_status", "get_qoder_gateway_models",
   // 限额护栏视图（只读；逐账号当日用量 + 拦截原因）。
   "qoder_gateway_quota",
@@ -641,6 +643,8 @@ const ROUTES: Record<string, Route> = {
   // issue #47 · 逐账号「今日签到状态」只读重取（`accountIds` 逗号分隔，见 Trae 侧同一注释）。
   qoder_checkin_status_map: { method: "GET", path: "/api/qoder/checkin/status-map" },
   qoder_checkin_claim: { method: "POST", path: "/api/qoder/checkin/claim" },
+  // 自动签到台账（只读：后台那几轮做了什么、有没有排 10:00 后的补跑）。
+  qoder_checkin_logs: { method: "GET", path: "/api/qoder/checkin/logs" },
   qoder_pro_pack_status: { method: "GET", path: "/api/qoder/pro-pack/status" },
   qoder_pro_pack_claim: { method: "POST", path: "/api/qoder/pro-pack/claim" },
   qoder_credits: { method: "GET", path: "/api/qoder/credits" },
@@ -3933,6 +3937,48 @@ export interface QoderCheckinClaimResult {
 
 export function qoderCheckinClaim(scope: Scope, uid: string): Promise<QoderCheckinClaimResult> {
   return call<QoderCheckinClaimResult>("qoder_checkin_claim", { scope, uid });
+}
+
+/** 自动签到台账里的一轮。 */
+export interface QoderCheckinLogEntry {
+  atMs: number;
+  /** `YYYY-MM-DD HH:MM:SS`（本地时区）。 */
+  at: string;
+  total: number;
+  okCount: number;
+  /** 本轮真领到的额度合计。 */
+  earned: number;
+  /** 本轮**确实领到**（而不是只重复签了已领的实例）。 */
+  progress: boolean;
+  failures: number;
+  /** 非空 = 已排到这个时刻（epoch ms）再跑一轮（上游 10:00 才刷新实例）。 */
+  retryAtMs: number | null;
+  accounts: Array<{
+    uid: string;
+    name: string;
+    ok: boolean | null;
+    already: boolean | null;
+    earned: number | null;
+    disabled: boolean | null;
+    error: string | null;
+  }>;
+}
+
+/**
+ * 自动签到台账（**只读**，本地文件，零上游请求）。
+ *
+ * 后台签到不会弹任何提示；没有它，「跑了但今日实例已领完」「上游报错」「压根没跑」
+ * 在界面上三者无法区分 —— 这正是用户报「Qoder 总是没有自动签到」时缺的那块证据。
+ */
+export interface QoderCheckinLogView {
+  region: string;
+  /** 最近的在前。 */
+  entries: QoderCheckinLogEntry[];
+  pendingRetryMs: number | null;
+}
+
+export function qoderCheckinLogs(scope: Scope): Promise<QoderCheckinLogView> {
+  return call<QoderCheckinLogView>("qoder_checkin_logs", { scope });
 }
 
 /** Pro 升级包资格（**只读**；`available=false` = 活动已下线/本区域没有 ⇒ 不渲染入口）。 */

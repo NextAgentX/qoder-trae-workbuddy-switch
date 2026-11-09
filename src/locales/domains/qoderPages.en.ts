@@ -364,6 +364,12 @@ export const en = {
   "qoder.page.settings.schedule.keepaliveTimesLabel": "Keep-alive times",
   "qoder.page.settings.schedule.keepaliveTimesDesc": "Checks once at each of these times whether the token is close to expiry.",
   "qoder.page.settings.schedule.saveFailed": "Failed to save scheduled tasks",
+  "qoder.page.settings.schedule.autoLogSummary":
+    "Last auto check-in: {at} · {ok}/{total} ok · earned {earned}",
+  "qoder.page.settings.schedule.autoLogPending":
+    "Retry scheduled at {at} — the upstream reward only resets at 10:00, so an earlier run can do nothing but re-claim yesterday's instance.",
+  "qoder.page.settings.schedule.autoLogNever":
+    "No runs recorded yet: this schedule has not fired (a catch-up run happens on startup, then at the times above).",
   "qoder.page.settings.filtered":
     "Only sections with real content are listed; check-in / gateway / permissions / log settings will appear once those features land (no empty shells are shown up front).",
 } as const;

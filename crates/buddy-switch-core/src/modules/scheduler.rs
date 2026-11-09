@@ -33,6 +33,37 @@ use super::{
 /// 禁用态不能退出循环（否则用户后来打开开关就再也不会生效），只需低频重查。
 const DISABLED_RECHECK_MS: u64 = 60_000;
 
+/// 单次 `sleep` 的上限：**1 分钟分片**。
+///
+/// 排程点可能远在十几小时后，但「待办时刻」会由**另一条路径**写入（启动补跑里的
+/// Qoder 签到会写 `pendingRetryMs`）。一口气睡到排程点就会把它错过——那正是
+/// 「09:00 白跑、10:05 该补跑却没跑」的成因。分片后最迟 1 分钟必重算一次。
+const MAX_SLEEP_MS: u64 = 60_000;
+
+/// 某类任务在当前进程里的「待办时刻」（epoch 毫秒）。
+///
+/// 目前只有 Qoder 签到需要它：上游每日实例在 10:00（UTC+8）切换，排程若在本日
+/// 10:00 之前跑，签到的必然是上一个实例（`already`）。`qoder::checkin` 会把
+/// 「新实例出来后再跑一轮」的时刻写进台账，本循环据此提前唤醒。
+fn pending_retry_at(task: ScheduleTask) -> Option<i64> {
+    match task {
+        ScheduleTask::QoderCheckin => qoder::region::QoderRegion::all()
+            .into_iter()
+            .filter_map(qoder::checkin::pending_retry_ms)
+            .min(),
+        _ => None,
+    }
+}
+
+/// 清掉待办（已到点执行 / 任务被关闭）。
+fn clear_pending_retry(task: ScheduleTask) {
+    if task == ScheduleTask::QoderCheckin {
+        for region in qoder::region::QoderRegion::all() {
+            qoder::checkin::clear_pending_retry(region);
+        }
+    }
+}
+
 /// 哪些任务在**进程启动时补跑一轮**。
 ///
 /// 只补「今天该做但还没做」的几类：签到核验（WorkBuddy 与 Trae 各一）、Trae JWT 续期、
@@ -155,6 +186,10 @@ pub async fn run_scheduled_task(task: ScheduleTask) -> Value {
 ///
 /// 每轮**重新读取配置**并重算自己的 `next_fire`，因此运行期间改动时点表或开关、
 /// **下一轮即生效**，无需重启应用。任务被禁用（`times` 为空）时不派发，只按 1 分钟重查。
+///
+/// 唤醒时刻取 `min(下一个排程点, 待办时刻)`：待办时刻由签到模块在**发现「只是重复签
+/// 上一个实例」**时写入（见 `qoder::checkin::retry_after_ms`），用于等上游 10:00 刷新后
+/// 补跑一轮。睡眠按 [`MAX_SLEEP_MS`] 分片，保证「另一条路径刚写进去的待办」不会被长睡吞掉。
 pub async fn schedule_loop(task: ScheduleTask) {
     loop {
         let cfg = schedule::load_schedule_config();
@@ -167,14 +202,24 @@ pub async fn schedule_loop(task: ScheduleTask) {
             task.as_str(),
             now,
         );
-        let wait_ms = match at {
-            Some(at) => (at - now).max(0) as u64,
-            // 任务被禁用：1 分钟后重查配置，避免无谓空转。
-            None => DISABLED_RECHECK_MS,
-        };
-        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-        if at.is_none() {
+        // 任务被禁用：1 分钟后重查配置，并**清掉待办** —— 否则关掉开关后仍会在
+        // 待办时刻跑一次，那个开关就成了假控件。
+        let Some(at) = at else {
+            clear_pending_retry(task);
+            tokio::time::sleep(Duration::from_millis(DISABLED_RECHECK_MS)).await;
             continue;
+        };
+        let pending = pending_retry_at(task);
+        let wake = pending.map_or(at, |deferred| deferred.min(at));
+        let wait_ms = ((wake - now).max(0) as u64).min(MAX_SLEEP_MS);
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        // 分片醒来未必到点（也可能是配置刚被改）⇒ 回到循环开头重算。
+        if config::now_ms() < wake {
+            continue;
+        }
+        // 待办到点：先消费掉再执行，执行失败也不会变成每小时重试的滚雪球。
+        if pending == Some(wake) {
+            clear_pending_retry(task);
         }
         let _ = run_scheduled_task(task).await;
     }

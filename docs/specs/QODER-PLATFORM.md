@@ -89,13 +89,13 @@ macOS 上永远查不到钥匙串条目 ⇒ 解密失败 ⇒ 「桌面端检测�
 
 | 能力 | 有 | 说明 |
 |:---|:---:|:---|
-| 每日签到领积分 | ✅ | 走**活动平台**：`GET /sash/api/v1/me/campaigns` → 筛 `CLAIM_BENEFIT` + `CLAIMABLE` → 逐个 `POST …/{id}/claim`，累加 Credits；已领 ⇒ 幂等「今日已领」。旧 `/sash/daily-check-in` 只在**整区没有活动平台**（404/405/410）时兜底。三档语义不变：**没有积分类活动 ⇒ 未开放（`ok:false` + `disabled`）**，不谎报成功。⚠️ 真机未复验（本仓无 Qoder 账号），当前只有协议级单测 + `#[ignore]` 探针（`live_campaigns_probe`） |
+| 每日签到领积分 | ✅ | 走**活动平台**：`GET /sash/api/v1/me/campaigns` → 筛 `CLAIM_BENEFIT` + `CLAIMABLE` → 逐个 `POST …/{id}/claim`，累加 Credits；已领 ⇒ 幂等「今日已领」。旧 `/sash/daily-check-in` 只在**整区没有活动平台**（404/405/410）时兜底。三档语义不变：**没有积分类活动 ⇒ 未开放（`ok:false` + `disabled`）**，不谎报成功。★ **上游实例在 10:00（UTC+8）切换，窗口 10:00 → 次日 09:59**（2026-11-09 真机取证：`startAt`=10:00、`endAt`=次日 09:59）；活动列表**依赖 `cosy-machine*` 原生头**——不带 `runtime-info` 身份时上游直接返回空列表（`showCampaign:false`），带了才有「每天领 100 Credits」 |
 | 积分 / 额度查询 | ✅ | quota/usage + 套餐快照 |
 | Pro 福利包 | ❌ | **未实现**：`PATH_PRO_CLAIM` 只有常量定义、零调用点（issue #58 第 1 阶段一并落地） |
 | OAuth 设备授权 | ✅ | **PKCE S256**；两区 URL 参数不同（国内带 `redirect_uri`，国际不带） |
 | PAT 导入 | ✅ | 前缀 `pt-`，导入后自动交换 jobToken |
 | API 网关 | ✅ | OpenAI 兼容（Chat Completions / Responses）+ **Anthropic 兼容**（`/v1/messages`） |
-| 定时调度 | ✅ | `ScheduleTask::{QoderCheckin, QoderKeepalive}`：逐账号**顺序**执行（并发会踩风控）。判据与 Trae 两条同源 —— 签到默认**关**（替用户去领东西，opt-in），保活默认**开**（维持用户交出来的 `refresh_token`）；入口在 Qoder 设置页「计划任务」 |
+| 定时调度 | ✅ | `ScheduleTask::{QoderCheckin, QoderKeepalive}`：逐账号**顺序**执行（并发会踩风控）。判据与 Trae 两条同源 —— 签到默认**关**（替用户去领东西，opt-in），保活默认**开**（维持用户交出来的 `refresh_token`）；入口在 Qoder 设置页「计划任务」。★ 签到默认时点 **10:05 / 21:00**（不是整点 09:00：09:00 落在上一个实例窗口内，必然 `CLAIMED` ⇒ 领不到）；老配置仍排 09:00 时由**窗口感知补跑**兜住（`qoder::checkin::retry_after_ms` → 下一个 10:05 补跑一次，`scheduler::schedule_loop` 消费）。每轮写台账 `qoder/checkin_logs.<region>.json` + 一条 `[qoder-checkin]` 运行日志，设置页「计划任务」显示最近一次结果 |
 | 会话复制 | ❌ | **不实现** —— 会话复制依赖客户端自身的会话存储与云端归属，当前只有 WorkBuddy 桌面具备 |
 | 自动旅行 | ❌ | WorkBuddy 独有 |
 
