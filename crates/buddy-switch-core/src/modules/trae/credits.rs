@@ -1432,7 +1432,10 @@ mod tests {
             })
         };
         let edge = parse_credit_packages(&[pack(7)], now);
-        assert!(edge[0].expiring_soon, "7 天后到期应算临期（窗口 7 天，边界含等号）");
+        assert!(
+            edge[0].expiring_soon,
+            "7 天后到期应算临期（窗口 7 天，边界含等号）"
+        );
         let far = parse_credit_packages(&[pack(8)], now);
         assert!(!far[0].expiring_soon, "8 天后到期不应算临期（窗口 7 天）");
     }
