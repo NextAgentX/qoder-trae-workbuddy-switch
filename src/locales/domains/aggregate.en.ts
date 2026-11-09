@@ -133,6 +133,7 @@ export const en = {
   "aggregate.detail.qoderPackDedicated": "Dedicated pack",
   "aggregate.detail.packFallbackName": "Credit pack",
   "aggregate.detail.packExpired": "Expired",
+  "aggregate.detail.packExpiresAt": "Expires {when}",
   "aggregate.detail.packForever": "Never expires",
   "aggregate.detail.groupSaved": "Group saved",
 

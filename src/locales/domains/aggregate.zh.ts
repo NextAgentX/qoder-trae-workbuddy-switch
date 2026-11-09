@@ -147,6 +147,8 @@ export const zh = {
   "aggregate.detail.qoderPackDedicated": "专用资源包",
   "aggregate.detail.packFallbackName": "积分包",
   "aggregate.detail.packExpired": "已到期",
+  /* 到期列的前缀式（与渠道页同一个形状 `到期 {when}`），但**不跨域借用**渠道页词条。 */
+  "aggregate.detail.packExpiresAt": "到期 {when}",
   "aggregate.detail.packForever": "长期有效",
   "aggregate.detail.groupSaved": "分组已保存",
 

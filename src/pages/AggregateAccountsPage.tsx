@@ -103,7 +103,10 @@ import { useT } from "@/lib/i18n";
 import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
 import type { AccountMeta, CheckinLog, CreditStatsEvent, Region } from "@/lib/types";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
-import { pickPriorityAccountId } from "@/lib/credit-priority";
+import { pickPriorityAccountId, creditExpiryFromPacks } from "@/lib/credit-priority";
+import { packState } from "@/lib/qoder-packs";
+import type { TraeAccount } from "@/lib/trae-types";
+import type { QoderAccountView } from "@/lib/api";
 import { lastSevenDays, localDateKey } from "@/lib/checkin-history";
 import { useWbProgramStatuses, wbProgramAvailability } from "@/lib/wb-program-statuses";
 import {
@@ -248,27 +251,89 @@ export default function AggregateAccountsPage() {
   );
 
   /**
-   * ⭐「建议优先」徽章：**每个作用域挑一个**（issue #89 · B6）。
+   * ⭐「建议优先」徽章：**每个作用域的每个平台各挑一个**（issue #89 · B6）。
    *
    * 判据与账号页**共用** `pickPriorityAccountId`（`lib/credit-priority.ts`）——
    * 此前账号页有徽章、聚合页没有，同一张卡在两个页面显示不同的推荐，
-   * 用户无从判断该信哪个。这里只做「按作用域分组」这一步。
+   * 用户无从判断该信哪个。这里只做「按作用域 + 平台分组」这一步。
+   *
+   * ★ 2026-11-09：Trae / Qoder 也纳入。它们的积分不在 `CreditExpiry` 形状里
+   * （Trae 在账号对象的 `creditPackages`、Qoder 在逐包缓存），此前**完全没参与**；
+   * 经 `creditExpiryFromPacks` 换成同形状后走同一套判据。
+   *
+   * ⚠️ key 必须带平台：WB 与 Qoder 的 scope 字符串可能相同（都是 `cn`），
+   * 只用 scope 会让两个平台的推荐互相覆盖。
    */
   const priorityIdByScope = useMemo(() => {
-    const grouped = new Map<Scope, AccountMeta[]>();
+    /* 三个平台共用同一个「现在」：各取一次会让同一次排序里出现两个「今天」，
+       跨秒时同一批包的临期判定可能不一致（排序结果就不可复现）。 */
+    const now = Date.now();
+    const out = new Map<string, string>();
+    const wbGroups = new Map<Scope, AccountMeta[]>();
+    const traeGroups = new Map<Scope, TraeAccount[]>();
+    const qoderGroups = new Map<Scope, QoderAccountView[]>();
     for (const account of accounts) {
-      if (account.platform !== "workbuddy") continue;
-      const list = grouped.get(account.scope) ?? [];
-      list.push(account.data);
-      grouped.set(account.scope, list);
+      if (account.platform === "workbuddy") {
+        const list = wbGroups.get(account.scope) ?? [];
+        list.push(account.data);
+        wbGroups.set(account.scope, list);
+      } else if (account.platform === "trae") {
+        const list = traeGroups.get(account.scope) ?? [];
+        list.push(account.data);
+        traeGroups.set(account.scope, list);
+      } else {
+        const list = qoderGroups.get(account.scope) ?? [];
+        list.push(account.data);
+        qoderGroups.set(account.scope, list);
+      }
     }
-    const out = new Map<Scope, string>();
-    for (const [scope, list] of grouped) {
+    for (const [scope, list] of wbGroups) {
       const id = pickPriorityAccountId(list, (account) => creditOf(scope, account.id));
-      if (id) out.set(scope, id);
+      if (id) out.set(`workbuddy:${scope}`, id);
+    }
+    for (const [scope, list] of traeGroups) {
+      const rows = list.map((account) => ({ id: account.userId, account }));
+      /* ⚠️ 逐包**不在账号视图里**：后端 `trae::account::account_view` 从不下发
+         `creditPackages`（全 crates 零匹配），它只存在于 `get_trae_credits` 的
+         `packages[uid]`，由信号层收进 `traeCredits`。此前这里读 `account.creditPackages`
+         ⇒ 恒 `undefined` ⇒ `creditExpiryFromPacks` 返回 `undefined` ⇒ 一枚都挑不出来，
+         徽章**永远不出现**（渠道页与卡片合并了信号层，所以只有这里中招）。
+         与 `renderCard` / `detailAccount` 的合并口径保持一致。 */
+      const packs = signalsByScope.get(scope)?.traeCredits;
+      const id = pickPriorityAccountId(rows, (row) =>
+        creditExpiryFromPacks(packs?.get(row.account.userId) ?? null, { unit: "s", now }),
+      );
+      if (id) out.set(`trae:${scope}`, id);
+    }
+    for (const [scope, list] of qoderGroups) {
+      const rows = list.map((account) => ({ id: account.uid, account }));
+      /* ⚠️ Qoder 的「优先」**依赖逐包到期时间**（`pickPriorityAccountId` 只返回
+         「有临期积分」的账号），而逐包只在网页会话链路里（`qoder_web_credit_packs`）。
+         本页**不预取**：那会是「2 个 region × N 个账号」串带会话 Cookie 的上游请求，
+         打多了会被上游判异常（见 `renderCard` 里 Qoder 卡片的同名注释）。
+         ⇒ 只有**打开过抽屉 / 浮层**的账号才有缓存、才可能被选中；其余返回 `undefined`
+         （= 未知，不是「不临期」）。要让聚合页的 Qoder 徽章稳定出现，得先批准一条
+         预取策略，别在这里偷偷加 `load()`。 */
+      const id = pickPriorityAccountId(rows, (row) => {
+        const packs = qoderWebPacks.packs[qoderPackKey(scope, row.account.uid)];
+        if (!packs?.available) return undefined;
+        return creditExpiryFromPacks(
+          packs.packs.map((pack) => ({
+            total: pack.limit,
+            remaining: pack.remaining,
+            used: pack.used,
+            expireAt: pack.expiresAtMs ?? null,
+            expired: packState(pack, now) === "expired",
+            expiringSoon: packState(pack, now) === "expiring",
+            packageCode: pack.id ?? null,
+          })),
+          { now },
+        );
+      });
+      if (id) out.set(`qoder:${scope}`, id);
     }
     return out;
-  }, [accounts, creditOf]);
+  }, [accounts, creditOf, qoderWebPacks.packs, signalsByScope]);
 
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<AggregateMode>("group");
@@ -907,7 +972,7 @@ export default function AggregateAccountsPage() {
             /* ★ issue #89 · B5：旅行状态来自信号层（`reloadSignals` 会一起刷新）。 */
             travelStatus={signals?.travel.get(item.data.id)}
             /* ★ issue #89 · B6：与账号页共用一个判据（见 `priorityIdByScope`）。 */
-            creditPriority={item.data.id === priorityIdByScope.get(item.scope)}
+            creditPriority={item.data.id === priorityIdByScope.get(`workbuddy:${item.scope}`)}
             onCheckin={() => void checkinOne(item)}
             onRefreshPart={(_account, kind) => void refreshPart(item, kind)}
             refreshingKinds={refreshBusy.kindsOf(item.ref)}
@@ -951,6 +1016,9 @@ export default function AggregateAccountsPage() {
                不传 ⇒ `disabled={... || !onRefreshCredits}` 命中，而这一行恰恰是
                「没有积分」时唯一的出口。 */
             onRefreshCredits={() => void refreshTraeCredits(item)}
+            /* ★ 2026-11-09：「优先」徽章此前只有 WB 有 —— Trae 的数据一直在账号对象上，
+               只是没传这个 prop（漏做，不是缺功能）。判据见 `priorityIdByScope`。 */
+            creditPriority={item.data.userId === priorityIdByScope.get(`trae:${item.scope}`)}
             checkedTodayOverride={checkinToday ?? undefined}
             onRefreshPart={(_account, kind) => void refreshPart(item, kind)}
             refreshingKinds={refreshBusy.kindsOf(item.ref)}
@@ -994,6 +1062,7 @@ export default function AggregateAccountsPage() {
           }
           checkinToday={checkinToday}
           programs={qoderPrograms.length ? qoderPrograms : null}
+          creditPriority={item.data.uid === priorityIdByScope.get(`qoder:${item.scope}`)}
           /* ★ issue #166：到期徽章要逐包数据。聚合页**不预取** —— 跨 6 个作用域 × N 个账号
              就是 N 串带会话 Cookie 的上游请求；这里只复用抽屉/浮层已经读过的缓存。 */
           packs={qoderWebPacks.packs[qoderPackKey(item.scope, item.data.uid)]}
@@ -1290,16 +1359,62 @@ export default function AggregateAccountsPage() {
     const region = scopeParts(detailAccount.scope).region;
     const signals = signalsByScope.get(detailAccount.scope);
     const todayEntry = todayTokensOf(signals, detailAccount);
+    /* 一次装配只取一次「现在」：下面三个平台的临期判定都要用它，各取一次会让
+       同一次渲染里出现两个「今天」（跨秒时同一批包可能被判成两种状态）。 */
+    const now = Date.now();
+    const wbCredit =
+      detailAccount.platform === "workbuddy"
+        ? creditOf(detailAccount.scope, detailAccount.data.id)
+        : undefined;
+    const traeCredit =
+      detailAccount.platform === "trae"
+        ? creditExpiryFromPacks(detailAccount.data.creditPackages, { unit: "s", now })
+        : undefined;
+    /* Qoder 的逐包只在网页会话链路里（打开抽屉时才取）。 */
+    const qoderPacks =
+      detailAccount.platform === "qoder"
+        ? qoderWebPacks.packs[qoderPackKey(detailAccount.scope, detailAccount.data.uid)]
+        : undefined;
+    const qoderCredit =
+      qoderPacks?.available
+        ? creditExpiryFromPacks(
+            qoderPacks.packs.map((pack) => ({
+              total: pack.limit,
+              remaining: pack.remaining,
+              used: pack.used,
+              expireAt: pack.expiresAtMs ?? null,
+              expired: packState(pack, now) === "expired",
+              expiringSoon: packState(pack, now) === "expiring",
+              packageCode: pack.id ?? null,
+            })),
+            { now },
+          )
+        : undefined;
     return {
       t,
-      credit:
-        detailAccount.platform === "workbuddy"
-          ? creditOf(detailAccount.scope, detailAccount.data.id)
-          : undefined,
+      credit: wbCredit,
       credits:
         detailAccount.platform === "trae"
-          ? { remaining: detailAccount.data.remainingCredits, total: detailAccount.data.credits }
+          ? { remaining: detailAccount.data.remainingCredits, total: null }
           : null,
+      /* 详情页积分块副文本的金额来源：三个平台各算各的，装配层只排版。
+         ★ 拿不到 ⇒ **`null`（未知）**，不是 0 —— 类型本来就是 `number | null`，
+           null 就是留给「不知道」的。此前 `?? 0` 把「没有数据」说成「0 积分要到期」，
+           而同一抽屉的积分格在没有真值时会整格不渲染（`aggregateDetailStats` 的守卫），
+           两种口径互相矛盾。
+         ⚠️ `creditExpiryFromPacks` 的 `expiringSoonRemaining` 恒有值（自己算成 0），
+           但 WB 的字段是后端可选字段：旧后端 / 半截响应下缺失 ⇒ 仍是「不知道」，
+           必须 `?? null` 而不是 `?? 0`（同一条纪律：未知不得说成已知）。 */
+      expiringAmount: wbCredit
+        ? (wbCredit.expiringSoonRemaining ?? null)
+        : traeCredit
+          ? traeCredit.expiringSoonRemaining
+          : qoderCredit
+            ? qoderCredit.expiringSoonRemaining
+            : null,
+      /* 与上面三个平台判临期用的是**同一个**「现在」：资源包明细（`aggregateDetailPacks`）
+         复用它，否则同一次渲染里会出现两个「今天」。 */
+      now,
       /* 今日 Token 的**总量**（客户端 + 网关）；缺席 = 未知 ⇒ 那一格不渲染。 */
       todayTokens: todayEntry
         ? todayEntry.clientIn + todayEntry.clientOut + todayEntry.gatewayIn + todayEntry.gatewayOut
@@ -1318,10 +1433,7 @@ export default function AggregateAccountsPage() {
       traePrograms:
         detailAccount.platform === "trae" ? traeProgramsOf(signals, detailAccount) : undefined,
       qoderPrograms: detailAccount.platform === "qoder" ? signals?.qoderPrograms : undefined,
-      qoderPacks:
-        detailAccount.platform === "qoder"
-          ? qoderWebPacks.packs[qoderPackKey(detailAccount.scope, detailAccount.data.uid)]
-          : undefined,
+      qoderPacks,
     };
   }, [
     creditOf,
