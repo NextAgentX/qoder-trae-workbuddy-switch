@@ -97,7 +97,7 @@ import { useAccountsStore } from "@/stores/accounts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n";
 import type { Translate } from "@/lib/i18n";
-import { nearestExpiringBatch, remainingSpan } from "@/lib/credit-expiry";
+import { expiringSubtextAmount, nearestExpiringBatch, remainingSpan } from "@/lib/credit-expiry";
 import {
   compareCreditPriority,
   nearestCreditExpiry,
@@ -1930,12 +1930,12 @@ function RegionPanel({ region }: { region: Region }) {
     /* 与下面所有判定共用上面那一个 `now`（注释就写在 `const now` 上，别又各写一次）。 */
     const expired = detail.expiresAt != null && detail.expiresAt < now;
     const credBad = expired || Boolean(detail.needsRelogin);
-    /* 临期金额：**读不到 ⇒ `null`**（未查询 / 查询失败 / 字段缺失），不是 0。
-       写成 0 会与主值的「—」自相矛盾 —— 主值说读不到，副文本却说「0 积分要到期」。
-       「0 也照写」只覆盖「确实为 0」这一种情况。
-       ⚠️ 字段本身是可选的（`CreditExpiry.expiringSoonRemaining?`）：旧后端 / 半截响应下
-       缺失 ⇒ 仍是「不知道」，`?? 0` 会把它说成「0 积分要到期」。 */
-    const soon = credit?.ok ? (credit.expiringSoonRemaining ?? null) : null;
+    /* 临期金额：闸门在 `credit-expiry.ts::expiringSubtextAmount` —— 未知（未查询 / 查询失败 /
+       字段缺失 / 旧后端）与「确实是 0」**都不渲染副文本**。
+       0 是绝大多数账号的常态，写成「7 天内到期 0 积分」等于把「一切正常」说成一条提醒，
+       看久了这一行就被无视；而「未知写成 0」是另一条错（把不知道说成没有），两件事一起挡。
+       ⚠️ 字段本身是可选的（`CreditExpiry.expiringSoonRemaining?`）⇒ 不能 `?? 0`。 */
+    const soon = credit?.ok ? expiringSubtextAmount(credit.expiringSoonRemaining) : null;
     return [
       {
         key: "credits",
@@ -1951,7 +1951,7 @@ function RegionPanel({ region }: { region: Region }) {
             : "—",
         subText:
           soon === null ? undefined : t("shared.detail.creditsExpiring", { amount: formatCredits(soon) }),
-        tone: soon !== null && soon > 0 ? "warn" : undefined,
+        tone: soon === null ? undefined : "warn",
         refreshKind: "credits",
       },
       {

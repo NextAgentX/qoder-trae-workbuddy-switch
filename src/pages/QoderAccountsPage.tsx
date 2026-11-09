@@ -97,6 +97,7 @@ import type {
 } from "@/lib/api";
 import { accountSearchText } from "@/lib/account-search";
 import { packSourceLabel, packState, qoderExpiringSummary } from "@/lib/qoder-packs";
+import { expiringSubtextAmount } from "@/lib/credit-expiry";
 import { qoderCredentialExpired } from "@/lib/qoder-credential";
 import { creditExpiryFromPacks, pickPriorityAccountId } from "@/lib/credit-priority";
 import { qoderPackKey, qoderPacksNotice, useQoderWebPacks } from "@/lib/use-qoder-web-packs";
@@ -964,15 +965,16 @@ export default function QoderAccountsPage() {
     if (!detail) return [];
     const row = credits[detail.uid];
     /* 逐包数据（抽屉打开时已按需取过）——用于算「7 天内到期 X 积分」。
-       取不到逐包 ⇒ **`null`（未知）**，副文本整条不渲染。此前塌成 0，于是出现
-       「主值说读不到（—）、副文本说 0 积分要到期」的矛盾 ——「0 也照写」只覆盖
-       「确实为 0」这一种情况。 */
+       闸门在 `credit-expiry.ts::expiringSubtextAmount`：取不到逐包（未知）与确实是 0
+       **都不渲染副文本**（0 是常态不是信息；未知更不能写成 0）。 */
     const webPacks = packOf(detail.uid);
     /* 一次装配只取一次「现在」：下面的临期金额（逐包窗口判定）与凭据过期判定共用它 ——
        各取一次 `Date.now()`，跨秒边界时同一份数据可能被判成「临期」与「不临期」两种。 */
     const now = Date.now();
     const soon =
-      webPacks?.available === true ? (qoderExpiringSummary(webPacks.packs, now)?.total ?? 0) : null;
+      webPacks?.available === true
+        ? expiringSubtextAmount(qoderExpiringSummary(webPacks.packs, now)?.total)
+        : null;
     const checked = checkinTodayOf(detail);
     /* 凭据判据走 `lib/qoder-credential.ts`（与卡片红徽章**同一个函数**）：
        此前这里是裸 `detail.expiresAt < Date.now()`，没有毫秒量级守卫 —— 若该值是秒，
@@ -992,7 +994,7 @@ export default function QoderAccountsPage() {
           row && row.ok && soon !== null
             ? t("shared.detail.creditsExpiring", { amount: formatCredits(soon) })
             : undefined,
-        tone: row && row.ok && soon !== null && soon > 0 ? "warn" : undefined,
+        tone: row && row.ok && soon !== null ? "warn" : undefined,
         refreshKind: "credits",
       },
       {

@@ -45,9 +45,8 @@ const { normalizePacks, toDetailPacks, packIsExpired, packRatio, secondsToMs } =
   "src/lib/credit-packs.ts",
 );
 /* 临期窗口的镜像常量（#144 复核 §3.3）：与后端 `EXPIRING_SOON_SECS` 必须同值。 */
-const { TRAE_EXPIRING_SOON_MS, remainingSpan, summarizeExpiring } = await loadTs(
-  "src/lib/credit-expiry.ts",
-);
+const { TRAE_EXPIRING_SOON_MS, remainingSpan, summarizeExpiring, expiringSubtextAmount } =
+  await loadTs("src/lib/credit-expiry.ts");
 
 /** 递归列出 `src/**` 的 ts/tsx（用法断言的扫描面）。 */
 function walkTs(dir, out = []) {
@@ -335,6 +334,38 @@ check("★ 剩余时长粒度只有一处判据（remainingSpan）：徽章与�
   const expirySource = readFileSync(path.join(root, "src/lib/credit-expiry.ts"), "utf8");
   if (/export function daysUntil/.test(expirySource)) {
     throw new Error("credit-expiry 又长回了 daysUntil —— 判据只允许 remainingSpan 一处");
+  }
+});
+
+/* ── 「7 天内到期 X 积分」副文本：0 与未知都不渲染 ──────────────────────────
+ *
+ * 这行是**警示**不是读数：0 是绝大多数账号的常态，写成「7 天内到期 0 积分」等于把
+ * 「一切正常」说成一条提醒（看久了这一行就被无视）；而「读不到」更不能塌成 0
+ * （把不知道说成没有）。两件事在同一个出口挡掉，五个调用点只判 `null`。
+ *
+ * 可证伪点：
+ * ① 闸门本身：0 / 负数 / NaN / null / undefined ⇒ `null`；正数原样返回；
+ * ② 用法：四个文件（WB / Trae / Qoder 抽屉 + 聚合详情两个分支）都必须走它 ——
+ *    各自写 `!= null && > 0` 会漏掉其中一个分支，而 tsc 不会报。
+ */
+check("★ 「7 天内到期 X 积分」副文本：0 与未知都不渲染（同一出口）", () => {
+  eq(expiringSubtextAmount(12.5), 12.5, "有金额应原样返回");
+  eq(expiringSubtextAmount(0), null, "0 = 常态，不渲染");
+  eq(expiringSubtextAmount(-1), null, "负数不渲染");
+  eq(expiringSubtextAmount(Number.NaN), null, "NaN（非数）不渲染");
+  eq(expiringSubtextAmount(null), null, "未知（null）不渲染");
+  eq(expiringSubtextAmount(undefined), null, "缺失（undefined）不渲染");
+  const callSites = [
+    "src/pages/AccountsPage.tsx",
+    "src/pages/QoderAccountsPage.tsx",
+    "src/pages/TraeAccountsPage.tsx",
+    "src/lib/aggregate-detail.ts",
+  ];
+  for (const rel of callSites) {
+    const src = readFileSync(path.join(root, rel), "utf8");
+    if (!/expiringSubtextAmount\(/.test(src)) {
+      throw new Error(`${rel} 的副文本没走 expiringSubtextAmount —— 0 / 未知 会各自判错`);
+    }
   }
 });
 

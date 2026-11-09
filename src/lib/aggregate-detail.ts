@@ -41,6 +41,7 @@ import type {
 } from "@/components/account-detail-drawer";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { packIsExpired, secondsToMs, toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
+import { expiringSubtextAmount } from "@/lib/credit-expiry";
 import { packState } from "@/lib/qoder-packs";
 import { displayText } from "@/lib/display-text";
 import { formatCredits } from "@/components/usage/format";
@@ -173,28 +174,29 @@ export function aggregateDetailStats(
   if (account.platform === "workbuddy") {
     const credit = ctx.credit;
     if (credit?.ok && typeof credit.totalRemaining === "number") {
-      /* `null` / `undefined` = 装配层没拿到临期金额（未知）⇒ **不渲染副文本**。
-         写成 0 会与「只给有真值的项」这条口径打架：同一格的主值都只在有真值时才出，
-         副文本却报一个 0 —— 等于把「不知道」说成「没有」。 */
-      const soon = ctx.expiringAmount;
+      /* 副文本只在**有金额**时渲染：未知（装配层没拿到）与「确实是 0」都不写 ——
+         「7 天内到期 X 积分」是一句警示，0 是常态不是信息（判据见
+         `credit-expiry.ts::expiringSubtextAmount`，五个调用点同一个出口）。 */
+      const soon = expiringSubtextAmount(ctx.expiringAmount);
       stats.push({
         key: "credits",
         label: t("wbAccounts.card.metric.credits"),
         valueText: formatCredits(credit.totalRemaining),
         subText:
           soon == null ? undefined : t("shared.detail.creditsExpiring", { amount: formatCredits(soon) }),
-        tone: soon != null && soon > 0 ? "warn" : undefined,
+        tone: soon == null ? undefined : "warn",
       });
     }
   } else if (ctx.credits && ctx.credits.remaining != null) {
-    const soon = ctx.expiringAmount;
+    /* 同 WB 分支：闸门在 `expiringSubtextAmount`（未知 / 0 都不渲染）。 */
+    const soon = expiringSubtextAmount(ctx.expiringAmount);
     stats.push({
       key: "credits",
       label: t("wbAccounts.card.metric.credits"),
       valueText: formatCredits(ctx.credits.remaining),
       subText:
         soon == null ? undefined : t("shared.detail.creditsExpiring", { amount: formatCredits(soon) }),
-      tone: soon != null && soon > 0 ? "warn" : undefined,
+      tone: soon == null ? undefined : "warn",
     });
   }
 

@@ -34,7 +34,7 @@ import {
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { TraeAccountCard, formatCredits, formatExpiryTime, jwtBadge, shortTime, type TraeProgram } from "@/components/trae-account-card";
 import { secondsToMs, toDetailPacks } from "@/lib/credit-packs";
-import { TRAE_EXPIRING_SOON_MS, summarizeExpiring } from "@/lib/credit-expiry";
+import { TRAE_EXPIRING_SOON_MS, expiringSubtextAmount, summarizeExpiring } from "@/lib/credit-expiry";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { creditExpiryFromPacks, pickPriorityAccountId } from "@/lib/credit-priority";
 import { REFRESH_DONE_LABEL, useAccountRefreshBusy, type AccountRefreshKind } from "@/lib/account-refresh";
@@ -1781,18 +1781,21 @@ export default function TraeAccountsPage() {
          分支补上 `> 0` 下界 —— 此前只有上界，已过期的账号也命中，指标块永远是黄色（B4）。 */
     const packs = detail.creditPackages ?? [];
     const expiringSummary = summarizeExpiring(packs, { unit: "s", now: statNow });
-    /* 临期金额：**拿不到 ⇒ `null`（未知）**，不是 0。副文本据此整条不渲染 ——
-       主值写「—」（余额未知）时，副文本再报一个绝对金额是自相矛盾的。 */
-    const soonAmount: number | null = expiringSummary
-      ? expiringSummary.total
-      : (() => {
-          const expireAtMs = secondsToMs(detail.creditsExpireAt);
-          if (expireAtMs === null) return null;
-          /* 没有余额读数就不报金额，别把「不知道有多少」说成「0 积分要到期」。 */
-          if (detail.remainingCredits == null) return null;
-          const remain = expireAtMs - statNow;
-          return remain > 0 && remain <= TRAE_EXPIRING_SOON_MS ? detail.remainingCredits : 0;
-        })();
+    /* 临期金额：**拿不到 ⇒ `null`（未知）**，不是 0；确实是 0 也返回 `null`（常态不是信息）。
+       两者由 `credit-expiry.ts::expiringSubtextAmount` 统一挡掉，副文本只需判 `null`。
+       ⚠️ 主值写「—」（余额未知）时也不能报绝对金额 —— 自相矛盾。 */
+    const soonAmount = expiringSubtextAmount(
+      expiringSummary
+        ? expiringSummary.total
+        : (() => {
+            const expireAtMs = secondsToMs(detail.creditsExpireAt);
+            if (expireAtMs === null) return null;
+            /* 没有余额读数就不报金额，别把「不知道有多少」说成「0 积分要到期」。 */
+            if (detail.remainingCredits == null) return null;
+            const remain = expireAtMs - statNow;
+            return remain > 0 && remain <= TRAE_EXPIRING_SOON_MS ? detail.remainingCredits : 0;
+          })(),
+    );
     const credBad = detail.jwtStatus === "expired";
 
     /* 今日 Token（issue #47）：只统计**经本网关**的调用，客户端那一档 Trae 拿不到
@@ -1863,10 +1866,7 @@ export default function TraeAccountsPage() {
           detail.remainingCredits != null && soonAmount !== null
             ? t("shared.detail.creditsExpiring", { amount: formatCredits(soonAmount) })
             : undefined,
-        tone:
-          detail.remainingCredits != null && soonAmount !== null && soonAmount > 0
-            ? "warn"
-            : undefined,
+        tone: detail.remainingCredits != null && soonAmount !== null ? "warn" : undefined,
         refreshKind: "credits",
       },
       tokensBlock,
