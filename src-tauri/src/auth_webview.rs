@@ -49,6 +49,10 @@
 //!
 //! 合并会让「关窗要不要等收割」这个条件渗进授权路径，把简单的事弄成时序问题。
 
+// ★ 只被 Windows 的 `profiles_root` / `prune_profiles` 使用 ⇒ 必须同 cfg 限定，
+//   否则 mac / linux 构建报 `unused import`，而 CI 的 rust-cache 默认带 `-D warnings`
+//   （v2026.11.91845 已经这样挂过一次，别再犯）。
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -66,6 +70,10 @@ const WINDOW_WIDTH: f64 = 520.0;
 const WINDOW_HEIGHT: f64 = 760.0;
 
 /// 数据目录的保鲜期：超过它的自动清理（Windows 每次登录一份，不清理会单调增长）。
+///
+/// ★ 同 `PathBuf`：只有 Windows 分支建目录，常量也必须跟着 cfg，否则 mac / linux
+///   报 `dead_code`（同样被 `-D warnings` 打成错误）。
+#[cfg(target_os = "windows")]
 const PROFILE_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
 /// 窗口序号：保证同一平台连续登录两次拿到两个**不同**的 label（也就有两份数据目录）。
