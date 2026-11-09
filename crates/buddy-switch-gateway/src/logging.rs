@@ -22,11 +22,13 @@
 //! - [`RequestMeta::total_ms`]（`totalMs`）= **整次请求总耗时**，
 //!   流式由 sink 在流结束时补齐（那是新增信息，不覆盖任何旧字段）。
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 
 use buddy_switch_core::modules::config as core_config;
@@ -225,6 +227,27 @@ pub struct RequestLog {
     keep: Mutex<usize>,
     log_bodies: AtomicBool,
     entries: Mutex<Vec<Value>>,
+    /// ★ **用量流水目录**（`gateway_usage/`）：每条日志额外追加一行到
+    /// `gateway_usage/<本地日>.jsonl`，**不参与环形裁剪**。
+    ///
+    /// 为什么需要：`entries` 只留 `log_keep`（缺省 200）条，而 `token_daily`
+    /// 的「今日网关桶」曾直接在这份滚动窗口上做增量 ⇒ 单轮窗口内写入超过 200 条
+    /// 的请求**永久丢失**（用户报「用量比 cc-switch 少很多」的根因之一）。
+    /// 流水是 append-only 的当日全量事实表，窗口怎么滚都不影响它。
+    ///
+    /// `None` = 未启用（Trae / Qoder 的子网关有自己的账本，不需要再写一份）。
+    usage_dir: Mutex<Option<PathBuf>>,
+}
+
+/// 毫秒时间戳 → **本地日**（`YYYY-MM-DD`，流水文件名的分片键）。
+///
+/// 与 `token_daily::local_date_string` 必须同口径（本地时区）：两边一旦不一致，
+/// 跨零点的请求会落到「今天的桶但昨天的文件」里，表现为每天都少一截。
+fn usage_day(ts_ms: i64) -> Option<String> {
+    Local
+        .timestamp_millis_opt(ts_ms)
+        .single()
+        .map(|at| at.format("%Y-%m-%d").to_string())
 }
 
 impl RequestLog {
@@ -239,7 +262,16 @@ impl RequestLog {
             keep: Mutex::new(keep.max(1)),
             log_bodies: AtomicBool::new(log_bodies),
             entries: Mutex::new(entries),
+            usage_dir: Mutex::new(None),
         }
+    }
+
+    /// 启用**用量流水**（append-only，按本地日分文件）。
+    ///
+    /// 只由**主网关**调用：流水是 `token_daily` 的「今日网关桶」事实源，取代原先
+    /// 「每 2 分钟拿 200 条滚动窗口做增量」的读法（那种读法在高峰时会丢量）。
+    pub fn enable_usage_stream(&self, dir: PathBuf) {
+        *self.usage_dir.lock().unwrap() = Some(dir);
     }
 
     /// 是否记录正文。
@@ -260,11 +292,76 @@ impl RequestLog {
 
     /// 追加一条日志（元数据），并裁剪到保留上限。
     pub fn record(&self, entry: Value) {
+        /* 先写流水、再入环形缓冲：流水是统计事实源，早一步落盘就早一步
+        可被 `token_daily` 读到；两者之间没有锁嵌套（`usage_dir` 与 `entries` 独立）。 */
+        self.append_usage(&entry);
         {
             let mut entries = self.entries.lock().unwrap();
             entries.push(entry);
         }
         self.trim_and_save();
+    }
+
+    /// 向当日用量流水追加一行（**只挑统计必需字段**）。
+    ///
+    /// ## 为什么单独一份文件，而不是「把 `log_keep` 调大」
+    ///
+    /// 调大只是把丢失概率推后：日志是**滚动窗口**，统计侧永远无法证明「今天没丢」。
+    /// 流水按本地日分文件、只增不删（保留期由 `token_daily` 统一清理 90 天），
+    /// 让「今日网关桶」可以**整日重算**而不是增量猜。
+    ///
+    /// ## 为什么只挑字段
+    ///
+    /// `error` 可能带上游原文（含账号名/内部码），统计不需要它；行宽也直接影响
+    /// 90 天保留的磁盘占用。
+    ///
+    /// ## 失败处置
+    ///
+    /// 全程**尽力而为**：目录建不出来 / 磁盘满 / 行序列化失败都直接返回。
+    /// 记日志不是业务路径，绝不能因为写流水失败而影响请求本身（与 `save` 同取向）。
+    fn append_usage(&self, entry: &Value) {
+        let Some(dir) = self.usage_dir.lock().unwrap().clone() else {
+            return;
+        };
+        let Some(ts) = entry.get("ts").and_then(Value::as_i64) else {
+            return;
+        };
+        let Some(day) = usage_day(ts) else {
+            return;
+        };
+        let text_of = |key: &str| entry.get(key).cloned().unwrap_or(Value::Null);
+        let line = json!({
+            "ts": ts,
+            "region": text_of("region"),
+            "account": text_of("account"),
+            "accountUid": text_of("accountUid"),
+            "model": text_of("model"),
+            "status": text_of("status"),
+            "endpoint": text_of("endpoint"),
+            "promptTokens": text_of("promptTokens"),
+            "completionTokens": text_of("completionTokens"),
+            "cachedTokens": text_of("cachedTokens"),
+            "credit": text_of("credit"),
+            "keyId": text_of("keyId"),
+            "keyScope": text_of("keyScope"),
+        });
+        let Ok(mut text) = serde_json::to_string(&line) else {
+            return;
+        };
+        text.push('\n');
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join(format!("{day}.jsonl"));
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            // 单行一次 `write_all`：O_APPEND 下多进程（桌面端 / server 宿主）也是原子的，
+            // 读侧最多看到半行 —— 由 `token_daily` 的逐行容错兜住。
+            let _ = file.write_all(text.as_bytes());
+        }
     }
 
     /// 返回最近 N 条（按时间升序）。
@@ -542,6 +639,66 @@ mod tests {
         );
         assert_eq!(entries[0]["accountUid"], "uid-1");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ 用量流水：每条请求一行、**不受 `log_keep` 裁剪**、字段够 `token_daily` 直接复用。
+    ///
+    /// 可证伪：把 `RequestLog::record` 里的 `append_usage` 调用去掉 ⇒ 文件不存在，断言红。
+    #[test]
+    fn usage_stream_appends_one_line_per_request_beyond_the_ring_cap() {
+        let (log, dir) = temp_log("usage-stream");
+        let usage_dir = dir.join("gateway_usage");
+        let _ = std::fs::remove_dir_all(&usage_dir); // 重复跑时不留残留
+        log.enable_usage_stream(usage_dir.clone());
+
+        // keep = 50（见 `temp_log`）⇒ 环形日志裁到 50，流水必须是 60。
+        for _ in 0..60 {
+            log.record(streaming_template().to_value());
+        }
+        assert_eq!(log.list().len(), 50, "环形日志按 log_keep 裁剪");
+
+        let day = usage_day(core_config::now_ms()).expect("本地日");
+        let text = std::fs::read_to_string(usage_dir.join(format!("{day}.jsonl")))
+            .expect("流水文件应存在");
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        assert_eq!(lines.len(), 60, "流水不受 log_keep 影响：{lines:?}");
+
+        let first: Value = serde_json::from_str(lines[0]).expect("每行是完整 JSON");
+        for key in [
+            "ts",
+            "region",
+            "account",
+            "accountUid",
+            "model",
+            "status",
+            "endpoint",
+            "promptTokens",
+            "completionTokens",
+            "cachedTokens",
+            "credit",
+            "keyId",
+            "keyScope",
+        ] {
+            assert!(first.get(key).is_some(), "流水缺少字段 {key}：{first}");
+        }
+        assert_eq!(first["model"], "hy4");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 流水是**opt-in**：未启用时不得凭空多写一份（Trae / Qoder 子网关不需要）。
+    #[test]
+    fn usage_stream_stays_off_until_enabled() {
+        let (log, dir) = temp_log("usage-off");
+        log.record(streaming_template().to_value());
+        assert!(
+            !dir.join("gateway_usage").exists(),
+            "未启用流水时不得创建 gateway_usage 目录"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

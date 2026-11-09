@@ -448,6 +448,35 @@ fn prune_store(store: &mut Store, at_ms: i64) {
         };
         store.days.remove(&oldest);
     }
+    prune_gateway_usage(cutoff);
+}
+
+/// 清掉保留窗之外的用量流水文件（`gateway_usage/YYYY-MM-DD.jsonl`）。
+///
+/// 与 `days` 同一个保留窗（[`TOKEN_DAILY_RETENTION_DAYS`]）—— 流水是账本的事实源，
+/// 保留期必须**不短于**账本，否则「账本里的日桶还在、明细却没了」，对账又变成猜。
+///
+/// 只删**文件名严格匹配 `YYYY-MM-DD.jsonl`** 的条目：目录里出现别的文件（用户手放的
+/// dump、临时文件）一律不动。删除失败忽略 —— 清理不是业务路径。
+fn prune_gateway_usage(cutoff: NaiveDate) {
+    let Ok(entries) = std::fs::read_dir(gateway_usage_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        let Ok(date) = NaiveDate::parse_from_str(stem, "%Y-%m-%d") else {
+            continue;
+        };
+        if date < cutoff {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +513,46 @@ fn load_gateway_log() -> Vec<Value> {
         }
     }
     Vec::new()
+}
+
+/// 用量流水目录（`gateway_usage/`，与 `gateway_logs.json` 同目录）。
+///
+/// 流水由网关侧 `RequestLog::record` 追加（`buddy-switch-gateway::logging`），
+/// **不受 `log_keep` 环形裁剪影响** —— 这是「今日网关桶」从「窗口读数」升级为
+/// 「账本级统计」的关键：窗口会滚，流水不会。
+fn gateway_usage_dir() -> PathBuf {
+    gateway_log_file().with_file_name("gateway_usage")
+}
+
+fn gateway_usage_day_file(day: &str) -> PathBuf {
+    gateway_usage_dir().join(format!("{day}.jsonl"))
+}
+
+/// 读某一本地日的用量流水。
+///
+/// 返回 `None` 只有两种情形：**文件不存在**（老版本网关 / 升级首日）或读失败 ——
+/// 调用方据此回落到环形日志（见 [`record_gateway_today`]）。
+/// 文件存在但**一行都没有**时会返回 `Some(vec![])`：那是「今天确实还没有请求」，
+/// 与「没有流水」是两件事（前者可以放心按空重算，后者必须回落）。
+///
+/// ## 为什么逐行容错
+///
+/// 写侧是 `O_APPEND` 单行追加，但桌面端与 server 宿主可能同时写同一个文件，
+/// 读侧仍可能撞上**未落完的最后一行**。跳过坏行即可 —— 绝不能因为半行就
+/// 把整日流水判成不可用（那等于退回丢量的老路径）。
+fn load_gateway_usage_day(day: &str) -> Option<Vec<Value>> {
+    let text = std::fs::read_to_string(gateway_usage_day_file(day)).ok()?;
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            rows.push(value);
+        }
+    }
+    Some(rows)
 }
 
 /// 网关日志「**今日**部分可能已被裁剪」的判据（诚实标注，不假装是完整总量）。
@@ -720,6 +789,10 @@ enum GatewayWrite {
 /// ⚠️ 同毫秒边界：增量比较用**严格大于**。若一条条目与水位线同毫秒（罕见），它会被跳过
 /// —— 方向是「少算」，与 `gatewayTruncated` 的「下界」披露一致；反过来用 `>=` 会让
 /// 边界条目**每轮重复计一次**（跨轮双计），更坏。
+///
+/// ⚠️ **2026-11-09 起这条增量路径只是回落**：当日有 `gateway_usage/<日>.jsonl` 流水时，
+/// 调用方（[`record_gateway_today`]）传 `watermark = None` 走整窗 `Correct`。环形日志
+/// 做增量在高峰会**永久丢量**（单轮窗口内 >200 条即被 FIFO 裁掉），流水才修得掉。
 fn gateway_round(
     watermark: Option<i64>,
     dims_empty: bool,
@@ -1353,78 +1426,127 @@ pub fn fallback_stats(region: Region, days: u32) -> Value {
 pub fn record_gateway_today(region: Region) -> Value {
     let at = now_ms();
     let day = local_date_string(at).unwrap_or_default();
-    let entries = load_gateway_log();
+    let (uids, names) = load_gateway_identity(region);
+
+    let _guard = TOKEN_DAILY_WRITE_LOCK.lock().unwrap();
+    let mut store = load_store(region);
+
+    /* ★ 事实源优先级：**当日用量流水** > 环形日志。
+     *
+     * 流水存在 ⇒ **整日重算**（`Correct`：整条取大、幂等）。窗口滚动、轮询间隔、
+     * 单轮写入条数都不再影响结果 —— 这正是「用量比 cc-switch 少」的修法：
+     * 旧路径每 2 分钟只能看到最近 `log_keep`（缺省 200）条，高峰一轮写入超过 200
+     * 条的请求会被 FIFO 裁掉且**永远不会再被读到**。
+     *
+     * 没有流水（老版本网关 / 升级首日）⇒ 维持原有水位线增量，并在下一轮自动切换。 */
+    let usage = load_gateway_usage_day(&day);
+    let rows = match &usage {
+        Some(stream) if !stream.is_empty() => {
+            let rows = parse_gateway_rows(stream);
+            let record = store.days.entry(day.clone()).or_default();
+            apply_gateway_round(record, &rows, region, &day, &uids, &names, true);
+            // 流水是全量事实表 ⇒ 当日总量是**精确值**，不再有「≥ 下界」的污点。
+            record.gateway_truncated = false;
+            prune_store(&mut store, at);
+            save_store(region, &store);
+            return build_response(&day, store.days.get(&day));
+        }
+        _ => load_gateway_log(),
+    };
+
     // 最旧存活条目的本地日（FIFO ⇒ 它早于今天就意味着今天的条目一条都没丢过）。
-    let oldest_day = entries
+    let oldest_day = rows
         .iter()
         .filter_map(|value| value.get("ts").and_then(Value::as_i64))
         .min()
         .and_then(local_date_string);
-    let truncated = gateway_log_truncated_today(
-        entries.len(),
-        gateway_log_keep(),
-        oldest_day.as_deref(),
-        &day,
-    );
-    let (uids, names) = load_gateway_identity(region);
-    let rows = parse_gateway_rows(&entries);
-
-    let _guard = TOKEN_DAILY_WRITE_LOCK.lock().unwrap();
-    let mut store = load_store(region);
+    let truncated =
+        gateway_log_truncated_today(rows.len(), gateway_log_keep(), oldest_day.as_deref(), &day);
+    let parsed = parse_gateway_rows(&rows);
     {
         let record = store.days.entry(day.clone()).or_default();
-        let round = gateway_round(
-            record.gateway_watermark_ts,
-            record.gateway_models.is_empty(),
-            record.gateway_keys.is_empty(),
-            &rows,
-            region,
-            &day,
-            &uids,
-            &names,
-        );
-        match round.accounts {
-            GatewayWrite::Add(increments) => {
-                for (account, bucket) in increments {
-                    let entry = record.accounts.entry(account).or_default();
-                    entry.gateway.input = entry.gateway.input.saturating_add(bucket.input);
-                    entry.gateway.output = entry.gateway.output.saturating_add(bucket.output);
-                    entry.gateway.cached = entry.gateway.cached.saturating_add(bucket.cached);
-                }
-            }
-            GatewayWrite::Correct(snapshot) => {
-                for (account, bucket) in snapshot {
-                    let entry = record.accounts.entry(account).or_default();
-                    // 逐字段取大：不倒退、不双计（两个读数都只是今天的**子集**）。
-                    entry.gateway.input = entry.gateway.input.max(bucket.input);
-                    entry.gateway.output = entry.gateway.output.max(bucket.output);
-                    entry.gateway.cached = entry.gateway.cached.max(bucket.cached);
-                }
-            }
-        }
-        /* 四条维度：与账号桶同轮同水位线。`Correct` = 逐键取大（不倒退、不双计）。 */
-        apply_dim_write(&mut record.gateway_models, round.models);
-        apply_dim_write(&mut record.gateway_accounts, round.accounts_dim);
-        apply_dim_write(&mut record.gateway_endpoints, round.endpoints);
-        apply_dim_write(&mut record.gateway_keys, round.keys);
-        /* 升级播种：只有该日**原本就有**账号桶时才标「不完整」——
-        新的一天整窗播种就是全量，不该挂污点。 */
-        let had_prior = record
-            .accounts
-            .values()
-            .any(|entry| entry.gateway.input > 0 || entry.gateway.output > 0);
-        if round.dims_partial && had_prior {
-            record.gateway_models_partial = true;
-        }
-        if round.keys_partial && had_prior {
-            record.gateway_keys_partial = true;
-        }
-        record.gateway_watermark_ts = round.next_watermark;
+        apply_gateway_round(record, &parsed, region, &day, &uids, &names, false);
         record.gateway_truncated = truncated;
     }
     prune_store(&mut store, at);
     save_store(region, &store);
     build_response(&day, store.days.get(&day))
+}
+
+/// 把一轮聚合结果落到某日的桶上。
+///
+/// `exact = true` ⇒ 输入是**当日全量流水**：走 `Correct`（整条取大、幂等）、
+/// 且**不推进水位线**（下一轮仍是整窗重算）。取大而不是直接赋值，是为了兼容
+/// 升级首日「桶里已有环形日志那半截数据」的过渡态 —— 相加会双计，取大不会。
+fn apply_gateway_round(
+    record: &mut DayRecord,
+    rows: &[GatewayRow],
+    region: Region,
+    day: &str,
+    uids: &HashSet<String>,
+    names: &HashMap<String, Option<String>>,
+    exact: bool,
+) {
+    let watermark = if exact {
+        None
+    } else {
+        record.gateway_watermark_ts
+    };
+    let round = gateway_round(
+        watermark,
+        record.gateway_models.is_empty(),
+        record.gateway_keys.is_empty(),
+        rows,
+        region,
+        day,
+        uids,
+        names,
+    );
+    match round.accounts {
+        GatewayWrite::Add(increments) => {
+            for (account, bucket) in increments {
+                let entry = record.accounts.entry(account).or_default();
+                entry.gateway.input = entry.gateway.input.saturating_add(bucket.input);
+                entry.gateway.output = entry.gateway.output.saturating_add(bucket.output);
+                entry.gateway.cached = entry.gateway.cached.saturating_add(bucket.cached);
+            }
+        }
+        GatewayWrite::Correct(snapshot) => {
+            for (account, bucket) in snapshot {
+                let entry = record.accounts.entry(account).or_default();
+                /* **整条取大**，而不是逐字段取大：逐字段会把「旧桶的 input + 流水的
+                output」拼成一个从未真实存在过的中间值（实测 100 + 1 = 101，而两个
+                读数分别是 100 和 11）。两个读数都只是当日的**子集**，谁大用谁整条，
+                既不倒退也不双计。 */
+                let current = entry.gateway.input.saturating_add(entry.gateway.output);
+                let next = bucket.input.saturating_add(bucket.output);
+                if next > current {
+                    entry.gateway.input = bucket.input;
+                    entry.gateway.output = bucket.output;
+                    entry.gateway.cached = bucket.cached;
+                }
+            }
+        }
+    }
+    /* 四条维度：与账号桶同轮同水位线。`Correct` = 逐键取大（不倒退、不双计）。 */
+    apply_dim_write(&mut record.gateway_models, round.models);
+    apply_dim_write(&mut record.gateway_accounts, round.accounts_dim);
+    apply_dim_write(&mut record.gateway_endpoints, round.endpoints);
+    apply_dim_write(&mut record.gateway_keys, round.keys);
+    /* 升级播种：只有该日**原本就有**账号桶时才标「不完整」——
+    新的一天整窗播种就是全量，不该挂污点。 */
+    let had_prior = record
+        .accounts
+        .values()
+        .any(|entry| entry.gateway.input > 0 || entry.gateway.output > 0);
+    if round.dims_partial && had_prior {
+        record.gateway_models_partial = true;
+    }
+    if round.keys_partial && had_prior {
+        record.gateway_keys_partial = true;
+    }
+    // 流水路径固定 `None`：下一轮仍是整窗重算（推进水位线会让它退化成增量）。
+    record.gateway_watermark_ts = if exact { None } else { round.next_watermark };
 }
 
 /// 把一轮维度写入意图落到桶上。
@@ -1447,13 +1569,12 @@ fn apply_dim_write(target: &mut BTreeMap<String, DimBucket>, write: DimWrite) {
         DimWrite::Correct(snapshot) => {
             for (key, bucket) in snapshot {
                 let entry = target.entry(key).or_default();
-                entry.input = entry.input.max(bucket.input);
-                entry.output = entry.output.max(bucket.output);
-                entry.cached = entry.cached.max(bucket.cached);
-                entry.requests = entry.requests.max(bucket.requests);
-                entry.failed = entry.failed.max(bucket.failed);
-                if bucket.credit > entry.credit {
-                    entry.credit = bucket.credit;
+                /* 与账号桶同一套「整条取大」：逐字段取大会拼出从未真实存在的读数
+                （input 来自旧读数、output 来自新读数）。 */
+                let current = entry.input.saturating_add(entry.output);
+                let next = bucket.input.saturating_add(bucket.output);
+                if next > current {
+                    *entry = bucket;
                 }
             }
         }
@@ -2684,6 +2805,131 @@ mod tests {
         let third = record_gateway_today(Region::Cn);
         assert_eq!(value_of(&third, "uid-a"), 66, "同窗重复记录不得双计");
         assert_eq!(value_of(&third, "uid-b"), 1008);
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ 用量流水是**事实源**：环形日志被裁到只剩 2 条，桶仍必须是 3 条的全量。
+    ///
+    /// 可证伪：把 `record_gateway_today` 的选源顺序改回「只读 gateway_logs.json」
+    /// ⇒ 断言变成 55（20+2+30+3 中的后两条）而不是 66。
+    #[test]
+    fn usage_stream_is_the_source_of_truth_even_when_ring_log_is_trimmed() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-token-daily-stream-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create home dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+        let store = dir.join(".buddy-switch");
+        std::fs::create_dir_all(&store).expect("create store dir");
+
+        let t1 = now_ms() - 3_000;
+        let t2 = now_ms() - 2_000;
+        let t3 = now_ms() - 1_000;
+        let day = local_date_string(now_ms()).expect("today");
+
+        // 环形日志：只剩最近两条（模拟 log_keep 裁剪把 t1 顶掉了）。
+        let log = json!([gw_row(t2, 20, 2), gw_row(t3, 30, 3)]);
+        std::fs::write(
+            store.join("gateway_logs.json"),
+            serde_json::to_string(&log).unwrap(),
+        )
+        .expect("write ring log");
+
+        // 流水：当日全量三条。
+        let usage_dir = store.join("gateway_usage");
+        std::fs::create_dir_all(&usage_dir).expect("create usage dir");
+        let lines: Vec<String> = [gw_row(t1, 10, 1), gw_row(t2, 20, 2), gw_row(t3, 30, 3)]
+            .iter()
+            .map(|row| row.to_string())
+            .collect();
+        std::fs::write(
+            usage_dir.join(format!("{day}.jsonl")),
+            lines.join("\n") + "\n",
+        )
+        .expect("write usage stream");
+
+        let value_of = |response: &Value, uid: &str| -> u64 {
+            response["accounts"]
+                .as_array()
+                .and_then(|accounts| accounts.iter().find(|a| a["uid"] == uid))
+                .map(|account| {
+                    account["gatewayIn"].as_u64().unwrap_or(0)
+                        + account["gatewayOut"].as_u64().unwrap_or(0)
+                })
+                .unwrap_or(0)
+        };
+
+        let first = record_gateway_today(Region::Cn);
+        assert_eq!(
+            value_of(&first, "uid-a"),
+            66,
+            "流水是全量（10+1 + 20+2 + 30+3）；等于 55 说明又在读被裁过的环形日志"
+        );
+        assert_eq!(
+            first["gatewayTruncated"], false,
+            "流水覆盖的当日是精确值，不得再标「下界」"
+        );
+
+        // 幂等：整日重算不是增量，重复跑不得翻倍。
+        let second = record_gateway_today(Region::Cn);
+        assert_eq!(value_of(&second, "uid-a"), 66, "整日重算必须幂等");
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 升级首日：桶里已有环形日志那半截数据，流水算出更小的值时**取大**（不倒退）。
+    #[test]
+    fn usage_stream_never_lowers_a_legacy_bucket() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-token-daily-stream-legacy-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create home dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+        let store = dir.join(".buddy-switch");
+        std::fs::create_dir_all(&store).expect("create store dir");
+
+        let t1 = now_ms() - 2_000;
+        let day = local_date_string(now_ms()).expect("today");
+        let legacy_store = json!({
+            "version": 1,
+            "days": {
+                day.clone(): {
+                    "accounts": {
+                        "uid-a": { "client": {"input":0,"output":0}, "gateway": {"input":100,"output":0} }
+                    },
+                    "gatewayTruncated": false
+                }
+            }
+        });
+        std::fs::write(
+            store.join("token_daily.json"),
+            serde_json::to_string(&legacy_store).unwrap(),
+        )
+        .expect("pre-write store");
+
+        let usage_dir = store.join("gateway_usage");
+        std::fs::create_dir_all(&usage_dir).expect("create usage dir");
+        std::fs::write(
+            usage_dir.join(format!("{day}.jsonl")),
+            gw_row(t1, 10, 1).to_string() + "\n",
+        )
+        .expect("write usage stream");
+
+        let response = record_gateway_today(Region::Cn);
+        let total = response["accounts"]
+            .as_array()
+            .and_then(|accounts| accounts.iter().find(|a| a["uid"] == "uid-a"))
+            .map(|account| {
+                account["gatewayIn"].as_u64().unwrap_or(0)
+                    + account["gatewayOut"].as_u64().unwrap_or(0)
+            })
+            .unwrap_or(0);
+        assert_eq!(total, 100, "流水更小 ⇒ 保持旧值（取大，不倒退）");
 
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);

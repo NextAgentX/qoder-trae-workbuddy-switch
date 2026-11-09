@@ -406,6 +406,10 @@ impl GatewayState {
             config.log_keep,
             config.log_bodies,
         ));
+        /* ★ 用量流水：`token_daily` 的「今日网关桶」事实源。
+        环形日志只留 `log_keep` 条（缺省 200），高峰时统计侧会丢量；流水 append-only
+        按日分片，窗口怎么滚都不影响它。只给主网关启用 —— Trae / Qoder 有自己的账本。 */
+        log.enable_usage_stream(gateway_log_file().with_file_name("gateway_usage"));
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()
