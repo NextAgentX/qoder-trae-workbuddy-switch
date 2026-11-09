@@ -27,7 +27,9 @@ import * as api from "@/lib/api";
 import type { QoderWebCreditPacks } from "@/lib/api";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { useT } from "@/lib/i18n";
+import { isUsablePack } from "@/lib/credit-packs";
 import { packSourceLabel, packState } from "@/lib/qoder-packs";
+import { formatAbsoluteTime } from "@/lib/catalog-source";
 
 export interface QoderPacksPopoverProps {
   /** `undefined` = 还没请求过；`null` = 请求过但没有结果（按未授权处理）。 */
@@ -103,8 +105,24 @@ export function QoderPacksPopover({
   // 展示不出来的话这个页面等于没有该功能。真正的「不支持」分支由 webui 实机覆盖。
   const desktop = demoModeEnabled || !api.isWebui();
   const available = desktop && packs?.available === true;
-  const count = packs?.summary?.count ?? 0;
-  const remaining = packs?.summary?.remaining ?? 0;
+  /* ★ 只列「未过期且还有剩余」的包：逐包接口连已用完 / 已失效的包一起下发，
+     全列出来会被读成「这里还有额度」。与 WB 统计页明细用同一套判据
+     （`isUsablePack` + `packState` 的 expired），不在本组件另写一个过滤条件。
+     「N 个 / 共剩」也用同一份过滤结果 —— 否则会出现「3 个」下面只有 2 行。
+     ⚠️ 这里的「共剩」**不等于**卡片指标行那个「积分 X/Y」：那两个数走
+       openapi `/api/v2/quota/usage`（`userQuota + addOnQuota`），本浮层走 web 端
+       `quota_detail` 逐包 —— 两条独立通道（见 `qoder/web_usage.rs` 文件头），
+       上游口径不同、也**不会**相等。本组件只保证「这个浮层里，标题与列表同源」。 */
+  const packsNow = Date.now();
+  const visiblePacks =
+    packs?.available === true
+      ? packs.packs.filter(
+          (pack) =>
+            isUsablePack(pack.remaining, pack.limit) && packState(pack, packsNow) !== "expired",
+        )
+      : [];
+  const count = visiblePacks.length;
+  const remaining = visiblePacks.reduce((sum, pack) => sum + pack.remaining, 0);
 
   // ★ `packs === undefined` = **还没取过**，此时说「未登录」就是假信息（用户可能已登录）。
   //   三态必须分开：未知（中性标签）/ 在读 / 已知（有包或确实没登录）。
@@ -145,7 +163,7 @@ export function QoderPacksPopover({
       <PopoverContent align="start" className="w-72 p-3">
         <div className="mb-2 flex items-center justify-between gap-2">
           <span className="text-[11.5px] font-medium">{t("qoder.page.accounts.web.title")}</span>
-          {available && packs?.summary ? (
+          {available ? (
             <span className="text-[11px] tabular-nums text-muted-foreground">
               {t("qoder.page.accounts.web.summary", {
                 n: String(count),
@@ -161,61 +179,61 @@ export function QoderPacksPopover({
             {t("qoder.page.accounts.web.loading")}
           </div>
         ) : available ? (
-          <ul className="max-h-[min(60vh,320px)] space-y-2 overflow-y-auto pr-1">
-            {packs!.packs.map((pack, index) => {
-              const state = packState(pack, Date.now());
-              const expired = state === "expired";
-              const expiringSoon = state === "expiring";
-              const ratio =
-                pack.limit > 0
-                  ? Math.min(100, Math.max(0, (pack.remaining / pack.limit) * 100))
-                  : 0;
-              return (
-                <li key={pack.id ?? `${pack.group}-${index}`} className="min-w-0">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="min-w-0 truncate text-[11.5px]" title={pack.id}>
-                      {packSourceLabel(t, pack.source)}
-                    </span>
-                    <span
-                      className={cn(
-                        "shrink-0 text-[10.5px] tabular-nums",
-                        expired
-                          ? "text-destructive"
-                          : expiringSoon
-                            ? "text-warning"
-                            : "text-muted-foreground",
-                      )}
-                    >
-                      {expired
-                        ? t("qoder.page.accounts.web.expired")
-                        : pack.expiresAtMs !== undefined
+          visiblePacks.length === 0 ? (
+            <p className="py-2 text-[11.5px] text-muted-foreground">
+              {t("qoder.page.accounts.web.noUsablePacks")}
+            </p>
+          ) : (
+            <ul className="max-h-[min(60vh,320px)] space-y-2 overflow-y-auto pr-1">
+              {visiblePacks.map((pack, index) => {
+                /* `expired` / `zero` 的包已在 `visiblePacks` 里剔除，这里只剩临期与正常。 */
+                const expiringSoon = packState(pack, packsNow) === "expiring";
+                const ratio = Math.min(100, Math.max(0, (pack.remaining / pack.limit) * 100));
+                return (
+                  <li key={pack.id ?? `${pack.group}-${index}`} className="min-w-0">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="min-w-0 truncate text-[11.5px]" title={pack.id}>
+                        {packSourceLabel(t, pack.source)}
+                      </span>
+                      <span
+                        className={cn(
+                          "shrink-0 text-[10.5px] tabular-nums",
+                          expiringSoon ? "text-warning" : "text-muted-foreground",
+                        )}
+                      >
+                        {pack.expiresAtMs !== undefined
                           ? t("qoder.page.accounts.web.expiresAt", {
-                              date: new Date(pack.expiresAtMs).toLocaleDateString(),
+                              /* 全仓唯一的绝对时间出口。此前是 `toLocaleDateString()`：
+                                 ① 只到日、没有时刻；② **没有固定 locale**，中文系统渲
+                                 `2026/11/20`、英文系统渲 `11/20/2026` —— 同一个包在两台机器上
+                                 长得不一样，也无法与抽屉里的 `到期 2026-11-20 23:59` 对齐。 */
+                              date: formatAbsoluteTime(pack.expiresAtMs),
                             })
                           : t("qoder.page.accounts.web.neverExpires")}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex items-baseline justify-between gap-2 text-[11px]">
-                    <span className="font-medium tabular-nums">
-                      {pack.remaining} / {pack.limit}
-                    </span>
-                    <span className="text-muted-foreground tabular-nums">
-                      {t("qoder.page.accounts.web.used", { n: String(pack.used) })}
-                    </span>
-                  </div>
-                  <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                    <div
-                      className={cn(
-                        "h-full rounded-full",
-                        expired ? "bg-destructive/60" : expiringSoon ? "bg-warning/80" : "bg-primary/75",
-                      )}
-                      style={{ width: `${ratio}%` }}
-                    />
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+                      </span>
+                    </div>
+                    <div className="mt-1 flex items-baseline justify-between gap-2 text-[11px]">
+                      <span className="font-medium tabular-nums">
+                        {pack.remaining} / {pack.limit}
+                      </span>
+                      <span className="text-muted-foreground tabular-nums">
+                        {t("qoder.page.accounts.web.used", { n: String(pack.used) })}
+                      </span>
+                    </div>
+                    <div className="mt-1 h-1 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+                      <div
+                        className={cn(
+                          "h-full rounded-full",
+                          expiringSoon ? "bg-warning/80" : "bg-primary/75",
+                        )}
+                        style={{ width: `${ratio}%` }}
+                      />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )
         ) : (
           <div className="space-y-2 py-1">
             <div className="flex items-start gap-1.5 text-[11.5px]">

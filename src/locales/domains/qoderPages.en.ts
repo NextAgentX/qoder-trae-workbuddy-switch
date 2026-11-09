@@ -211,13 +211,20 @@ export const en = {
 
   // ── Check-in / quota (backend was ready; there was no UI entry) ──
   "qoder.page.accounts.chip.checkedIn": "Checked in today",
-  "qoder.page.accounts.chip.notCheckedIn": "Not checked in",
+  "qoder.page.accounts.chip.notCheckedIn": "Not checked in today",
+  /* Credential expired — the new branch of the status slot (previously Qoder only checked
+     `hasCredential` / `unrecognized`, so a long-expired token still read "Credential usable"). */
+  "qoder.page.accounts.chip.expired": "Credentials expired",
   "qoder.page.accounts.chip.checkinUnavailable": "Check-in unavailable",
+  "qoder.page.accounts.chip.priority": "Priority",
+  "qoder.page.accounts.chip.priorityTip": "Recommended priority",
+  "qoder.page.accounts.chip.toolsInUse": "{n} tools in use",
   "qoder.page.accounts.metric.credits": "Credits",
-  "qoder.page.accounts.metric.creditsValue": "{remaining} / {total}",
-  // Expiry badges (issue #166): warning = expiring soon, secondary = nearest batch.
-  "qoder.page.accounts.metric.expiringChip": "{amount} credits expire within {days} days",
-  "qoder.page.accounts.metric.nearestExpiringChip": "nearest {amount} credits · expire in {days} days",
+  // Expiry badge (issue #166): warning = expiring soon (7-day window, same as WB / Trae).
+  // Badge reports the **closest-expiring batch only**; per-batch absolute timestamps go in the tooltip.
+  "qoder.page.accounts.metric.expiringChip": "Closest expiry in {days} days · {amount} credits",
+  /* Within 48 hours the badge speaks in hours, so 25h and 47h stay distinguishable. */
+  "qoder.page.accounts.metric.expiringChipHours": "Closest expiry in {hours} hrs · {amount} credits",
   "qoder.page.accounts.metric.expiringTipTitle": "Expiring batches ({n})",
   "qoder.page.accounts.metric.expiringTipLine": "{time} · {amount} credits",
 
@@ -249,7 +256,8 @@ export const en = {
   "qoder.page.accounts.web.summary": "{n} packs · {remaining} left",
   "qoder.page.accounts.web.loading": "Loading…",
   "qoder.page.accounts.web.used": "{n} used",
-  "qoder.page.accounts.web.expiresAt": "expires {date}",
+  "qoder.page.accounts.web.noUsablePacks": "No packs with remaining credits",
+  "qoder.page.accounts.web.expiresAt": "Expires {date}",
   "qoder.page.accounts.web.state.noSession": "Not signed in to Qoder web",
   "qoder.page.accounts.web.state.noSessionHint": "Per-pack detail lives behind the web endpoint. Sign in there once and it will be remembered.",
   "qoder.page.accounts.web.state.expired": "Web session expired",

@@ -96,7 +96,9 @@ import type {
   QoderProgramStatus,
 } from "@/lib/api";
 import { accountSearchText } from "@/lib/account-search";
-import { packSourceLabel, packState } from "@/lib/qoder-packs";
+import { packSourceLabel, packState, qoderExpiringSummary } from "@/lib/qoder-packs";
+import { qoderCredentialExpired } from "@/lib/qoder-credential";
+import { creditExpiryFromPacks, pickPriorityAccountId } from "@/lib/credit-priority";
 import { qoderPackKey, qoderPacksNotice, useQoderWebPacks } from "@/lib/use-qoder-web-packs";
 import {
   filterAccounts,
@@ -153,7 +155,7 @@ function QODER_PACK_TEXTS(t: Translate): CreditPackTexts {
       expired
         ? t("qoder.page.accounts.web.expired")
         : expireAtMs !== null
-          ? formatAbsoluteTime(expireAtMs)
+          ? t("qoder.page.accounts.web.expiresAt", { date: formatAbsoluteTime(expireAtMs) })
           : t("qoder.page.accounts.web.neverExpires"),
   };
 }
@@ -377,6 +379,35 @@ export default function QoderAccountsPage() {
     (a) => !a.hasCredential || a.credential.unrecognized || a.domainMismatch,
   ).length;
   const foreignAccounts = rows.filter((a) => a.domainMismatch);
+
+  /**
+   * 「建议优先」徽章（与 WB / Trae 账号页**同一判据** `pickPriorityAccountId`）。
+   *
+   * ★ Qoder 的逐包来自网页会话链路（`qoderWebPacks`，卡片本就会按需取一次）；
+   *   取不到逐包 ⇒ 该账号返回 `undefined`（未知，不参与推荐），不猜。
+   */
+  const priorityAccountId = useMemo(() => {
+    const now = Date.now();
+    const candidates = rows.map((account) => ({ id: account.uid, account }));
+    return pickPriorityAccountId(candidates, (candidate) => {
+      const packs = packOf(candidate.account.uid);
+      if (!packs?.available) return undefined;
+      return creditExpiryFromPacks(
+        packs.packs.map((pack) => ({
+          total: pack.limit,
+          remaining: pack.remaining,
+          used: pack.used,
+          expireAt: pack.expiresAtMs ?? null,
+          expired: packState(pack, now) === "expired",
+          expiringSoon: packState(pack, now) === "expiring",
+          packageCode: pack.id ?? null,
+        })),
+        /* 与上面的 `packState` 用**同一个** `now`：否则同一次计算里两次取时，
+           跨秒边界时同一批包可能一次算「临期」、一次算「不临期」。 */
+        { now },
+      );
+    });
+  }, [rows, packOf]);
 
   /**
    * 列表配置 —— 差异**全部以数据表达**（共享组件里不写平台判断）。
@@ -908,18 +939,36 @@ export default function QoderAccountsPage() {
   const detailStats = useMemo<DetailStat[]>(() => {
     if (!detail) return [];
     const row = credits[detail.uid];
+    /* 逐包数据（抽屉打开时已按需取过）——用于算「7 天内到期 X 积分」。
+       取不到逐包 ⇒ **`null`（未知）**，副文本整条不渲染。此前塌成 0，于是出现
+       「主值说读不到（—）、副文本说 0 积分要到期」的矛盾 ——「0 也照写」只覆盖
+       「确实为 0」这一种情况。 */
+    const webPacks = packOf(detail.uid);
+    /* 一次装配只取一次「现在」：下面的临期金额（逐包窗口判定）与凭据过期判定共用它 ——
+       各取一次 `Date.now()`，跨秒边界时同一份数据可能被判成「临期」与「不临期」两种。 */
+    const now = Date.now();
+    const soon =
+      webPacks?.available === true ? (qoderExpiringSummary(webPacks.packs, now)?.total ?? 0) : null;
     const checked = checkinTodayOf(detail);
-    const expired = detail.expiresAt != null && detail.expiresAt < Date.now();
+    /* 凭据判据走 `lib/qoder-credential.ts`（与卡片红徽章**同一个函数**）：
+       此前这里是裸 `detail.expiresAt < Date.now()`，没有毫秒量级守卫 —— 若该值是秒，
+       凭据块会恒红，而卡片上的徽章却是绿的。 */
+    const expired = qoderCredentialExpired(detail.expiresAt, now);
     const credBad = expired || !detail.hasCredential;
     return [
       {
         key: "credits",
         label: t("shared.stat.credits"),
-        valueText:
-          row && row.ok
-            ? `${formatCredits(row.remaining ?? 0)}/${formatCredits(row.total ?? 0)}`
-            : "—",
-        subText: row?.ok && row.plan ? t("shared.stat.plan", { plan: row.plan }) : undefined,
+        /* ★ 2026-11-09：值 = **可用总积分**，不显示分母；副文本统一为「7 天内到期 X 积分」。
+           此前副文本是套餐名，与 WB / Trae / 聚合抽屉的「到期信息」不是一回事。
+           套餐名仍在抽屉的资源包区块里（聚合行回落时 `name` 就是套餐名）。
+           ⚠️ 副文本还要求**主值有数**：台账读不到时，副文本里那个绝对金额同样没有意义。 */
+        valueText: row && row.ok ? formatCredits(row.remaining ?? 0) : "—",
+        subText:
+          row && row.ok && soon !== null
+            ? t("shared.detail.creditsExpiring", { amount: formatCredits(soon) })
+            : undefined,
+        tone: row && row.ok && soon !== null && soon > 0 ? "warn" : undefined,
         refreshKind: "credits",
       },
       {
@@ -961,7 +1010,7 @@ export default function QoderAccountsPage() {
         refreshKind: "credential",
       },
     ];
-  }, [detail, credits, checkinTodayOf, checkinMap, t]);
+  }, [detail, credits, checkinTodayOf, checkinMap, packOf, t]);
 
   /**
    * 资源包明细（issue #144 复核 · L1/L2）。
@@ -1000,7 +1049,7 @@ export default function QoderAccountsPage() {
             expireAtMs: pack.expiresAtMs ?? null,
             expired: state === "expired",
             /* Qoder 上游**没有**临期标记 ⇒ 用 `packState` 算，窗口取 `qoder-packs.ts`
-               的 `EXPIRING_SOON_MS`（14 天，与卡片浮层同源）。这里是「平台适配层」，
+               的 `EXPIRING_SOON_MS`（7 天，与卡片浮层同源）。这里是「平台适配层」，
                纯函数不猜窗口。 */
             expiringSoon: state === "expiring",
           };
@@ -1211,12 +1260,7 @@ export default function QoderAccountsPage() {
         const row = credits[account.uid];
         if (!row || !row.ok) return <span className="text-muted-foreground">—</span>;
         return (
-          <span className="tabular-nums">
-            {t("qoder.page.accounts.metric.creditsValue", {
-              remaining: String(row.remaining ?? 0),
-              total: String(row.total ?? 0),
-            })}
-          </span>
+          <span className="tabular-nums">{formatCredits(row.remaining ?? 0)}</span>
         );
       },
     },
@@ -1476,6 +1520,8 @@ export default function QoderAccountsPage() {
               }
               checkinToday={checkinTodayOf(account)}
               programs={programs}
+              /* ★ 2026-11-09：「优先」徽章（判据见上面的 `priorityAccountId`）。 */
+              creditPriority={account.uid === priorityAccountId}
               onSwitch={(program) => setSwitchTarget({ account, program })}
             />
           );

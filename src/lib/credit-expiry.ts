@@ -1,27 +1,35 @@
 /**
- * 「临期积分」的**唯一汇总口径** —— 账号卡片上那枚 `N 积分 M 天内过期` 徽章用它。
+ * 「临期积分」的**唯一汇总口径** —— 账号卡片上那枚徽章 + 它的逐批悬浮列表都用它。
  *
- * ## 为什么需要这个模块（issue #44）
+ * ## 徽章只报**最快到期的那一批**
  *
- * 徽章原先在两张卡片里各写一遍，且两处的 `amount` 与 `days` **不是同一批积分**：
+ * 徽章文案是「最近到期 {days}天 · {amount} 积分」，两个数字**必须来自同一批**
+ * （`batches[0]`）：天数 = 该批距今天数（向上取整、≥1），金额 = 该批剩余积分。
  *
- * - `amount` = 窗口内**全部**临期剩余积分之和；
- * - `days`   = 窗口内**最早**那一刻距今天数（向上取整）。
+ * ⚠️ 不要退回「总量 + 最快天数」或「总量 + 最晚天数」这类混搭：
  *
- * 于是只要窗口里有两批不同到期日，徽章就是假话：100 明天到期 + 200 后天到期，
- * 会显示「300 积分 1 天后过期」—— 那 200 积分根本不在 1 天内到期。
+ * - 「300 积分 1 天后过期」—— 300 里有 200 是后天到期的，假话（issue #44 的原始 bug）；
+ * - 「300 积分 2 天内过期」—— 最晚那批是 2 天，但用户想知道的是「最早哪天要动手」，
+ *   徽章被拉长成「还有 2 天」，会让人误以为不急。
  *
- * ## 现在的口径
+ * 窗口内的**总量**仍是真实有用的数（抽屉副文本「7 天内到期 X 积分」、聚合页 / 统计页
+ * 的 `expiringSoonRemaining` 都读它），所以保留在 `total` 字段，只是**不进徽章**。
  *
- * - `total`  窗口内临期剩余积分之和（**不**只算最早一批，总量不丢）；
- * - `days`   窗口内**最晚**到期时刻距今天数（向上取整）⇒「{total} 积分 {days} 天内过期」
- *   对窗口内每一笔都成立，不再有半句假话；
- * - `batches` 按到期时刻**升序**的明细，供 tooltip 逐批展开（最急的那批排第一）。
+ * ## 时间单位：≤ 48 小时用「小时」
+ *
+ * 徽章的时间单位由最快那批的剩余时长决定：**≤ 48 小时 ⇒ 小时**（`最近到期 47小时`），
+ * 超过 48 小时才折算成**天**（`最近到期 3天`）。用小时是为了不让「25 小时」和「47 小时」
+ * 都被说成「1 天」；天档向上取整，宁可说晚不说早。
+ *
+ * ## 明细放 tooltip，用绝对时刻
+ *
+ * `batches` 按到期时刻**升序**（最快的那批排第一），每行渲染 `YYYY-MM-DD HH:mm · 金额`。
+ * 不用相对倒计时：这一行既要回答「哪天」，又要能直接和账号页 / 抽屉里的日期对照。
  *
  * ## 窗口由**后端**决定，前端不再自设
  *
  * 是否临期只认后端下发的 `expiringSoon` 标记（`credits.rs::EXPIRING_SOON_DAYS` = 7 天、
- * `trae/credits.rs::EXPIRING_SOON_SECS` = **14 天**）。此前 WorkBuddy 卡片在前端另设 3 天窗口，
+ * `trae/credits.rs::EXPIRING_SOON_SECS` = **7 天**）。此前 WorkBuddy 卡片在前端另设 3 天窗口，
  * 与统计页 / 总览页（都读后端的 `expiringSoonRemaining`）口径不一致 —— 同一件事两个数字。
  *
  * ⚠️ 不可把 `expiringSoon`（布尔）当额度求和，也不可在缺该字段时自行推窗口：
@@ -31,19 +39,27 @@
  * {@link TRAE_EXPIRING_SOON_MS} —— 它是后端窗口的**镜像**，不是第二个口径。
  */
 
+/** 一小时的毫秒数（徽章短区间用「小时」）。 */
+const HOUR_MS = 3_600_000;
 /** 一天的毫秒数。 */
 const DAY_MS = 86_400_000;
+/** 徽章在这个区间内用「小时」，超过才用「天」：≤ 48 小时。 */
+const HOUR_DISPLAY_LIMIT_MS = 48 * HOUR_MS;
 
 /**
- * Trae 的临期窗口，**镜像后端** `trae/credits.rs::EXPIRING_SOON_SECS`（14 天）。
+ * Trae 的临期窗口，**镜像后端** `trae/credits.rs::EXPIRING_SOON_SECS`（**7 天**）。
  *
  * 只给「拿不到后端 `expiringSoon` 标记」的地方用（积分页到期分桶、账号抽屉的积分指标块）。
- * 有标记时必须只认标记 —— 前端写死 7 天正是 #144 复核 §3.3 的残差：
+ * 有标记时必须只认标记 —— 前端写死窗口正是 #144 复核 §3.3 的残差：
  * 10 天后到期的包在卡片上说临期、点开抽屉却不说。
+ *
+ * ★ 2026-11-09：从 14 天统一到 **7 天**（与 WorkBuddy 的 `credits.rs::EXPIRING_SOON_DAYS`
+ * 同值）。此前三个平台两个数：同一批「10 天后到期」的积分，WB 不标黄、
+ * Trae / Qoder 标黄，用户在分区之间来回看会觉得其中一个在说谎。
  *
  * ⚠️ 改后端那个常量时这里要跟着改（两个数刻意分开写，不跨语言共享，但**必须同值**）。
  */
-export const TRAE_EXPIRING_SOON_MS = 14 * DAY_MS;
+export const TRAE_EXPIRING_SOON_MS = 7 * DAY_MS;
 
 /** 一批到期：同一时刻到期的剩余积分之和。 */
 export interface ExpiringBatch {
@@ -54,11 +70,20 @@ export interface ExpiringBatch {
 }
 
 export interface ExpiringSummary {
-  /** 窗口内全部临期剩余积分之和。 */
+  /** 窗口内全部临期剩余积分之和（抽屉副文本 / 聚合页读它；**不进徽章**）。 */
   total: number;
-  /** 窗口内**最晚**到期时刻距今天数（向上取整，≥1）。 */
-  days: number;
-  /** 按到期时刻升序的逐批明细。 */
+  /**
+   * 徽章的**单位**：最快那批剩余 ≤ 48 小时 ⇒ `"hours"`，否则 `"days"`。
+   * 短区间用小时是因为「1 天」会把 25 小时和 47 小时说成同一个数。
+   */
+  soonestUnit: "hours" | "days";
+  /** 最快那批距今天数，向上取整、≥1 —— 仅 `soonestUnit === "days"` 时使用。 */
+  soonestDays: number;
+  /** 最快那批距今小时数，向上取整、≥1 —— 仅 `soonestUnit === "hours"` 时使用。 */
+  soonestHours: number;
+  /** 最快那批（`batches[0]`）的剩余积分 —— 徽章的金额，与上面的数值同批。 */
+  soonestAmount: number;
+  /** 按到期时刻升序的逐批明细（最快的那批排第一）。 */
   batches: ExpiringBatch[];
 }
 
@@ -69,7 +94,7 @@ export interface ExpiringItem {
   /** 后端标记：已到期。 */
   expired?: boolean;
   /**
-   * 后端标记：临期（窗口见后端 `EXPIRING_SOON_SECS`，**14 天**）。
+   * 后端标记：临期（窗口见后端 `EXPIRING_SOON_SECS`，**7 天**）。
    * `undefined` 表示数据源没这个字段 ⇒ 视为未知、跳过。
    */
   expiringSoon?: boolean;
@@ -114,15 +139,26 @@ export function summarizeExpiring(
   const total = batches.reduce((sum, batch) => sum + batch.amount, 0);
   if (total <= 0) return null;
 
-  const latest = batches[batches.length - 1].expireAt;
-  return { total, days: Math.max(1, Math.ceil((latest - now) / DAY_MS)), batches };
+  /* 徽章只看最快那批：单位、数值、金额必须来自同一批（见模块头）。
+     ≤ 48 小时用「小时」：25 小时与 47 小时都能各自说准；超过 48 小时才折算成「天」
+     （向上取整，宁可说晚不说早 —— 29 小时不能说成「1 天」）。 */
+  const soonest = batches[0];
+  const remaining = soonest.expireAt - now;
+  return {
+    total,
+    soonestUnit: remaining <= HOUR_DISPLAY_LIMIT_MS ? "hours" : "days",
+    soonestDays: Math.max(1, Math.ceil(remaining / DAY_MS)),
+    soonestHours: Math.max(1, Math.ceil(remaining / HOUR_MS)),
+    soonestAmount: soonest.amount,
+    batches,
+  };
 }
 
 /* ══════════════════════ 「最近到期」（不限窗口）══════════════════════
  *
  * ## 为什么要有这一段（issue #69）
  *
- * `summarizeExpiring` 只看**后端临期窗口**（14 天）内的批次 —— 那是对的，因为「N 天内过期」
+ * `summarizeExpiring` 只看**后端临期窗口**（7 天）内的批次 —— 那是对的，因为「N 天内过期」
  * 是一句**警告**（「再不用就浪费了」）。但用户真正要回答的是另一个问题：
  * **「我好几个账号，先用哪个？」** —— 这个问题需要「**每一笔未来到期**」的相对顺序，
  * 而不是「7 天内的那批」。
@@ -132,7 +168,7 @@ export function summarizeExpiring(
  *
  * ## 三条与 `summarizeExpiring` **刻意不同**的地方
  *
- * ① **不读 `expiringSoon`**：那个布尔由后端的 14 天窗口决定，**不能**表达「30 天后」。
+ * ① **不读 `expiringSoon`**：那个布尔由后端的 7 天窗口决定，**不能**表达「30 天后」。
  * ② **不读 `credit.soonestExpireAt`**：它把**已过期**资源也算进最小值 ⇒ 拿它排序会
  *    把「已过期」排到最前（那是「已经浪费了」，不该抢占「先消耗」的位）。
  * ③ **不设天数上限**：「最近一批」是相对顺序，不是一个窗口。
@@ -141,7 +177,7 @@ export function summarizeExpiring(
  */
 
 /** 一批「未来到期」：同一时刻到期的剩余积分之和。 */
-export interface UpcomingBatch {
+interface UpcomingBatch {
   /** 到期时刻（epoch 毫秒）。 */
   expireAt: number;
   /** 该批此刻的剩余积分之和。 */
@@ -152,10 +188,14 @@ export interface UpcomingBatch {
  * 所有**未来**到期批次：过滤「已过期 / 剩余 ≤ 0 / 无到期时刻 / 已到时刻」，
  * 按到期升序，**同一时刻合并**。
  *
+ * ⚠️ **不导出**：它只被 {@link nearestExpiringBatch} 用来取第一个。此前是 `export`，
+ *   但删除中性徽章后外部零调用（唯一的外部消费方是已删的 `qoderUpcomingExpiries`）——
+ *   留着导出会让下一个人以为「有人要全部批次」而去找那个不存在的调用方。
+ *
  * @param options.now 判定基准时刻（毫秒），默认 `Date.now()`
  * @param options.unit 入参 `expireAt` 的单位（WB 毫秒 / Trae 秒）—— 同 `summarizeExpiring`。
  */
-export function upcomingExpiries(
+function upcomingExpiries(
   items: readonly ExpiringItem[] | null | undefined,
   options: { now?: number; unit?: "ms" | "s" } = {},
 ): UpcomingBatch[] {
@@ -190,6 +230,7 @@ export function nearestExpiringBatch(
 export function daysUntil(expireAt: number, now: number = Date.now()): number {
   return Math.max(1, Math.ceil((expireAt - now) / DAY_MS));
 }
+
 
 /* ══════════════════════ 渲染约束 ══════════════════════ */
 

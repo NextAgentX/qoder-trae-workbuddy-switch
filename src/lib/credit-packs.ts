@@ -86,9 +86,29 @@ export interface NormalizedPack extends CreditPackInput {
  * 前端依赖它就成了隐式耦合（后端口径一改，界面就把过期包标成临期）。
  * 反过来多算一次也不会错：过去时刻就是过期。
  */
-export function packIsExpired(pack: CreditPackInput, now: number): boolean {
+export function packIsExpired(
+  pack: Pick<CreditPackInput, "expired" | "expireAtMs">,
+  now: number,
+): boolean {
   if (pack.expired) return true;
   return pack.expireAtMs !== null && Number.isFinite(pack.expireAtMs) && pack.expireAtMs <= now;
+}
+
+/**
+ * 一个包是否**可展示**：剩余 > 0 且额度 > 0。
+ *
+ * ★ 这是「可用积分列表」与「资源包明细」共用的**唯一**剔除判据（`normalizePacks`、
+ * WB 统计页明细、Qoder 逐包浮层都调它）。
+ *
+ * ★ `total <= 0` 一律按**已用完**处理（2026-11-09 口径确认）：Qoder 真机上
+ *   `plan_quota` 的 `limit_value = 0`，它的「0 / 0」读起来就是「用完了」，不该列。
+ *   不引入「不计量 / 无限额度」这种第二含义 —— 同一列数字只能有一种解释。
+ *
+ * ⚠️ 它**不**判过期：资源包明细要保留过期包（垫底标红），「可用积分列表」才额外叠加
+ * {@link packIsExpired}。两件事分开，调用方才不会把「历史记录」与「可用额度」混成一个过滤。
+ */
+export function isUsablePack(remaining: number, total: number): boolean {
+  return Number.isFinite(remaining) && remaining > 0 && total > 0;
 }
 
 /**
@@ -127,9 +147,8 @@ export function normalizePacks(
   if (!packs || packs.length === 0) return [];
 
   const rows = packs
-    /* ② `remaining <= 0` 不列；`total <= 0` 是「不计量」的那类（Qoder 真机上 `plan_quota`
-       的 `limit_value = 0`），它的「0 / 0」会被读成「用完了」，同样不列。 */
-    .filter((pack) => Number.isFinite(pack.remaining) && pack.remaining > 0 && pack.total > 0)
+    /* ② `remaining <= 0` 不列；`total <= 0` 同理由 —— 判据见 {@link isUsablePack}。 */
+    .filter((pack) => isUsablePack(pack.remaining, pack.total))
     .map((pack) => {
       const expired = packIsExpired(pack, now);
       return {

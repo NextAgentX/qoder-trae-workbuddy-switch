@@ -22,7 +22,6 @@
  * 渲染层 `CreditDivergingBar` 按数据自动决定单/双向（P3 决策 #1），不需要平台分支。
  */
 
-import { TRAE_EXPIRING_SOON_MS } from "@/lib/credit-expiry";
 import type { CreditExpiry, TokenStatsGroup, TokenStatsSource } from "@/lib/types";
 import type {
   TraeDailySnapshot,
@@ -141,8 +140,14 @@ export function traeCreditExpiry(
         status: null,
         expireAt,
         expired: expireAt !== null && expireAt <= now,
-        expiringSoon:
-          expireAt !== null && expireAt > now && expireAt - now <= TRAE_EXPIRING_SOON_MS,
+        /* ⚠️ 写死 `false` 不是「后端说不临期」，而是「**本形状不承载临期信息**」：
+           `CreditResource.expiringSoon` 是必填（类型上不能省略），而这里没有后端标记。
+           采用 `false` 而不是按时间自己算 —— 后者会制造一个假的「前端推窗口」的
+           消费方，与 `credit-packs.ts` / `credit-expiry.ts` 明文写的
+           「窗口只认后端标记」直接冲突。唯一消费方 `expiryBuckets()` 只读
+           `expired` / `expireAt` / `remaining`，从不读这个字段，所以行为无差。
+           真要临期数据，走 `summarizeExpiring(..., { unit: "s" })`。 */
+        expiringSoon: false,
       };
     });
   return { ok: true, resources };

@@ -77,7 +77,7 @@ export const zh = {
 
   // ---- 到期 ----
   "trae.comp.card.expiry.permanent": "长期有效",
-  "trae.comp.card.expiry.short": "{date} 到期",
+  "trae.comp.card.expiry.short": "到期 {date}",
   // ⚠️ 2026-10-12：卡片按原型删掉「大数字行 + 近期到期逐包列表」后，
   // `expiry.cooldownUntil` / `expiry.earliest` / `expiry.none` / `expiry.noneShort`
   // 与 `section.expiring` / `package.tip` / `package.remaining` / `package.empty`
@@ -91,24 +91,30 @@ export const zh = {
   "trae.comp.card.label.group": "分组",
 
   // ---- 状态标签 ----
-  "trae.comp.card.chip.checked": "已签到",
+  "trae.comp.card.chip.checked": "今日已签到",
   // ★ 2026-10-12：与 WorkBuddy 卡片**同一组槽位**（原型对两个平台用同一个渲染器）。
   "trae.comp.card.chip.toolsInUse": "使用中 {n} 个工具",
   "trae.comp.card.chip.expired": "凭据已过期",
   "trae.comp.card.chip.needRelogin": "需重新登录",
-  // 「{amount} 积分 {days} 天内过期」——issue #44：金额是窗口内**全部**临期之和，
-  // 天数取其中最晚那一刻，故只能写「天内」（写「天后」会把不同批次混成一句话，是假话）。
-  "trae.comp.card.chip.expiring": "{amount} 积分 {days} 天内过期",
-  // issue #83 · 3 后半：卡片上要能看到**逐包**的名称 / 剩余 / 到期，而不是只有汇总。
-  // 落点是浮层（卡片是 4 块 / 243px 的固定版式，塞第五块会挤掉「当前登录」徽章）。
-  "trae.comp.card.packs.title": "积分包明细（{n}）",
-  "trae.comp.card.packs.line": "{name} · 剩 {remaining}/{total} · {expire} 到期",
-  "trae.comp.card.packs.lineExpired": "{name} · 剩 {remaining}/{total} · {expire} 已过期",
-  "trae.comp.card.packs.unnamed": "未命名包",
+  // 「最近到期 {days}天 · {amount} 积分」—— 天数与金额都取**最快到期的那一批**。
+  // 不把窗口总量和某一批的天数拼在一起：那是两批积分，怎么拼都有半句假话。
+  "trae.comp.card.chip.expiring": "最近到期 {days}天 · {amount} 积分",
+  /* ≤ 48 小时用小时：与 `summarizeExpiring.soonestUnit` 同源。 */
+  "trae.comp.card.chip.expiringHours": "最近到期 {hours}小时 · {amount} 积分",
+  /* 徽章浮层的逐批明细 —— **与 WB / Qoder 同一形状**（一行一批、按到期时刻合并、不带包名）。
+     金额前是**绝对时刻**（`YYYY-MM-DD HH:mm`），可与账号页 / 抽屉的日期直接对照。
+     ★ 包名不是 Trae 的特色：WB 的 `CreditResource` 本来就有 `packageName`，只是从未放进
+       tooltip。包名去抽屉的「资源包明细」表看（三平台都有那张表）。 */
+  "trae.comp.card.expiringTipTitle": "按到期时间分批（共 {n} 批）",
+  "trae.comp.card.expiringTipLine": "{time} · {amount} 积分",
+  /* 「优先」——与 WB 同语义（来自 `lib/credit-priority.ts` 的排序结果）。 */
+  "trae.comp.card.chip.priority": "优先",
+  "trae.comp.card.chip.priorityTip": "建议优先使用",
   "trae.comp.card.chip.unchecked": "今日未签到",
   "trae.comp.card.chip.cooling": "冷却中",
-  "trae.comp.card.chip.jwtAuto": "自动刷新 JWT",
-  "trae.comp.card.chip.jwtManual": "支持刷新 JWT",
+  /* JWT 续期能力**不做徽章**：它属于长期属性而非「需要用户注意的状态」，做徽章只会
+     挤占到期/签到这些时效性槽位。该信息在抽屉的指标行里已完整体现
+     （`trae.comp.card.detail.jwtAuto*` 四态）——故此处不保留 chip 词条。 */
   "trae.comp.card.cooldown.until": " · 至 {time}",
   "trae.comp.card.cooldown.fallback": "冷却中（{type}）",
   "trae.comp.card.chip.authRejected": "凭据被拒（可自愈）",
@@ -184,7 +190,6 @@ export const zh = {
   //   两个产品分区的卡片是同一套结构，文案也不该各写一版。
   "trae.comp.card.currentLogin": "当前登录",
   "trae.comp.card.metric.credits": "积分",
-  "trae.comp.card.metric.expiry": "到期",
 
   // ---- 详情抽屉的信息区块（由 TraeAccountsPage 装配后注入）----
   "trae.comp.card.detail.section.account": "账号信息",

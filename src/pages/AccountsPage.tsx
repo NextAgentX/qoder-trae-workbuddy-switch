@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 
 import { AccountMoreMenu } from "@/components/account-more-menu";
-import { AccountCard, accountIdentity, accountDisplayName, formatCredits, formatCreditExpiry, formatTodayTokens, todayTokensBreakdown, type GuideTarget } from "@/components/account-card";
+import { AccountCard, accountIdentity, accountDisplayName, formatCredits, formatTodayTokens, todayTokensBreakdown, type GuideTarget } from "@/components/account-card";
 import { REFRESH_DONE_LABEL, useAccountRefreshBusy, type AccountRefreshKind } from "@/lib/account-refresh";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
 import { AccountsTableAvatar } from "@/components/account-list-parts";
@@ -105,7 +105,7 @@ import {
 } from "@/lib/credit-priority";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
 import { showUndoToast } from "@/lib/undo-toast";
-import { toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
+import { packIsExpired, toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
 
 /**
  * 资源包明细的**文案层**（WorkBuddy 词条域）。
@@ -122,7 +122,7 @@ function WB_PACK_TEXTS(t: Translate): CreditPackTexts {
       expired
         ? t("wbAccounts.card.expired")
         : expireAtMs !== null
-          ? t("wbAccounts.card.expiresOn", { date: formatCreditExpiry(expireAtMs, t) })
+          ? t("wbAccounts.card.expiresOn", { date: formatAbsoluteTime(expireAtMs) })
           : t("wbAccounts.card.forever"),
   };
 }
@@ -1917,26 +1917,31 @@ function RegionPanel({ region }: { region: Region }) {
     const credit = creditMap[detail.id];
     const todayEntry = detail.uid ? tokenTodayMap.get(detail.uid) : undefined;
     const checkedIn = checkinMap[detail.id];
-    const expired = detail.expiresAt != null && detail.expiresAt < Date.now();
+    /* 与下面所有判定共用上面那一个 `now`（注释就写在 `const now` 上，别又各写一次）。 */
+    const expired = detail.expiresAt != null && detail.expiresAt < now;
     const credBad = expired || Boolean(detail.needsRelogin);
-    const soon = credit?.expiringSoonRemaining ?? 0;
-    const soonestDays =
-      credit?.soonestExpireAt != null
-        ? Math.max(1, Math.ceil((credit.soonestExpireAt - Date.now()) / 86_400_000))
-        : 0;
+    /* 临期金额：**读不到 ⇒ `null`**（未查询 / 查询失败 / 字段缺失），不是 0。
+       写成 0 会与主值的「—」自相矛盾 —— 主值说读不到，副文本却说「0 积分要到期」。
+       「0 也照写」只覆盖「确实为 0」这一种情况。
+       ⚠️ 字段本身是可选的（`CreditExpiry.expiringSoonRemaining?`）：旧后端 / 半截响应下
+       缺失 ⇒ 仍是「不知道」，`?? 0` 会把它说成「0 积分要到期」。 */
+    const soon = credit?.ok ? (credit.expiringSoonRemaining ?? null) : null;
     return [
       {
         key: "credits",
         label: t("shared.stat.credits"),
+        /* ★ 2026-11-09：值 = **可用总积分**，不显示分母（与 Trae / Qoder / 聚合抽屉同一形状）。
+           副文本改为「7 天内到期 X 积分」—— 此前用 `soonestExpireAt` 算天数，而该字段
+           **不过滤已过期资源**（后端取所有 `remaining > 0` 资源的最小 `expireAt`），
+           已过期那批永远是最小值 ⇒ 差值负数 ⇒ 恒显示「1 天内到期」（B3）。
+           现在只报窗口内金额，不再回答「还有几天」。 */
         valueText:
-          credit && credit.totalCapacity != null
-            ? `${formatCredits(credit.totalRemaining ?? 0)}/${formatCredits(credit.totalCapacity)}`
+          credit?.ok && credit.totalRemaining != null
+            ? formatCredits(credit.totalRemaining)
             : "—",
         subText:
-          soon > 0
-            ? t("shared.stat.expiringSoon", { n: formatCredits(soon), d: soonestDays })
-            : t("shared.stat.noExpiring"),
-        tone: soon > 0 ? "warn" : undefined,
+          soon === null ? undefined : t("shared.detail.creditsExpiring", { amount: formatCredits(soon) }),
+        tone: soon !== null && soon > 0 ? "warn" : undefined,
         refreshKind: "credits",
       },
       {
@@ -1948,7 +1953,16 @@ function RegionPanel({ region }: { region: Region }) {
       {
         key: "checkin",
         label: t("shared.stat.checkin"),
-        valueText: checkedIn ? t("shared.stat.checkedIn") : t("shared.stat.notCheckedIn"),
+        /* ⚠️ 三态：`true` 已签 / `false` 未签 / `undefined` **还没查到**。
+           此前写成 `checkedIn ? 已签到 : 未签到`，把「不知道」说成「今日未签到」——
+           同页详情面板（本文件 `checkinMap[detail.id] === true ? … : === false ? … : "—"`）
+           早就按三态渲染，两处对同一个字段给出两种答案。 */
+        valueText:
+          checkedIn === true
+            ? t("shared.stat.checkedIn")
+            : checkedIn === false
+              ? t("shared.stat.notCheckedIn")
+              : "—",
         refreshKind: "checkin",
       },
       {
@@ -1974,30 +1988,43 @@ function RegionPanel({ region }: { region: Region }) {
    * 永久垫后；③ `ratio` 乘 100 并夹紧。此前这四份实现（三渠道页 + 聚合页）各自
    * 决定，于是「同一账号的同一批包」在卡片与抽屉里排在不同位置。
    *
+   * ★ WB 在这里**额外剔除已过期包**：后端的 `totalRemaining` 已按可用口径把过期额度排除了，
+   * 抽屉若继续列过期包，就会出现「顶部余额 80、下面明细合计 120」的对不上。过期包的
+   * 浪费量由后端 `expiredRemaining` 单独报告（当前界面无消费方）。Trae / Qoder 的抽屉
+   * 仍保留过期包 —— 它们的账号级余额口径没改，两者不能一刀切。
+   *
    * ⚠️ `expiringSoon` 改读**后端标记**（`EXPIRING_SOON_DAYS` = 7 天），不再前端写死
    * 7 天窗口 —— 前端自设窗口正是 `credit-expiry.ts` 文件头那条规范要根除的东西。
    */
   const detailPacks: DetailPack[] =
     detail && detailCredit?.ok
       ? toDetailPacks(
-          (detailCredit.resources ?? []).map((resource) => ({
-            key: `${resource.packageCode ?? resource.packageName ?? "pack"}-${resource.expireAt ?? "none"}`,
-            // `packageName` / `packageCode` 声明为 `string | null`，但后端可能吐对象
-            // （`api.ts` 只归一了账号字段，没归一 credit 的这两个）⇒ 直接当 React 子节点会
-            // 卸载整棵树（issue #2 白屏）。过 `displayText` 出口归一，取不到再回落。
-            name:
-              displayText(resource.packageName) ||
-              displayText(resource.packageCode) ||
-              t("wbAccounts.card.creditPackFallback"),
-            total: resource.total,
-            remaining: resource.remaining,
-            used: resource.used,
-            /* WB 的 `CreditResource.expireAt` 是**毫秒**（后端 `parse_timestamp_ms`）——
-               与 Trae 的秒口径不同，见 `credit-packs.ts` 文件头第 ① 条。 */
-            expireAtMs: resource.expireAt,
-            expired: resource.expired,
-            expiringSoon: resource.expiringSoon,
-          })),
+          (detailCredit.resources ?? [])
+            .filter(
+              (resource) =>
+                !packIsExpired(
+                  { expired: resource.expired, expireAtMs: resource.expireAt },
+                  now,
+                ),
+            )
+            .map((resource) => ({
+              key: `${resource.packageCode ?? resource.packageName ?? "pack"}-${resource.expireAt ?? "none"}`,
+              // `packageName` / `packageCode` 声明为 `string | null`，但后端可能吐对象
+              // （`api.ts` 只归一了账号字段，没归一 credit 的这两个）⇒ 直接当 React 子节点会
+              // 卸载整棵树（issue #2 白屏）。过 `displayText` 出口归一，取不到再回落。
+              name:
+                displayText(resource.packageName) ||
+                displayText(resource.packageCode) ||
+                t("wbAccounts.card.creditPackFallback"),
+              total: resource.total,
+              remaining: resource.remaining,
+              used: resource.used,
+              /* WB 的 `CreditResource.expireAt` 是**毫秒**（后端 `parse_timestamp_ms`）——
+                 与 Trae 的秒口径不同，见 `credit-packs.ts` 文件头第 ① 条。 */
+              expireAtMs: resource.expireAt,
+              expired: resource.expired,
+              expiringSoon: resource.expiringSoon,
+            })),
           WB_PACK_TEXTS(t),
           now,
         )
