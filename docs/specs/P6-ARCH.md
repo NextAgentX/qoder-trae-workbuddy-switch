@@ -86,6 +86,13 @@ planScopeShortcuts({ scopes, enabled })
 
 > ⚠️ **切 scope 必须清空选择集**：`/s/wb-cn/accounts → /s/wb-global/accounts` 是**同一路由、不同参数**，React 不会重挂载页面 ⇒ 页内 `selected` 会残留。这属 **P5 §2.5 第 (4) 条**（选择集按 `(scope, id)` 键控、切 scope 即失效）—— P6 **依赖 P5 已落地**该纪律；P6 的导航路径**不额外补偿**（避免两处各写一份「清空」逻辑）。见 §6 R7。
 
+**聚合页签的键盘入口**：`Ctrl` + 反引号键（数字 `1` 左边那枚）⇒ 导航到 `/aggregate`。
+
+- 聚合**不是第 7 个作用域**（`SCOPES` 仍是 6 项）⇒ 它**不参与**「>9 个作用域降级」与「作用域快捷键开关」；与 `⌘B` / `⌘K` 同族：恒在。
+- 键位是**物理键** `Backquote`（`KeyboardEvent.code`）：`event.key` 只作兜底，因为非美式布局上这枚键产出的字符不一定是反引号。**约束**：`App.tsx` 读 `src/lib/scope-shortcuts.ts` 的 `AGGREGATE_SHORTCUT_CODE`，不得硬编码字面量；门禁断言这一点。
+- 提示文案是 `AGGREGATE_SHORTCUT_HINT`（同文件），渲染在顶栏作用域菜单聚合项右侧（与 6 个作用域项的 `⌘N` 同位）。门禁断言两处分别 import 对应常量。
+- 已在聚合页时按下**直接 return**：不导航、不 `preventDefault`，**也不写历史**。这里比 `⌘1..N` 更严格 —— 后者对「已是当前作用域」仍 `navigate` 同一路径，会 push 一条重复历史记录。
+
 ### 1.4 撤销 toast：★ 假承诺红线（本期最硬的一条）
 
 **边界（PLAN §3.5 + `P5-P12-TASKS.md` 附 A5）**：`toast` 撤销**只适用于后端真的可逆**的操作；删除账号在 P5 落地软删除 / 回收站**之前是硬删除 ⇒ UI 上不许出现「已删除·撤销」**。

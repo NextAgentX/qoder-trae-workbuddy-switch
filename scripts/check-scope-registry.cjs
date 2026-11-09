@@ -4140,17 +4140,50 @@ check("★ P6 降级接线：App 的 ⌘1..N 在未绑定（降级）时**不导
   return "未绑定 ⇒ return（不 navigate）· 绑定取自 plan.bindings";
 });
 
-check("★ P6 输入框豁免：⌘K 与 ⌘1..N **两键**在输入态都不触发（§1.10）", () => {
-  /* 变异：任一全局键漏掉 `isTypingTarget` 豁免 ⇒ 打字时被劫持（如按数字跳走）⇒ 变红。 */
+check("★ P6 输入框豁免：每个全局键（⌘B / ⌘K / ⌘1..N / Ctrl+`）在输入态都不触发（§1.10）", () => {
+  /* 变异：任一全局键漏掉 `isTypingTarget` 豁免 ⇒ 打字时被劫持（如按数字跳走）⇒ 变红。
+     ★ 不写死数量：断言「keydown 监听数 == 豁免数」，将来加键自动纳入。 */
   const app = readCode(APP_TSX);
+  const listeners = (app.match(/window\.addEventListener\("keydown"/g) || []).length;
   const hits = (app.match(/isTypingTarget\(event\.target\)/g) || []).length;
-  if (hits < 2) {
-    throw new Error(`输入框豁免只出现在 ${hits} 处 —— ⌘K 与 ⌘1..N 应各自豁免`);
+  if (listeners < 2) {
+    throw new Error(`只注册了 ${listeners} 个全局 keydown —— 基线已丢，断言失去意义`);
+  }
+  if (listeners !== hits) {
+    throw new Error(`注册了 ${listeners} 个全局 keydown，但只有 ${hits} 处输入框豁免 —— 有键会劫持打字`);
   }
   if (!/tag === "INPUT" \|\| tag === "TEXTAREA" \|\| el\?\.isContentEditable === true/.test(app)) {
     throw new Error("输入框判据不完整（应含 INPUT / TEXTAREA / isContentEditable）");
   }
-  return `${hits} 处豁免 · 判据含 INPUT/TEXTAREA/isContentEditable`;
+  return `${listeners} 键 / ${hits} 处豁免一一对应 · 判据含 INPUT/TEXTAREA/isContentEditable`;
+});
+
+check("★ 聚合页签快捷键：提示与实现同源（App.tsx 读常量，不硬编码物理键）", () => {
+  /* 可证伪点：
+     ① 物理键在 lib 里钉死为 `Backquote`（数字 1 左边那枚）；
+     ② 提示文案钉死为 `Ctrl+`` —— macOS 的 `Cmd+`` 会被系统截获，写 `⌘` 是假提示；
+     ③ `App.tsx` 的判据读 `AGGREGATE_SHORTCUT_CODE`，且**不出现**该字面量 ——
+        硬编码会让改键位时提示与实现静默漂移；
+     ④ 作用域菜单确实渲染了提示（否则是「有键无提示」）。 */
+  if (scopeShortcutsLib.AGGREGATE_SHORTCUT_CODE !== "Backquote") {
+    throw new Error("物理键必须是 Backquote（数字 1 左边那枚）");
+  }
+  if (scopeShortcutsLib.AGGREGATE_SHORTCUT_HINT !== "Ctrl+`") {
+    throw new Error(`提示文案应为 \`Ctrl+\` + 反引号（macOS 的 ⌘\` 会被系统截获），实际 ${JSON.stringify(scopeShortcutsLib.AGGREGATE_SHORTCUT_HINT)}`);
+  }
+  const app = readCode(APP_TSX);
+  if (!/AGGREGATE_SHORTCUT_CODE/.test(app)) {
+    throw new Error("App.tsx 未使用 `AGGREGATE_SHORTCUT_CODE` —— 键位与提示会漂移");
+  }
+  /* 只拦**字符串字面量**（`"Backquote"` / `'Backquote'`）：注释里写裸词不算违规。 */
+  if (/["']Backquote["']/.test(app)) {
+    throw new Error("App.tsx 硬编码了物理键字面量 —— 必须走 `AGGREGATE_SHORTCUT_CODE`");
+  }
+  const selector = readCode("src/components/shell/scope-selector.tsx");
+  if (!/\{AGGREGATE_SHORTCUT_HINT\}/.test(selector)) {
+    throw new Error("作用域菜单没有渲染 `AGGREGATE_SHORTCUT_HINT` —— 有键无提示");
+  }
+  return "物理键/文案各有单一来源 · App.tsx 无字面量 · 菜单已渲染提示";
 });
 
 check("★ P6 面板禁用 cmdk 自带过滤（shouldFilter=false）—— 否则被另一套算法二次过滤", () => {

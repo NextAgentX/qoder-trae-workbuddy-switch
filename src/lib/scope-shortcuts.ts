@@ -76,6 +76,48 @@ export function planScopeShortcuts(input: {
 }
 
 /**
+ * 聚合页签快捷键的**物理键**（`KeyboardEvent.code`）。
+ *
+ * 用 `code` 而不是 `key`：非美式布局上这枚（数字 `1` 左边的）键产出的字符不一定是
+ * 反引号，而 `code` 与布局无关。`event.key` 只能作兜底（少量环境不填 `code`）。
+ *
+ * ⚠️ `App.tsx` 的全局键**必须**读这个常量 —— 门禁断言它不得再出现该字面量。
+ * 改键位只改这里；漏改 `App.tsx` 会被 `scripts/check-scope-registry.cjs` 拦下。
+ */
+export const AGGREGATE_SHORTCUT_CODE = "Backquote";
+
+/**
+ * 聚合页签的快捷键提示：`Ctrl` + 反引号键（键盘上数字 `1` 左边那枚）。
+ *
+ * ## 为什么和 `⌘1..N` 分开，不并进 `planScopeShortcuts`
+ *
+ * 聚合**不是第 7 个作用域**（`Scope` 是封闭字面量，`SCOPES` 长度被门禁钉死为 6）。
+ * 它是一条独立路由 `/aggregate`，因此也不参与「>9 个作用域降级」与
+ * 「作用域快捷键开关」—— 那两个概念的对象都是作用域。这枚键只是**入口加速器**，
+ * 与 `⌘B`（侧栏折叠）同族：恒在，不进规划结果。
+ *
+ * ## 为什么提示写 `Ctrl` 而不是 `⌘`
+ *
+ * macOS 的 `Cmd` + 反引号 是系统级「循环切换窗口」（Move focus to next window），
+ * 可能在系统层就被吃掉、到不了 WebView；真实可达的是 `Ctrl` + 反引号。
+ * 绑定本身仍接受 `ctrlKey || metaKey`（与其它全局键同族），但提示必须说真话。
+ *
+ * ## 提示按美式键帽写（已知限制）
+ *
+ * 提示是静态字符串，不随键盘布局变。非美式布局上这枚**物理键**的键帽可能不是反引号
+ * （德语 `^` / `´`、法语 `²`…）—— 功能照常触发（判据是 `code`），只有文字与键帽不符。
+ * 用 `navigator.keyboard.getLayoutMap()` 动态生成能修掉，但那是异步 + 特性检测的 API，
+ * 为一个键不值当；主要用户群用标准布局。
+ *
+ * ## 与实现的同源关系（门禁可证）
+ *
+ * 键位来自 {@link AGGREGATE_SHORTCUT_CODE}、文案来自本常量，两处都在本文件；
+ * `App.tsx` 只允许 import 前者、`scope-selector.tsx` 只允许 import 后者。
+ * 门禁三查：物理键值 = `Backquote`、`App.tsx` 无该字面量、菜单渲染了本常量。
+ */
+export const AGGREGATE_SHORTCUT_HINT = "Ctrl+`";
+
+/**
  * 快捷键目标 URL：`/s/{scope}/{dest}`。
  *
  * 当前目的地缺失或非法（旧路由、根路径）⇒ **回落 `accounts`** —— 快捷键是纯加速器，
