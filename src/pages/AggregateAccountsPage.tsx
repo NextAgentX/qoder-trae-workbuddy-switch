@@ -92,6 +92,7 @@ import {
   useAggregateSignals,
 } from "@/lib/use-aggregate-signals";
 import { useAggregateVisible, subscribeAggregateVisibleStorage } from "@/lib/aggregate-visibility-pref";
+import { subscribeAggregateModeStorage, useAggregateMode } from "@/lib/aggregate-view-mode-pref";
 import {
   aggregateDetailPacks,
   aggregateDetailPrograms,
@@ -118,8 +119,6 @@ import {
 import { showUndoToast } from "@/lib/undo-toast";
 import { useAccountsStore } from "@/stores/accounts";
 import { cn } from "@/lib/utils";
-
-type AggregateMode = "group" | "flat";
 
 /** 取该作用域对应的 Trae 账号库变体（删除 / 刷新 JWT 都要它）。 */
 function traeVariantOf(scope: Scope) {
@@ -336,7 +335,9 @@ export default function AggregateAccountsPage() {
   }, [accounts, creditOf, qoderWebPacks.packs, signalsByScope]);
 
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<AggregateMode>("group");
+  /* 视图模式（分组 / 平铺）**记住用户的选择**：偏好存 localStorage，
+     下次冷启动仍落在上次看的那个视图（`lib/aggregate-view-mode-pref.ts`）。 */
+  const [mode, setMode] = useAggregateMode();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
   const [panelQuery, setPanelQuery] = useState("");
@@ -349,8 +350,9 @@ export default function AggregateAccountsPage() {
   /** 被用户「忽略」的新增账号（本轮不再提示）。 */
   const [dismissedNewcomers, setDismissedNewcomers] = useState<Set<string>>(new Set());
 
-  /* 跨标签页同步（webui 可能开多个）：别的标签改了筛选，这里要跟着变。 */
+  /* 跨标签页同步（webui 可能开多个）：别的标签改了筛选 / 视图模式，这里要跟着变。 */
   useEffect(() => subscribeAggregateVisibleStorage(), []);
+  useEffect(() => subscribeAggregateModeStorage(), []);
 
   /** 当前真实存在的全部账号键。**筛选的有效性以它为界**（账号被删 ⇒ 键自动失效）。 */
   const universe = useMemo(() => accounts.map((account) => account.ref), [accounts]);
