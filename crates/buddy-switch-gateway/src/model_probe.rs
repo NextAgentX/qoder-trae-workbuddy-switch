@@ -1306,6 +1306,7 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
             conversation_id: None,
         },
         false,
+        None,
     );
 
     let context = ConversationContext::new(None, None, None, None, None);

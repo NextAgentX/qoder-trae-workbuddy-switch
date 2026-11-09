@@ -76,6 +76,7 @@ fn outbound_messages(inbound: &Value) -> Vec<Value> {
         &OutboundOptions::default(),
         &OutboundMeta::default(),
         false,
+        None,
     );
     serde_json::from_str::<Value>(&prepared)
         .expect("改写结果可解析")

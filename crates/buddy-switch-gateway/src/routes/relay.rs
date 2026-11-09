@@ -1944,9 +1944,16 @@ pub async fn prepare_body(
     let degraded = state.degrade_active(now_ms).await;
     let options = state.outbound_options().await;
     let meta = outbound_meta(uid_hint, conversation_id);
+    let config = state.config_snapshot().await;
 
-    let prepared =
-        outbound::prepare_outbound_body_report(region, raw_body, &options, &meta, degraded);
+    let prepared = outbound::prepare_outbound_body_report(
+        region,
+        raw_body,
+        &options,
+        &meta,
+        degraded,
+        Some(&config.model_efforts),
+    );
 
     let request_id =
         session_headers::resolve_conversation_request_id(inbound_request_id, None, turn_key);

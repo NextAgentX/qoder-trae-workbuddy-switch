@@ -1787,6 +1787,13 @@ export interface GatewayConfig {
    */
   auto_failover: boolean;
   /**
+   * **按模型配置的默认思考档**（模型名 → 档位）。
+   *
+   * 语义：客户端**自己没传** `reasoning_effort` 时，网关补上这里配置的档位；
+   * 客户端显式传了就尊重客户端。空 map = 不补档（与加该字段前行为一致）。
+   */
+  model_efforts?: Record<string, string>;
+  /**
    * **上游请求是否走系统代理**（默认 `false` = 直连）。
    *
    * 默认直连的原因：`reqwest` 不带 `no_proxy()` 时会自动读 `HTTPS_PROXY` 等变量，

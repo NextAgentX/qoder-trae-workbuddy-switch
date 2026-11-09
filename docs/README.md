@@ -28,6 +28,7 @@
 | 改网关（路由 / 换号 / 错误信封 / 命名空间） | [`specs/UNIFIED-GATEWAY-ARCH.md`](specs/UNIFIED-GATEWAY-ARCH.md) + [`specs/P11-ARCH.md`](specs/P11-ARCH.md) + [`specs/P12-ARCH.md`](specs/P12-ARCH.md) |
 | 账号在回复中途挂掉 / 想「静默换号」（issue #129） | [`specs/ACCOUNT-FAILOVER.md`](specs/ACCOUNT-FAILOVER.md)（对外错误形状契约 + 关闭态不变量 + 五条治理链路） |
 | 网关「必须开着代理才能用」/ 上游 TLS 被掐断 / 要不要走 `HTTPS_PROXY` | [`specs/GATEWAY-UPSTREAM-NETWORK.md`](specs/GATEWAY-UPSTREAM-NETWORK.md) |
+| 想按模型设默认思考档（`reasoning_effort`） | [`specs/GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) |
 | 改前端某个页面 | [`specs/PLAN.md`](specs/PLAN.md) 对应 §3.x + 该期 `P*-ARCH.md` |
 | 给密钥设 token 配额 / 限制可访问账号（issue #76） | [`specs/KEY-PERMISSION-UI-DESIGN.md`](specs/KEY-PERMISSION-UI-DESIGN.md)（**已实现**：四条产品线的台账 / 命令 / 前端表 / 中继全部接通）+ [`prototype/key-permission-design.html`](prototype/key-permission-design.html)（可点设计稿） |
 | 侧栏太占地方 / 想只看图标（折叠） | [`specs/SIDEBAR-COLLAPSE-DESIGN.md`](specs/SIDEBAR-COLLAPSE-DESIGN.md)（已落地）+ [`prototype/verify-sidebar-collapse.cjs`](prototype/verify-sidebar-collapse.cjs)（行为校验） |
@@ -58,6 +59,7 @@
 | [`P5-P12-TASKS.md`](specs/P5-P12-TASKS.md) | P5–P12 的执行级任务清单 | 现行 |
 | [`UPDATE-NOTES-ARCH.md`](specs/UPDATE-NOTES-ARCH.md) | 升级前说明弹窗（版本内容）：四阶段交互、数据契约、发布侧产出与切片口径 | 现行 · 2026-10-17 落地 |
 | [`GATEWAY-UPSTREAM-NETWORK.md`](specs/GATEWAY-UPSTREAM-NETWORK.md) | 网关**出站**网络：默认直连 vs 系统代理（`no_proxy` 纪律 + 兜底回落 + 排查手法） | 现行 · 2026-11-08 落地 |
+| [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |
 
 ### 分期架构（P3–P15）
 

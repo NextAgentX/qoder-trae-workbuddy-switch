@@ -7,18 +7,19 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { CatalogSourceBar } from "@/components/gateway/catalog-source-bar";
 import { ContextSourceCard } from "@/components/gateway/context-source-card";
-import { ModelTable } from "@/components/gateway/model-table";
 import { CreditsCell, EffortCell } from "@/components/gateway/model-ability";
 import { useImageCapColumn } from "@/components/gateway/model-image-column";
+import { ModelEffortSelect } from "@/components/gateway/model-effort-select";
+import { ModelTable } from "@/components/gateway/model-table";
 import { DemoAction } from "@/components/demo-action";
 import * as api from "@/lib/api";
 import { formatAbsoluteTime, type CatalogSourceView } from "@/lib/catalog-source";
 import { useT } from "@/lib/i18n";
+import { cn } from "@/lib/utils";
 import type { QoderGatewayCatalog } from "@/lib/qoder-gateway";
 import { scopeOf } from "@/lib/scope";
 import { servedCount } from "@/lib/types";
 import type { GatewayModelRow, Region } from "@/lib/types";
-import { cn } from "@/lib/utils";
 import { EMPTY_DISABLED_SET, useGatewayStore } from "@/stores/gateway";
 
 /**
@@ -50,6 +51,7 @@ import { EMPTY_DISABLED_SET, useGatewayStore } from "@/stores/gateway";
  * **没有卡头**（「Qoder 模型清单」标题与左栏分区导航重复，已去掉）。
  * 表下的计数与「两个出口」说明即原型说明段，保持不变。
  */
+
 export function QoderModelList({
   catalog,
   region,
@@ -57,6 +59,8 @@ export function QoderModelList({
   onRefresh,
   maxContext,
   onToggleMaxContext,
+  modelEfforts = {},
+  onModelEffortChange,
   className,
 }: {
   catalog: QoderGatewayCatalog;
@@ -67,6 +71,11 @@ export function QoderModelList({
   /** 是否声明上游**最大**上下文窗口（默认 true）。 */
   maxContext: boolean;
   onToggleMaxContext: (checked: boolean) => void;
+  /** 按模型的默认思考档：{ modelKey: effort } */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  modelEfforts?: Record<string, string>;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onModelEffortChange: (modelKey: string, effort: string | null) => void;
   className?: string;
 }) {
   const t = useT();
@@ -233,12 +242,22 @@ export function QoderModelList({
               header: t("shared.gateway.models.colEfforts"),
               render: (row) => {
                 const model = catalogById.get(row.id);
+                const efforts = model?.efforts ?? [];
+                if (efforts.length === 0) {
+                  return (
+                    <EffortCell
+                      efforts={[]}
+                      defaultEffort={null}
+                      unavailable={model?.isReasoning ? "unknown" : "unsupported"}
+                    />
+                  );
+                }
                 return (
-                  <EffortCell
-                    efforts={model?.efforts ?? []}
-                    // Qoder 官方只给「支持哪些档」，不给默认档 ⇒ 不编。
-                    defaultEffort={null}
-                    unavailable={model?.isReasoning ? "unknown" : "unsupported"}
+                  <ModelEffortSelect
+                    modelId={row.id}
+                    efforts={efforts}
+                    value={modelEfforts[row.id] ?? null}
+                    onChange={onModelEffortChange}
                   />
                 );
               },

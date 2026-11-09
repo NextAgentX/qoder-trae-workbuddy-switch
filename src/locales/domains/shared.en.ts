@@ -132,6 +132,11 @@ export const en = {
   "shared.gateway.models.effortNoneUnsupported": "This model has no selectable thinking level",
   "shared.gateway.models.effortNoneUndeclared": "Not declared upstream, and the built-in table has no entry",
   /** issue #65: model effort selection UI */
+  "shared.gateway.models.selectEffort": "Select thinking level",
+  "shared.gateway.models.noEffort": "No available levels",
+  "shared.gateway.models.current": "Current",
+  "shared.gateway.models.effortSaved": "Default thinking level saved for this model",
+  "shared.gateway.models.effortSaveFailed": "Failed to save the default thinking level",
   "shared.gateway.models.upstreamProxyTitle": "Upstream connection",
   "shared.gateway.models.upstreamProxyDesc":
     "Off = connect to upstream directly (default, recommended). On = send upstream requests through the system proxy (HTTPS_PROXY); only needed when your network can reach upstream solely through a proxy. Takes effect after restarting the app.",

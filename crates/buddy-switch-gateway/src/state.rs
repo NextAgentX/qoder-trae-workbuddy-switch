@@ -114,6 +114,9 @@ pub struct GatewayConfig {
     /// 用户会误以为 300k 就是上限。
     #[serde(alias = "maxContext")]
     pub max_context: bool,
+    /// **按模型配置的默认思考档**（可选）。键为模型名，值为档位。优先于静态表使用。
+    #[serde(default, alias = "modelEfforts")]
+    pub model_efforts: std::collections::HashMap<String, String>,
     /// **上游请求是否走系统代理**（默认 `false` = 直连）。
     ///
     /// 为什么默认直连：`reqwest::Client::builder()` 不带 `.no_proxy()` 时会自动读取
@@ -152,6 +155,7 @@ impl Default for GatewayConfig {
             allow_model_region_prefix: false,
             max_body_mb: DEFAULT_MAX_BODY_MB,
             max_context: true,
+            model_efforts: std::collections::HashMap::new(),
             upstream_via_proxy: false,
         }
     }
@@ -717,6 +721,8 @@ mod tests {
             "allow_model_region_prefix",
             "max_body_mb",
             "max_context",
+            // 按模型默认思考档（issue：Qoder/WB 思考档位可配）
+            "model_efforts",
             // 上游是否走系统代理（默认 false = 直连，见字段文档）
             "upstream_via_proxy",
         ]

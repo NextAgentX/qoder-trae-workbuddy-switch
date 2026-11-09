@@ -10,6 +10,7 @@ import { ContextSourceCard } from "@/components/gateway/context-source-card";
 import { ModelTable } from "@/components/gateway/model-table";
 import { CreditsCell, EffortCell } from "@/components/gateway/model-ability";
 import { useImageCapColumn } from "@/components/gateway/model-image-column";
+import { ModelEffortSelect } from "@/components/gateway/model-effort-select";
 import { focusProbeModel, PROBE_LIMIT_STATES } from "@/components/gateway/model-probe-card";
 import * as api from "@/lib/api";
 import { describeCatalogSource, formatAbsoluteTime } from "@/lib/catalog-source";
@@ -303,6 +304,25 @@ export function ModelList({ region, className }: { region: Region; className?: s
     scope,
     entryOf: (id) => catalogById.get(id),
   });
+  /**
+   * 按模型改默认思考档 —— **选完即存**（与 `max_context` 开关同口径）。
+   *
+   * 不做草稿态：项目里其余网关设置都是即时生效，多一个「保存」按钮只会出现
+   * 「改了没点保存 = 白改」这种静默失效。失败时回滚成 store 里的旧配置。
+   */
+  async function onModelEffortChange(modelKey: string, effort: string | null) {
+    const next = { ...(config.model_efforts ?? {}) };
+    if (effort == null || effort === "") delete next[modelKey];
+    else next[modelKey] = effort;
+    try {
+      await saveConfig({ ...config, model_efforts: next });
+    } catch (error) {
+      toast.error(t("shared.gateway.models.effortSaveFailed"), {
+        description: String(error),
+      });
+    }
+  }
+
   return (
     <div className={cn(className)}>
       {/* 无卡头 —— 分区名由左栏导航承担（与 Trae / Qoder 侧同口径）。
@@ -373,17 +393,34 @@ export function ModelList({ region, className }: { region: Region; className?: s
             imageColumn={imageColumn}
             /* ★ issue #65：思考档位 / 积分倍率（三平台同构，渲染统一走
                `model-ability.tsx`）。档位空数组在 WB 侧只有一种成因：上游没声明、
-               内置档位表也没条目 ⇒ `undeclared`。 */
+               内置档位表也没条目 ⇒ `undeclared`。
+               ★ 有档位时给**可编辑的默认档选择器**（与 Qoder 共用
+               `ModelEffortSelect`）：选中的值写进网关配置 `model_efforts`，
+               客户端不传 `reasoning_effort` 时由网关补上。 */
             effortColumn={{
               header: t("shared.gateway.models.colEfforts"),
-              render: (row) => (
-                <EffortCell
-                  efforts={catalogById.get(row.id)?.reasoning_efforts ?? []}
-                  defaultEffort={catalogById.get(row.id)?.default_effort ?? null}
-                  source={catalogById.get(row.id)?.efforts_source ?? null}
-                  unavailable="undeclared"
-                />
-              ),
+              render: (row) => {
+                const model = catalogById.get(row.id);
+                const efforts = model?.reasoning_efforts ?? [];
+                if (efforts.length === 0) {
+                  return (
+                    <EffortCell
+                      efforts={[]}
+                      defaultEffort={null}
+                      source={model?.efforts_source ?? null}
+                      unavailable="undeclared"
+                    />
+                  );
+                }
+                return (
+                  <ModelEffortSelect
+                    modelId={row.id}
+                    efforts={efforts}
+                    value={(config.model_efforts ?? {})[row.id] ?? null}
+                    onChange={onModelEffortChange}
+                  />
+                );
+              },
             }}
             creditsColumn={{
               header: t("shared.gateway.models.colCredits"),

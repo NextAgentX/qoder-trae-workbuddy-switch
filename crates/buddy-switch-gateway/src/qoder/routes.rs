@@ -600,6 +600,25 @@ pub async fn chat_for_region_once(
     }
 
     let meta = payload::meta_for(&catalog.models, &model, state.max_context_now());
+    /* ★ 默认思考档的**查找键**：与出口 ① / 管理面同源的模型标识（`id` 优先，回退 `key`）。
+    不能直接拿 `meta.key` 去查 —— `ModelMeta::from_catalog_entry` 只读 `entry["key"]`，
+    而上游条目可能只给 `id`（此时 `meta.key` 是空串），按模型配置就永远匹配不上：
+    界面上能选、发请求却不生效，这种「静默无效」比报错更难查。 */
+    let effort_model_id = catalog
+        .models
+        .iter()
+        .find(|entry| {
+            entry
+                .get("id")
+                .or_else(|| entry.get("key"))
+                .and_then(Value::as_str)
+                .map(|id| id.eq_ignore_ascii_case(&model))
+                .unwrap_or(false)
+        })
+        .and_then(|entry| entry.get("id").or_else(|| entry.get("key")))
+        .and_then(Value::as_str)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| meta.key.clone());
     let allowed_tools = payload::allowed_tool_names(&openai_payload);
     /* Responses 的 **custom（freeform）工具**名只从**原始**请求体取：转换（`to_upstream_request`）
     之后它们已被降级成普通 function，名字还在，但 `type` 已经没了。 */
@@ -623,6 +642,8 @@ pub async fn chat_for_region_once(
     let build_encoded = |user_type: &str, structured: bool, uid: &str| -> Result<String, String> {
         let mut body_value =
             api::build_chat_body_with_structured(&openai_payload, &meta, user_type, structured)?;
+
+        // ★ 会话缓存连续性：同一个会话轮复用稳定的上游 session_id。
         if let (Some(conversation), Some(object)) =
             (sticky_key.as_deref(), body_value.as_object_mut())
         {
@@ -630,6 +651,37 @@ pub async fn chat_for_region_once(
                 "session_id".into(),
                 Value::String(stable_upstream_session_id(uid, conversation)),
             );
+        }
+
+        // ★ issue #65 后续：客户端没传思考档时，用**按模型配置**的默认档补上。
+        // `build_chat_body_with_structured` 已经把客户端的 `reasoning_effort` /
+        // `reasoning.effort` / `thinking.effort|level` 归一后写进
+        // `parameters.reasoning_effort`，所以这里只判「有没有」，不重复解析。
+        let already_set = body_value
+            .get("parameters")
+            .and_then(Value::as_object)
+            .map(|params| params.contains_key("reasoning_effort"))
+            .unwrap_or(false);
+        if !already_set {
+            let configured = config
+                .model_efforts
+                .get(&effort_model_id)
+                .or_else(|| config.model_efforts.get(&meta.key));
+            if let Some(effort) = configured {
+                // `canonical_effort`：不在官方词表里的值丢弃 —— 宁可退回上游默认，
+                // 也不要把非法档位发上去换一个 400。
+                if let Some(canonical) = api::canonical_effort(effort) {
+                    if let Some(params) = body_value
+                        .get_mut("parameters")
+                        .and_then(Value::as_object_mut)
+                    {
+                        params.insert(
+                            "reasoning_effort".to_string(),
+                            Value::String(canonical.to_string()),
+                        );
+                    }
+                }
+            }
         }
         Ok(cosy::qoder_encode(body_value.to_string().as_bytes()))
     };
