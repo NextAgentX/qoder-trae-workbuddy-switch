@@ -5758,18 +5758,27 @@ pub async fn qoder_program_status(scope: String) -> Result<Value, String> {
 ///
 /// ⚠️ 这是**写客户端文件**的动作（本项目里与 `switch_account` 同级）：客户端在跑时会被
 /// 拒绝（`switch::program_running` 守卫），失败自动还原备份。
-#[tauri::command]
+///
+/// `close_first = true`（界面「关闭并继续」按钮）⇒ 先按映像名关掉客户端、确认进程消失，
+/// 再写回（`switch::switch_account_for_closing`）。默认 `false`：普通切换绝不主动杀客户端。
+#[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_switch_account(
     scope: String,
     program: String,
     uid: String,
+    close_first: Option<bool>,
 ) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
     let program = qoder::switch::QoderProgram::parse(&program)
         .ok_or_else(|| format!("未知的 Qoder 程序位: {program}"))?;
+    let close_first = close_first.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        qoder::switch::switch_account_for(region, program, &uid)
+        if close_first {
+            qoder::switch::switch_account_for_closing(region, program, &uid)
+        } else {
+            qoder::switch::switch_account_for(region, program, &uid)
+        }
     })
     .await
     .map_err(|error| format!("切换 Qoder 账号失败: {error}"))?

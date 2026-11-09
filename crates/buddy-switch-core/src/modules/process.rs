@@ -1438,6 +1438,89 @@ fn windows_rows_match_image(rows: &[WindowsProcessRow], image: &str) -> bool {
     rows.iter().any(|row| row.name.eq_ignore_ascii_case(image))
 }
 
+/// 按**映像名**关闭某个客户端（写前守卫的「关闭并继续」路径）。
+///
+/// ## 与 [`is_image_running`] 同一口径
+///
+/// `image` 是**完整映像名**（`Qoder CN.exe`），Windows 上大小写不敏感、精确匹配；
+/// 判据必须是同一个，否则会出现「守卫说在跑、关闭说没在跑」这种自相矛盾的组合。
+///
+/// ## 顺序（不可调换）
+///
+/// ① `taskkill /PID … /T`（**不带 `/F`**，等同正常退出，让客户端自己收尾）→
+/// ② 等待至多 `timeout_secs` 预算内的一半（≤8s）→ ③ 仍存活则 `/F` 强杀 →
+/// ④ 再等剩余预算 → ⑤ 仍存活 ⇒ `Err`（附残余 PID，用户可手动结束）。
+///
+/// ## 为什么必须「先关掉、确认消失、再去写」
+///
+/// 这类 Electron 客户端退出时会把内存里的登录态整体写回磁盘。若在它退出前就写完凭据，
+/// 它随后那次回写会**覆盖**我们的写入 —— 表现为「切换成功但客户端还是旧账号」。
+///
+/// 映像名不存在 ⇒ 直接 `Ok(())`（本来就没在跑），调用方不必先判一次。
+pub fn close_image(image: &str, timeout_secs: u64) -> Result<(), String> {
+    let image = image.trim();
+    if image.is_empty() {
+        // 空映像名判不出来 ⇒ 拒绝关闭（关错进程比关不掉更坏）。
+        return Err("映像名为空 —— 无法确定要关闭哪个客户端。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let rows = windows_tasklist_image_rows(image);
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let pids: Vec<u32> = rows.iter().map(|row| row.pid).collect();
+        for pid in &pids {
+            let pid_s = pid.to_string();
+            let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T"], 10);
+        }
+        let started = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs.max(1));
+        let graceful = Duration::from_secs(8).min(timeout);
+        let remaining = wait_windows_pids_gone(&pids, graceful);
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        for pid in &remaining {
+            let pid_s = pid.to_string();
+            let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
+        }
+        let rest = timeout
+            .saturating_sub(started.elapsed())
+            .max(Duration::from_secs(1));
+        let leftover = wait_windows_pids_gone(&remaining, rest);
+        if leftover.is_empty() {
+            return Ok(());
+        }
+        let list: Vec<String> = leftover.iter().map(|pid| pid.to_string()).collect();
+        Err(format!("进程无法关闭（残留 PID: {}）", list.join(", ")))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // macOS / Linux：`pkill -x` 按**完整进程名**匹配（那里不带 `.exe`），与
+        // `pgrep -x` 同一口径。
+        let stem = image.strip_suffix(".exe").unwrap_or(image);
+        let _ = run_cmd_timeout("pkill", &["-TERM", "-x", stem], 10);
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1));
+        while Instant::now() < deadline {
+            if !is_image_running(image) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let _ = run_cmd_timeout("pkill", &["-KILL", "-x", stem], 10);
+        // 复查交给调用方（`is_image_running` 的 fail-closed 语义在那里统一收口）。
+        std::thread::sleep(Duration::from_millis(200));
+        if is_image_running(image) {
+            Err("进程无法关闭".to_string())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// 轮询等待 WorkBuddy 进程全部退出，返回是否已退出（CN）。对照 `_wait_process_gone`。
 pub fn wait_process_gone(timeout_secs: f64) -> bool {
     wait_process_gone_for(Region::Cn, timeout_secs)
@@ -1958,6 +2041,20 @@ INFO: No tasks are running which match the specified criteria.
     fn blank_image_name_is_treated_as_running() {
         assert!(is_image_running(""));
         assert!(is_image_running("   "));
+    }
+
+    /// ★ 空映像名 ⇒ **拒绝关闭**（不是「什么都没关就报成功」）。
+    ///
+    /// 可证伪性：把 `close_image` 开头的空串分支删掉 ⇒ 变红。这条与
+    /// [`blank_image_name_is_treated_as_running`] 是同一枚硬币的两面：
+    /// 判不出在不在跑时，守卫**不写**，关闭**不动手**。
+    ///
+    /// ⚠️ 本用例**不**碰真实进程：`close_image` 只在映像名非空时才去 `tasklist` /
+    /// `pkill`，空串在这里就直接返回，不会误杀开发机上正在跑的客户端。
+    #[test]
+    fn blank_image_name_cannot_be_closed() {
+        assert!(close_image("", 1).is_err());
+        assert!(close_image("   ", 1).is_err());
     }
 
     /// P0-1 的语义护栏：**枚举失败不得被当成「进程已退出」**。    ///

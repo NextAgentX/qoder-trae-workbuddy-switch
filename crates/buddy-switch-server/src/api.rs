@@ -8487,6 +8487,10 @@ async fn api_qoder_program_status(RawQuery(query): RawQuery) -> Response {
 /// POST /api/qoder/accounts/switch —— 切换账号（把凭据写回指定程序位的登录态）。
 ///
 /// ⚠️ 写客户端文件（与 `switch_account` 同级）：客户端在跑时被守卫拒绝，失败自动还原备份。
+///
+/// `close_first`（同名 body 字段，缺省 `false`）与桌面端同一条语义：**先关客户端再写**
+/// （`switch::switch_account_for_closing`）。两条通道必须收同一个字段 —— 否则会出现
+/// 「桌面端能关闭并切换、浏览器里点了没反应」。
 async fn api_qoder_switch_account(Json(body): Json<Value>) -> Response {
     let region = match qoder_region_from_body(&body) {
         Ok(region) => region,
@@ -8508,8 +8512,17 @@ async fn api_qoder_switch_account(Json(body): Json<Value>) -> Response {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    let close_first = body
+        .get("closeFirst")
+        .or_else(|| body.get("close_first"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     match tokio::task::spawn_blocking(move || {
-        qoder::switch::switch_account_for(region, program, &uid)
+        if close_first {
+            qoder::switch::switch_account_for_closing(region, program, &uid)
+        } else {
+            qoder::switch::switch_account_for(region, program, &uid)
+        }
     })
     .await
     {

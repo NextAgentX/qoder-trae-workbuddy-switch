@@ -104,14 +104,17 @@ export const en = {
   "qoder.page.accounts.program.current": "Signed in",
   "qoder.page.accounts.program.switchTo": "Switch to this account",
   "qoder.page.accounts.program.running": "Client is running",
-  "qoder.page.accounts.program.runningHint": "Quit the client first — on exit it writes its in-memory sign-in state back, overwriting this switch.",
+  "qoder.page.accounts.program.runningHint": "The client is running — it will be closed before switching (closing its window does not quit it; it usually stays in the system tray).",
   "qoder.page.accounts.program.missing": "Not detected",
   "qoder.page.accounts.program.unreadable": "Unreadable",
   "qoder.page.accounts.program.empty": "Not signed in",
   "qoder.page.accounts.switch.title": "Switch account",
   "qoder.page.accounts.switch.desc":
     "Write the credentials of “{name}” into {program}. The current sign-in state is backed up first; a failed verification restores it automatically.",
+  "qoder.page.accounts.switch.runningDesc":
+    "{program} is running (closing its window does not quit it — it usually stays in the system tray). Continuing closes it first and then writes the sign-in state; unsaved work there may be lost.",
   "qoder.page.accounts.switch.confirm": "Switch",
+  "qoder.page.accounts.switch.closeAndSwitch": "Close {program} and continue",
   "qoder.page.accounts.switch.cancel": "Cancel",
   "qoder.page.accounts.switch.done": "Switched to {name}",
   "qoder.page.accounts.switch.backup": "Previous sign-in state backed up to {path}",

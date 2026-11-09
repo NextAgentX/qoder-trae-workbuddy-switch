@@ -4378,13 +4378,24 @@ export function qoderProgramStatus(scope: Scope): Promise<QoderProgramsView> {
  * 切换账号：把该账号的凭据**写回**指定程序位的登录态。
  *
  * ⚠️ 这是写客户端文件的动作：客户端在跑时后端会拒绝（进程守卫），写后校验失败会自动还原备份。
+ *
+ * `closeFirst`：先**关闭**该程序位客户端、等进程消失再写回（界面「关闭并继续」按钮）。
+ * 普通切换绝不要传 `true` —— 它会主动杀掉用户正在用的客户端。
  */
 export function qoderSwitchAccount(
   scope: Scope,
   program: string,
   uid: string,
+  closeFirst = false,
 ): Promise<QoderSwitchResult> {
-  return call<QoderSwitchResult>("qoder_switch_account", { scope, program, uid });
+  return call<QoderSwitchResult>("qoder_switch_account", {
+    scope,
+    program,
+    uid,
+    /* ★ camelCase：桌面端 `#[tauri::command]` 默认按 camelCase 取参，HTTP 通道也按同一
+       名字读（`api.rs` 的 `closeFirst`）。两边同名才不会出现「桌面端生效、浏览器 no-op」。 */
+    closeFirst,
+  });
 }
 
 /** 改自定义分组（与备注同构；`null` / 空串 = 未分组）。 */

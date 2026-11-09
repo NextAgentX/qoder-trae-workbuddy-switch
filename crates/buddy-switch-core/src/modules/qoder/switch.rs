@@ -272,6 +272,40 @@ where
     }))
 }
 
+/// 切换（**先关闭客户端再写回**）：客户端在跑时按映像名关掉它，确认进程消失后再切换。
+///
+/// ## 为什么单独一个入口，而不是给 [`switch_account_for`] 加布尔参数
+///
+/// 两条路径的**失败语义**不同：普通切换遇到「在跑」就拒绝，让用户自己决定；本入口会
+/// **主动杀掉用户的客户端**（可能丢掉它未保存的会话）。因此它必须由界面在用户明确
+/// 点了「关闭并继续」之后才调用 —— 用一个独立名字，调用点一眼能看出这是破坏性动作。
+///
+/// ## 顺序不可调换
+///
+/// 客户端退出时会用内存态回写登录态 ⇒ **必须先关掉、再写**（见 [`program_running`]）。
+/// 关闭失败则整次切换失败，绝不「关不掉也照写」。
+pub fn switch_account_for_closing(
+    region: QoderRegion,
+    program: QoderProgram,
+    uid: &str,
+) -> Result<Value, String> {
+    if program_running(region, program) {
+        let image = program_image(region, program);
+        crate::modules::process::close_image(image, 20).map_err(|error| {
+            format!(
+                "{} 仍在运行，无法自动关闭（{error}）。请手动退出后重试。",
+                program.label()
+            )
+        })?;
+        // 关闭声称成功但仍判在跑 ⇒ 残余进程还会回写，不写。
+        if program_running(region, program) {
+            return Err(format!("{} 仍在运行，请手动退出后重试。", program.label()));
+        }
+    }
+    // 走一次普通路径：即使上面判过，也让守卫在真正写之前再兜一次底。
+    switch_account_for(region, program, uid)
+}
+
 /// 一次写回的结果（内部形态）。
 struct SwitchWriteOutcome {
     /// 下发用的 `written` 字段（不含令牌明文）。

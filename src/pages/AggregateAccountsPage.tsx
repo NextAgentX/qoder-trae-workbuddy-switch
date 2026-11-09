@@ -1838,7 +1838,8 @@ export default function AggregateAccountsPage() {
       <RestartConfirmDialog {...traeSwitch.confirmProps} />
 
       {/* ══ Qoder 程序位切换确认（issue #89 · 2.2）══
-          Qoder 没有「重启客户端」这一档 ⇒ 普通确认框，不摆无效的「自动重开」勾选。 */}
+          Qoder 没有「重启客户端」这一档 ⇒ 普通确认框，不摆无效的「自动重开」勾选。
+          客户端在跑时正文换成「正在运行」+ 主按钮换成「关闭并继续」（与渠道页同一行为）。 */}
       <Dialog
         open={qoderSwitch.confirmProps.open}
         onOpenChange={qoderSwitch.confirmProps.onOpenChange}
@@ -1847,10 +1848,14 @@ export default function AggregateAccountsPage() {
           <DialogHeader>
             <DialogTitle>{t("qoder.page.accounts.switch.title")}</DialogTitle>
             <DialogDescription>
-              {t("qoder.page.accounts.switch.desc", {
-                name: qoderSwitch.confirmProps.name,
-                program: qoderSwitch.confirmProps.programLabel,
-              })}
+              {qoderSwitch.confirmProps.running
+                ? t("qoder.page.accounts.switch.runningDesc", {
+                    program: qoderSwitch.confirmProps.programLabel,
+                  })
+                : t("qoder.page.accounts.switch.desc", {
+                    name: qoderSwitch.confirmProps.name,
+                    program: qoderSwitch.confirmProps.programLabel,
+                  })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1861,8 +1866,19 @@ export default function AggregateAccountsPage() {
             >
               {t("qoder.page.accounts.switch.cancel")}
             </Button>
-            <Button onClick={qoderSwitch.confirmProps.onConfirm} disabled={qoderSwitch.switchBusy}>
-              {t("qoder.page.accounts.switch.confirm")}
+            <Button
+              onClick={() =>
+                qoderSwitch.confirmProps.running
+                  ? qoderSwitch.confirmProps.onCloseAndSwitch()
+                  : qoderSwitch.confirmProps.onConfirm()
+              }
+              disabled={qoderSwitch.switchBusy}
+            >
+              {qoderSwitch.confirmProps.running
+                ? t("qoder.page.accounts.switch.closeAndSwitch", {
+                    program: qoderSwitch.confirmProps.programLabel,
+                  })
+                : t("qoder.page.accounts.switch.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>

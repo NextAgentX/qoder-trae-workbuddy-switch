@@ -710,9 +710,11 @@ export function QoderAccountCard({
             {programs.map((program) => {
               const active = program.currentUid === account.uid;
               /* 三态：当前（✓） / 可切换（可点） / 未就绪（禁用 + 原因 tooltip）。
-                 ★ 客户端在跑时**不可切换** —— 后端会拒绝（进程守卫），界面提前置灰并说明，
-                 而不是让用户点了才失败。 */
-              const ready = program.state === "ready" && !program.running;
+                 ★ 客户端在跑**不再是禁用理由**：确认框会给出「关闭并继续」（先关客户端、
+                 等进程消失再写；否则它退出时的内存态会覆盖这次切换）。所以 `running`
+                 只影响 tooltip 文案，不影响可点性 —— 禁用它会让用户**没有任何入口**
+                 走到那条路径，只能自己先去托盘里翻进程。 */
+              const ready = program.state === "ready";
               const title = program.running
                 ? t("qoder.page.accounts.program.runningHint")
                 : stateLabel(t, program.state);

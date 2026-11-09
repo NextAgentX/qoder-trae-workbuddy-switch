@@ -112,14 +112,17 @@ export const zh = {
   "qoder.page.accounts.program.current": "当前登录",
   "qoder.page.accounts.program.switchTo": "切换到此账号",
   "qoder.page.accounts.program.running": "客户端正在运行",
-  "qoder.page.accounts.program.runningHint": "请先退出该客户端再切换 —— 否则它退出时会把内存里的登录态写回，覆盖这次切换。",
+  "qoder.page.accounts.program.runningHint": "客户端正在运行 —— 切换前会先关闭它（关掉窗口不等于退出，它通常还留在系统托盘）。",
   "qoder.page.accounts.program.missing": "未检测到",
   "qoder.page.accounts.program.unreadable": "读不出来",
   "qoder.page.accounts.program.empty": "未登录",
   "qoder.page.accounts.switch.title": "切换账号",
   "qoder.page.accounts.switch.desc":
     "把「{name}」的凭据写入 {program} 的登录态。原登录态会先备份，写入后校验失败会自动还原。",
+  "qoder.page.accounts.switch.runningDesc":
+    "{program} 正在运行（关掉窗口不等于退出，它通常还留在系统托盘）。继续会先关闭它再写入登录态 —— 它里面未保存的内容可能丢失。",
   "qoder.page.accounts.switch.confirm": "切换",
+  "qoder.page.accounts.switch.closeAndSwitch": "关闭 {program} 并继续",
   "qoder.page.accounts.switch.cancel": "取消",
   "qoder.page.accounts.switch.done": "已切换到 {name}",
   "qoder.page.accounts.switch.backup": "原登录态已备份到 {path}",

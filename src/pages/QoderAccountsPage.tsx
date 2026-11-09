@@ -240,6 +240,14 @@ export default function QoderAccountsPage() {
   /** 待确认的切换（账号 × 程序位）。 */
   const [switchTarget, setSwitchTarget] = useState<{ account: QoderAccountView; program: QoderProgramStatus } | null>(null);
   const [switchBusy, setSwitchBusy] = useState(false);
+  /**
+   * 目标客户端此刻**确实**在运行（点「切换」时现查出来的）。
+   *
+   * 页面里的 `programs` 是加载时的快照：用户完全可能在那之后才打开 Qoder（实测报障
+   * 就是这个形态 —— 卡片胶囊看着可点，点完才发现被进程守卫挡住）。查到在跑就**不写**，
+   * 把确认框改成「关闭并继续」，而不是让用户去托盘里自己找。
+   */
+  const [switchRunning, setSwitchRunning] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<QoderAccountView | null>(null);
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
 
@@ -589,9 +597,10 @@ export default function QoderAccountsPage() {
   /**
    * 抽屉里的「切换到此账号」目标（原型 :3480-3486）。
    *
-   * `available` 的判据 = **该程序位已就绪且客户端没在跑**：
+   * `available` 的判据 = **该程序位已就绪**：
    * - 四态不是 `ready` ⇒ 没装 / 没登录 / 读不出来，切换无处可写；
-   * - 客户端在跑 ⇒ 后端会拒绝（退出时内存态会覆盖），界面提前置灰。
+   * - 客户端在跑**不再排除**：确认框会现查进程并给出「关闭并继续」（`confirmSwitch`），
+   *   禁用它会让用户根本没有入口触发那次关闭。
    * `current` 为真时不再重复切换（只读高亮）。
    */
   const switchTargetsFor = useCallback(
@@ -600,7 +609,7 @@ export default function QoderAccountsPage() {
         key: program.id,
         label: program.label,
         current: program.currentUid === account.uid,
-        available: program.state === "ready" && !program.running,
+        available: program.state === "ready",
         busy: switchBusy,
         onSwitch: () => setSwitchTarget({ account, program }),
       })),
@@ -631,19 +640,34 @@ export default function QoderAccountsPage() {
    *
    * ⚠️ 后端会在客户端运行时拒绝、写后校验失败时自动还原备份 —— 前端**如实转述**后端的话，
    * 不要自己编「切换成功」。
+   *
+   * `closeFirst = true` 只在用户点了「关闭并继续」时传：让后端先关掉客户端（它会主动杀
+   * 进程），确认进程消失后再写。为什么不直接在打开确认框时判 `program.running`：
+   * 那是页面加载时的快照，用户可能早就自己把客户端开了 —— 所以每次点「切换」都**现查一次**。
    */
-  async function confirmSwitch() {
+  async function confirmSwitch(closeFirst = false) {
     if (!switchTarget || switchBusy) return;
     const { account, program } = switchTarget;
     setSwitchBusy(true);
     try {
-      const result = await api.qoderSwitchAccount(scope, program.id, account.uid);
+      if (!closeFirst) {
+        const fresh = await api.qoderProgramStatus(scope);
+        const current = fresh.programs.find((item) => item.id === program.id);
+        if (current?.running) {
+          /* 把快照换成刚查到的真相（徽章 / 标签跟着变），并让确认框给出关闭入口。 */
+          setSwitchTarget({ account, program: current });
+          setSwitchRunning(true);
+          return;
+        }
+      }
+      const result = await api.qoderSwitchAccount(scope, program.id, account.uid, closeFirst);
       toast.success(t("qoder.page.accounts.switch.done", { name: qoderAccountName(account) }), {
         description: result.backupPath
           ? t("qoder.page.accounts.switch.backup", { path: result.backupPath })
           : undefined,
       });
       setSwitchTarget(null);
+      setSwitchRunning(false);
       /* 切换改的是**客户端登录态**⇒ 必须重取程序位状态（「当前登录」徽章才会跟着动）。 */
       await loadEnrichment();
     } catch (e) {
@@ -1598,26 +1622,45 @@ export default function QoderAccountsPage() {
       />
 
       {/* ── 切换确认（**写客户端登录态**，与 WB 的切换同级 ⇒ 必须先确认） ── */}
-      <Dialog open={switchTarget !== null} onOpenChange={(open) => !open && setSwitchTarget(null)}>
+      <Dialog
+        open={switchTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setSwitchTarget(null);
+            setSwitchRunning(false);
+          }
+        }}
+      >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{t("qoder.page.accounts.switch.title")}</DialogTitle>
             <DialogDescription>
               {switchTarget
-                ? t("qoder.page.accounts.switch.desc", {
-                    name: qoderAccountName(switchTarget.account),
-                    program: switchTarget.program.label,
-                  })
+                ? switchRunning
+                  ? t("qoder.page.accounts.switch.runningDesc", { program: switchTarget.program.label })
+                  : t("qoder.page.accounts.switch.desc", {
+                      name: qoderAccountName(switchTarget.account),
+                      program: switchTarget.program.label,
+                    })
                 : ""}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setSwitchTarget(null)} disabled={switchBusy}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSwitchTarget(null);
+                setSwitchRunning(false);
+              }}
+              disabled={switchBusy}
+            >
               {t("qoder.page.accounts.switch.cancel")}
             </Button>
-            <Button onClick={() => void confirmSwitch()} disabled={switchBusy}>
+            <Button onClick={() => void confirmSwitch(switchRunning)} disabled={switchBusy}>
               {switchBusy ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t("qoder.page.accounts.switch.confirm")}
+              {switchRunning && switchTarget
+                ? t("qoder.page.accounts.switch.closeAndSwitch", { program: switchTarget.program.label })
+                : t("qoder.page.accounts.switch.confirm")}
             </Button>
           </DialogFooter>
         </DialogContent>
