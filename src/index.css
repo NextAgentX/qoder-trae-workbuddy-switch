@@ -28,6 +28,18 @@
   --muted: oklch(0.96 0.004 264);
   --muted-foreground: oklch(0.52 0.012 264);
   --accent: oklch(0.955 0.004 264);
+  /**
+   * ★ 骨架屏两档色（`--skeleton-base` 底色 / `--skeleton-hi` 扫光高光）。
+   *
+   * 为什么不复用 `muted` / `accent`（#188）：那两档的职责是「弱化底色」与「悬停底色」，
+   * 二者在浅色主题下几乎同值（`muted`↔`accent` 对比度 **1.015 : 1**）⇒ 扫光扫了也看不出动；
+   * 在深色 / 纯黑下 `muted` 又**等于 `card`**（对比度 **1.000 : 1**）⇒ 画在 `bg-card` 上的骨架块直接隐形
+   * （与 `scope-selector.tsx` 记录的「深色下 muted 与 card 同值会隐形」是同一个坑）。
+   * 所以骨架用**专用**两档：高光一档要足够亮，底色一档要能从 `card` 上分出来。
+   * 对比度均由 OKLCH → sRGB → WCAG 相对亮度实算，注释里带值便于下一轮复核。
+   */
+  --skeleton-base: oklch(0.96 0.004 264); /* #f0f2f4，vs card(#ffffff) 1.123:1 */
+  --skeleton-hi: oklch(0.9 0.008 264); /* #dbdee3，vs base 1.200:1（原先 muted↔accent 仅 1.015:1） */
   --accent-foreground: oklch(0.24 0.01 264);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.99 0.002 270);
@@ -97,6 +109,13 @@
   --secondary-foreground: oklch(0.929 0.013 255.508);
   --muted: oklch(0.279 0.041 260.031);
   --muted-foreground: oklch(0.704 0.04 256.788);
+  /**
+   * ★ 骨架屏两档色 —— 深色下 `--muted` 与 `--card` 同值（1.000:1），
+   * 骨架块在卡片 / 抽屉里**根本不存在**，因此底色主动抬到 card 之上（0.279 → 0.33）。
+   * 抬升幅度只取「刚好能看出边界」（1.199:1），不加到抢注意力。
+   */
+  --skeleton-base: oklch(0.33 0.041 260.031); /* #29364b，vs card 1.199:1 */
+  --skeleton-hi: oklch(0.42 0.041 260.031); /* #404e64，vs base 1.445:1 */
   /**
    * ⚠️ 原型的深色 `--accent` 是 `oklch(0.33 0.041 260)` —— **比 `muted` 亮一档**，
    * 因为它的唯一职责是「悬停底色」，必须能与静止态（`card` / `card-2`）区分开。
@@ -175,6 +194,12 @@
   --secondary-foreground: oklch(0.945 0.004 264);
   --muted: oklch(0.145 0.006 264);
   --muted-foreground: oklch(0.68 0.018 260);
+  /**
+   * ★ 骨架屏两档色 —— 与深色同因：`--muted` = `--card`（0.145）⇒ 隐形。
+   * 底色抬到 0.245（vs card 1.220:1）；纯黑下 `--card-2`(0.105) 比 card 更暗、方向不对，故不复用它。
+   */
+  --skeleton-base: oklch(0.245 0.008 264); /* #1e2024，vs card 1.220:1 */
+  --skeleton-hi: oklch(0.34 0.01 264); /* #35383d，vs base 1.380:1 */
   /* 悬停态必须明显亮于 card(0.145)，否则纯黑下 hover 反馈等于没有。 */
   --accent: oklch(0.215 0.012 264);
   --accent-foreground: oklch(0.98 0.002 250);
@@ -264,10 +289,11 @@
   --shadow-card: var(--elevation-1);
   --shadow-card-hover: var(--elevation-2);
   --shadow-overlay: var(--elevation-3);
-  /* ★ 骨架屏扫光（原型 `@keyframes sk`）→ `animate-skeleton-sweep`。
-     ⚠️ 必须在这里登记：Tailwind v4 的 `animate-*` 工具类只认`@theme` 里声明的
-     `--animate-*`，光写 `@keyframes` 不会生成工具类（且类名会被静默丢弃）。 */
-  --animate-skeleton-sweep: skeleton-sweep 1.3s ease-in-out infinite;
+  /* ★ 骨架屏扫光不在 `@theme` 里登记 `--animate-*`（#188）。
+     原先登记成 `--animate-skeleton-sweep` 供 `animate-skeleton-sweep` 工具类使用，但工具类只能给
+     **一条** animation 简写，而骨架需要「扫光 + 延迟淡入」两条；且扫光还必须自带
+     `background-image`（否则 `background-position` 没有作用对象 ⇒ 动画在跑、屏幕静止）。
+     两件事都落在 `.skeleton-sweep` 这一条普通类里，见本文件末尾。 */
   /* ★ 旋转时长对齐原型 `.spinner`（`demo.css:618`：`animation: spin .7s linear infinite`）。
      Tailwind 默认 `animate-spin` 是 **1s** ⇒ 全仓 70+ 处 loading 图标都比原型慢 43%，
      视觉上「转得不够快、像卡住了」。这里覆盖成 0.7s，一处改动全局生效。 */
@@ -375,6 +401,62 @@
   }
   to {
     background-position: -200% 0;
+  }
+}
+
+/**
+ * ★ 骨架屏延迟淡入（`#188` C 档的第一档：0~400ms 不显示）。
+ *
+ * 极快返回的请求（<400ms）原本会闪一下骨架，观感像「页面抽搐」。
+ * 用 `animation ... 400ms both` 让骨架在 400ms 内保持 `opacity:0` —— 元素仍**占位**，
+ * 所以不会有布局位移；超过 400ms 才淡入。纯 CSS，不改任何调用点。
+ */
+@keyframes skeleton-appear {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/**
+ * ★ 骨架屏最终外观（原型 `.sk`，`demo.css:365-366`；缺陷修复见 `#188`）。
+ *
+ * ## 为什么是普通类而不是 `animate-skeleton-sweep` 工具类
+ *
+ * 1. **缺的那一半**：原型用 `background:` 简写，同时设了 `background-image` 与 `background-color`；
+ *    迁到 Tailwind 时只搬了 `bg-muted`（= `background-color`），
+ *    `background-position` 这一族因此**没有作用对象** —— 动画在跑，屏幕上完全静止。
+ *    渐变必须回到元素上，且两档色要用专用 token（见 `:root` / `.dark` / `.black` 的 `--skeleton-*`）。
+ * 2. **两条 animation**：扫光（无限循环）+ 400ms 延迟淡入。工具类只能承载一条。
+ *
+ * ⚠️ 本类**刻意不在 `@layer` 内**：未分层规则优先级高于 Tailwind utilities，
+ * 保证调用点传的 `bg-*` 不会意外把渐变冲掉。圆角仍交给组件的 `rounded-[7px]`（可被覆盖）。
+ */
+.skeleton-sweep {
+  background-color: var(--skeleton-base);
+  background-image: linear-gradient(
+    90deg,
+    var(--skeleton-base) 25%,
+    var(--skeleton-hi) 50%,
+    var(--skeleton-base) 75%
+  );
+  background-size: 200% 100%;
+  background-repeat: repeat;
+  animation:
+    skeleton-sweep 1.3s ease-in-out infinite,
+    skeleton-appear 0.18s ease-out 0.4s both;
+}
+
+/**
+ * ★ 无障碍：系统开了「减弱动效」时，骨架停在静止底色上（且不受 `both` 的 opacity:0 影响）。
+ * 此前全仓没有任何 `prefers-reduced-motion` 查询，无限循环的扫光会一直转。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-sweep {
+    animation: none;
+    background-image: none;
   }
 }
 
