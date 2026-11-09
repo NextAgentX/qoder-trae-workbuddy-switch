@@ -164,14 +164,11 @@ export const zh = {
   "trae.stats.credits.trendEmptyData": "暂无积分数据。执行一次签到或「同步积分」后即可看到每日变化。",
 
   // ---- 平台不支持的维度 ----
-  "trae.stats.credits.unsupportedTitle": "平台不支持的维度",
-  "trae.stats.credits.unsupportedOnly": "（仅 {on}）",
 
   // =====================================================================
   // TraeApiServicePage.tsx —— 「API 服务」页
   // =====================================================================
   "trae.stats.api.title": "API 服务",
-  "trae.stats.api.subtitle": "把 Trae 的模型额度以 OpenAI 兼容接口提供给本机工具。",
   "trae.stats.api.loadFailed": "无法读取网关状态",
   "trae.stats.api.retry": "重试",
   "trae.stats.api.refresh": "刷新",

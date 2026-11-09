@@ -81,7 +81,6 @@ export const zh = {
   "qoder.gateway.quota.creditLabel": "当日 credit 上限",
   "qoder.gateway.quota.creditHint": "单账号今天经网关消耗的 credits（可填小数）",
   "qoder.gateway.quota.creditsUsed": "已用 {n} credit",
-  "qoder.gateway.quota.why.daily_credits": "当日 credit 已满",
   "qoder.gateway.quota.modelLabel": "单模型当日 token",
   "qoder.gateway.quota.modelHint": "只限该模型，不连坐同账号的其它模型",
   "qoder.gateway.quota.invalid": "只能填非负整数（0 = 关闭）",
@@ -102,7 +101,6 @@ export const zh = {
   "qoder.gateway.quota.why.daily_tokens": "当日 token 已满",
   "qoder.gateway.quota.why.model_tokens": "模型额度已满",
   "qoder.gateway.quota.why.other": "已拦下",
-  "qoder.gateway.models.title": "模型清单",
   "qoder.gateway.models.promotionWindow": "错峰时段 {range}（UTC+8）",
   "qoder.gateway.models.note":
     "清单直接来自 Qoder 官方（拉取需要账号凭据），10 分钟内不重复请求；「禁用」的模型不会出现在 /v1/models。",

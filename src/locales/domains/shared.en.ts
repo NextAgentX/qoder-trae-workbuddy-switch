@@ -43,7 +43,6 @@ export const en = {
   // ---- Statistics scope bar (region-bar.tsx) ----
   /* P3: `shared.region.scope.aria` removed (region selector moved to the sidebar). */
   "shared.region.combine.aria": "Combine both regions",
-  "shared.region.combine.label": "Combine both regions",
   /* P3: the merge toggle is a `.seg` of two buttons (prototype `viewUsage` params). */
   "shared.region.combine.only": "This scope only",
   "shared.region.combine.all": "Merge all scopes",
@@ -57,7 +56,6 @@ export const en = {
   "shared.poolStatus.excluded": "Excluded",
 
   // ---- Gateway account pool card (components/gateway/account-pool-card.tsx) ----
-  "shared.gateway.pool.title": "Account pool",
   /* P3: snippet field labels are shared (previously one set per platform). */
   /* P11: `snippet.apiBase` / `snippet.apiKey` removed — the `cherry` snippet that used them was
      dropped with the tool-set change (see `shared.gateway.access.*`). "Base URL" / "API Key" are
@@ -201,7 +199,6 @@ export const en = {
   "shared.gateway.fallback.field.fromLocked": "The primary cannot be changed. Delete and recreate to switch it — changing from is a different chain.",
   "shared.gateway.fallback.field.crossModelPlaceholder": "target platform model id",
   "shared.gateway.fallback.field.thisScope": "this scope",
-  "shared.gateway.fallback.field.crossPlatformPending": "cross-platform only from WorkBuddy",
   "shared.gateway.fallback.field.targets": "Backup models (tried in order)",
   "shared.gateway.fallback.field.targetsHint": "Up to {max} (with the primary, {hops} hops total). Disabled or unavailable models are not listed.",
   "shared.gateway.fallback.capsNote": "Requests with images automatically skip backups that do not accept image input; tools, structured output and context window are not checked in this version — the backup accepts or rejects them itself.",
@@ -240,8 +237,6 @@ export const en = {
   "shared.gateway.fallback.saveOkDesc": "Takes effect immediately, no gateway restart",
   "shared.gateway.fallback.needTarget": "Pick at least one backup model",
   "shared.gateway.fallback.needTargetDesc": "A primary alone is not a fallback chain",
-  "shared.gateway.fallback.enabledToast": "Fallback enabled",
-  "shared.gateway.fallback.disabledToast": "Fallback disabled",
   "shared.gateway.probe.title": "Rate-limit probe",
   "shared.gateway.probe.badge": "Account × model live probe",
   "shared.gateway.probe.expand": "Expand",
@@ -403,8 +398,6 @@ export const en = {
   "shared.gateway.pool.modelCoolingBadge": "{count} model(s) rate-limited · thaw at {time}",
   "shared.gateway.pool.modelCoolingBadgeApprox":
     "{count} model(s) rate-limited · thaw ~{time}",
-  "shared.gateway.pool.modelCoolingHint":
-    "{models} is/are cooling at the model level (only those models are affected; the account still serves others). Earliest thaw at {time}.",
   // Per-model tooltip rows (issue #88 gap 4.2): name · remaining · fallback marker ·
   // upstream-declared reset time.
   "shared.gateway.pool.modelCoolingRow": "{model} · {remaining} left{fallback}{upstream}",
@@ -577,8 +570,6 @@ export const en = {
   "shared.demo.trae.pack.checkinBonus": "Check-in Bonus Pack",
   "shared.demo.trae.pack.cnPlan": "CN Plan Pack",
   "shared.demo.trae.pack.trial": "Trial Pack",
-  "shared.demo.trae.cooldown.rateLimited": "Too many requests, please try again later",
-  "shared.demo.trae.cooldown.sessionDead": "Session expired, please sign in again",
   "shared.demo.trae.cooldown.reasonRateLimited": "Rate limited",
   "shared.demo.trae.cooldown.reasonSessionDead": "Session expired",
   // ---- Trae: check-in ----
@@ -680,8 +671,6 @@ export const en = {
   "shared.cardMenu.needLoginHint": "Credential expired — sign in before checking in",
   "shared.cardMenu.busy": "Refreshing…",
   "shared.cardMenu.done": "Updated",
-  "shared.cardMenu.checkinDone": "Checked in today",
-  "shared.cardMenu.checkinNeedsLogin": "Sign in first",
   "shared.refreshPart.credits": "Credits refreshed",
   "shared.refreshPart.tokens": "Today's tokens refreshed",
   "shared.refreshPart.checkin": "Check-in status refreshed",
@@ -736,7 +725,6 @@ export const en = {
   "shared.drawer.snapshot.time": "Last modified",
   "shared.drawer.snapshot.size": "Size",
   "shared.drawer.snapshot.files": "{n} files",
-  "shared.drawer.snapshot.empty": "No snapshot for this account yet",
   "shared.drawer.remark.title": "Remark",
   "shared.drawer.remark.placeholder": "e.g. DS4.1 quota · unlocks 10/03",
   "shared.drawer.remark.aria": "Remark for {name}",
@@ -750,10 +738,6 @@ export const en = {
   "shared.drawer.group.picker.confirm": "Create",
   "shared.drawer.group.picker.cancel": "Cancel",
   "shared.drawer.group.picker.exists": "This group already exists — it will be reused",
-  "shared.drawer.group.placeholder": "Enter a custom group name (leave blank to ungroup)",
-  "shared.drawer.group.aria": "Group for {name}",
-  "shared.drawer.group.editAria": "Edit group for {name}",
-  "shared.drawer.group.add": "Set group",
   "shared.drawer.packs.title": "Credits / packs",
   // ★ B5: check-in credits (fields come from the **measured upstream response**).
   "shared.drawer.checkin.title": "Check-in",
@@ -781,7 +765,6 @@ export const en = {
   "shared.drawer.checkin.result.already": "Already checked in",
   "shared.drawer.checkin.result.fail": "Failed",
   "shared.drawer.checkin.result.none": "Not checked in",
-  "shared.drawer.checkin.historyEmpty": "No check-in records yet",
   "shared.drawer.empty.title": "No details",
   "shared.drawer.empty.description": "No details to show for this account yet; re-check and try again.",
 
@@ -861,7 +844,6 @@ export const en = {
   "shared.authPanel.remaining": "{time} left",
   "shared.authPanel.expired": "Expired",
   "shared.authPanel.expiredDesc": "This link is no longer valid — generate a new one",
-  "shared.authPanel.regenerate": "Regenerate",
   "shared.authPanel.step1": "Open the link above on your phone or any other computer.",
   "shared.authPanel.step2": "Sign in and approve — no client needs to be installed on this machine.",
   "shared.authPanel.step3": "This window receives the result and the account lands in the library.",
@@ -886,25 +868,15 @@ export const en = {
   "shared.srv.capOff.usage": "Client usage scan — sourced from client session files",
   "shared.srv.capOff.sessions": "Session browsing and copy — same source",
   "shared.srv.traeNote": "Trae is the exception: both authorization and refresh need the client's device private key, so pure browser login cannot complete — open \"Browser authorization\" to see the two realistic paths.",
-  "shared.srv.help.title": "No-client notes",
-  "shared.srv.help.whyTitle": "Why \"no client\" is not a fault",
-  "shared.srv.help.why1": "The library stores credentials (access / refresh token); gateway forwarding, check-in and credit stats only use them. Whether the client sits on the same machine does not matter for these three.",
-  "shared.srv.help.why2": "The old UI rendered \"no client detected\" in red with only \"Re-detect / Import from this machine\", which told server users \"you can't use this\" — that treated a deployment form as an error.",
-  "shared.srv.help.moveTitle": "Moving accounts from another machine",
   "shared.srv.help.moveDesc": "Export a backup (JSON) there, then use \"Import backup\" here. The backup carries credentials, so refresh and the gateway work immediately — no second sign-in.",
   "shared.srv.paste.title": "Paste credentials",
   "shared.srv.paste.desc": "Copy credentials from any machine that has the client, or paste them after a browser authorization. This machine needs no client.",
-  "shared.srv.paste.whyTitle": "Why pasting works",
-  "shared.srv.paste.whyDesc": "The library stores the credential itself; \"Import from this machine\" merely reads it from the client directory for you. Once stored, refresh, check-in and the gateway take the same path.",
   "shared.srv.paste.verify": "Verify and add",
   "shared.srv.paste.empty": "Nothing pasted",
   "shared.srv.paste.emptyDesc": "Paste the auth file contents or a refresh_token",
-  "shared.srv.paste.failed": "Credential verification failed",
   "shared.srv.paste.ok": "Added {name}",
   "shared.srv.paste.okDesc": "Credential stored · refresh and gateway are live",
   "shared.srv.paste.hint.wb": "Paste the JSON from auth/workbuddy-desktop-ai.info (access_token / refresh_token)",
-  "shared.srv.paste.hint.trae": "Paste a refresh_token, or the callback URL the authorize page redirected to",
-  "shared.srv.paste.hint.qoder": "Paste a Qoder personal access token (PAT)",
   "shared.srv.localUnavailable": "No client on this machine to read",
   "shared.srv.localUnavailableDesc": "Use \"Browser authorization\" or \"Paste credentials\" instead; or export a backup on a machine that has the client and import it here",
   "shared.srv.oauthTitle": "Browser authorization",

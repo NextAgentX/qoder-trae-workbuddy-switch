@@ -9,7 +9,6 @@ export const en = {
   // TraeAccountsPage.tsx — Accounts page
   // =====================================================================
   "trae.page.accounts.title": "Accounts",
-  "trae.page.accounts.subtitle": "Manage credentials, check-in and sign-in state for {line} accounts. The account store is kept separate from WorkBuddy's.",
   "trae.page.accounts.loadFailed": "Cannot read Trae data",
 
   // ---- Generic action results ----
@@ -72,8 +71,6 @@ export const en = {
   "trae.page.accounts.importLocalFailed": "Failed to import local account",
 
   // ---- "Add & migrate accounts" banner ----
-  "trae.page.accounts.addTitle": "Add & migrate accounts",
-  "trae.page.accounts.addSubtitle": "Add an account quickly, or restore from an existing environment",
   "trae.page.accounts.oauthLogin": "OAuth web sign-in",
   "trae.page.accounts.pasteJwt": "Paste JWT",
   "trae.page.accounts.pasteJwtTitle": "Paste Cloud-IDE-JWT manually (fallback — prefer the web sign-in above)",
@@ -88,8 +85,6 @@ export const en = {
   "trae.page.accounts.storageJsonMissing": "(Directory exists, but storage.json was never written — the client has not completed its first sign-in)",
 
   // ---- Accounts toolbar ----
-  "trae.page.accounts.sectionTitle": "Accounts",
-  "trae.page.accounts.countAria": "{count} accounts",
   /* The list section no longer renders a visible heading (the prototype's account list has
      none); the count lives in the page-head subtitle, and semantics come from aria-label. */
   "trae.page.accounts.sectionAria": "Account list ({count})",
@@ -187,7 +182,6 @@ export const en = {
   // TraeSettingsPage.tsx — Settings page
   // =====================================================================
   "trae.page.settings.title": "Settings",
-  "trae.page.settings.subtitle": "Locate the client, set local ports and the check-in policy, and review sign-in snapshots and runtime logs. Trae settings are stored apart from WorkBuddy's and neither affects the other.",
   "trae.page.settings.loadFailed": "Cannot read Trae settings",
   "trae.page.settings.cancel": "Cancel",
   "trae.page.settings.refresh": "Refresh",

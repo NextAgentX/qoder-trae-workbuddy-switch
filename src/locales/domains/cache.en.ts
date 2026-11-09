@@ -15,7 +15,6 @@ export const en = {
   "cache.total": "Total {size}",
   "cache.storePath": "Data directory: {path}",
   "cache.entries": "{count} files",
-  "cache.empty": "Nothing to clear",
   "cache.clear": "Clear selected…",
   "cache.clearNone": "Select at least one category first",
   "cache.confirmTitle": "Clear the selected caches?",

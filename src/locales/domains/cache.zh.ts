@@ -18,7 +18,6 @@ export const zh = {
   "cache.total": "合计 {size}",
   "cache.storePath": "数据目录：{path}",
   "cache.entries": "{count} 个文件",
-  "cache.empty": "没有可清除的缓存",
   "cache.clear": "清除所选…",
   "cache.clearNone": "请先勾选要清除的类别",
   "cache.confirmTitle": "确认清除所选缓存？",

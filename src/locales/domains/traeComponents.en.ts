@@ -54,11 +54,6 @@ export const en = {
   // the prototype card, so the related keys are gone.
 
   // ---- Body row labels ----
-  "trae.comp.card.label.device": "Device",
-  "trae.comp.card.label.jwtExpiry": "JWT expiry",
-  "trae.comp.card.label.addedAt": "Added",
-  "trae.comp.card.label.updatedAt": "Last updated",
-  "trae.comp.card.label.group": "Group",
 
   // ---- Status chips ----
   "trae.comp.card.chip.checked": "Checked in today",
@@ -123,7 +118,6 @@ export const en = {
   "trae.comp.card.credits.remaining": "Credits left",
   "trae.comp.card.credits.notQueried": "No credits fetched yet",
   "trae.comp.card.credits.refresh": "Refresh credits",
-  "trae.comp.card.section.info": "Account info",
   "trae.comp.card.package.fallback": "Credit package",
   // P4: "used / expiry" text for the drawer `DetailPack` (mirrors the WorkBuddy drawer).
   "trae.comp.card.package.expired": "Expired",
@@ -135,8 +129,6 @@ export const en = {
   "trae.comp.card.action.saveNoLogin": "This account is not signed in on any Trae client — sign in on the client first, then save",
   "trae.comp.card.action.refreshJwtTip": "Exchange the refresh token for a new JWT",
   "trae.comp.card.action.refreshCreditsTip": "Re-query credits for this account only — no need to select all accounts and refresh in bulk",
-  "trae.comp.card.footer.updatedAt": "Updated {time}",
-  "trae.comp.card.footer.noUpdate": "No update time recorded",
   "trae.comp.card.footer.updatedTip": "Last time this account was updated in the local account library",
 
   // ---- Card head + metrics row (prototype `.acct-top` / `.acct-metrics`) ----
@@ -176,8 +168,6 @@ export const en = {
   "trae.comp.oauth.error.timeout": "Timed out waiting for authorization ({seconds}s). Confirm that you finished authorizing in the browser; if you did and it still timed out, the authorization page usually failed to send the callback back to the local listening port (see the port below). Close this dialog and try again; if it keeps timing out, make sure port 17388 on this machine is not taken by another program. You can also use “Import local accounts” instead.",
   "trae.comp.oauth.start": "Start {variant} web sign-in",
   "trae.comp.oauth.startBusy": "Starting sign-in for {variant}…",
-  "trae.comp.oauth.waiting": "Waiting for authorization; please finish signing in in your browser…",
-  "trae.comp.oauth.remaining": "{time} left",
   "trae.comp.oauth.callback": "Local callback listener: ",
   "trae.comp.oauth.result": "Account added: {name}",
   "trae.comp.oauth.close": "Close",

@@ -27,11 +27,7 @@ export const zh = {
     "只读探测桌面版与 CLI 的登录态。不会修改客户端里的任何文件。",
   "qoder.page.accounts.import.result": "新增 {imported} 个，更新 {updated} 个",
   "qoder.page.accounts.import.none": "两处来源都没有可导入的账号",
-  "qoder.page.accounts.addDrawer.notInstalled":
-    "两处本机来源都未检测到。可以先用官方客户端登录后导入，或直接粘贴 PAT。",
 
-  "qoder.page.accounts.source.desktop": "Qoder 桌面版",
-  "qoder.page.accounts.source.cli": "Qoder CLI",
   "qoder.page.accounts.source.missing": "未检测到",
   "qoder.page.accounts.source.unreadable": "读不出来",
   "qoder.page.accounts.source.empty": "里面没有账号",
@@ -126,8 +122,6 @@ export const zh = {
   "qoder.page.accounts.switch.cancel": "取消",
   "qoder.page.accounts.switch.done": "已切换到 {name}",
   "qoder.page.accounts.switch.backup": "原登录态已备份到 {path}",
-  "qoder.page.accounts.group.label": "分组",
-  "qoder.page.accounts.group.placeholder": "留空表示未分组",
   "qoder.page.accounts.group.saved": "分组已保存",
   "qoder.page.accounts.group.missing": "这条账号已不在库里 —— 分组未保存",
   "qoder.page.accounts.toolbar.group.group": "按分组",
@@ -135,11 +129,8 @@ export const zh = {
   "qoder.page.accounts.toolbar.programBucket.none": "未登录到任何程序位",
   "qoder.page.accounts.toolbar.groupBucket.ungrouped": "未分组",
   "qoder.page.accounts.card.setGroup": "设置分组",
-  "qoder.page.accounts.refresh.batchPartial": "刷新成功 {ok} 个，失败 {fail} 个",
 
   // ── 用量（单位是 credits，不是 token）──
-  "qoder.page.usage.title": "用量",
-  "qoder.page.usage.subtitle": "{scope} · 近 {days} 天 · 单位 {unit}",
   "qoder.page.usage.unit.credits": "积分（credits）",
   "qoder.page.usage.sourceNote":
     "数据来自本机 Qoder 客户端的会话记录。Qoder 按 credits 计费，客户端记录的 token 计数恒为 0 —— 因此本视图统计的是 credits，不是 token。",
@@ -155,7 +146,6 @@ export const zh = {
   "qoder.page.usage.ledger.bothNote":
     "「全部」把两本账按日相加 —— 同一笔调用若既在客户端记录里又经网关转发，会被两边各记一次；要看准确消耗请切到单一账本。",
   "qoder.page.usage.trend": "每日积分",
-  "qoder.page.usage.byModel": "按模型拆分",
   "qoder.page.usage.empty.title": "这段时间没有用量记录",
   "qoder.page.usage.empty.description": "本机客户端的会话记录里没有落在该窗口内的请求。",
   "qoder.page.usage.missing.title": "没有找到客户端会话记录",
@@ -163,11 +153,6 @@ export const zh = {
     "本机没有 Qoder 客户端的会话目录（{path}）—— 装好客户端并至少对话一次后这里会有数据。",
   "qoder.page.usage.loadFailed": "用量读取失败",
   "qoder.page.usage.recheck": "重新读取",
-  "qoder.page.usage.window.label": "窗口",
-  "qoder.page.usage.window.d7": "近 7 天",
-  "qoder.page.usage.window.d30": "近 30 天",
-  "qoder.page.usage.window.d90": "近 90 天",
-  "qoder.page.usage.window.all": "全部",
   "qoder.page.usage.models.count": "模型数",
   "qoder.page.usage.models.top": "头部模型",
   "qoder.page.usage.models.topShare": "头部占比",
@@ -208,12 +193,9 @@ export const zh = {
     "在浏览器里完成 Qoder 授权，回到这里会自动采集账号（双区域的授权页不同，由当前作用域决定）。",
   "qoder.page.accounts.oauth.start": "开始登录",
   "qoder.page.accounts.oauth.starting": "正在发起…",
-  "qoder.page.accounts.oauth.waiting": "等待浏览器完成授权…",
   "qoder.page.accounts.oauth.collected": "已采集账号：{name}",
   "qoder.page.accounts.oauth.failed": "登录失败",
   "qoder.page.accounts.oauth.close": "关闭",
-  "qoder.page.accounts.oauth.entry": "设备码登录",
-  "qoder.page.accounts.oauth.entryDesc": "用浏览器授权，适合本机还没装 Qoder 客户端的情况",
 
   // ── 回收站（软删除）──
   "qoder.page.accounts.trash.restored": "已恢复 {name}",
@@ -288,13 +270,8 @@ export const zh = {
 
 
   "qoder.page.accounts.metric.plan": "套餐",
-  "qoder.page.accounts.credits.loading": "额度查询中…",
-  "qoder.page.accounts.checkin.action": "签到",
-  "qoder.page.accounts.checkin.already": "{name} 今日已签到",
   "qoder.page.accounts.checkin.done": "{name} 签到成功",
-  "qoder.page.accounts.checkin.batchDone": "已签到 {n} 个账号",
   "qoder.page.accounts.checkin.batchPartial": "成功 {ok} 个，失败 {fail} 个",
-  "qoder.page.accounts.checkin.resultOk": "签到成功 {n} 个",
   "qoder.page.accounts.checkin.resultFail": "签到失败 {n} 个",
   "qoder.page.accounts.pro.title": "Pro 升级包",
   "qoder.page.accounts.pro.desc": "一次性福利：领取 +1800 积分",
@@ -308,11 +285,6 @@ export const zh = {
   "qoder.page.accounts.refresh.batchDone": "已刷新 {n} 个账号的令牌",
 
   "qoder.page.accounts.toolbar.sort.credits": "积分余额",
-  "qoder.page.accounts.toolbar.group.source": "按来源",
-  "qoder.page.accounts.toolbar.group.checkin": "按签到",
-  "qoder.page.accounts.toolbar.checkinBucket.checkedIn": "今日已签",
-  "qoder.page.accounts.toolbar.checkinBucket.notCheckedIn": "今日未签",
-  "qoder.page.accounts.toolbar.checkinBucket.unknown": "签到状态未知",
 
   "qoder.page.pending.title": "这个页面尚未接入 Qoder",
   "qoder.page.pending.description":

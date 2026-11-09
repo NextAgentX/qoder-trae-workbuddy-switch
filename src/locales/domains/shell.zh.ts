@@ -5,7 +5,6 @@
  */
 export const zh = {
   // ---- 应用外壳 / 侧栏 ----
-  "app.name": "Buddy Switch",
   "app.demoBadge": "演示模式",
   "product.workbuddy": "WorkBuddy",
   /* ★ issue #44：`TraeWork` 是**已被官方合并掉**的老程序线名（客户端自 2026-10-13 起只剩
@@ -22,12 +21,9 @@ export const zh = {
      原型是**短词**「账号」「网关」—— 不是「账号管理」「API 服务」（后者会把 240px 侧栏占满）。 */
   "nav.accounts": "账号",
   "nav.usage": "用量",
-  "nav.tokenStats": "Token 统计",
-  "nav.credits": "积分统计",
   "nav.apiService": "网关",
   "nav.settings": "设置",
 
-  "sidebar.version": "版本",
   // 品牌块副标题（原型 `.brand-text i`，`buddy-switch-prototype.html:163`）。
   "sidebar.brand.tagline": "多平台账号管理",
   "sidebar.running": "{product} 运行中",
@@ -90,7 +86,6 @@ export const zh = {
   "palette.description": "跨作用域搜索账号、页面与动作，回车直达。",
   "palette.aria": "命令面板",
   "palette.placeholder": "搜索账号、页面或动作…",
-  "palette.loading": "正在加载账号…",
   "palette.results": "{count} 个结果",
   "palette.empty.title": "没有匹配项",
   "palette.empty.description": "换个关键词试试，或清空搜索查看全部。",
@@ -181,7 +176,6 @@ export const zh = {
   "appSettings.update.doneTitle": "更新检查完成",
   "appSettings.update.foundDetail": "发现新版本 v{latest}（当前 v{current}）",
   "appSettings.update.upToDate": "已是最新版本 v{current}",
-  "appSettings.update.installNow": "立即升级",
   /* 设置页的入口改成「先看说明」：点开的是说明弹窗，不是直接下载（见 UPDATE-NOTES-ARCH.md）。 */
   "appSettings.update.viewNotes": "查看更新内容",
 
@@ -272,7 +266,6 @@ export const zh = {
   "gateway.subnav.logs": "请求日志",
 
   // ---- 统一网关（第三个产品线 · 跨作用域）----
-  "gateway.subnav.unified": "统一网关",
   /* ★ 网关页的**两个类型**（2026-10-15，对齐原型 `GW_TYPES` / `.gw-type-seg`）。
      类型与分区是**两个正交的轴**：类型回答「哪个网关」，子导航回答「这个网关的哪个分区」。
      ⚠️ 「统一网关」既是类型名也是旧子导航项名 —— 类型化之后**子导航里不再有它**。 */
@@ -343,7 +336,6 @@ export const zh = {
   "unifiedGateway.allowLanDesc": "改为 0.0.0.0 后，局域网内任何设备都能通过你的机器调用模型，直接消耗你的账号额度。默认只监听 127.0.0.1。",
   "unifiedGateway.confirmOpen": "确认开放",
   "unifiedGateway.confirm": "确认",
-  "unifiedGateway.nsCount": "已启用 {count} / {total} 个",
   /* ── 账号池分区（跨平台只读汇总）──
      ★ 统一网关**没有自己的池**：它按命名空间前缀分派到三条产品线各自的池。
      所以这一区的措辞一律是「汇总 / 只读」，**不要**写成「管理」。 */
@@ -385,15 +377,10 @@ export const zh = {
   "unifiedGateway.health.disabled": "已停用",
   "unifiedGateway.health.disabledHint": "本网关未启用该命名空间，调用会返回 400。",
   "unifiedGateway.title": "统一网关",
-  "unifiedGateway.running": "运行中",
-  "unifiedGateway.stopped": "已停用",
   "unifiedGateway.crossScope": "本网关跨全部作用域；上方的作用域选择器对它不生效。",
-  "unifiedGateway.summary": "{namespaces} 个命名空间 · {keys} 把可用密钥 · 监听 {addr}",
   "unifiedGateway.enable": "启用统一网关",
   "unifiedGateway.enableHint": "带命名空间前缀的单一入口 —— 一个 provider 用遍全部平台与版本",
   "unifiedGateway.bindAddr": "监听地址",
-  "unifiedGateway.bindLan": "改为局域网",
-  "unifiedGateway.bindLoopback": "改回仅本机",
   "unifiedGateway.port": "端口",
   /* ★ 2026-10-17 订正：端口按 5789x 一段排开（界面 57890 · WB 57891 · 统一 57892 ·
      hook 57893 · Trae 57894 · Qoder 57895）。原文混着旧值 7864 / 7865，看不出规律。
@@ -406,7 +393,6 @@ export const zh = {
   "unifiedGateway.showLess": "收起额外程序线",
   "unifiedGateway.keepOne": "至少保留一个命名空间",
   "unifiedGateway.nsOff": "本网关已停用该命名空间，调用会返回 400",
-  "unifiedGateway.keysTitle": "统一密钥",
   "unifiedGateway.createKey": "创建密钥",
   "unifiedGateway.noKeys": "还没有统一密钥",
   "unifiedGateway.noKeysHint": "一把密钥可同时授权多个命名空间（如 WorkBuddy 国内 + Trae 国内）。",
@@ -451,10 +437,6 @@ export const zh = {
   //    （`~/.workbuddy/logs/`，按日分目录 + `automation.log`）。
   //    此前这里写「WorkBuddy 分区的运行日志在网关页可见」—— 网关页显示的是
   //    **本工具的请求日志**，与客户端的运行日志不是一回事，照着找会白费功夫。
-  "settings.logs.emptyTitle": "本分区暂无运行日志",
-  "settings.logs.emptyBody":
-    "这里只有本工具的设置与备份入口；WorkBuddy 客户端自己的运行日志在其数据目录的 logs 子目录下（本工具暂未接入展示）。",
-  "settings.logs.emptyAction": "查看网关设置",
 
   // ---- 设置页「日志」分区 · 运行日志卡片（runtime-log-card.tsx）----
   // ⚠️ 这份是**本工具自己**的日志（网关起不来 / 切号失败 / panic）。

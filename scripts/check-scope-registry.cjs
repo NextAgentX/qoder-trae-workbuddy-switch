@@ -3407,6 +3407,43 @@ check("★ P5 回收站词条 zh + en 同步（逐键对齐，且已组合进词
   return `${zk.size} 键 zh=en 且已组合`;
 });
 
+check("★ 词条 zh/en 全局逐域对齐（每个域两侧键集必须完全一致）", () => {
+  /* 为什么要全局查，而不只查新增功能：
+     单边加/删词条不会让 tsc 变红（`en` 的类型来自 `zh`，少一个键只是那门外语里少一句话，
+     界面上显示成键名）。这类缺口只有在真的切到英文时才被发现，而多数人不切。
+     2026-11-09 清扫 168 条死词条时用过这条判据（逐域对齐后才敢批量删）。 */
+  const dir = path.join(ROOT, "src/locales/domains");
+  const files = fs.readdirSync(dir);
+  const domains = [
+    ...new Set(
+      files
+        .filter((name) => /\.(zh|en)\.ts$/.test(name))
+        .map((name) => name.replace(/\.(zh|en)\.ts$/, "")),
+    ),
+  ];
+  if (domains.length < 10) throw new Error(`域数量异常（${domains.length}）—— 扫描面是不是错了`);
+  const keysOf = (name) =>
+    new Set(
+      [...fs.readFileSync(path.join(dir, name), "utf8").matchAll(/^\s*"([^"]+)":/gm)].map((m) => m[1]),
+    );
+  let total = 0;
+  for (const domain of domains) {
+    const zhFile = `${domain}.zh.ts`;
+    const enFile = `${domain}.en.ts`;
+    if (!files.includes(zhFile) || !files.includes(enFile)) {
+      throw new Error(`${domain} 缺一侧文件（zh=${files.includes(zhFile)} / en=${files.includes(enFile)}）`);
+    }
+    const zk = keysOf(zhFile);
+    const ek = keysOf(enFile);
+    const missingEn = [...zk].filter((key) => !ek.has(key));
+    const missingZh = [...ek].filter((key) => !zk.has(key));
+    if (missingEn.length) throw new Error(`${domain}：en 缺 ${missingEn.length} 键（如 ${missingEn[0]}）`);
+    if (missingZh.length) throw new Error(`${domain}：zh 缺 ${missingZh.length} 键（如 ${missingZh[0]}）`);
+    total += zk.size;
+  }
+  return `${domains.length} 个域 / ${total} 键 zh=en`;
+});
+
 /* ──────────────────────────────────────────────────────────────────────────
  * P6 T04 · 撤销 toast（★ 假承诺护栏 —— 本期最硬的一条）
  *

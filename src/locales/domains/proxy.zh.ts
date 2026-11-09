@@ -61,7 +61,6 @@ export const zh = {
   "proxy.guide.title": "怎么开启（需要你手动设一步）",
   "proxy.guide.why":
     "客户端从自己的设置文件读代理（不是系统代理，也不是环境变量），应用无法替你改（也不该改你的设置）。",
-  "proxy.guide.envLabel": "在客户端设置里填",
   "proxy.guide.restart": "设好后需要重启客户端才生效。",
   "proxy.guide.copy": "复制",
   "proxy.guide.copied": "已复制",

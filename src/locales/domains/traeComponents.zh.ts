@@ -84,11 +84,6 @@ export const zh = {
   // 均已无引用，一并删除。
 
   // ---- 正文行标签 ----
-  "trae.comp.card.label.device": "设备",
-  "trae.comp.card.label.jwtExpiry": "JWT 到期",
-  "trae.comp.card.label.addedAt": "加入时间",
-  "trae.comp.card.label.updatedAt": "最近更新",
-  "trae.comp.card.label.group": "分组",
 
   // ---- 状态标签 ----
   "trae.comp.card.chip.checked": "今日已签到",
@@ -163,7 +158,6 @@ export const zh = {
   // 现在提示只说事实，出口是同一行右侧那枚真的能点的按钮。
   "trae.comp.card.credits.notQueried": "尚未查询到积分",
   "trae.comp.card.credits.refresh": "刷新积分",
-  "trae.comp.card.section.info": "账号信息",
   "trae.comp.card.package.fallback": "积分包",
   // P4：抽屉 `DetailPack` 的「已用 / 到期」文本（与 WorkBuddy 抽屉同形，各平台自持文案）。
   "trae.comp.card.package.expired": "已到期",
@@ -181,8 +175,6 @@ export const zh = {
   // issue #44：这条说明挂在两个入口上（积分提示行的按钮 / 菜单项）—— 要写清「只动这一个账号」，
   // 否则用户仍会以为必须全选账号才能刷。
   "trae.comp.card.action.refreshCreditsTip": "只重新查询该账号的剩余积分，不必全选账号批量刷新",
-  "trae.comp.card.footer.updatedAt": "{time} 更新",
-  "trae.comp.card.footer.noUpdate": "未记录更新时间",
   "trae.comp.card.footer.updatedTip": "该账号在本地账号库中的最近更新时间",
 
   // ---- 卡片头部与指标行（原型 `.acct-top` / `.acct-metrics`）----
@@ -223,8 +215,6 @@ export const zh = {
   "trae.comp.oauth.error.timeout": "等待授权超时（{seconds} 秒）。请确认浏览器里已完成授权；若已授权但仍超时，通常是授权页没有把回调打回本机监听端口（端口见下方）。可先关闭弹窗后重试；若反复超时，请确认本机 17388 端口未被其它程序占用。也可改用「导入本机账号」。",
   "trae.comp.oauth.start": "开始 {variant} 网页登录",
   "trae.comp.oauth.startBusy": "正在为 {variant} 发起登录…",
-  "trae.comp.oauth.waiting": "正在等待授权，请在浏览器完成登录…",
-  "trae.comp.oauth.remaining": "剩余 {time}",
   "trae.comp.oauth.callback": "本机回调监听：",
   "trae.comp.oauth.result": "已添加账号：{name}",
   "trae.comp.oauth.close": "关闭",

@@ -73,7 +73,6 @@ export const en = {
   "qoder.gateway.quota.creditLabel": "Daily credit limit",
   "qoder.gateway.quota.creditHint": "Credits this account spent via the gateway today (decimals ok)",
   "qoder.gateway.quota.creditsUsed": "{n} credits used",
-  "qoder.gateway.quota.why.daily_credits": "Daily credits used up",
   "qoder.gateway.quota.modelLabel": "Per-model daily tokens",
   "qoder.gateway.quota.modelHint": "Only that model is limited; other models keep working",
   "qoder.gateway.quota.invalid": "Non-negative integers only (0 = off)",
@@ -94,7 +93,6 @@ export const en = {
   "qoder.gateway.quota.why.daily_tokens": "Daily tokens used up",
   "qoder.gateway.quota.why.model_tokens": "Model quota used up",
   "qoder.gateway.quota.why.other": "Blocked",
-  "qoder.gateway.models.title": "Model list",
   "qoder.gateway.models.promotionWindow": "Off-peak {range} (UTC+8)",
   "qoder.gateway.models.note":
     "This list comes straight from Qoder (fetching it needs account credentials) and is cached for 10 minutes; disabled models disappear from /v1/models.",

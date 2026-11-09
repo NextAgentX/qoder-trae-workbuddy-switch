@@ -160,14 +160,11 @@ export const en = {
   "trae.stats.credits.trendEmptyData": "No credits data yet. Run a check-in or “Sync credits” once to see the daily change.",
 
   // ---- Dimensions the platform cannot provide ----
-  "trae.stats.credits.unsupportedTitle": "Dimensions not supported by the platform",
-  "trae.stats.credits.unsupportedOnly": " ({on} only)",
 
   // =====================================================================
   // TraeApiServicePage.tsx — API service page
   // =====================================================================
   "trae.stats.api.title": "API service",
-  "trae.stats.api.subtitle": "Serve Trae's model quota to local tools through an OpenAI-compatible API.",
   "trae.stats.api.loadFailed": "Cannot read gateway status",
   "trae.stats.api.retry": "Retry",
   "trae.stats.api.refresh": "Refresh",

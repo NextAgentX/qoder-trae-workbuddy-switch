@@ -18,7 +18,6 @@ export const zh = {
   // =====================================================================
   // gateway/trae-model-list.tsx —— 模型清单
   // =====================================================================
-  "trae.gateway.models.title": "模型清单",
   "trae.gateway.models.summary": "共 {count} 个 · 默认 {model}",
   "trae.gateway.models.note": "清单读自 Trae 客户端的本地缓存（上游下发），客户端刷新后这里会跟着变；网关对外清单（/v1/models）按 API Key 的归属程序位取，两条程序位的内容不同。",
   "trae.gateway.models.empty": "暂无模型数据。",
@@ -57,7 +56,6 @@ export const zh = {
   // =====================================================================
   /* 与 WB 侧 `wbStats.gateway.requestLog` **逐字同文案**（含「最近 50 条」这个上限）——
      两平台的请求日志是同一种东西，标题不该一个说上限、一个说实际条数。 */
-  "trae.gateway.log.title": "请求日志（最近 50 条）",
   "trae.gateway.log.clear": "清空",
   "trae.gateway.log.refresh": "刷新",
   "trae.gateway.log.empty": "暂无请求。网关启动后，客户端发来的每次调用都会记在这里（默认只记元数据，不记正文）。",

@@ -14,11 +14,8 @@ export const en = {
   /* The total isn't known yet ⇒ **don't show a number** (showing 0 would be a lie). */
   "aggregate.scopeMenu.entrySubUnknown": "across {scopes} scopes",
   "aggregate.scopeMenu.entryAttention": "{n} need attention",
-  "aggregate.scopeMenu.hint":
-    "The scope decides which account set you are managing. Pick “Aggregate” to see all {scopes} scopes at once; pick any scope to go back to its accounts page.",
 
   // ---- Top bar run state ----
-  "aggregate.topbar.runningScopes": "{n} scopes running",
 
   // ---- Toolbar ----
   "aggregate.toolbar.searchPlaceholder": "Filter accounts (name / remark / email)",
@@ -54,7 +51,6 @@ export const en = {
   "aggregate.empty.filtered.action": "Show all accounts",
   "aggregate.empty.none.title": "No accounts yet",
   "aggregate.empty.none.desc": "Add an account in any scope and the aggregate view will pick it up automatically.",
-  "aggregate.empty.none.action": "Open scope menu",
   "aggregate.empty.search.title": "No matching accounts",
   "aggregate.empty.search.desc": "Try another keyword, or clear the search box.",
   "aggregate.empty.search.action": "Clear search",
@@ -78,7 +74,6 @@ export const en = {
 
   // ---- Q3 option C: newly added accounts ----
   "aggregate.newcomer.title": "{n} accounts are not in the current filter",
-  "aggregate.newcomer.note": "newly added",
   "aggregate.newcomer.add": "Add to filter",
   "aggregate.newcomer.ignore": "Ignore",
 
@@ -88,21 +83,15 @@ export const en = {
   "aggregate.batch.acrossScopesHint": "Batch actions apply to these scopes",
 
   // ---- Account "more" menu header ----
-  "aggregate.menu.head": "{name} · {scope}",
 
   // ---- Toasts ----
-  "aggregate.toast.entered": "Aggregate view opened",
-  "aggregate.toast.enteredDesc": "{n} accounts from {scopes} scopes on one screen",
-  "aggregate.toast.left": "Left the aggregate view · now in {scope}",
   "aggregate.toast.filtered": "Filtered: showing {shown} / {total} accounts",
   "aggregate.toast.filteredDesc": "This filter is kept after you restart the app",
   "aggregate.toast.showAll": "Showing all accounts",
   "aggregate.toast.filterCleared": "Filter preference cleared",
   "aggregate.toast.newcomerAdded": "Added to the filter (your existing filter is kept)",
-  "aggregate.toast.retried": "Reloaded {scope}",
   "aggregate.toast.refreshed": "Refreshed {n} scopes",
   "aggregate.toast.refreshedDesc": "Status of {n} accounts updated",
-  "aggregate.toast.guideLeavesAggregate": "⚠️ This leaves the aggregate view (diagnostics is a per-scope page)",
 
   // ---- Detail drawer (assembly lives in `lib/aggregate-detail.ts`) ----
   "aggregate.detail.checkin": "Check-in",
@@ -135,7 +124,6 @@ export const en = {
   "aggregate.detail.packExpired": "Expired",
   "aggregate.detail.packExpiresAt": "Expires {when}",
   "aggregate.detail.packForever": "Never expires",
-  "aggregate.detail.groupSaved": "Group saved",
 
   // ---- Export (per scope: the export command is single-scope) ----
   "aggregate.export.button": "Export",

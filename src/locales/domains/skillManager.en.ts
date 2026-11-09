@@ -12,7 +12,6 @@ export const en = {
   "skillManager.description":
     "Scan the CN / Global skills directory: enable, copy across regions, import locally.",
 
-  "skillManager.loading": "Loading…",
   "skillManager.reload": "Refresh",
   "skillManager.openDir": "Open folder",
   "skillManager.error": "Failed to load: {message}",
@@ -24,8 +23,6 @@ export const en = {
   "skillManager.count": "{n} total",
   "skillManager.version": "v{version}",
 
-  "skillManager.enabled": "Enabled",
-  "skillManager.disabled": "Disabled",
   /** Accessible label for the toggle; `name` comes from the call site. */
   "skillManager.toggle.aria": "Enable / disable {name}",
   "skillManager.toggle.failed": "Toggle failed: {message}",
@@ -42,7 +39,6 @@ export const en = {
 
   "skillManager.copyCross": "Copy from the other region",
   "skillManager.copyCross.source": "Source: {source}",
-  "skillManager.copyCross.running": "Copying…",
   "skillManager.copyCross.done": "Copy complete",
   "skillManager.copyCross.none": "Nothing to copy",
   "skillManager.copyCross.copied": "{n} added",
@@ -54,7 +50,6 @@ export const en = {
 
   "skillManager.import": "Import from local",
   "skillManager.import.placeholder": "Full path to a folder or .zip",
-  "skillManager.import.running": "Importing…",
   "skillManager.import.done": "Imported {name}",
   "skillManager.import.identical": "{name} already exists with identical content — skipped",
   "skillManager.import.conflict": "{name} already exists with different content — target kept",
