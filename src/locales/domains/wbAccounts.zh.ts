@@ -117,7 +117,7 @@ export const zh = {
   //    而装了也没用**（原型断言 `verify-behaviors.cjs:1297-1302` 反向禁止）。
   "wbAccounts.program.plannedHint": "尚未支持",
   "wbAccounts.card.unnamed": "未命名账号",
-  "wbAccounts.card.checkedIn": "已签到",
+  "wbAccounts.card.checkedIn": "今日已签到",
   // 原型 `accountStatus()`（`buddy-switch-prototype.html:2390-2395`）是**互斥的一枚**状态：
   // 凭据已过期 → 需重新登录 → 今日未签到 → （否则）已签到。
   "wbAccounts.card.notCheckedIn": "今日未签到",
@@ -127,13 +127,16 @@ export const zh = {
   // 此前我们只摆一枚星形图标，与原型不同。
   "wbAccounts.card.priority": "优先",
   "wbAccounts.card.priorityTip": "建议优先使用",
-  // 原型 `.acct-chips` 第三条（`:2507`）：`{X} 积分 {N} 天后过期`。
-  // ★ issue #44：金额是窗口内**全部**临期之和、天数取其中最晚那一刻 ⇒ 只能写「天内」。
-  //   照原型写「天后」会把不同批次混成一句话（100 明天到期 + 200 后天到期 ⇒「300 积分 1 天后过期」）。
-  "wbAccounts.card.expiringChip": "{amount} 积分 {days} 天内过期",
-  /* issue #69：7 天窗口外的那一批（中性徽章 —— 回答「先用哪个账号」）。 */
-  "wbAccounts.card.nearestExpiringChip": "最近 {amount} 积分 · {days} 天后过期",
+  // 原型 `.acct-chips` 第三条（`:2507`）的形态。
+  // ★ 2026-11-09：徽章只报**最快到期的那一批** —— 天数与该批金额同批（`batches[0]`），
+  //   不再把「窗口内总量」和某一批的天数拼在一起（那是两批积分，怎么拼都有半句假话）。
+  "wbAccounts.card.expiringChip": "最近到期 {days}天 · {amount} 积分",
+  /* ≤ 48 小时用小时：25 小时与 47 小时各自说准，不被都写成「1 天」。 */
+  "wbAccounts.card.expiringChipHours": "最近到期 {hours}小时 · {amount} 积分",
   "wbAccounts.card.expiringTipTitle": "按到期时间分批（共 {n} 批）",
+  /* 明细一行一批：**绝对时刻**（`2026-11-20 23:59`）+ 该批金额。
+     ★ 不用相对倒计时：这一行要和账号页 / 抽屉里的日期直接对照；
+       徽章已经回答过「还有几天」，列表回答「具体哪天」。 */
   "wbAccounts.card.expiringTipLine": "{time} · {amount} 积分",
   "wbAccounts.card.toolsInUse": "使用中 {n} 个工具",
   // 头部「当前登录」徽章（原型 `accountCard` :2502）：绑定任一程序位即为当前登录。

@@ -21,8 +21,8 @@
  * 「14 天后到期」的账号**前面** —— 那正好把用户要的相对顺序倒过来了。
  */
 
-import type { CreditExpiry } from "@/lib/types";
-import { nearestExpiringBatch } from "@/lib/credit-expiry";
+import type { CreditExpiry, CreditResource } from "@/lib/types";
+import { nearestExpiringBatch, summarizeExpiring } from "@/lib/credit-expiry";
 
 /** 临期窗口内的剩余积分（查询失败 / 无数据按 0）。 */
 export function expiringSoonAmount(credit?: CreditExpiry): number {
@@ -66,6 +66,63 @@ export function compareCreditPriority(left?: CreditExpiry, right?: CreditExpiry)
   const rightExpiry = nearestCreditExpiry(right);
   if (leftExpiry !== rightExpiry) return leftExpiry - rightExpiry;
   return expiringSoonAmount(right) - expiringSoonAmount(left);
+}
+
+/**
+ * Trae / Qoder 的**逐包数据** → `CreditExpiry` 形状，供本文件的判据复用。
+ *
+ * ## 为什么需要这一层
+ *
+ * 「建议优先」原先只有 WorkBuddy 有（判据读 `CreditExpiry`）。Trae / Qoder 的积分
+ * 不在这个形状里（Trae 在账号对象的 `creditPackages`，Qoder 在逐包缓存里），
+ * 于是那两个平台**一枚徽章都没有** —— 数据都在，只是形状不同，属漏做而不是缺功能。
+ *
+ * 给它们另写一套排序会让「同一个号在三个分区显示不同的推荐」，所以这里只做形状转换：
+ * 判据、分档、胜负手全部走 {@link pickPriorityAccountId}。
+ *
+ * @param packs 逐包列表；`null` / 空 ⇒ **未知**（返回 `undefined`，不参与推荐）
+ * @param options.unit `expireAt` 的单位：Trae 是秒、Qoder 已是毫秒
+ * @param options.now 判定基准（毫秒），默认 `Date.now()`。一次渲染里同一批数据可能被
+ *   汇总多次（徽章 / 抽屉 / 推荐排序），各调一次 `Date.now()` 会让「今天」漂移几百毫秒 ——
+ *   跨秒边界时同一份数据给出两种临期判定。装配层应传同一个值。
+ */
+export function creditExpiryFromPacks(
+  packs:
+    | ReadonlyArray<{
+        total?: number;
+        remaining: number;
+        used?: number;
+        expireAt: number | null;
+        expired?: boolean;
+        expiringSoon?: boolean;
+        packageCode?: string | null;
+        packageName?: string | null;
+        status?: number | null;
+      }>
+    | null
+    | undefined,
+  options: { unit?: "ms" | "s"; now?: number } = {},
+): CreditExpiry | undefined {
+  if (!packs || packs.length === 0) return undefined;
+  const toMs = options.unit === "s" ? (value: number) => value * 1000 : (value: number) => value;
+  const resources: CreditResource[] = packs.map((pack) => ({
+    packageCode: pack.packageCode ?? null,
+    packageName: pack.packageName ?? null,
+    total: pack.total ?? 0,
+    remaining: pack.remaining,
+    used: pack.used ?? 0,
+    status: pack.status ?? null,
+    expireAt:
+      typeof pack.expireAt === "number" && Number.isFinite(pack.expireAt) ? toMs(pack.expireAt) : null,
+    expired: pack.expired === true,
+    expiringSoon: pack.expiringSoon === true,
+  }));
+  return {
+    ok: true,
+    resources,
+    expiringSoonRemaining: summarizeExpiring(resources, { now: options.now })?.total ?? 0,
+    expired: resources.some((resource) => resource.expired && resource.remaining > 0),
+  };
 }
 
 /**

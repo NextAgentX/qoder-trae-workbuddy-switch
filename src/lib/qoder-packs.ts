@@ -7,23 +7,24 @@
 
 import type { QoderCreditPack } from "@/lib/api";
 import {
-  nearestExpiringBatch,
   summarizeExpiring,
-  upcomingExpiries,
   type ExpiringItem,
   type ExpiringSummary,
-  type UpcomingBatch,
 } from "@/lib/credit-expiry";
 import type { Translate } from "@/lib/i18n";
 
 /**
- * 「临期」窗口：14 天。
+ * 「临期」窗口：**7 天**。
  *
- * ★ 必须与后端 `trae::credits::EXPIRING_SOON_SECS`（14 天）**同值**：同一批数据在
- * 两个产品线给出不同的临期判定，用户会认为工具在乱报。后端那份是 `i64` 秒，
- * 这里是毫秒（前端时间戳统一毫秒）。
+ * ★ 2026-11-09：从 14 天统一到 7 天。必须与后端 `trae::credits::EXPIRING_SOON_SECS`
+ * （现 7 天）以及 WorkBuddy 的 `credits.rs::EXPIRING_SOON_DAYS`（7 天）**同值**：
+ * 同一批数据在两个产品线给出不同的临期判定，用户会认为工具在乱报。
+ * 后端那份是 `i64` 秒，这里是毫秒（前端时间戳统一毫秒）。
+ *
+ * ⚠️ 此前这里写着「必须与 Trae 的 14 天同值」，于是改 Trae 的窗口会**静默改掉 Qoder 的**
+ *   口径，而改 WB 的窗口谁都不跟。现在三个数同值，但仍然分开写（跨语言不能共享常量）。
  */
-export const EXPIRING_SOON_MS = 14 * 24 * 3600 * 1000;
+export const EXPIRING_SOON_MS = 7 * 24 * 3600 * 1000;
 
 /**
  * 逐包数据的**前端缓存有效期**：60 秒。
@@ -85,9 +86,13 @@ export function packSourceLabel(
  * ## 与 WorkBuddy 的口径关系
  *
  * WB 卡的黄徽章（`N 积分 M 天内过期`）用**后端 `expiringSoon`**；Qoder 的逐包响应里
- * **没有这个标记**，所以这里用 `EXPIRING_SOON_MS`（14 天）自己判 —— 它是后端窗口的
+ * **没有这个标记**，所以这里用 `EXPIRING_SOON_MS`（7 天）自己判 —— 它是后端窗口的
  * 镜像常量，不是第二个口径（`packState()` 判每行状态用的就是它）。
- * 中性徽章（`最近 N 积分 · X 天后过期`）与 WB 完全同源：不设窗口，只看「下一批什么时候到期」。
+ *
+ * ★ 2026-11-09：中性徽章（`最近 N 积分 · X 天后过期`）已删除 —— 三平台只保留 7 天窗口内
+ *   的黄徽章。所以本文件不再需要「不限窗口」的那两个薄包装（`qoderNearestExpiry` /
+ *   `qoderUpcomingExpiries`）：卡片的「优先」徽章走 `lib/credit-priority.ts`，它直接用
+ *   `credit-expiry` 的 `nearestExpiringBatch`，与本文件的逐包清洗是两条独立的路。
  */
 
 /**
@@ -116,7 +121,7 @@ function expiringItems(
 }
 
 /**
- * 临期批次汇总（14 天窗口内）。
+ * 临期批次汇总（7 天窗口内）。
  *
  * 没有可渲染的批次时返回 `null` —— 调用方据此**整条不渲染**，绝不写一个猜出来的「N 天」。
  */
@@ -125,23 +130,4 @@ export function qoderExpiringSummary(
   now: number = Date.now(),
 ): ExpiringSummary | null {
   return summarizeExpiring(expiringItems(packs, now), { now });
-}
-
-/**
- * 最近一批未来到期（**不限窗口**）—— 「我先用哪个号」要的是相对顺序，不是一个窗口。
- * 没有未来到期返回 `null`。
- */
-export function qoderNearestExpiry(
-  packs: readonly QoderCreditPack[] | null | undefined,
-  now: number = Date.now(),
-): UpcomingBatch | null {
-  return nearestExpiringBatch(expiringItems(packs, now), { now });
-}
-
-/** 未来全部到期批次（按到期升序，同一时刻合并）—— 徽章 tooltip 的明细。 */
-export function qoderUpcomingExpiries(
-  packs: readonly QoderCreditPack[] | null | undefined,
-  now: number = Date.now(),
-): UpcomingBatch[] {
-  return upcomingExpiries(expiringItems(packs, now), { now });
 }

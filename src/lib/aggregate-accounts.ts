@@ -29,6 +29,7 @@ import type { AccountMeta } from "@/lib/types";
 import type { QoderAccountView } from "@/lib/api";
 import type { TraeAccount, TraeJwtStatus } from "@/lib/trae-types";
 import { cooldownNeedsAttention } from "@/lib/trae-cooldown";
+import { qoderCredentialExpired } from "@/lib/qoder-credential";
 import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
 import type { PlatformSlug } from "@/lib/platforms/registry";
 
@@ -142,7 +143,19 @@ export function aggregateSearchText(account: AggregateAccount): string {
 
 /* ══════════════════════ 「需处理」与紧迫度 ══════════════════════ */
 
-/** 凭据是否已过期（`expiresAt` 是 epoch 毫秒；`null` = 没有到期概念 ⇒ 不算过期）。 */
+/**
+ * 凭据是否已过期（`expiresAt` 是 epoch 毫秒；`null` = 没有到期概念 ⇒ 不算过期）。
+ *
+ * ⚠️ **只给 WorkBuddy 的 `expiresAt` 与 Trae 的 `jwtExpTimestamp` 用** —— 这两个字段在
+ * 后端就是毫秒（`modules/account.rs::has_unexpired_plain_token` 拿 `now_ms()` 比、
+ * Trae 侧同样由 `now_ms()` 写入），可以放心裸比。
+ *
+ * Qoder 的 `expiresAt` 单位未取证（见 `lib/qoder-credential.ts` 文件头）⇒ 走
+ * {@link qoderCredentialExpired}。此前这里也拿 Qoder 的值调本函数，于是同一个号
+ * 「需处理」与否（`aggregateNeedsAttention`）和「平铺视图排第几」（`aggregateUrgency`）
+ * 会给出互相矛盾的答案：秒值在 `> 0 && < now` 下恒为真 ⇒ 紧迫度 0（排最前），
+ * 而隔壁的 `aggregateNeedsAttention` 已经不这么判了。
+ */
 function expiredAt(expiresAt: number | null | undefined, now: number): boolean {
   return typeof expiresAt === "number" && expiresAt > 0 && expiresAt < now;
 }
@@ -188,7 +201,10 @@ export function aggregateNeedsAttention(account: AggregateAccount, now: number =
   // 过期时间轴仍逐平台取，不合并成一个字段：WB/Qoder 用 `expiresAt`，Trae 用 `jwtExpTimestamp`。
   if (account.platform === "workbuddy") return expiredAt(account.data.expiresAt, now);
   if (account.platform === "trae") return expiredAt(account.data.jwtExpTimestamp, now);
-  return expiredAt(account.data.expiresAt, now);
+  /* Qoder 走 `lib/qoder-credential.ts`（与卡片红徽章、抽屉「凭据」块**同一个函数**）：
+     它的 `expiresAt` 单位未取证，`expiredAt` 那种「当成毫秒直接比」在秒值上会恒判过期 ——
+     而 WB / Trae 那两个字段都有后端 `now_ms` 佐证，可以放心比。 */
+  return qoderCredentialExpired(account.data.expiresAt, now);
 }
 
 /**
@@ -215,7 +231,10 @@ export function aggregateUrgency(account: AggregateAccount, now: number = Date.n
   }
   const a = account.data;
   if (!a.hasCredential) return 0;
-  if (expiredAt(a.expiresAt, now)) return 0;
+  /* 与 `aggregateNeedsAttention` 用**同一个**判据（`lib/qoder-credential.ts`）：
+     两处一个说「已过期」一个说「没过期」，会让平铺视图把某行排到最前、
+     而「需处理」计数里却没有它。 */
+  if (qoderCredentialExpired(a.expiresAt, now)) return 0;
   return 4;
 }
 

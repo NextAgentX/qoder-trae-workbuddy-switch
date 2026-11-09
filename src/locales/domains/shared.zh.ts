@@ -765,8 +765,10 @@ export const zh = {
   "shared.stat.tokens": "今日 Token",
   "shared.stat.checkin": "今日签到",
   "shared.stat.credential": "凭据",
-  "shared.stat.checkedIn": "已签到",
-  "shared.stat.notCheckedIn": "未签到",
+  // 标签本身已写「今日签到」（`shared.stat.checkin`），值也说「今日已签到」——
+  // 三张卡片（WB / Trae / Qoder）的徽章用的都是这个口径，抽屉不能再说得含糊。
+  "shared.stat.checkedIn": "今日已签到",
+  "shared.stat.notCheckedIn": "今日未签到",
   // issue #47：Trae / Qoder 的签到与 Token 两个块多出来的**诚实**措辞。
   // 「读不到」「未开放」「按本地台账」三档必须分开 —— 合成一句就是把「不知道」
   // 说成「没有」，用户会反复去点一个注定无效的按钮。
@@ -779,12 +781,17 @@ export const zh = {
   "shared.stat.credentialRelogin": "需重登",
   "shared.stat.credentialOkSub": "可正常使用",
   "shared.stat.credentialBadSub": "先重新登录",
-  "shared.stat.noExpiring": "无临期积分",
-  "shared.stat.expiringSoon": "{n} 积分 {d} 天内到期",
-  "shared.stat.total": "累计 {n}",
-  "shared.stat.expiresAt": "到期 {when}",
-  "shared.stat.noExpiry": "无到期时间",
-  "shared.stat.plan": "{plan} 套餐",
+  /* 详情页积分块的副文本 —— 三平台**同一个口径**：只回答「7 天窗口内还有多少要到期」。
+     ★ 0 也照写（`7 天内到期 0 积分`），不写「无临期积分」：后者是另一个断言，
+       而且四处渲染（WB / Trae / Qoder 抽屉 + 聚合抽屉）会各写一种说法。
+     （`shared.stat.noExpiring` / `shared.stat.expiringSoon` 是它的前身，零引用已删 ——
+       抽屉不再需要「有/无」两句话，金额为 0 时照写金额即可。） */
+  "shared.detail.creditsExpiring": "7 天内到期 {amount} 积分",
+  /* ⚠️ 2026-11-09：`shared.stat.total` / `expiresAt` / `noExpiry` / `plan` 四条已删。
+     它们原本只服务「详情页积分块副文本」的四种写法（累计量 / 到期时刻 / 无到期 / 套餐名），
+     而那块副文本现在三平台统一成 `shared.detail.creditsExpiring`（见上），
+     四条全部零引用。不要因为「以后可能用到」留死键 —— 留着只会让下一个人以为
+     还有一处界面在用这种措辞。 */
   "shared.drawer.close": "关闭",
   "shared.drawer.loading": "正在加载详情…",
   // 详情页签：把 7 段长滚动切成四块（概览 / 积分 / 签到 / 凭据）。只切「看」的部分，

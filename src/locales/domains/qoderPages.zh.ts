@@ -220,14 +220,24 @@ export const zh = {
   "qoder.page.accounts.trash.undo": "撤销",
 
   // ── 签到 / 额度（后端早已就绪，此前无 UI 入口）──
-  "qoder.page.accounts.chip.checkedIn": "今日已签",
-  "qoder.page.accounts.chip.notCheckedIn": "今日未签",
+  "qoder.page.accounts.chip.checkedIn": "今日已签到",
+  "qoder.page.accounts.chip.notCheckedIn": "今日未签到",
+  /* 凭据已过期 —— 状态槽新增的一支。此前 Qoder 只判 `hasCredential` / `unrecognized`，
+     于是 access token 早就过期、上游必然失败的账号，卡片也照样说「凭据可用」。 */
+  "qoder.page.accounts.chip.expired": "凭据已过期",
   "qoder.page.accounts.chip.checkinUnavailable": "签到不可用",
+  /* 「优先」——与 WB / Trae 同语义（`lib/credit-priority.ts` 的排序结果）。 */
+  "qoder.page.accounts.chip.priority": "优先",
+  "qoder.page.accounts.chip.priorityTip": "建议优先使用",
+  /* 「使用中 N 个工具」—— Qoder 一直有 `QoderProgramStatus[].currentUid`，
+     只是从来没画这枚徽章（WB / Trae 都有）。 */
+  "qoder.page.accounts.chip.toolsInUse": "使用中 {n} 个工具",
   "qoder.page.accounts.metric.credits": "积分",
-  "qoder.page.accounts.metric.creditsValue": "{remaining} / {total}",
-  // 到期徽章（issue #166）：黄=临期警告，中性=最近一批（与 WB 卡同一口径）。
-  "qoder.page.accounts.metric.expiringChip": "{amount} 积分 {days} 天内过期",
-  "qoder.page.accounts.metric.nearestExpiringChip": "最近 {amount} 积分 · {days} 天后过期",
+  // 到期徽章（issue #166）：黄=临期警告（7 天窗口，与 WB / Trae 同口径）。
+  // 只报**最快到期的那一批**：天数与该批金额同批；逐批明细（绝对时刻）在 tooltip。
+  "qoder.page.accounts.metric.expiringChip": "最近到期 {days}天 · {amount} 积分",
+  /* ≤ 48 小时用小时：与 `summarizeExpiring.soonestUnit` 同源。 */
+  "qoder.page.accounts.metric.expiringChipHours": "最近到期 {hours}小时 · {amount} 积分",
   "qoder.page.accounts.metric.expiringTipTitle": "按到期时间分批（共 {n} 批）",
   "qoder.page.accounts.metric.expiringTipLine": "{time} · {amount} 积分",
 
@@ -261,7 +271,8 @@ export const zh = {
   "qoder.page.accounts.web.summary": "{n} 个 · 共剩 {remaining}",
   "qoder.page.accounts.web.loading": "正在读取…",
   "qoder.page.accounts.web.used": "已用 {n}",
-  "qoder.page.accounts.web.expiresAt": "{date} 到期",
+  "qoder.page.accounts.web.noUsablePacks": "没有剩余可用的资源包",
+  "qoder.page.accounts.web.expiresAt": "到期 {date}",
   "qoder.page.accounts.web.state.noSession": "还没有登录 Qoder 网页端",
   "qoder.page.accounts.web.state.noSessionHint": "逐包明细只存在于网页端接口，需要在网页端登录一次（之后会记住，不必重复登录）。",
   "qoder.page.accounts.web.state.expired": "网页登录已失效",

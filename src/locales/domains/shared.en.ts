@@ -700,8 +700,10 @@ export const en = {
   "shared.stat.tokens": "Today's tokens",
   "shared.stat.checkin": "Check-in",
   "shared.stat.credential": "Credential",
-  "shared.stat.checkedIn": "Checked in",
-  "shared.stat.notCheckedIn": "Not checked in",
+  // The label already says "Check-in" (`shared.stat.checkin`); the value spells out
+  // "today" so the drawer matches the three cards' badges.
+  "shared.stat.checkedIn": "Checked in today",
+  "shared.stat.notCheckedIn": "Not checked in today",
   // issue #47: the honest wording Trae / Qoder need for check-in and token tiles.
   // "Unreadable" / "not available" / "from local ledger" must stay three separate
   // states — collapsing them turns "don't know" into "no", and the user keeps
@@ -715,12 +717,14 @@ export const en = {
   "shared.stat.credentialRelogin": "Sign in again",
   "shared.stat.credentialOkSub": "Usable",
   "shared.stat.credentialBadSub": "Sign in first",
-  "shared.stat.noExpiring": "No expiring credits",
-  "shared.stat.expiringSoon": "{n} credits expire within {d} days",
-  "shared.stat.total": "Total {n}",
-  "shared.stat.expiresAt": "Expires {when}",
-  "shared.stat.noExpiry": "No expiry",
-  "shared.stat.plan": "{plan} plan",
+  /* Sub-text of the credits tile in the detail drawer — same rule on all three platforms.
+     (Its predecessors `shared.stat.noExpiring` / `shared.stat.expiringSoon` are gone:
+     the drawer no longer needs a "yes/no" pair — a zero amount is written as zero.) */
+  "shared.detail.creditsExpiring": "{amount} credits expire within 7 days",
+  /* Removed 2026-11-09: `shared.stat.total` / `expiresAt` / `noExpiry` / `plan`.
+     They only served the four ways the drawer's credits tile used to word its sub-text;
+     that tile now uses `shared.detail.creditsExpiring` on all three platforms, leaving
+     all four keys unreferenced. */
   "shared.drawer.close": "Close",
   "shared.drawer.loading": "Loading details…",
   "shared.drawer.tab.overview": "Overview",

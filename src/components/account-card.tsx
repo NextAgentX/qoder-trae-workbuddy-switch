@@ -15,13 +15,7 @@ import { ENCRYPTED_CREDENTIAL_REASON } from "@/lib/api";
 import { compactTokens, exactTokens } from "@/components/usage/format";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
-import {
-  EXPIRY_TIP_MAX_HEIGHT,
-  daysUntil,
-  nearestExpiringBatch,
-  summarizeExpiring,
-  upcomingExpiries,
-} from "@/lib/credit-expiry";
+import { EXPIRY_TIP_MAX_HEIGHT, summarizeExpiring } from "@/lib/credit-expiry";
 import { formatAbsoluteTime, formatRelativeTime } from "@/lib/catalog-source";
 import { useT, type Translate } from "@/lib/i18n";
 import type { AccountMeta, AccountTokenTodayEntry, CreditExpiry, TravelStatus } from "@/lib/types";
@@ -216,14 +210,6 @@ export function todayTokensBreakdown(
   }
   if (truncated) parts.push(t("wbAccounts.card.metric.todayTokensTruncated"));
   return parts.join(t("shared.punct.comma"));
-}
-
-export function formatCreditExpiry(ts: number | null, t: Translate): string {
-  if (!ts) return t("wbAccounts.card.forever");
-  const date = new Date(ts);
-  if (Number.isNaN(date.getTime())) return t("wbAccounts.card.forever");
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function accountIdentity(account: AccountMeta): string {
@@ -588,19 +574,27 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
    * ⚠️ 行间距由卡片根的 `gap-2.5` 承担，这里不再自带 `mb-*`。
    */
   const metricResources = credit?.ok ? credit.resources ?? [] : [];
-  /** 当前（剩余）积分 —— 与原型 `a.credits` 同义。 */
+  /**
+   * 本次渲染的「现在」—— 徽章天数与悬浮列表的批次过滤**共用**这一个值。
+   *
+   * 各取一次 `Date.now()` 的后果不是精度问题，是**自相矛盾**：同一批积分可能在徽章上
+   * 已算进「最近到期 N天」、在悬浮列表里却因跨过 `expireAt` 被判成已过期而不列。
+   * Trae / Qoder 卡片同款做法（Qoder 的 `packsNow`）。
+   */
+  const expiryNow = Date.now();
+  /**
+   * 当前（剩余）积分 —— 与原型 `a.credits` 同义。后端已按可用口径剔除过期包的剩余。
+   * ★ 2026-11-09：指标行只显示这个分子，**不写 `/总额`** —— 分母要么来自会过期的包、
+   *   要么与分子不同源，怎么算都得配一句解释；用户要的是「还能用多少」。
+   */
   const metricCreditCurrent =
     credit?.ok && typeof credit.totalRemaining === "number" ? credit.totalRemaining : null;
-  const metricCreditTotal =
-    credit?.ok && metricResources.length > 0
-      ? metricResources.reduce((sum, resource) => sum + (Number.isFinite(resource.total) ? resource.total : 0), 0)
-      : null;
   /** 「最后使用」：仅当有真实的 `lastUsedAt`（epoch 毫秒）才渲染该项；否则整项省略。 */
   const lastUsedAt = typeof account.lastUsedAt === "number" && account.lastUsedAt > 0 ? account.lastUsedAt : null;
 
   /* ★ 指标行 —— 逐项对齐原型 `.acct-metrics`（`demo.css:341-342`：
      `display:flex; gap:14px; font-size:11.5px; color:var(--muted-fg)`，**不换行**、无下边距）：
-     `积分 1,240/2,000` · `今日 42.1K` · `2 分钟前`。
+     `积分 1,240` · `今日 42.1K` · `2 分钟前`。
      ⚠️ 第三项原型是**相对时间、且没有标签**（`<span class="muted">${a.lastUsed}</span>`），
      此前我们写「最后使用 10-12 17:10」——标签与绝对日期都是本仓自加的，与原型不同。
      绝对时刻改挂 `title`（悬停可见，不占版面）。 */
@@ -612,12 +606,9 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
         {metricCreditCurrent === null ? (
           <b className="font-semibold tabular-nums text-foreground">—</b>
         ) : (
-          <>
-            <b className="font-semibold tabular-nums text-foreground">
-              {formatCredits(metricCreditCurrent)}
-            </b>
-            {metricCreditTotal === null ? "" : `/${formatCredits(metricCreditTotal)}`}
-          </>
+          <b className="font-semibold tabular-nums text-foreground">
+            {formatCredits(metricCreditCurrent)}
+          </b>
         )}
       </span>
       <span className="inline-flex items-center gap-1">
@@ -655,7 +646,10 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
   ) : null;
 
   /**
-   * 逐批到期明细（两枚徽章的 tooltip 共用一套渲染，**只有取哪一段批次**不同）。
+   * 逐批到期明细（黄徽章的 tooltip 用这一套渲染）。
+   *
+   * 中性徽章已删（见下方 `nearestChip` 的说明），所以这里现在只有**一个**消费方 ——
+   * 但仍抽成函数：标题 + 限高 + 逐行的结构容易写歪，集中一处才不会与 Trae / Qoder 分叉。
    *
    * ★ issue #79：明细是**一行一批**，用户实测有 41 批 ⇒ 浮层比窗口还高，
    * `side="top"` 把**最关键的最近几批**顶出窗口上沿，且没有滚动条（Radix tooltip
@@ -675,6 +669,8 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
       {batches.map((batch) => (
         <div key={batch.expireAt} className="whitespace-nowrap tabular-nums">
           {t("wbAccounts.card.expiringTipLine", {
+            /* 绝对时刻（`YYYY-MM-DD HH:mm`）：这一行要能和账号页 / 抽屉里的日期对照。
+               相对倒计时只在徽章上出现一次，别在这里重复。 */
             time: formatAbsoluteTime(batch.expireAt),
             amount: formatCredits(batch.amount),
           })}
@@ -687,28 +683,37 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
    * 「N 积分 M 天内过期」——原型 `.acct-chips` 的第三条（`buddy-switch-prototype.html:2507`）：
    * `a.expiring ? <span class="badge warn">${fmt(a.expiring)} 积分 ${a.expireInDays} 天后过期</span> : ""`。
    *
-   * ★ 2026-10-17 **口径修正**（issue #44）：此前金额取「3 天内临期之和」、天数取「最早那一刻」，
-   * 两者不是同一批积分 ⇒ 100 明天到期 + 200 后天到期会显示「300 积分 1 天后过期」（假话）。
-   * 现在统一由 `summarizeExpiring` 汇总：**金额 = 全部临期之和、天数 = 其中最晚那一刻**
-   * ⇒「N 积分 M 天内过期」对每一笔都成立；逐批明细（最急的排在首位）放进 tooltip。
+   * ★ 2026-11-09 **口径修正**：徽章只报**最快到期的那一批** —— 天数与金额同批
+   * （`summarizeExpiring` 的 `soonestDays` / `soonestAmount`）。
+   * 此前「金额 = 全部临期之和」配「天数 = 最晚那一刻」会让徽章说成「2 天内过期」，
+   * 而实际上明天就有一批要作废。逐批明细（最快排第一、绝对时刻）放进 tooltip。
    *
    * ⚠️ 窗口不再是前端自设的 3 天，而是**后端的 `expiringSoon`（7 天）**——统计页 / 总览页
    * 读的就是同一口径（`expiringSoonRemaining`），卡片若另设窗口，同一件事会出现两个数字。
    * 拿不到临期批次 ⇒ **整条不渲染**（绝不写一个猜出来的「N 天」标签）。
    */
-  const expiring = credit?.ok ? summarizeExpiring(metricResources) : null;
+  const expiring = credit?.ok ? summarizeExpiring(metricResources, { now: expiryNow }) : null;
+  /* 徽章文案：≤ 48 小时用小时，超过才用天（与 `summarizeExpiring.soonestUnit` 同源）。 */
+  const expiringChipText = expiring
+    ? expiring.soonestUnit === "hours"
+      ? t("wbAccounts.card.expiringChipHours", {
+          amount: formatCredits(expiring.soonestAmount),
+          hours: expiring.soonestHours,
+        })
+      : t("wbAccounts.card.expiringChip", {
+          amount: formatCredits(expiring.soonestAmount),
+          days: expiring.soonestDays,
+        })
+    : "";
   const expiringChip = expiring ? (
     <Tooltip>
       <TooltipTrigger asChild>
         <Badge
           variant="warning"
           className={chipClass}
-          aria-label={t("wbAccounts.card.expiringChip", {
-            amount: formatCredits(expiring.total),
-            days: expiring.days,
-          })}
+          aria-label={expiringChipText}
         >
-          {t("wbAccounts.card.expiringChip", { amount: formatCredits(expiring.total), days: expiring.days })}
+          {expiringChipText}
         </Badge>
       </TooltipTrigger>
       <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
@@ -718,58 +723,16 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
   ) : null;
 
   /**
-   * 「最近 N 积分 · X 天后过期」—— **中性**徽章（issue #69）。
+   * 中性徽章（「最近 N 积分 · X 天后过期」）已**删除**（2026-11-09）。
    *
-   * ## 它补的是什么
+   * 它唯一的职责是显示 7 天窗口**外**那批（如 11 天后、30 天后），而定位是「信息」不是
+   * 「警告」。定位收窄为「7 天内才提示」后，它没有剩余内容可渲染 —— 保留只会是一枚
+   * 永远不会出现的死代码。7 天内没有批次 ⇒ 卡片上不显示任何到期徽章。
    *
-   * `expiringChip`（黄色「N 积分 M 天内过期」）只覆盖**后端 7 天临期窗口**内的批次。
-   * 用户多账号时真正要答的是「**先用哪个**」—— 8 天 / 30 天后到期的那批在窗口外，
-   * **完全不可见** ⇒ 用户说「两周内到期的看不到」。
-   *
-   * ## 口径
-   *
-   * · `amount` = **最近一批**的剩余积分（同日多包合并）—— 不是总额、不是已用量；
-   * · `days`   = 最近一批距今天数（向上取整）；
-   * · 无未来到期 / 积分查询失败 / `resources` 为空 ⇒ **整条不渲染**（不写「0 天后」）。
-   *
-   * ## 为什么不并进黄色徽章
-   *
-   * 黄色那枚是**警告**（「再不用就浪费」），7 天口径**不变**（issue #69 明确要求）；
-   * 中性那枚是**信息**（「什么时候到期」）。合并会让「7 天内」的警告强度被稀释。
-   *
-   * ⚠️ 不新增块级元素：卡片结构必须保持 header → chips → metrics → actions
-   * （`scripts/check-scope-registry.cjs` 有反向门禁）。
+   * ⚠️ `nearestExpiringBatch` **函数本身保留**：本页表格的「积分到期」列与排序、
+   * 以及 `lib/credit-priority.ts` 都还在调用（它不限窗口，回答的是「先用哪个号」）。
+   * 只删了「把它渲染成徽章」这一步。
    */
-  const nearestBatch = credit?.ok ? nearestExpiringBatch(metricResources) : null;
-  /**
-   * 未来全部批次 —— **算一次**。
-   *
-   * 此前 title 与明细各调一次 `upcomingExpiries`：同一份数据被过滤+合并+排序两遍，
-   * 而且两次调用之间若跨过某个到期时刻，标题里的「共 N 笔」会和下面列出来的行数不一致。
-   */
-  const upcoming = nearestBatch ? upcomingExpiries(metricResources) : [];
-  const nearestChip = nearestBatch && !expiring ? (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge
-          variant="secondary"
-          className={chipClass}
-          aria-label={t("wbAccounts.card.nearestExpiringChip", {
-            amount: formatCredits(nearestBatch.amount),
-            days: daysUntil(nearestBatch.expireAt),
-          })}
-        >
-          {t("wbAccounts.card.nearestExpiringChip", {
-            amount: formatCredits(nearestBatch.amount),
-            days: daysUntil(nearestBatch.expireAt),
-          })}
-        </Badge>
-      </TooltipTrigger>
-      <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
-        {expiryTipBody(upcoming)}
-      </TooltipContent>
-    </Tooltip>
-  ) : null;
 
   /**
    * 状态标签 —— 与原型 `accountStatus()`（`buddy-switch-prototype.html:2390-2395`）**同一口径**：
@@ -803,7 +766,6 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
       {statusChip}
       {travelChip(travelStatus)}
       {expiringChip}
-      {nearestChip}
       {creditPriority && (
         <Badge variant="info" className={chipClass} title={t("wbAccounts.card.priorityTip")}>
           {t("wbAccounts.card.priority")}

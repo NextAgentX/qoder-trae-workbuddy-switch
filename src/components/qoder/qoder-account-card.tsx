@@ -77,16 +77,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { AccountRefreshKind } from "@/lib/account-refresh";
 import { shouldOpenAccountDetail } from "@/lib/account-open-guard";
 import type { QoderAccountView, QoderProgramStatus, QoderWebCreditPacks } from "@/lib/api";
-import { EXPIRY_TIP_MAX_HEIGHT, daysUntil } from "@/lib/credit-expiry";
+import { formatAbsoluteTime } from "@/lib/catalog-source";
+import { EXPIRY_TIP_MAX_HEIGHT } from "@/lib/credit-expiry";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
 import { useT, type Translate } from "@/lib/i18n";
-import {
-  qoderExpiringSummary,
-  qoderNearestExpiry,
-  qoderUpcomingExpiries,
-} from "@/lib/qoder-packs";
-import { formatAbsoluteTime } from "@/lib/catalog-source";
+import { qoderCredentialExpired } from "@/lib/qoder-credential";
+import { qoderExpiringSummary } from "@/lib/qoder-packs";
 import { cn } from "@/lib/utils";
 import type { TranslationKey } from "@/locales/zh";
 
@@ -156,6 +153,24 @@ export function QoderStatusChips({
     return (
       <Badge variant="warning" className={CHIP_CLASS}>
         {t("qoder.page.accounts.chip.unrecognized")}
+      </Badge>
+    );
+  }
+  /**
+   * 凭据已过期 —— 此前**完全没判**：只要还有 access token，哪怕早就过期，
+   * 卡片也照样说「凭据可用」，用户点签到/刷新一律失败却看不出原因。
+   *
+   * 判据收在 `lib/qoder-credential.ts`（含毫秒量级守卫）—— 抽屉的「凭据」指标块
+   * 用**同一个函数**。此前两处各写一遍、判据还不同：卡片有量级守卫、抽屉没有，
+   * 于是同一个号在卡片上说「凭据可用」、点开抽屉却是红色「已过期」。
+   *
+   * 放在签到态**之前**：凭据坏了，今天签没签到是次要信息
+   * （与 WB / Trae 的「凭据问题 > 签到态」同一顺序）。
+   */
+  if (qoderCredentialExpired(account.expiresAt)) {
+    return (
+      <Badge variant="destructive" className={CHIP_CLASS}>
+        {t("qoder.page.accounts.chip.expired")}
       </Badge>
     );
   }
@@ -416,6 +431,11 @@ export interface QoderAccountCardProps {
    * 不摆一排「未检测到」的灰胶囊：那是「没数据」伪装成「没装」。
    */
   programs?: QoderProgramStatus[] | null;
+  /**
+   * 是否被 `lib/credit-priority.ts` 选为「建议优先使用」的账号
+   * （与 WB / Trae 卡片同一枚徽章、同一判据，只是各域自建词条）。
+   */
+  creditPriority?: boolean;
   /** 点击某个程序位胶囊 → 页面弹切换确认。未传 ⇒ 胶囊只读（不可点）。 */
   onSwitch?: (program: QoderProgramStatus) => void;
   /**
@@ -467,6 +487,7 @@ export function QoderAccountCard({
   credits = null,
   checkinToday,
   programs = null,
+  creditPriority = false,
   onSwitch,
   switchBusy = false,
   onSetGroup,
@@ -492,13 +513,22 @@ export function QoderAccountCard({
      判定放在卡片里（同一个 currentUid 要跟列表每条账号比），后端只给事实。 */
   const currentPrograms = (programs ?? []).filter((program) => program.currentUid === account.uid);
   const isCurrent = currentPrograms.length > 0;
+  /* 「使用中 N 个工具」—— 与 WB 的 `activeProductCount`（`account-card.tsx`：
+     `programSlots.filter((slot) => slot.active)`）、Trae 的 `activeProgramCount`
+     （`trae-account-card.tsx`：`programs.filter((p) => p.current)`）**同一判据：
+     本账号占用了几个程序位**。
+     ⚠️ 不能用 `program.currentUid !== null` —— 那是「这个位**有任何一个**账号登着」
+     （全局占用数），多账号时每张卡都会显示同一个数字，用户会以为三个号都在跑。
+     直接复用上面的 `currentPrograms`，与 `isCurrent` 同源，不可能再分叉。 */
+  const activeProgramCount = currentPrograms.length;
 
   /* ── 到期汇总（issue #166）───────────────────────────────────────────────
    *
-   * 与 WB 卡**同一口径**（`lib/qoder-packs.ts` 的「到期汇总」段）：
-   * · 黄徽章 = 临期警告，14 天窗口（`EXPIRING_SOON_MS`，镜像后端窗口）；
-   * · 中性徽章 = 最近一批，**不限窗口**（「我这个号先用哪个」要的是相对顺序）；
-   * · 两枚**互斥** —— 同一张卡不出两个到期数字。
+   * 与 WB / Trae 卡**同一口径**（`lib/qoder-packs.ts` 的「到期汇总」段）：
+   * 黄徽章 = 临期警告，**7 天窗口**（`EXPIRING_SOON_MS`，镜像后端窗口）。
+   *
+   * 中性徽章（`最近 N 积分 · X 天后过期`）已删除：它的唯一职责是显示 7 天窗口**外**那批，
+   * 定位收窄到「7 天内才提示」后没有剩余内容，留着就是一枚永不出现的死代码。
    *
    * ⚠️ 判据是 `packs.available` 而不是 `packs != null`：未登录网页端 / 会话过期 /
    * 上游失败时 `packs` 有值但 `available=false`，这时**整条不渲染**，
@@ -507,10 +537,8 @@ export function QoderAccountCard({
   const packsNow = Date.now();
   const packList = packs?.available ? packs.packs : null;
   const expiring = qoderExpiringSummary(packList, packsNow);
-  const nearest = expiring ? null : qoderNearestExpiry(packList, packsNow);
-  const upcoming = nearest ? qoderUpcomingExpiries(packList, packsNow) : [];
 
-  /** 逐批明细（最急的在前）；`sticky` 标题在 40+ 批时仍能钉住「共 N 批」。 */
+  /** 逐批明细（最快在前、绝对时刻）；`sticky` 标题在 40+ 批时仍能钉住「共 N 批」。 */
   const expiryTipBody = (batches: readonly { expireAt: number; amount: number }[]) => (
     <>
       <div className="sticky -top-2 -mx-3 -mt-2 bg-popover px-3 pb-1 pt-2 font-medium">
@@ -519,6 +547,7 @@ export function QoderAccountCard({
       {batches.map((batch) => (
         <div key={batch.expireAt} className="whitespace-nowrap tabular-nums">
           {t("qoder.page.accounts.metric.expiringTipLine", {
+            /* 绝对时刻（`YYYY-MM-DD HH:mm`），与账号页 / 抽屉里的日期可直接对照。 */
             time: formatAbsoluteTime(batch.expireAt),
             amount: formatCredits(batch.amount),
           })}
@@ -527,32 +556,27 @@ export function QoderAccountCard({
     </>
   );
 
+  /* 徽章文案：≤ 48 小时用小时，超过才用天（与 `summarizeExpiring.soonestUnit` 同源）。 */
+  const expiringChipText = expiring
+    ? expiring.soonestUnit === "hours"
+      ? t("qoder.page.accounts.metric.expiringChipHours", {
+          amount: formatCredits(expiring.soonestAmount),
+          hours: expiring.soonestHours,
+        })
+      : t("qoder.page.accounts.metric.expiringChip", {
+          amount: formatCredits(expiring.soonestAmount),
+          days: expiring.soonestDays,
+        })
+    : "";
   const expiryChip = expiring ? (
     <Tooltip>
       <TooltipTrigger asChild>
         <Badge variant="warning" className={CHIP_CLASS}>
-          {t("qoder.page.accounts.metric.expiringChip", {
-            amount: formatCredits(expiring.total),
-            days: expiring.days,
-          })}
+          {expiringChipText}
         </Badge>
       </TooltipTrigger>
       <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
         {expiryTipBody(expiring.batches)}
-      </TooltipContent>
-    </Tooltip>
-  ) : nearest ? (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge variant="secondary" className={cn(CHIP_CLASS, "text-muted-foreground")}>
-          {t("qoder.page.accounts.metric.nearestExpiringChip", {
-            amount: formatCredits(nearest.amount),
-            days: daysUntil(nearest.expireAt, packsNow),
-          })}
-        </Badge>
-      </TooltipTrigger>
-      <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
-        {expiryTipBody(upcoming)}
       </TooltipContent>
     </Tooltip>
   ) : null;
@@ -644,14 +668,26 @@ export function QoderAccountCard({
         </div>
       </header>
 
-      {/* chips：状态槽（恒一枚） + 归属异常（正交） + 到期徽章（正交） + 来源徽章。 */}
+      {/* chips：槽位顺序与 WB / Trae **一致**
+          （`当前登录 → 工具数 → 状态 → 正交警告 → 积分到期 → 优先 → 平台专属`）；
+          没有内容的槽位直接跳过，但位置留对。 */}
       <div className="flex min-w-0 flex-wrap items-center gap-[5px]">
-        <QoderStatusChips account={account} checkinToday={checkinToday} />
-        <QoderForeignBadge account={account} />
-        {expiryChip}
         {isCurrent ? (
           <Badge variant="info" className={CHIP_CLASS}>
             {t("qoder.page.accounts.program.current")}
+          </Badge>
+        ) : null}
+        {activeProgramCount >= 2 && (
+          <Badge variant="info" className={CHIP_CLASS}>
+            <CircleCheck /> {t("qoder.page.accounts.chip.toolsInUse", { n: activeProgramCount })}
+          </Badge>
+        )}
+        <QoderStatusChips account={account} checkinToday={checkinToday} />
+        <QoderForeignBadge account={account} />
+        {expiryChip}
+        {creditPriority ? (
+          <Badge variant="info" className={CHIP_CLASS} title={t("qoder.page.accounts.chip.priorityTip")}>
+            {t("qoder.page.accounts.chip.priority")}
           </Badge>
         ) : null}
         {sourceLabel ? (
@@ -668,10 +704,7 @@ export function QoderAccountCard({
             <span className="text-muted-foreground">
               {t("qoder.page.accounts.metric.credits")}{" "}
               <span className="font-medium tabular-nums text-foreground">
-                {t("qoder.page.accounts.metric.creditsValue", {
-                  remaining: String(credits.remaining),
-                  total: String(credits.total),
-                })}
+                {formatCredits(credits.remaining)}
               </span>
             </span>
             {credits.plan ? (

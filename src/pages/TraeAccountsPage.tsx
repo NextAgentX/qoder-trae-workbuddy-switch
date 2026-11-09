@@ -32,9 +32,11 @@ import {
   type DetailSwitchTarget,
 } from "@/components/account-detail-drawer";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
-import { TraeAccountCard, formatCredits, jwtBadge, shortTime, shortTimeFromMs, type TraeProgram } from "@/components/trae-account-card";
+import { TraeAccountCard, formatCredits, formatExpiryTime, jwtBadge, shortTime, type TraeProgram } from "@/components/trae-account-card";
 import { secondsToMs, toDetailPacks } from "@/lib/credit-packs";
-import { TRAE_EXPIRING_SOON_MS } from "@/lib/credit-expiry";
+import { TRAE_EXPIRING_SOON_MS, summarizeExpiring } from "@/lib/credit-expiry";
+import { formatAbsoluteTime } from "@/lib/catalog-source";
+import { creditExpiryFromPacks, pickPriorityAccountId } from "@/lib/credit-priority";
 import { REFRESH_DONE_LABEL, useAccountRefreshBusy, type AccountRefreshKind } from "@/lib/account-refresh";
 import { TraeExportAccountsDialog } from "@/components/trae-export-accounts-dialog";
 import { TraeImportAccountsDialog } from "@/components/trae-import-accounts-dialog";
@@ -1019,6 +1021,31 @@ export default function TraeAccountsPage() {
   const [todayTokens, setTodayTokens] = useState<Record<string, AccountTokenTodayEntry>>({});
   const [todayTokensTruncated, setTodayTokensTruncated] = useState(false);
   /**
+   * 「今日 Token」加载 —— 与 WB 账号页**同一时机**：进页面 / 账号数变化时拉一次
+   * （`force=false`，由后端按 TTL 决定要不要重扫），只有用户显式「刷新 Token」才
+   * `force=true`。
+   *
+   * ⚠️ 代次守卫：切变体后晚到的旧响应不得覆盖新结果。
+   * ⚠️ 缺席的账号**仍然不渲染**该格（后端诚实边界：缺席 = 今日无记录 / 未知，不是 0）。
+   */
+  const tokenTodayGenRef = useRef(0);
+  const loadTokenToday = useCallback(
+    async (force: boolean) => {
+      const gen = (tokenTodayGenRef.current += 1);
+      try {
+        const today = await api.getTraeAccountTokenToday(variant, force);
+        if (gen !== tokenTodayGenRef.current) return;
+        setTodayTokens(Object.fromEntries(today.accounts.map((entry) => [entry.uid, entry])));
+        setTodayTokensTruncated(today.gatewayTruncated);
+      } catch {
+        if (gen !== tokenTodayGenRef.current) return;
+        setTodayTokens({});
+        setTodayTokensTruncated(false);
+      }
+    },
+    [variant],
+  );
+  /**
    * 逐账号签到状态（`get_trae_checkin_status_map`）——**只覆盖被刷新过的账号**。
    *
    * 刻意不在进页面时全量拉：这要逐账号打上游（N 个账号 = N 次请求），
@@ -1037,11 +1064,7 @@ export default function TraeAccountsPage() {
             await api.traeRefreshCredits(account.userId, variant);
           } else if (kind === "tokens") {
             /* 一次调用取全部账号（网关日志是区域共用的），按 uid 落到 state。 */
-            const today = await api.getTraeAccountTokenToday(variant, true);
-            setTodayTokens(
-              Object.fromEntries(today.accounts.map((entry) => [entry.uid, entry])),
-            );
-            setTodayTokensTruncated(today.gatewayTruncated);
+            await loadTokenToday(true);
           } else if (kind === "checkin") {
             /* 只问这一个账号（批量接口传 1 个 id 即可，不新增「单账号」变体）。 */
             const map = await api.getTraeCheckinStatusMap(variant, [account.userId]);
@@ -1056,7 +1079,7 @@ export default function TraeAccountsPage() {
         }
       });
     },
-    [refreshBusy, variant, loadAll, t],
+    [refreshBusy, variant, loadAll, loadTokenToday, t],
   );
 
   function refreshCreditsOne(account: TraeAccount) {
@@ -1296,7 +1319,30 @@ export default function TraeAccountsPage() {
   }
 
   const accounts = overview?.accounts ?? [];
+
+  /* 今日 Token：与 WB 账号页同时机加载（见 `loadTokenToday` 的注释）。 */
+  useEffect(() => {
+    void loadTokenToday(false);
+  }, [loadTokenToday, accounts.length]);
   const groups = overview?.groups ?? [];
+
+  /**
+   * 「建议优先」徽章（与 WB 账号页**同一判据** `pickPriorityAccountId`）。
+   *
+   * ★ 数据一直在（`get_trae_credits` 的 `packages[uid]`），只是这个页面从没算过 ——
+   *   此前 Trae 卡片压根没有这枚徽章，属漏做而不是缺功能。
+   * 判据要把逐包换算成 `CreditExpiry` 形状（`creditExpiryFromPacks`，单位秒）。
+   */
+  const priorityAccountId = useMemo(() => {
+    const now = Date.now();
+    const rows = accounts.map((account) => ({
+      id: account.userId,
+      creditPackages: credits?.packages?.[account.userId] ?? account.creditPackages ?? null,
+    }));
+    return pickPriorityAccountId(rows, (row) =>
+      creditExpiryFromPacks(row.creditPackages, { unit: "s", now }),
+    );
+  }, [accounts, credits?.packages]);
 
   /**
    * 该账号是不是**当前登录**（卡片头部高亮 + 幽灵 logo + 「当前登录」徽章 + 左侧竖条）。
@@ -1547,13 +1593,17 @@ export default function TraeAccountsPage() {
     );
   }
 
-  /** 表格「到期」列：积分到期（无到期时间 → 「长期有效」）。 */
+  /**
+   * 表格「到期」列：积分到期（无到期时间 → 「长期有效」）。
+   *
+   * ⚠️ 值里**不带**「到期」前缀：列头已经是 `trae.page.accounts.table.expiry`（「到期」），
+   * 再加前缀会渲染成「到期 | 到期 2026-11-20 23:59」。`trae.comp.card.expiry.short`
+   * （`到期 {date}`）只给**没有 label** 的位置用（资源包明细那一列）。
+   */
   function formatAccountExpiry(account: TraeAccount): string {
     // ★ issue #186：余额未知时不能说「长期有效」—— 那是断言，而我们没读到额度包。
     if (traeCreditsOrNull(account) === null) return "—";
-    return account.creditsExpireAt
-      ? t("trae.comp.card.expiry.short", { date: shortTime(account.creditsExpireAt) })
-      : t("trae.comp.card.expiry.permanent");
+    return formatExpiryTime(account.creditsExpireAt) ?? t("trae.comp.card.expiry.permanent");
   }
 
   /**
@@ -1670,10 +1720,11 @@ export default function TraeAccountsPage() {
                   : t("trae.comp.card.detail.notQueried"),
             },
             {
+              /* ⚠️ 值不带「到期」前缀：label 已是「积分到期」，带前缀会渲染成
+                 「积分到期 | 到期 2026-11-20 23:59」。 */
               label: t("trae.comp.card.detail.creditsExpiry"),
-              value: detail.creditsExpireAt
-                ? t("trae.comp.card.expiry.short", { date: shortTime(detail.creditsExpireAt) })
-                : t("trae.comp.card.expiry.permanent"),
+              value:
+                formatExpiryTime(detail.creditsExpireAt) ?? t("trae.comp.card.expiry.permanent"),
             },
           ],
         },
@@ -1718,16 +1769,30 @@ export default function TraeAccountsPage() {
    */
   const detailStats = useMemo<DetailStat[]>(() => {
     if (!detail) return [];
+    /* 本次 memo 的「现在」—— 临期汇总与兜底分支**共用**它。
+       各取一次 `Date.now()`，跨秒边界时同一批包可能一次判「临期」、一次判「不临期」，
+       而徽章那边（卡片的 `expiryNow`）又是第三个值。 */
+    const statNow = Date.now();
     const badge = jwtBadge(detail.jwtStatus, detail.jwtExpHours, t);
-    /* ★ 临期判据**只认后端标记**（`EXPIRING_SOON_SECS` = 14 天）：此前这里前端写死 7 天，
-       于是「10 天后到期的包」在卡片上说临期、点开抽屉的指标块却不说（#144 复核 §3.3）。
-       拿不到逐包标记（旧快照 / 该账号没有包）时才退回镜像常量，不再另立一个数。 */
+    /* ★ 临期判据**只认后端标记**（`EXPIRING_SOON_SECS`，现已统一为 7 天）：此前这里
+       前端写死 7 天，于是「10 天后到期的包」在卡片上说临期、点开抽屉的指标块却不说
+       （#144 复核 §3.3）。拿不到逐包标记（旧快照 / 该账号没有包）时才退回镜像常量。
+       ★ 2026-11-09：这里要的是**金额**（`7 天内到期 X 积分`），不再是布尔；同时给兜底
+         分支补上 `> 0` 下界 —— 此前只有上界，已过期的账号也命中，指标块永远是黄色（B4）。 */
     const packs = detail.creditPackages ?? [];
-    const soon =
-      packs.length > 0
-        ? packs.some((pack) => pack.expiringSoon)
-        : detail.creditsExpireAt != null &&
-          detail.creditsExpireAt - Date.now() <= TRAE_EXPIRING_SOON_MS;
+    const expiringSummary = summarizeExpiring(packs, { unit: "s", now: statNow });
+    /* 临期金额：**拿不到 ⇒ `null`（未知）**，不是 0。副文本据此整条不渲染 ——
+       主值写「—」（余额未知）时，副文本再报一个绝对金额是自相矛盾的。 */
+    const soonAmount: number | null = expiringSummary
+      ? expiringSummary.total
+      : (() => {
+          const expireAtMs = secondsToMs(detail.creditsExpireAt);
+          if (expireAtMs === null) return null;
+          /* 没有余额读数就不报金额，别把「不知道有多少」说成「0 积分要到期」。 */
+          if (detail.remainingCredits == null) return null;
+          const remain = expireAtMs - statNow;
+          return remain > 0 && remain <= TRAE_EXPIRING_SOON_MS ? detail.remainingCredits : 0;
+        })();
     const credBad = detail.jwtStatus === "expired";
 
     /* 今日 Token（issue #47）：只统计**经本网关**的调用，客户端那一档 Trae 拿不到
@@ -1787,12 +1852,21 @@ export default function TraeAccountsPage() {
       {
         key: "credits",
         label: t("shared.stat.credits"),
-        valueText: detail.credits != null ? formatCredits(detail.credits) : "—",
+        /* ★ 2026-11-09（B1）：此前读 `detail.credits` —— 那是**钱包历史里的最新快照**
+           （同日期取较大值、跨日期取最新），可能已是几天前的、也可能是当天峰值，
+           而且它是整数，与卡片 / 表格读的 `remainingCredits`（当前逐包余额，小数）
+           不是同一个数。同一个号在卡片上显示 38.85、点开抽屉变成 38，就是这么来的。
+           现在统一用 `remainingCredits`，**不显示分母**（分母是「上次快照余额」，
+           比分子还小时看起来像超额使用）。 */
+        valueText: detail.remainingCredits != null ? formatCredits(detail.remainingCredits) : "—",
         subText:
-          detail.creditsExpireAt != null
-            ? t("shared.stat.expiresAt", { when: shortTime(detail.creditsExpireAt) })
-            : t("shared.stat.noExpiry"),
-        tone: soon ? "warn" : undefined,
+          detail.remainingCredits != null && soonAmount !== null
+            ? t("shared.detail.creditsExpiring", { amount: formatCredits(soonAmount) })
+            : undefined,
+        tone:
+          detail.remainingCredits != null && soonAmount !== null && soonAmount > 0
+            ? "warn"
+            : undefined,
         refreshKind: "credits",
       },
       tokensBlock,
@@ -1814,7 +1888,7 @@ export default function TraeAccountsPage() {
    * `expire_time`），而抽屉与 `formatAbsoluteTime` 要毫秒。此前聚合页直接把秒当毫秒
    * 渲染，到期列全是 `1970-01-22`（#144 回归）—— `* 1000` 现在只允许出现在这一行。
    *
-   * ★ `expiringSoon` 改读**后端标记**（`EXPIRING_SOON_SECS` = 14 天）：此前这里前端
+   * ★ `expiringSoon` 改读**后端标记**（`EXPIRING_SOON_SECS`，现 7 天）：此前这里前端
    * 写死 7 天，于是「10 天后到期的包」在卡片上说临期、点开抽屉却不说 —— 同一枚徽章
    * 两个答案。
    */
@@ -1843,7 +1917,7 @@ export default function TraeAccountsPage() {
             expired
               ? t("trae.comp.card.package.expired")
               : expireAtMs !== null
-                ? t("trae.comp.card.expiry.short", { date: shortTimeFromMs(expireAtMs) })
+                ? t("trae.comp.card.expiry.short", { date: formatAbsoluteTime(expireAtMs) })
                 : t("trae.comp.card.expiry.permanent"),
         },
         now,
@@ -2255,6 +2329,8 @@ export default function TraeAccountsPage() {
                               onSwitchTo={requestSwitchTo}
                               onCheckin={(target) => void checkinOne(target)}
                               onRefreshCredits={refreshCreditsOne}
+                              /* ★ 2026-11-09：「优先」徽章（判据见 `priorityAccountId`）。 */
+                              creditPriority={account.userId === priorityAccountId}
                               onRefreshPart={onRefreshPart}
                               doneKinds={refreshBusy.doneKindsOf(account.userId)}
                               refreshingKinds={refreshBusy.kindsOf(account.userId)}

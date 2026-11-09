@@ -254,26 +254,64 @@ check("★ 打上游的三处自动刷新都接到 opt-in 开关（新增视图�
 /* ── 临期窗口：只认后端标记，缺标记时用**镜像常量**（#144 复核 §3.3）────────
  *
  * 这条失败模式很隐蔽：同一个包在卡片上说「临期」、点开抽屉却不说 —— 因为两处用了
- * 不同窗口（前端写死 7 天 vs 后端 14 天）。#144 复核当时数出五处实现，其中三处是
- * 前端自设窗口；现在收敛成「后端标记 + 一个镜像常量」。
+ * 不同窗口。#144 复核当时数出五处实现，其中三处是前端自设窗口；现在收敛成
+ * 「后端标记 + 两个镜像常量」。
+ *
+ * ★ 2026-11-09：窗口从 14 天统一到 **7 天**（与 WorkBuddy 的 `EXPIRING_SOON_DAYS` 同值）。
+ *   因此本门禁不再「禁止 7 天写法」，而是断言两个镜像常量都等于 7 天，并且**这两个文件
+ *   之外**不许再出现写死的窗口。
  */
-check("★ 临期窗口只剩两档：后端标记，或镜像后端的 14 天常量（不许再写死 7 天）", () => {
-  eq(TRAE_EXPIRING_SOON_MS, 14 * DAY, "TRAE_EXPIRING_SOON_MS 必须镜像后端 EXPIRING_SOON_SECS");
+check("★ 临期窗口只剩两档：后端标记，或镜像后端的 7 天常量（不许在别处写死）", () => {
+  eq(TRAE_EXPIRING_SOON_MS, 7 * DAY, "TRAE_EXPIRING_SOON_MS 必须镜像后端 EXPIRING_SOON_SECS（7 天）");
+  /* Qoder 那个文件带值导入（`@/lib/credit-expiry`），esbuild 出来的 ESM 仍带 `@/` 别名、
+     node 解不了 ⇒ 这里用源码断言，不动态 import。 */
+  const qoderSource = readFileSync(path.join(root, "src/lib/qoder-packs.ts"), "utf8");
+  if (!/export const EXPIRING_SOON_MS\s*=\s*7\s*\*\s*24\s*\*\s*3600\s*\*\s*1000\s*;/.test(qoderSource)) {
+    throw new Error("qoder-packs.EXPIRING_SOON_MS 必须与后端 EXPIRING_SOON_SECS 同值（7 天）");
+  }
+  const mirrorFiles = new Set([
+    path.join(root, "src/lib/credit-expiry.ts"),
+    path.join(root, "src/lib/qoder-packs.ts"),
+  ]);
   const offenders = [];
   for (const file of walkTs(path.join(root, "src"))) {
+    if (mirrorFiles.has(file)) continue;
     const code = readFileSync(file, "utf8")
       .split("\n")
       .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
       .join("\n");
-    /* 只抓「7 天窗口」这一种写法：`7 * 86_400_000` / `7 * 86400000` / `7 * 24 * 3600`。 */
+    /* 抓「写死的临期窗口」：`7 * 86_400_000` / `7 * 86400000` / `7 * 24 * 3600`。 */
     if (/\b7\s*\*\s*(?:86_?400_?000|24\s*\*\s*3600)/.test(code)) {
       offenders.push(path.relative(root, file));
     }
   }
   if (offenders.length > 0) {
     throw new Error(
-      `这些文件仍在前端自设 7 天临期窗口（应用后端标记或 TRAE_EXPIRING_SOON_MS）：${offenders.join("、")}`,
+      `这些文件仍在自行写死临期窗口（应用后端标记或 TRAE_EXPIRING_SOON_MS / EXPIRING_SOON_MS）：${offenders.join("、")}`,
     );
+  }
+});
+
+/* ── 文案里的窗口天数 ──────────────────────────────────────────────────────
+ *
+ * 「7 天内到期 X 积分」把窗口**写进了句子**（不是参数化的 `{days}`）。常量改了、
+ * 文案没改，界面就会说假话 —— 而且这种假话没有任何测试会红。
+ * 这里把两边钉在一起：文案里的天数必须等于 `TRAE_EXPIRING_SOON_MS / DAY`。
+ */
+check("★ 抽屉副文本的「7 天」与窗口常量同值（改窗口必须同步改文案）", () => {
+  const days = TRAE_EXPIRING_SOON_MS / DAY;
+  for (const lang of ["zh", "en"]) {
+    const source = readFileSync(path.join(root, `src/locales/domains/shared.${lang}.ts`), "utf8");
+    const line = source.match(/^\s*"shared\.detail\.creditsExpiring":\s*"([^"]*)"/m);
+    if (!line) {
+      throw new Error(`src/locales/domains/shared.${lang}.ts 里找不到 shared.detail.creditsExpiring`);
+    }
+    /* 尾部不锚 `\b`：中文「7 天内」的「天」与「内」之间没有单词边界，锚了就永远匹配不上。 */
+    if (!new RegExp(`\\b${days}\\s*(天|days?)`).test(line[1])) {
+      throw new Error(
+        `shared.${lang}.ts 的 creditsExpiring 文案（"${line[1]}"）没有写 ${days} 天 —— 与 TRAE_EXPIRING_SOON_MS 不一致`,
+      );
+    }
   }
 });
 

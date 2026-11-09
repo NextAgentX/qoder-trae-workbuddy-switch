@@ -49,7 +49,7 @@ export const en = {
 
   // ---- Expiry ----
   "trae.comp.card.expiry.permanent": "No expiry",
-  "trae.comp.card.expiry.short": "Due {date}",
+  "trae.comp.card.expiry.short": "Expires {date}",
   // 2026-10-12: the in-card "big number row + expiring packages list" was removed to match
   // the prototype card, so the related keys are gone.
 
@@ -61,21 +61,25 @@ export const en = {
   "trae.comp.card.label.group": "Group",
 
   // ---- Status chips ----
-  "trae.comp.card.chip.checked": "Checked in",
+  "trae.comp.card.chip.checked": "Checked in today",
   "trae.comp.card.chip.toolsInUse": "{n} tools in use",
   "trae.comp.card.chip.expired": "Credentials expired",
   "trae.comp.card.chip.needRelogin": "Needs re-login",
-  "trae.comp.card.chip.expiring": "{amount} credits expire within {days} days",
-  // issue #83 · 3 (second half): per-package name / remaining / expiry must be visible,
-  // not just the aggregate. Rendered in a tooltip — the card is a fixed 4-block layout.
-  "trae.comp.card.packs.title": "Credit packages ({n})",
-  "trae.comp.card.packs.line": "{name} · {remaining}/{total} left · expires {expire}",
-  "trae.comp.card.packs.lineExpired": "{name} · {remaining}/{total} left · expired {expire}",
-  "trae.comp.card.packs.unnamed": "Unnamed package",
+  "trae.comp.card.chip.expiring": "Closest expiry in {days} days · {amount} credits",
+  /* Within 48 hours the badge speaks in hours, so 25h and 47h stay distinguishable. */
+  "trae.comp.card.chip.expiringHours": "Closest expiry in {hours} hrs · {amount} credits",
+  /* Badge tooltip detail — same shape as WB / Qoder (one line per batch, merge by expiry,
+     no package name; package names live in the drawer's pack table).
+     Each line leads with an absolute timestamp, matching dates shown elsewhere. */
+  "trae.comp.card.expiringTipTitle": "Expiring batches ({n})",
+  "trae.comp.card.expiringTipLine": "{time} · {amount} credits",
+  "trae.comp.card.chip.priority": "Priority",
+  "trae.comp.card.chip.priorityTip": "Recommended priority",
   "trae.comp.card.chip.unchecked": "Not checked in today",
   "trae.comp.card.chip.cooling": "Cooling down",
-  "trae.comp.card.chip.jwtAuto": "Auto-refresh JWT",
-  "trae.comp.card.chip.jwtManual": "JWT refreshable",
+  /* JWT renewal is a long-lived attribute, not a state needing attention — no badge
+     (it would crowd out the time-sensitive expiry / check-in slots). Fully surfaced in
+     the drawer's metric rows via `trae.comp.card.detail.jwtAuto*`. */
   "trae.comp.card.cooldown.until": " · until {time}",
   "trae.comp.card.cooldown.fallback": "Cooling down ({type})",
   "trae.comp.card.chip.authRejected": "Credential rejected (self-healing)",
@@ -139,7 +143,6 @@ export const en = {
   // Same names and meaning as the WorkBuddy card: both product areas render one card shape.
   "trae.comp.card.currentLogin": "Current login",
   "trae.comp.card.metric.credits": "Credits",
-  "trae.comp.card.metric.expiry": "Expires",
 
   // ---- Detail drawer sections (assembled by TraeAccountsPage) ----
   "trae.comp.card.detail.section.account": "Account",

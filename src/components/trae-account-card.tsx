@@ -15,12 +15,11 @@ import { AVATAR_TEXT_CLASS, accountInitials, avatarTone } from "@/components/acc
 import { displayText } from "@/lib/display-text";
 import { cooldownAgeKey, describeTraeCooldown } from "@/lib/trae-cooldown";
 import { EXPIRY_TIP_MAX_HEIGHT, summarizeExpiring } from "@/lib/credit-expiry";
-import { formatRelativeTime } from "@/lib/catalog-source";
+import { formatAbsoluteTime, formatRelativeTime } from "@/lib/catalog-source";
 import { useT, type Translate } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import type {
   TraeAccount,
-  TraeCreditPackage,
   TraeJwtStatus,
   TraeProgramId,
   TraeRegionId,
@@ -40,22 +39,18 @@ export function hoursText(hours: number | null, t: Translate): string {
   return t("trae.comp.card.hours.days", { count: Math.floor(hours / 24) });
 }
 
-/** Unix 秒 → `MM-DD HH:mm`。 */
+/**
+ * Unix 秒 → `MM-DD HH:mm`。
+ *
+ * ⚠️ 只给**同一天内不需要年份**的位置用（Trae 页面的 Token 到期列、统计行）。
+ * 积分包到期一律走 `formatAbsoluteTime`（`lib/catalog-source.ts`，`YYYY-MM-DD HH:mm`）：
+ * 只到 `MM-DD` 会让跨年的批次看起来像今年。
+ */
 export function shortTime(seconds: number | null): string {
   if (!seconds) return "—";
   const date = new Date(seconds * 1000);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-/**
- * `shortTime` 的**毫秒**版。
- *
- * Trae 上游给的是秒，但归一之后（`credit-packs.ts` 的 `expireAtMs`）全仓只传毫秒。
- * 有这一层，调用方就不必各自记得「这里要除回 1000」—— 少一次心算，少一次 #144。
- */
-export function shortTimeFromMs(ms: number | null): string {
-  return shortTime(ms === null ? null : ms / 1000);
 }
 
 /** JWT 状态 → Badge 变体与文案。 */
@@ -87,18 +82,20 @@ export function formatCredits(value: number | null): string {
 }
 
 /**
- * 到期日**只到日**（`MM/DD`）—— 指标行专用。
+ * 到期时刻 `YYYY-MM-DD HH:mm`（本地时区），**与 WorkBuddy 同一出口** `formatAbsoluteTime`。
  *
- * ⚠️ 只返回日期本身：指标行的标签已经写了「到期」，若值再带后缀就成了
- * 「到期 10/03 到期」。原型 `.acct-metrics` 的值也是**纯值**（标签在行内）。
+ * 历史：这里曾只给 `MM/DD`（指标行当时只到日）。但积分包的真实到期时刻精确到分钟，
+ * 只给日期会让「今天 23:59 到期」和「今天 00:10 到期」看起来是同一件事 —— 用户按
+ * 这个时间决定先消耗哪批。统一到全仓唯一的绝对时间格式（`lib/catalog-source.ts`）。
+ *
+ * ⚠️ 返回 `null` 而不是空串：调用方用 `?? t("…permanent")` 回落「长期有效」，
+ *   空串会让 `??` 失效、渲染出一个空白。
  */
-export function formatExpiryDate(seconds: number | null): string | null {
+export function formatExpiryTime(seconds: number | null): string | null {
   if (!seconds) return null;
-  const date = new Date(seconds * 1000);
-  if (Number.isNaN(date.getTime())) return null;
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const dd = String(date.getDate()).padStart(2, "0");
-  return `${mm}/${dd}`;
+  const ms = seconds * 1000;
+  if (!Number.isFinite(ms)) return null;
+  return formatAbsoluteTime(ms) || null;
 }
 
 /**
@@ -233,6 +230,13 @@ interface Props {
   onOpenDetail?: (account: TraeAccount) => void;
   /** 「更多 → 编辑备注」：打开抽屉并进入编辑态。 */
   onEditRemark?: (account: TraeAccount) => void;
+  /**
+   * 是否被 `lib/credit-priority.ts` 选为「建议优先使用」的账号。
+   *
+   * 与 WB 卡片同一枚徽章、同一判据（`pickPriorityAccountId`），只是各域自建词条。
+   * 此前 Trae / Qoder 根本没传这个 prop —— 数据在，徽章漏做。
+   */
+  creditPriority?: boolean;
 }
 
 /**
@@ -280,6 +284,7 @@ export function TraeAccountCard({
   onToggleSelect,
   onOpenDetail,
   onEditRemark,
+  creditPriority = false,
 }: Props) {
   const t = useT();
   /**
@@ -350,7 +355,17 @@ export function TraeAccountCard({
         .join(" · ")
     : "";
 
-  /** 第 2 槽「状态」—— 与原型 `accountStatus()` 同一口径（互斥的一枚）。 */
+  /**
+   * 第 2 槽「状态」—— 与原型 `accountStatus()` 同一口径（互斥的一枚）。
+   *
+   * ⚠️ 签到态**没有「未知」态**：`TraeAccount.checkedToday` 是后端必填布尔
+   * （`lib/trae-types.ts`），`checkedTodayOverride` 也是 `boolean` —— 二者都不是
+   * `boolean | null`。所以这里就是**二态**，别写成三态：那个 `null` 分支永远走不到，
+   * 而注释里声称「undefined 还没查到」会让下一个人以为存在未知态。
+   *
+   * （Qoder 那边不同：`checkinToday?: boolean | null`，null 是真未知，那里才需要三态。）
+   */
+  const checkedToday = checkedTodayOverride ?? account.checkedToday;
   const statusChip =
     account.jwtStatus === "expired" ? (
       <Badge variant="destructive" className={chipClass}>
@@ -364,90 +379,78 @@ export function TraeAccountCard({
       >
         {t(cooldownDisplay.labelKey)}
       </Badge>
-    ) : !(checkedTodayOverride ?? account.checkedToday) ? (
-      <Badge variant="warning" className={chipClass}>
-        {t("trae.comp.card.chip.unchecked")}
-      </Badge>
-    ) : (
+    ) : checkedToday ? (
       <Badge variant="success" className={chipClass}>
         <CircleCheck /> {t("trae.comp.card.chip.checked")}
+      </Badge>
+    ) : (
+      <Badge variant="warning" className={chipClass}>
+        {t("trae.comp.card.chip.unchecked")}
       </Badge>
     );
 
   /**
-   * 第 3 槽「N 积分 M 天内过期」—— 口径与 WorkBuddy 卡片**同一实现**（`summarizeExpiring`）：
-   * 金额 = 窗口内全部临期之和、天数 = 其中最晚那一刻，逐批明细进 tooltip。
+   * 第 3 槽「最近到期 N天 · M 积分」—— 口径与 WorkBuddy / Qoder 卡片**同一实现**
+   * （`summarizeExpiring`）：天数与金额都取**最快到期的那一批**，
+   * 逐批明细进 tooltip（一行一批、按到期时刻合并、**不带包名**、绝对时刻）。
    *
    * ⚠️ Trae 的 `expireAt` 是**秒**（后端直接透传上游 `expire_time`），WorkBuddy 是毫秒 ——
    * 单位必须显式传给汇总函数，此前这里靠 `> 1e12` 猜单位，猜错一次就会整条徽章消失。
-   */
-  /**
-   * 逐包明细（issue #83 · 3 后半）。
    *
-   * 排序：**未过期**按到期时刻升序（`null` 视为永久 ⇒ 排最后），**已过期**整体排到末尾
-   * —— 用户看这一列是为了决定「先用哪个」，把已浪费的排在前面会抢走注意力
-   * （与 `credit-priority` 的分档同一条道理）。
-   *
-   * ★ issue #143：**已用完的包（`remaining <= 0`）不列**。徽章金额只统计还有余额的包，
-   * 列表却列全部，会让同一枚徽章的两半互相矛盾（「剩 0/100」的行摆在「临期 X 积分」旁边）。
+   * ★ 2026-11-09：此前的「逐包列出（带名称 + 剩/总）」已删。包名不是 Trae 的特色
+   *   （WB 的 `CreditResource` 本来就有 `packageName`，只是从未放进 tooltip），
+   *   三平台统一为「按到期时刻分批 + 悬浮列表绝对时刻」；包名去抽屉的「资源包明细」表看。
    */
-  const packsSorted = (account.creditPackages ?? [])
-    .filter((pkg) => pkg.remaining > 0)
-    .sort((left, right) => {
-      if (left.expired !== right.expired) return left.expired ? 1 : -1;
-      const leftExpiry = left.expireAt ?? Number.POSITIVE_INFINITY;
-      const rightExpiry = right.expireAt ?? Number.POSITIVE_INFINITY;
-      return leftExpiry - rightExpiry;
-    });
+  /* 本次渲染的「现在」：徽章天数与悬浮列表的批次过滤**共用**这一个值 —— 各取一次会让
+     同一批积分在徽章上已算进「N天」、在列表里却因跨过到期时刻被滤掉。 */
+  const expiryNow = Date.now();
+  const expiring = summarizeExpiring(account.creditPackages, { unit: "s", now: expiryNow });
 
-  /** 逐包浮层内容：名称 · 剩余/总额 · 到期。标题钉在浮层顶部，列表限高可滚。 */
-  const packsTipBody = (rows: readonly TraeCreditPackage[], title: string) => (
+  /** 逐批明细（最急的在前）—— 与 WB / Qoder 同形状，只是词条属 Trae 域。 */
+  const expiryTipBody = (batches: readonly { expireAt: number; amount: number }[]) => (
     <>
-      <div className="sticky -top-2 -mx-3 -mt-2 bg-popover px-3 pb-1 pt-2 font-medium">{title}</div>
-      {rows.map((pkg, index) => (
-        <div
-          key={`${pkg.packageCode ?? pkg.packageName ?? "pack"}-${index}`}
-          className="whitespace-nowrap tabular-nums"
-        >
-          {t(pkg.expired ? "trae.comp.card.packs.lineExpired" : "trae.comp.card.packs.line", {
-            name: pkg.packageName ?? pkg.packageCode ?? t("trae.comp.card.packs.unnamed"),
-            remaining: formatCredits(pkg.remaining),
-            total: formatCredits(pkg.total),
-            expire: formatExpiryDate(pkg.expireAt) ?? t("trae.comp.card.expiry.permanent"),
+      <div className="sticky -top-2 -mx-3 -mt-2 bg-popover px-3 pb-1 pt-2 font-medium">
+        {t("trae.comp.card.expiringTipTitle", { n: batches.length })}
+      </div>
+      {batches.map((batch) => (
+        <div key={batch.expireAt} className="whitespace-nowrap tabular-nums">
+          {t("trae.comp.card.expiringTipLine", {
+            /* 绝对时刻（`YYYY-MM-DD HH:mm`），与账号页 / 抽屉里的日期可直接对照。 */
+            time: formatAbsoluteTime(batch.expireAt),
+            amount: formatCredits(batch.amount),
           })}
         </div>
       ))}
     </>
   );
 
-  const expiring = summarizeExpiring(account.creditPackages, { unit: "s" });
+  /* 徽章文案：≤ 48 小时用小时，超过才用天（与 `summarizeExpiring.soonestUnit` 同源）。 */
+  const expiringChipText = expiring
+    ? expiring.soonestUnit === "hours"
+      ? t("trae.comp.card.chip.expiringHours", {
+          amount: formatCredits(expiring.soonestAmount),
+          hours: expiring.soonestHours,
+        })
+      : t("trae.comp.card.chip.expiring", {
+          amount: formatCredits(expiring.soonestAmount),
+          days: expiring.soonestDays,
+        })
+    : "";
   const expiringChip = expiring ? (
     <Tooltip>
       <TooltipTrigger asChild>
         <Badge
           variant="warning"
           className={chipClass}
-          aria-label={t("trae.comp.card.chip.expiring", {
-            amount: formatCredits(expiring.total),
-            days: expiring.days,
-          })}
+          aria-label={expiringChipText}
         >
-          {t("trae.comp.card.chip.expiring", { amount: formatCredits(expiring.total), days: expiring.days })}
+          {expiringChipText}
         </Badge>
       </TooltipTrigger>
       {/* issue #79：逐批明细可能有几十行 ⇒ 限高可滚，标题钉在浮层顶部。
-          与 WB 卡片同一处理（`EXPIRY_TIP_MAX_HEIGHT`），见 `account-card.tsx::expiryTipBody`。 */}
+          与 WB / Qoder 卡片同一处理（`EXPIRY_TIP_MAX_HEIGHT`）。 */}
       <TooltipContent side="top" style={{ maxHeight: EXPIRY_TIP_MAX_HEIGHT }}>
-        {(() => {
-          /* ★ 逐包列出（带**名称**与剩余量），而不是只按到期时刻分批：
-             分批会把同一天到期的多个包合成一行、名称全部丢失，而用户要判断
-             「先用哪个」恰恰需要名称（「月卡」和「活动赠送」不是一回事）。 */
-          const soon = packsSorted.filter((pkg) => pkg.expiringSoon && !pkg.expired);
-          return packsTipBody(
-            soon,
-            t("trae.comp.card.packs.title", { n: soon.length }),
-          );
-        })()}
+        {expiryTipBody(expiring.batches)}
       </TooltipContent>
     </Tooltip>
   ) : null;
@@ -461,6 +464,11 @@ export function TraeAccountCard({
       )}
       {statusChip}
       {expiringChip}
+      {creditPriority ? (
+        <Badge variant="info" className={chipClass} title={t("trae.comp.card.chip.priorityTip")}>
+          {t("trae.comp.card.chip.priority")}
+        </Badge>
+      ) : null}
     </>
   );
 
@@ -590,9 +598,13 @@ export function TraeAccountCard({
   const identity = remark ? `${name} · UID · ${account.userId}` : `UID · ${account.userId}`;
 
   /* 「当前登录」徽章**单独拆出来**、与昵称同一行（原型 `:2502`）。
-     ⚠️ 不能塞进下面的 `statusChips` 行：那会把头部撑成三行（WorkBuddy 侧已踩过）。 */
+     ⚠️ 不能塞进下面的 `statusChips` 行：那会把头部撑成三行（WorkBuddy 侧已踩过）。
+     ★ 2026-11-09：样式从 `variant="secondary"` + 手写 `bg-primary/16 text-primary` 改为
+       `variant="info"` —— **颜色一模一样**（`badge.tsx` 里 `info` 的定义就是
+       `bg-primary/16 text-primary`），删的是重复：同一个语义（「这个号正登着」）
+       在 WB / Qoder 早就用 `info`，只有这里手抄了一遍色值，改主题时会漏掉这一处。 */
   const currentLoginBadge = current ? (
-    <Badge variant="secondary" className={cn(chipClass, "shrink-0 border-transparent bg-primary/16 text-primary")}>
+    <Badge variant="info" className={cn(chipClass, "shrink-0")}>
       {t("trae.comp.card.currentLogin")}
     </Badge>
   ) : null;
@@ -603,18 +615,11 @@ export function TraeAccountCard({
   const updatedSeconds = account.updatedAt ? Math.floor(new Date(account.updatedAt).getTime() / 1000) : null;
   /* ★ 指标行 —— 与 WorkBuddy 卡片、原型 `.acct-metrics`（`demo.css:341-342`）同一形状：
      `display:flex; gap:14px; font-size:11.5px; color:var(--muted-fg)`，**不换行**、无下边距。
-     Trae 没有「今日 Token」数据源 ⇒ 第二格用真实有的「到期」，**不摆一个永远「—」的假指标**。
+     Trae 的第二格是「今日 Token」（与 WorkBuddy 同形；无数据时整格不渲染）。
+     ★ 2026-11-09：删除原「到期」格 —— 它显示 `creditsExpireAt`（仍有剩余的包里最早到期的
+       那一笔），与临期徽章「最近到期 N天 · M 积分」回答同一个问题，且没有窗口与批次说明，
+       读起来像「这些积分全部在这天到期」。要看具体到期时刻，用徽章的悬浮列表（逐批绝对时刻）。
      第三格与原型一致：**无标签的相对时间**（`2 分钟前`），绝对时刻挂 `title`。 */
-  /* 积分总量 = 各包 `total` 之和（原型 `.acct-metrics` 是 `积分 X/Y`）。取不到包 ⇒ 不写「/Y」。
-     ★ issue #143：**已过期的包不计入分母** —— 分母的语义是「可用总额」，
-       把已经作废的额度算进去会让 `X/Y` 长期看着用不完。 */
-  const creditTotal = (() => {
-    const pkgs = (account.creditPackages ?? []).filter((pkg) => !pkg.expired);
-    if (pkgs.length === 0) return null;
-    const sum = pkgs.reduce((acc, pkg) => acc + pkg.total, 0);
-    return sum > 0 ? sum : null;
-  })();
-
   /** 今日 Token 合计（客户端 + 网关；Trae 客户端档恒为 0）。 */
   const todayTokenTotal = (entry: AccountTokenTodayEntry) =>
     entry.clientIn + entry.clientOut + entry.gatewayIn + entry.gatewayOut;
@@ -630,20 +635,14 @@ export function TraeAccountCard({
         <b className="font-semibold tabular-nums text-foreground">
           {formatCredits(account.remainingCredits)}
         </b>
-        {creditTotal === null ? "" : `/${formatCredits(creditTotal)}`}
-      </span>
-      <span>
-        {t("trae.comp.card.metric.expiry")}{" "}
-        <b className="font-semibold tabular-nums text-foreground">
-          {/* ★ issue #186：余额未知时**不能**说「长期有效」——「没有到期时间」是一个断言，
-              而我们其实根本没读到额度包。未知就写未知。 */}
-          {hasCredits
-            ? (formatExpiryDate(account.creditsExpireAt) ?? t("trae.comp.card.expiry.permanent"))
-            : "—"}
-        </b>
       </span>
       {todayTokens ? (
-        <span title={t("shared.cardMenu.refresh.tokensHint")}>
+        /* ★ 与抽屉同一说明：Trae 的今日 Token **只含网关量**（后端 `clientSource`
+           恒为 `"unavailable"`，客户端会话在 IDE 私有存储里不可解析）。
+           不要借 WB 的 `shared.cardMenu.refresh.tokensHint` —— 那句说的是
+           「重读客户端会话日志 + 网关日志」，对 Trae 是假话。
+           若将来该接口能读到客户端档，这里要一并改成按 `clientSource` 分支。 */
+        <span title={t("shared.stat.tokensGatewayOnly")}>
           {t("shared.stat.tokens")}{" "}
           <b className="font-semibold tabular-nums text-foreground">
             {todayTokensTruncated
@@ -710,7 +709,7 @@ export function TraeAccountCard({
         {/* 「手动签到」与 WorkBuddy 卡片菜单同位（刷新之后、删除之前）。
             只在今日未签到时出现：已签到的账号再点一次只会被跳过策略拦下，
             摆一个点不动的入口比不摆更差。 */}
-        {!(checkedTodayOverride ?? account.checkedToday) && (
+        {!checkedToday && (
           <DropdownMenuItem disabled={featuresDisabled || checkingIn} onSelect={() => onCheckin?.(account)}>
             <CircleCheck />{t("trae.comp.card.menu.checkin")}
           </DropdownMenuItem>
