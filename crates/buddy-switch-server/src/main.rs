@@ -263,31 +263,6 @@ fn spawn_background_task(spec: TaskSpec) {
                 );
             }
         },
-        // ★ Trae 逐请求积分回填（2026-11-07）：**独立**循环，60 秒巡检一次内存日志。
-        //
-        // 为什么独立：它刷的是「每一条请求花了多少积分」（供日志与账本），
-        // 与 `CreditsRefresh` 的「账号还剩多少积分」（供选号权重）是两件事、两种节奏。
-        //
-        // ⚠️ 它**不会**每轮都打上游：没有 `creditState == "pending"` 的条目时
-        //    一次请求都不发；网关未启动整轮跳过；单账号冷却 60 秒（与 tick 同频）。
-        TaskKind::CreditBackfill => {
-            tokio::spawn(async move {
-                loop {
-                    let state = trae_gateway_host::shared_state();
-                    /* 与网关监听无关：只看日志里有没有待回填条目。
-                    没有 pending 时一轮上游请求都不发。 */
-                    let _ = buddy_switch_gateway::trae::credit_backfill::run_once(
-                        &state,
-                        buddy_switch_gateway::trae::credit_backfill::Trigger::Auto,
-                    )
-                    .await;
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        buddy_switch_gateway::trae::credit_backfill::TICK_INTERVAL_MS,
-                    ))
-                    .await;
-                }
-            });
-        }
         // 账号池治理状态落盘：**周期**刷新，且只在有改动时写（`flush_if_dirty`）。
         //
         // ★ 为什么必须有它：`Pool::flush_if_dirty` 此前**没有任何生产调用点** ——

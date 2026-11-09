@@ -30,18 +30,16 @@ function statusTone(status: number): string {
 }
 
 /**
- * 最近 N 条 Trae 网关请求日志（仅元数据）+ 清空。
+ * 最近 N 条 Trae 网关请求日志（仅元数据）+ 刷新 / 清空。
  *
  * 对齐 WorkBuddy `gateway/request-log.tsx` 骨架，但**不搬 `regionDescriptor`**：
  * Trae 无 region，日志行里也就没有版本列。
  *
- * 「积分」列：Qoder 的上游逐请求回报 `usage.credits`，而 **Trae 的 SSE 不回报积分** ——
- * 它的积分由后台从上游账单**回填**（出账比请求晚 6–8 秒，见
- * `crates/buddy-switch-gateway/src/trae/credit_backfill.rs`）。因此这一列有三种状态：
- * 数值（已回填）、`…`（等账单，`creditState === "pending"`）、`—`（上游没有对应账单 /
- * 升级前的老条目）。**不能**把「等账单」画成 0 —— 那会被读成「免费」。
+ * 「积分」列同理是**可选**的（`credit` 取值函数）：Qoder 的上游逐请求回报
+ * `usage.credits`，Trae 的上游不回报 —— 让 Trae 页也画一列恒 0 的积分，
+ * 读者只会得出「Trae 免费用」这个错误结论。
  *
- * 本组件是**纯展示**：数据与清空 / 刷新动作都由页面持有（页面的 `loadAll` 已经拉了
+ * 本组件是**纯展示**：数据与刷新 / 清空动作都由页面持有（页面的 `loadAll` 已经拉了
  * 日志，组件再自拉一次只会得到两份可能不同步的快照）。
  *
  * ## 2026-10-15 骨架对齐原型：去掉 `<Card>`
@@ -51,11 +49,10 @@ function statusTone(status: number): string {
  * 分区导航重复，已去掉；**清空按钮必须保留**（本分区的写操作出口），独占表前一行
  * （与 WB 侧 `request-log.tsx` 同口径）。
  *
- * ## 2026-11-07 工具条加「刷新」
+ * ## 工具条「刷新」
  *
- * 页面心跳从 10 秒放慢到 5 分钟后，「等不到新积分」需要一个**手动出口**：`onRefresh`
- * 会催一轮上游账单回填（不是重绘）。冷却文案（`refreshCooling`）只换字不置灰 ——
- * 见该 prop 的说明。
+ * 语义由调用方决定：Trae 页 = 重读一份内存日志；WorkBuddy / Qoder 同样只重读列表。
+ * 组件只负责触发与进行中态。
  */
 export function TraeRequestLog<T extends TraeGatewayLogEntry>({
   logs,
@@ -63,10 +60,8 @@ export function TraeRequestLog<T extends TraeGatewayLogEntry>({
   onClear,
   onRefresh,
   refreshing,
-  refreshCooling,
   className,
   credit,
-  creditState,
 }: {
   logs: T[];
   clearing: boolean;
@@ -74,39 +69,21 @@ export function TraeRequestLog<T extends TraeGatewayLogEntry>({
   /**
    * 可选：**刷新**出口。给了才渲染按钮（在「清空」左侧）。
    *
-   * 具体语义由调用方决定：Trae 页是「催一轮积分回填 + 重读日志」，WorkBuddy /
-   * Qoder 的日志不需要回填 ⇒ 只重读列表。组件只负责触发与进行中态。
+   * 具体语义由调用方决定：目前三个平台都只是**重读日志列表**，不打上游。
    */
   onRefresh?: () => void;
   /** 刷新进行中（转圈 + 禁用）。 */
   refreshing?: boolean;
-  /**
-   * 刷新被节流：**冷却中不置灰整个按钮**，只改文案。
-   *
-   * 原因是「刚查过」这件事用户看不出来（自动心跳也在打上游），置灰会让人以为是坏了；
-   * 点了给一句「刚刚查过，稍后再试」比一个死按钮有用。
-   */
-  refreshCooling?: boolean;
   className?: string;
   /**
    * 可选：**积分取值函数**。给了才渲染「积分」列（列位在「耗时」与「Token」之间）。
    *
    * 为什么是函数而不是布尔开关：Qoder 的日志键叫 `credits`（复数）、Trae 的日志
-   * 由后台回填（可能是 `null`），且将来归一化口径可能再变 —— 取值方式交给调用方，
-   * 组件只负责排版。
-   * 返回值语义：`null`/`undefined` ⇒ `—`（未知：等账单 / 老条目）；`0` ⇒ 显示 `0`
-   * （上游确实记了 0 积分，**不等于免费**，表头带提示）。
+   * 压根没有这个键，且将来归一化口径可能再变 —— 取值方式交给调用方，组件只负责排版。
+   * 返回值语义：`null`/`undefined` ⇒ `—`（键不存在：升级前的老条目）；`0` ⇒ 显示 `0`
+   * （上游没上报，**不等于免费**，表头带提示）。
    */
   credit?: (entry: T) => number | null | undefined;
-  /**
-   * 可选：**积分状态函数**。用于区分两种「没有数字」：
-   *
-   * - `"pending"` ⇒ 显示 `…`（账单还没出，后台会自动补 —— 与「没有」是两件事）；
-   * - `"unmatched"` / `null` ⇒ 显示 `—`（上游没有对应账单 / 升级前的老条目）。
-   *
-   * 不给这个函数时退化为「没有数字就是 `—`」，与改造前一致。
-   */
-  creditState?: (entry: T) => string | null | undefined;
 }) {
   const t = useT();
 
@@ -121,19 +98,9 @@ export function TraeRequestLog<T extends TraeGatewayLogEntry>({
       <div className="mb-3 flex items-center justify-end gap-1">
         {onRefresh ? (
           <DemoAction>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={refreshing || clearing}
-              onClick={onRefresh}
-              /* 冷却中不置灰：只换文案。自动心跳 5 分钟一次，「刚查过」用户看不见，
-                 死按钮只会让人以为坏了。 */
-              title={refreshCooling ? t("trae.gateway.log.refreshCooling") : undefined}
-            >
+            <Button variant="ghost" size="sm" disabled={refreshing || clearing} onClick={onRefresh}>
               <RefreshCw className={cn(refreshing && "animate-spin")} />
-              {refreshCooling
-                ? t("trae.gateway.log.refreshCooling")
-                : t("trae.gateway.log.refresh")}
+              {t("trae.gateway.log.refresh")}
             </Button>
           </DemoAction>
         ) : null}
@@ -185,11 +152,7 @@ export function TraeRequestLog<T extends TraeGatewayLogEntry>({
             </thead>
             <tbody>
               {rows.map((entry, index) => (
-                <tr
-                  /* `id` = 进程内唯一的回填定位键；老条目没有 ⇒ 回退到 ts+index。 */
-                  key={entry.id ?? `${entry.ts}-${index}`}
-                  className="border-b border-border/40 last:border-0"
-                >
+                <tr key={`${entry.ts}-${index}`} className="border-b border-border/40 last:border-0">
                   <td className="whitespace-nowrap px-5 py-2 font-mono text-xs">{formatClock(entry.ts)}</td>
                   {/* 账号：显示**原值** + `truncate`（完整值放 `title`）。
                       此前只取末 8 位 —— 与 WB 侧的「显示全名」对不上，同一个账号在
@@ -214,26 +177,7 @@ export function TraeRequestLog<T extends TraeGatewayLogEntry>({
                   </td>
                   {credit ? (
                     <td className="px-3 py-2 text-right font-mono text-xs text-muted-foreground">
-                      {(() => {
-                        const state = creditState?.(entry);
-                        if (state === "pending") {
-                          /* 账单还没出：`…` 而不是 0 或 `—`。
-                             出账实测晚 6–8 秒，后台 60 秒内必补上，用户看到的是「正在算」。 */
-                          return (
-                            <span title={t("trae.gateway.log.creditPending")} aria-label={t("trae.gateway.log.creditPending")}>
-                              …
-                            </span>
-                          );
-                        }
-                        if (state === "unmatched") {
-                          return (
-                            <span title={t("trae.gateway.log.creditUnmatched")} aria-label={t("trae.gateway.log.creditUnmatched")}>
-                              —
-                            </span>
-                          );
-                        }
-                        return formatCredit(credit(entry));
-                      })()}
+                      {formatCredit(credit(entry))}
                     </td>
                   ) : null}
                   <td className="px-5 py-2 text-right font-mono text-xs text-muted-foreground">

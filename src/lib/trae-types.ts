@@ -926,22 +926,6 @@ export interface TraeGatewayLogEntry {
   keyId?: string | null;
   /** ★ `keyId` 的归属台账（`"trae"` / `"unified"` / `null`）。 */
   keyScope?: string | null;
-  /**
-   * ★ 积分回填的定位键（`<ts>-<seq>`）。老条目没有 ⇒ `undefined`。
-   *
-   * 只用于稳定渲染 key，不参与任何业务判断。
-   */
-  id?: string;
-  /**
-   * ★ 这次请求的积分（由后台从上游账单回填；Trae 的 SSE 不回报积分）。
-   *
-   * - `number`：已回填（`0` = 上游确实记了 0，**不是免费**）；
-   * - `null`：还没回填（配合 `creditState === "pending"` 显示 `…`）；
-   * - `undefined`：升级前的老条目 —— 永远不会回填，显示 `—`。
-   */
-  credit?: number | null;
-  /** `pending`（等账单）/ `matched`（已回填）/ `unmatched`（上游没有对应记录）。 */
-  creditState?: string | null;
 }
 
 /** 对外暴露的模型条目（`get_trae_gateway_models`）。 */

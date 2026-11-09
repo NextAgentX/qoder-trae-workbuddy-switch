@@ -742,11 +742,6 @@ fn api_routes() -> Router {
             "/api/trae/gateway/logs/clear",
             post(api_trae_clear_gateway_logs),
         )
-        // 立即催一轮积分回填（后台另有 60 秒周期任务）：用户点「刷新」的入口。
-        .route(
-            "/api/trae/gateway/credits/refresh",
-            post(api_trae_refresh_request_credits),
-        )
         // ---- 桌面悬浮窗（P9 · 只读数据层）----
         // 与 `src-tauri/src/commands.rs` 的 `companion_*` 一一对应（两宿主同步）。
         // 悬浮窗本体是**桌面端**的独立窗口；webui 无此窗口 ⇒ 显隐 / 聚焦返回结构化
@@ -5285,28 +5280,6 @@ async fn api_trae_clear_gateway_logs() -> Response {
     let state = crate::trae_gateway_host::shared_state();
     state.log.clear();
     json_ok(json!({ "ok": true }))
-}
-
-/// POST /api/trae/gateway/credits/refresh —— 立即催一轮积分回填。
-///
-/// 与桌面端 `refresh_trae_request_credits` **逐字同源**：都只是把后台那一轮
-/// 提前到现在，「同一账号 120 秒一次」的约束由 `run_once` 内部（冷却 + 退避）
-/// 保证，这里不重复实现。
-async fn api_trae_refresh_request_credits() -> Response {
-    let state = crate::trae_gateway_host::shared_state();
-    let report = buddy_switch_gateway::trae::credit_backfill::run_once(
-        &state,
-        buddy_switch_gateway::trae::credit_backfill::Trigger::Manual,
-    )
-    .await;
-    json_ok(json!({
-        "pending": report.pending,
-        "requests": report.requests,
-        "matched": report.matched,
-        "cooled": report.cooled,
-        "tooFresh": report.too_fresh,
-        "written": report.written,
-    }))
 }
 
 // ---------------------------------------------------------------------------

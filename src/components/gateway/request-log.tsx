@@ -72,8 +72,8 @@ export function RequestLog({ className }: { className?: string }) {
   /**
    * 重新读取请求日志（只读操作）。
    *
-   * 与 Trae 侧的「刷新」不同：WB 的积分由上游逐请求回报、在**写入日志时**就已就位，
-   * 不需要事后回填 ⇒ 这里只重读这一份列表，不打上游、不跑整页快照。
+   * 三个平台的「刷新」语义一致：只重读这一份列表，不打上游、不跑整页快照。
+   * WB 的积分由上游逐请求回报，写入日志时已就位，重读即可见。
    */
   async function onRefresh() {
     setRefreshing(true);
