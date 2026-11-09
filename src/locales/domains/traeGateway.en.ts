@@ -42,7 +42,6 @@ export const en = {
   "trae.gateway.log.title": "Request log (last 50)",
   "trae.gateway.log.clear": "Clear",
   "trae.gateway.log.refresh": "Refresh",
-  "trae.gateway.log.refreshCooling": "Just checked",
   "trae.gateway.log.empty": "No requests yet. Once the gateway is running, every call from a client is recorded here (metadata only by default, no bodies).",
   "trae.gateway.log.col.time": "Time",
   "trae.gateway.log.col.account": "Account",
@@ -50,10 +49,6 @@ export const en = {
   "trae.gateway.log.col.status": "Status",
   "trae.gateway.log.col.latency": "Latency",
   "trae.gateway.log.col.tokens": "Token",
-  /* Two "no number" states of the credit column — see `trae-request-log.tsx`.
-     Trae credits are backfilled from the upstream bill (6–8 s after the request). */
-  "trae.gateway.log.creditPending": "Waiting for the upstream bill (usually 6–8 s; backfilled every minute)",
-  "trae.gateway.log.creditUnmatched": "No matching record in the upstream bill (failed request / outside the backfill window)",
 
   // =====================================================================
   // gateway/trae-integration-guide.tsx —— integration guide

@@ -207,8 +207,8 @@ export default function QoderApiServicePage() {
   /**
    * 只重取请求日志，`patch` 进快照。
    *
-   * Qoder 的积分由上游在每次响应里直接回报（写入日志时已就位），不需要像 Trae
-   * 那样事后回填 ⇒ 刷新就是单纯重读；不重跑整份快照（配置 / 池 / 清单都不变）。
+   * Qoder 的积分由上游在每次响应里直接回报（写入日志时已就位）⇒ 刷新就是单纯重读；
+   * 不重跑整份快照（配置 / 池 / 清单都不变）。
    */
   const refreshLogsOnly = useCallback(async () => {
     const raw = await api.getQoderGatewayLogs();
@@ -763,7 +763,7 @@ export default function QoderApiServicePage() {
               logs={logs}
               clearing={clearing}
               onClear={() => void onClearLogs()}
-              /* 只重读日志：Qoder 的积分随响应写入，不涉及上游回填。 */
+              /* 只重读日志：Qoder 的积分随响应写入，刷新不涉及上游请求。 */
               onRefresh={() => void onRefreshLogs()}
               refreshing={refreshingLogs}
               /* Qoder 上游逐请求回报 `usage.credits` ⇒ 多显示一列「积分」。

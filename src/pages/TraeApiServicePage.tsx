@@ -1,5 +1,5 @@
 import { UnifiedGatewayView } from "@/components/gateway/unified-gateway-view";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Copy, FolderOpen, Loader2, Power, RefreshCw, ShieldAlert } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -60,45 +60,11 @@ import type { TraeGatewayConfig, TraeGatewayLogEntry, TraeGatewayStatus, TraeMod
 import { traeRegionOf } from "@/lib/trae-types";
 import { cn } from "@/lib/utils";
 import { useCachedResource } from "@/lib/use-cached-resource";
-import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 
 const LOOPBACK = "127.0.0.1";
 const LAN = "0.0.0.0";
-
-/**
- * 请求日志分区的自动刷新节拍（**5 分钟**）。
- *
- * ## 为什么这么慢
- *
- * 这条链路不打上游：`get_trae_gateway_logs` 只读网关进程内存里的 200 条日志。
- * 之前的 10 秒纯属「为了让人看到积分数字而反复拉同一份本地数组」，没有信息增量 ——
- * 积分的**产出**节奏由后台决定（60 秒 tick + 单账号 120 秒冷却），所以页面刷得再勤
- * 也只是在同一批数据上空转。
- *
- * 5 分钟是「不打扰」与「别让人以为坏了」的折中：真正想立刻看到某一条的积分，
- * 走日志区右上角的「刷新」按钮（会**催一轮上游账单**，见 `onRefreshLogs`）。
- *
- * ## 为什么只重取日志，不重跑整份快照
- *
- * 整份快照还包含客户端模型清单（要读 `state.vscdb` 的 sqlite）与网关状态 ——
- * 定时重跑纯属白烧 IO。这里只打 `get_trae_gateway_logs`（内存读：不碰上游、
- * 不扫磁盘），拿到后 `patch` 进快照，页面其它分区不受影响。
- *
- * 隐藏窗口 / 切到别的分区时**不建定时器**（`useAutoRefreshWhenVisible` 统一处理）。
- */
-const LOG_POLL_MS = 5 * 60_000;
-
-/**
- * 手动「刷新」的冷却（**2 分钟**）。
- *
- * 与后端 `PER_ACCOUNT_COOLDOWN_MS`（120 秒）同值不是巧合：手动刷新会真发一次上游
- * 账单请求，而「同一账号 2 分钟内只查一次」的硬约束在后端。前端这个值只用来
- * **改文案**（「刚刚查过」），不做拦截 —— 两套阈值各自为政必然对不上，
- * 真正的拦截以后端返回的 `cooled` 为准。
- */
-const LOG_REFRESH_COOLDOWN_MS = 2 * 60_000;
 
 /**
  * Trae 网关的子导航表：**去掉「请求代理」**。
@@ -176,12 +142,8 @@ export default function TraeApiServicePage() {
   const [variant] = useTraeVariant();
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
-  /** 手动「刷新积分」进行中（会真发一次上游账单请求）。 */
+  /** 手动刷新请求日志进行中（只重读列表，不打上游）。 */
   const [refreshingLogs, setRefreshingLogs] = useState(false);
-  /** 「刚刚查过」的文案开关（只影响文案，真正的拦截在后端冷却）。 */
-  const [logsCooling, setLogsCooling] = useState(false);
-  /** `logsCooling` 的复位定时器（卸载时清掉，避免 setState on unmounted）。 */
-  const logsCoolingTimer = useRef(0);
   const [riskOpen, setRiskOpen] = useState(false);
   const [openingDir, setOpeningDir] = useState(false);
   /** 正在「恢复」的 uid（池卡上该行按钮显示操作进行中）。 */
@@ -265,7 +227,6 @@ export default function TraeApiServicePage() {
     data: snapshot,
     loading,
     error,
-    at: snapshotAt,
     refresh: loadAll,
     patch,
   } = useCachedResource<ApiServiceSnapshot>(`trae:api-service:${variant}`, loadSnapshot);
@@ -275,26 +236,14 @@ export default function TraeApiServicePage() {
   const modelSources = snapshot?.modelSources ?? [];
   const logs = snapshot?.logs ?? [];
 
-  /* ★ 请求日志分区可见时的心跳（`LOG_POLL_MS` = 5 分钟）：积分由后台从上游账单回填，
-     不轮询的话这一列会一直停在 `…`。**只重取日志**（见 `LOG_POLL_MS`），
-     不动其它分区、不重跑整份快照。 */
-  const refreshLogsOnly = useCallback(async (silent = true) => {
-    try {
-      const raw = await api.getTraeGatewayLogs();
-      patch((current) => ({ ...current, logs: normalizeTraeGatewayLogs(raw) }));
-    } catch (e) {
-      /* 心跳失败保持旧快照；手动刷新（`silent = false`）把错误交给调用方提示 ——
-         否则「回填成功但日志读取失败」也会弹「已补入 N 条」，用户看不到真实问题。 */
-      if (!silent) throw e;
-    }
+  /**
+   * 只重取请求日志（`get_trae_gateway_logs` 读网关进程内存，不打上游），
+   * `patch` 进快照 —— 不重跑整份快照，配置 / 池 / 清单都不变。
+   */
+  const refreshLogsOnly = useCallback(async () => {
+    const raw = await api.getTraeGatewayLogs();
+    patch((current) => ({ ...current, logs: normalizeTraeGatewayLogs(raw) }));
   }, [patch]);
-
-  useAutoRefreshWhenVisible(
-    snapshotAt,
-    refreshLogsOnly,
-    LOG_POLL_MS,
-    section === "logs",
-  );
 
   /**
    * 限流探测卡（与 WB / Qoder 页**同一个组件**）要的**账号轴 / 模型轴**。
@@ -477,63 +426,22 @@ export default function TraeApiServicePage() {
   }
 
   /**
-   * 手动刷新请求日志 = **立即催一轮积分回填** + 重读日志。
+   * 手动刷新请求日志：**只重读列表**（`get_trae_gateway_logs` 读内存，不打上游）。
    *
-   * ## 为什么不是「重新读一遍本地文件」
-   *
-   * 积分由后台从上游账单回填，本地文件里的值在下一轮回填前不会变 —— 只重读等于
-   * 什么都没发生。真正的信息增量来自那次上游查询，所以这里调 `refresh_trae_request_credits`
-   * （把 60 秒 tick 的那一轮提前到现在）。
-   *
-   * ## 为什么"2 分钟一次"不在前端拦
-   *
-   * 硬约束在后端（`PER_ACCOUNT_COOLDOWN_MS` + 失败退避）：被挡下时它根本不发请求，
-   * 只回 `cooled`。前端再存一份倒计时就是第二套阈值 —— 两边一旦不一致，用户会看到
-   * 「按钮说可以了，点了却没反应」。所以这里**只按返回结果说话**：
-   * `requests > 0` 才是真的查了，`cooled` 说明后端刚查过。
+   * 与 WB / Qoder 两侧同一语义：网关进程里新写入的条目会立刻出现，
+   * 配置 / 池 / 清单都不变。
    */
   async function onRefreshLogs() {
     if (refreshingLogs) return;
     setRefreshingLogs(true);
-    const markCooling = () => {
-      setLogsCooling(true);
-      window.clearTimeout(logsCoolingTimer.current);
-      logsCoolingTimer.current = window.setTimeout(
-        () => setLogsCooling(false),
-        LOG_REFRESH_COOLDOWN_MS,
-      );
-    };
     try {
-      const report = await api.refreshTraeRequestCredits();
-      /* ⚠️ 先回填、后重读：顺序反了就会把「回填前」的旧积分显示出来，
-         而且不会再自动纠正（下一轮心跳要等 5 分钟）。
-         手动刷新不静默：日志读取失败要让下方 catch 提示，而不是假装成功。 */
-      await refreshLogsOnly(false);
-      if (report.requests > 0) {
-        markCooling();
-        if (report.matched > 0) {
-          toast.success(t("trae.stats.api.toast.logsRefreshed", { n: report.matched }));
-        } else {
-          toast.info(t("trae.stats.api.toast.logsRefreshedNone"));
-        }
-      } else if (report.cooled > 0) {
-        markCooling();
-        toast.info(t("trae.stats.api.toast.logsRefreshCooling"));
-      } else if (report.tooFresh > 0) {
-        toast.info(t("trae.stats.api.toast.logsRefreshTooFresh"));
-      } else {
-        /* 没有待回填的条目（全部已结算 / 全是失败请求）：不发上游，也没什么可等。 */
-        toast.info(t("trae.stats.api.toast.logsRefreshedNone"));
-      }
+      await refreshLogsOnly();
     } catch (e) {
       toast.error(t("trae.stats.api.toast.logsRefreshFailed"), { description: api.asError(e) });
     } finally {
       setRefreshingLogs(false);
     }
   }
-
-  /* 卸载时清掉「刚刚查过」的复位定时器（避免对已卸载组件 setState）。 */
-  useEffect(() => () => window.clearTimeout(logsCoolingTimer.current), []);
 
   /**
    * 打开 Trae 数据目录。
@@ -973,15 +881,9 @@ export default function TraeApiServicePage() {
               logs={logs}
               clearing={clearing}
               onClear={() => void onClearLogs()}
-              /* 自动心跳已放慢到 5 分钟（`LOG_POLL_MS`）：想看当前这条的积分就点它。
-                 会真发一次上游账单查询，同一账号 2 分钟内最多一次（后端冷却）。 */
+              /* 只重读列表（内存读，不打上游）；配置 / 池 / 清单不受影响。 */
               onRefresh={() => void onRefreshLogs()}
               refreshing={refreshingLogs}
-              refreshCooling={logsCooling}
-              /* 积分列：数值来自后台回填；`null` + `pending` 显示 `…`（账单还没出），
-                 `unmatched` / 老条目显示 `—`。三种状态都**不是 0**，见组件文档。 */
-              credit={(entry) => entry.credit}
-              creditState={(entry) => entry.creditState}
             />
           )}
           {section === "u-overview" && <UnifiedGatewayView section="overview" onGoSection={goUnified} />}

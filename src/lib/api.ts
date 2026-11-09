@@ -623,8 +623,6 @@ const ROUTES: Record<string, Route> = {
   trae_launch_client: { method: "POST", path: "/api/trae/launch-client" },
   get_trae_gateway_logs: { method: "GET", path: "/api/trae/gateway/logs" },
   clear_trae_gateway_logs: { method: "POST", path: "/api/trae/gateway/logs/clear" },
-  // 立即催一轮积分回填（**写**：会真发上游账单请求 ⇒ 不进上面的演示只读白名单）。
-  refresh_trae_request_credits: { method: "POST", path: "/api/trae/gateway/credits/refresh" },
   // ---- Qoder 模块（第三个平台）----
   // 键名必须与 src-tauri/src/lib.rs 的 invoke_handler 登记名、
   // 以及 crates/buddy-switch-server/src/api.rs 的路由 path+method 三方一致，
@@ -3794,24 +3792,6 @@ export function getTraeGatewayLogs(): Promise<unknown> {
 /** 清空网关请求日志。 */
 export function clearTraeGatewayLogs(): Promise<{ ok: boolean }> {
   return call("clear_trae_gateway_logs");
-}
-
-/**
- * 立即催一轮**积分回填**（不等后台 60 秒 tick），返回本轮计数。
- *
- * ⚠️ 这是**会打上游**的命令：同一账号 120 秒内最多一次（由后端冷却保证），
- * 被挡下时 `requests === 0 && cooled > 0` —— 调用方要据此提示「刚刚已查过」，
- * 而不是显示「刷新成功」。
- */
-export function refreshTraeRequestCredits(): Promise<{
-  pending: number;
-  requests: number;
-  matched: number;
-  cooled: number;
-  tooFresh: number;
-  written: number;
-}> {
-  return call("refresh_trae_request_credits");
 }
 
 // ---------------------------------------------------------------------------

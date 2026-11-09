@@ -60,7 +60,6 @@ export const zh = {
   "trae.gateway.log.title": "请求日志（最近 50 条）",
   "trae.gateway.log.clear": "清空",
   "trae.gateway.log.refresh": "刷新",
-  "trae.gateway.log.refreshCooling": "刚刚查过",
   "trae.gateway.log.empty": "暂无请求。网关启动后，客户端发来的每次调用都会记在这里（默认只记元数据，不记正文）。",
   "trae.gateway.log.col.time": "时间",
   "trae.gateway.log.col.account": "账号",
@@ -68,10 +67,6 @@ export const zh = {
   "trae.gateway.log.col.status": "状态",
   "trae.gateway.log.col.latency": "耗时",
   "trae.gateway.log.col.tokens": "Token",
-  /* 积分列的两个「没有数字」状态（见 `trae-request-log.tsx`）：
-     Trae 的积分由后台从上游账单回填，出账比请求晚 6–8 秒 —— 这段时间不是「0」，是「还没算」。 */
-  "trae.gateway.log.creditPending": "账单回填中（上游出账约需 6–8 秒，网关每分钟自动补）",
-  "trae.gateway.log.creditUnmatched": "上游账单里没有对应记录（失败请求 / 超出回填窗口）",
 
   // =====================================================================
   // gateway/trae-integration-guide.tsx —— 接入指引
