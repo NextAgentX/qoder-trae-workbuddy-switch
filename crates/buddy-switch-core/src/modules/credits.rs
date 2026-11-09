@@ -673,12 +673,12 @@ fn normalized_new_resources(
 
 fn credit_result(account: &Value, resources: Vec<Value>, now: i64) -> Value {
     /* ★ 可用口径：已过期包的额度**不再计入** `totalRemaining` / `totalCapacity`。
-       过期积分不能再用，计进去会让「还剩多少」偏大，也会与逐包明细（前端剔掉过期包）
-       对不上 —— 同一屏的「共剩」和明细合计必须是同一个数。浪费掉的量仍单独由
-       `expiredRemaining` 报告，两者相加才是「原始总量」。
+    过期积分不能再用，计进去会让「还剩多少」偏大，也会与逐包明细（前端剔掉过期包）
+    对不上 —— 同一屏的「共剩」和明细合计必须是同一个数。浪费掉的量仍单独由
+    `expiredRemaining` 报告，两者相加才是「原始总量」。
 
-       ⚠️ 快照落盘（下方 `record_snapshot`）用的是这两个值 ⇒ 2026-11-09 之前的历史快照
-       是旧口径（含过期）。跨这条边界时余额曲线会出现一个台阶，属于已知的预期代价。 */
+    ⚠️ 快照落盘（下方 `record_snapshot`）用的是这两个值 ⇒ 2026-11-09 之前的历史快照
+    是旧口径（含过期）。跨这条边界时余额曲线会出现一个台阶，属于已知的预期代价。 */
     let live_resources: Vec<&Value> = resources
         .iter()
         .filter(|resource| resource.get("expired").and_then(Value::as_bool) != Some(true))
