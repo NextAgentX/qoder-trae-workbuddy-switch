@@ -11,6 +11,41 @@ use crate::state::GatewayState;
 use buddy_switch_core::modules::catalog::{CatalogModel, CatalogSnapshot};
 use buddy_switch_core::modules::product::{scope_of_wb_region, Scope};
 
+/// 对客户端声明的上下文窗口上限（**保守口径**）。
+///
+/// ## 为什么不直接报目录里的 1M
+///
+/// 上游 WB 的真硬限是 **1,048,576** token，而客户端（Codex / Cursor / Cherry …）用的是
+/// **自己的** tokenizer 估算 prompt —— 实测普遍偏低 10~15%。两边一叠加，
+/// 「客户端认为还差 5 万才满」时上游已经回 `11115 prompt is too long`。
+///
+/// 更隐蔽的是第三方切换器：CC Switch 拿这里的值按 **×90%** 生成
+/// `auto_compact_token_limit`。按 1M 算出 900k，等它真到 900k 时真实 prompt 已越界
+/// ⇒ 压缩请求本身也带这份超长 prompt ⇒ 同样 400 ⇒ 死锁。
+/// （2026-11-09 实证：`1048723 tokens > 1048576 maximum`，只超 147 token。）
+///
+/// 因此出口**统一声明 900k**，把 14% 余量留给估算误差。真实上限仍在管理面
+/// （[`snapshot_view`]）与目录里，不受此影响 —— 那里不需要客户端做阈值决策。
+pub const CLIENT_SAFE_CONTEXT_WINDOW: u64 = 900_000;
+
+/// 把目录里的窗口收窄到客户端安全档（**只降不升**）。
+///
+/// 小于等于安全档的模型（如 192K / 300K）原样返回：压它们没有收益，
+/// 反而会让用户误以为上游缩水了。
+pub fn client_safe_window(window: u64) -> u64 {
+    window.min(CLIENT_SAFE_CONTEXT_WINDOW)
+}
+
+/// [`client_safe_window`] 的有符号版本（Trae / Qoder 的上游清单用 `i64`）。
+///
+/// 非正数（上游缺字段时的 0/负数占位）**原样返回**：那是「不知道」，不是「很小」。
+pub fn client_safe_window_i64(window: i64) -> i64 {
+    if window <= 0 {
+        return window;
+    }
+    client_safe_window(window as u64) as i64
+}
+
 /// 一条 WB 模型在 OpenAI `/v1/models` 里的形状（**唯一产出点**：独立网关与统一网关共用）。
 ///
 /// ★ `context_length` 必须与 Trae 侧同名字段对齐 —— OpenAI 兼容客户端读的是它；
@@ -29,20 +64,22 @@ use buddy_switch_core::modules::product::{scope_of_wb_region, Scope};
 /// 而真相是「上游没下发、内置表也没有」—— 与 `supports_images` 的取舍一致，不编事实。
 pub fn model_entry(model: &CatalogModel, max_context: bool, scope: Scope) -> serde_json::Value {
     // 开关决定声明「上限档」还是「默认档」（上游两档：如 300k 默认 / 1M 上限）。
-    let window = if max_context {
+    // ★ 两者都要过 [`client_safe_window`]：客户端真正据此设压缩阈值的是**生效档**，
+    //   但 `context_length_max` 也会被第三方工具拿去算，漏一个就等于没压。
+    let window = client_safe_window(if max_context {
         model.context_window
     } else {
         model.context_window_default.unwrap_or(model.context_window)
-    };
+    });
     let mut value = json!({
         "id": model.id,
         "object": "model",
         "created": 0,
         "owned_by": "workbuddy",
         "context_length": window,
-        // 两档原值：前端据此本地即时切换，不必等重新取数。
-        "context_length_default": model.context_window_default,
-        "context_length_max": model.context_window,
+        // 两档原值：前端据此本地即时切换，不必等重新取数（同样按安全档收窄）。
+        "context_length_default": model.context_window_default.map(client_safe_window),
+        "context_length_max": client_safe_window(model.context_window),
         "context_window": window,
         "max_tokens": model.max_tokens,
         // 原文（上游怎么写就怎么给）+ 数字（同一份解析的唯一出口）。
@@ -237,13 +274,26 @@ mod tests {
             reasoning: None,
         };
         let max = model_entry(&model, true, Scope::WbCn);
-        assert_eq!(max["context_length"], 960_000, "默认用上限档");
-        assert_eq!(max["context_window"], 960_000);
+        // ★ 960k 的目录值要压到安全档 900k：客户端据此算压缩阈值，
+        //   报满值会让它在越界之后才动手（见 [`CLIENT_SAFE_CONTEXT_WINDOW`]）。
+        assert_eq!(max["context_length"], 900_000, "上限档要压到客户端安全档");
+        assert_eq!(max["context_window"], 900_000);
+        assert_eq!(max["context_length_max"], 900_000, "max 档同样要压");
 
-        // 开关关 ⇒ 声明默认档（上游 contextWindow.defaultLength）。
+        // 开关关 ⇒ 声明默认档（上游 contextWindow.defaultLength）；低于安全档原样透出。
         let lower = model_entry(&model, false, Scope::WbCn);
         assert_eq!(lower["context_length"], 300_000);
         assert_eq!(lower["context_window"], 300_000);
+    }
+
+    /// 安全档**只降不升**：小窗口原样返回，别让用户以为上游缩水。
+    #[test]
+    fn client_safe_window_only_narrows() {
+        assert_eq!(client_safe_window(192_000), 192_000);
+        assert_eq!(client_safe_window(CLIENT_SAFE_CONTEXT_WINDOW), 900_000);
+        // 上游真硬限 1,048,576：必须落到安全档以内。
+        assert_eq!(client_safe_window(1_048_576), CLIENT_SAFE_CONTEXT_WINDOW);
+        assert_eq!(client_safe_window(u64::MAX), CLIENT_SAFE_CONTEXT_WINDOW);
     }
 
     /// ★ issue #101：出口 ① 必须把**图片能力**写进清单 —— 客户端就是靠它决定要不要发图。
@@ -301,7 +351,8 @@ mod tests {
         };
         assert_eq!(
             model_entry(&model, false, Scope::WbCn)["context_length"],
-            1_000_000
+            CLIENT_SAFE_CONTEXT_WINDOW,
+            "无默认档时回落到上限档，同样要压到安全档"
         );
     }
 

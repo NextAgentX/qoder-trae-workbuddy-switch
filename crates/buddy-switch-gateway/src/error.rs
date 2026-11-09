@@ -335,7 +335,22 @@ impl GatewayError {
             GatewayError::RegionMismatch(mismatch) => mismatch.message(),
             // ★ 截断必须带标记：否则下游拿到的是**未闭合的 JSON**，且无法区分
             //   「上游只发了这么多」与「网关截掉了」（issue #67 因此无法核对上游原文）。
-            GatewayError::Upstream { message, .. } => truncate_upstream_message(message),
+            //
+            // ★ 上下文超限要**翻译**成客户端认得的说法：上游回的是
+            //   `11115 prompt is too long: N tokens > M maximum`，而 OpenAI 兼容客户端
+            //   （codex-cli 实测字符串表）只匹配 `maximum context` / `context window exceeded`
+            //   —— 表里**没有** `prompt is too long`。不翻译，客户端就当普通 400 直接失败，
+            //   不会就地压缩上下文，用户只能手动 /new（2026-11-09 实证：超 147 token）。
+            //   前缀之后仍保留上游原文，便于核对。
+            GatewayError::Upstream { kind, message, .. } => {
+                let text = truncate_upstream_message(message);
+                match kind {
+                    UpstreamErrorKind::Client if is_context_overflow(&text) => {
+                        format!("context window exceeded: {text}")
+                    }
+                    _ => text,
+                }
+            }
             GatewayError::BadRequest(message) => message.clone(),
             // 与 Trae 侧共用同一句文案（`disabled_models::disabled_message`），避免两处漂移。
             GatewayError::ModelDisabled { scope, model } => {
@@ -634,6 +649,21 @@ fn truncate_upstream_message(message: &str) -> String {
     truncate_with_marker(message, UPSTREAM_MESSAGE_LIMIT)
 }
 
+/// 上游回的是不是「上下文超限」（而不是别的 400）。
+///
+/// 判据只认上游**真实出现过**的几种说法，不猜：
+/// - `prompt is too long` —— WB 上游 11115 的原文；
+/// - `context_length_exceeded` —— OpenAI 系上游的标准 code；
+/// - `maximum context length` —— 另一批 OpenAI 兼容上游的措辞。
+///
+/// ⚠️ 别把 `11115` 单独当判据：那是 WB 的错误码，别家上游有同名不同义的码。
+fn is_context_overflow(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("prompt is too long")
+        || lowered.contains("context_length_exceeded")
+        || lowered.contains("maximum context length")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +688,47 @@ mod tests {
         //   混进 502 会让客户端把它和「上游 5xx」当成同一件事（重试节奏不同）。
         assert_eq!(kind(UpstreamErrorKind::Timeout).status(), 504);
         assert_eq!(kind(UpstreamErrorKind::Client).status(), 400);
+    }
+
+    /// ★ 上下文超限必须能被客户端**认出来**：OpenAI 系客户端匹配
+    /// `maximum context` / `context window exceeded`，不匹配上游原文
+    /// `prompt is too long`。认不出 ⇒ 当普通 400 失败、不压缩（2026-11-09 实证）。
+    #[test]
+    fn context_overflow_gets_a_client_readable_prefix() {
+        let overflow = GatewayError::Upstream {
+            kind: UpstreamErrorKind::Client,
+            status: 400,
+            // 逐字取自真实上游响应（省略了 extError 等字段）。
+            message: r#"{"code":11115,"msg":"prompt is too long: 1048723 tokens > 1048576 maximum","requestId":"c6246257"}"#.to_string(),
+            attempts: Vec::new(),
+        };
+        let text = overflow.message();
+        assert!(
+            text.starts_with("context window exceeded: "),
+            "客户端靠这个串判定上下文超限：{text}"
+        );
+        assert!(
+            text.contains("prompt is too long"),
+            "上游原文必须保留，否则无法核对：{text}"
+        );
+
+        // 其他 400 一律不动 —— 加前缀会让客户端误以为「该压缩上下文」。
+        let plain = GatewayError::Upstream {
+            kind: UpstreamErrorKind::Client,
+            status: 400,
+            message: r#"{"code":11141,"msg":"invalid model"}"#.to_string(),
+            attempts: Vec::new(),
+        };
+        assert!(!plain.message().starts_with("context window exceeded: "));
+
+        // 判据只认文案，不认错误码：11115 在别家上游可能另有含义。
+        let unrelated = GatewayError::Upstream {
+            kind: UpstreamErrorKind::Client,
+            status: 400,
+            message: r#"{"code":11115,"msg":"quota policy rejected"}"#.to_string(),
+            attempts: Vec::new(),
+        };
+        assert!(!unrelated.message().starts_with("context window exceeded: "));
     }
 
     #[test]

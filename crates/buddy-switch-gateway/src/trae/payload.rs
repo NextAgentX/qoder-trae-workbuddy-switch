@@ -185,10 +185,14 @@ fn model_entry(
         "object": "model",
         "created": 1_753_600_000,
         "owned_by": "trae",
-        "context_length": context_length,
-        // 两档原值：管理面据此**本地即时**切换显示，不必等重新取数。
-        "context_length_default": default_window,
-        "context_length_max": max_window,
+        // ★ 与 WB / Qoder 出口同一口径：对客户端声明的是**安全窗口**，
+        //   不是目录里的满值（理由见 `routes::models::CLIENT_SAFE_CONTEXT_WINDOW`）。
+        //   客户端拿满值算压缩阈值，会在越界之后才动手 ⇒ 上游 400 死锁。
+        "context_length": crate::routes::models::client_safe_window_i64(context_length),
+        // 两档原值：管理面据此**本地即时**切换显示，不必等重新取数（同样收窄）。
+        "context_length_default": default_window
+            .map(crate::routes::models::client_safe_window_i64),
+        "context_length_max": max_window.map(crate::routes::models::client_safe_window_i64),
         "max_mode": max_mode,
     });
     if let (Some(scope), Some(object)) = (scope, value.as_object_mut()) {
@@ -1267,11 +1271,16 @@ mod tests {
             true,
         );
         let data = body["data"].as_array().unwrap();
-        assert_eq!(data[0]["context_length"], 1_000_000, "glm-5.3 上限 1M");
+        // 1M 与 981k 两档都落到客户端安全档 900k（理由见 `CLIENT_SAFE_CONTEXT_WINDOW`）；
+        // 低于安全档的模型（256k / 200k）原样透出 —— 那两条才是「目录说多少就是多少」的证据。
+        assert_eq!(
+            data[0]["context_length"], 900_000,
+            "glm-5.3 的 1M 压到安全档"
+        );
         assert_eq!(data[0]["max_mode"], true);
         assert_eq!(
-            data[1]["context_length"], 981_504,
-            "上限不是统一 1M —— 目录说多少就是多少"
+            data[1]["context_length"], 900_000,
+            "981_504 也高于安全档 ⇒ 同样收窄"
         );
         assert_eq!(data[1]["max_mode"], true);
         assert_eq!(
@@ -1308,7 +1317,10 @@ mod tests {
         assert_eq!(off["data"][0]["max_mode"], false);
 
         let on = models_response_from(entries, None, Some(TraeVariant::GlobalTraeCode), true);
-        assert_eq!(on["data"][0]["context_length"], 1_000_000, "开启时声明 max");
+        assert_eq!(
+            on["data"][0]["context_length"], 900_000,
+            "开启时声明 max（1M 收窄到客户端安全档）"
+        );
         assert_eq!(on["data"][0]["max_mode"], true);
 
         let prepare = |max_mode: bool| -> Value {

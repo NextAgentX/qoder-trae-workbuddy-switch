@@ -634,6 +634,11 @@ pub struct NamespaceModels {
 ///
 /// ⚠️ **不改写裸名以外的字段**：上游的 `context_window` / `credits` / `badges` 等原样透出，
 /// 否则两段同名模型的真实差异（倍率、上下文窗口都不同）就看不见了。
+///
+/// 唯一的例外在各自的 `model_entry` 里已经做完：上下文窗口会被收窄到
+/// [`crate::routes::models::CLIENT_SAFE_CONTEXT_WINDOW`]（客户端据此算压缩阈值，
+/// 报满值会让它在越界之后才动手）。本函数**不做**这件事 —— 三条产品线各压一次，
+/// 这里再压一遍就成了两套口径。
 pub fn build_models_response(entries: &[NamespaceModels]) -> Value {
     let mut data: Vec<Value> = Vec::new();
     let mut namespaces = serde_json::Map::new();

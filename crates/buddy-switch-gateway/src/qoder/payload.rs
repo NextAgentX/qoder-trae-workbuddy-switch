@@ -124,10 +124,17 @@ pub fn models_response(
                 "max_input_tokens": entry.get("max_input_tokens").cloned(),
                 // 与 WB / Trae 对齐：OpenAI 兼容客户端读 `context_length`。
                 // 开关开 ⇒ 上游最大档（如 1M）；关 ⇒ 默认档（如 200K）。
-                "context_length": selected_window(entry, max_context),
+                // ★ 全部收窄到客户端安全档（理由见 `routes::models::CLIENT_SAFE_CONTEXT_WINDOW`）；
+                //   管理面（[`admin_models_response`]）**不压**，那里要显示上游真实值。
+                "context_length": selected_window(entry, max_context)
+                    .map(crate::routes::models::client_safe_window_i64),
                 // 两档原值（前端本地即时切换用）。
-                "context_length_default": context_windows(entry).0,
-                "context_length_max": context_windows(entry).1,
+                "context_length_default": context_windows(entry)
+                    .0
+                    .map(crate::routes::models::client_safe_window_i64),
+                "context_length_max": context_windows(entry)
+                    .1
+                    .map(crate::routes::models::client_safe_window_i64),
             });
             if let Some(object) = value.as_object_mut() {
                 crate::model_capability::apply(object, scope, id, None);
@@ -377,9 +384,11 @@ mod tests {
             true,
             buddy_switch_core::modules::product::Scope::QoderCn,
         );
-        assert_eq!(max["data"][0]["context_length"], 1_000_000);
+        // 1M 目录值被压到客户端安全档（`CLIENT_SAFE_CONTEXT_WINDOW`）；
+        // 低于安全档的默认档原样透出。
+        assert_eq!(max["data"][0]["context_length"], 900_000);
         assert_eq!(max["data"][0]["context_length_default"], 200_000);
-        assert_eq!(max["data"][0]["context_length_max"], 1_000_000);
+        assert_eq!(max["data"][0]["context_length_max"], 900_000);
         let lower = models_response(
             &catalog,
             &BTreeSet::new(),

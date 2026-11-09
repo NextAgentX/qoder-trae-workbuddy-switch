@@ -477,6 +477,17 @@ fn input_to_messages(input: &Value, out: &mut Vec<Value>) {
                     }
                     // `reasoning` 是**出站**产物；上游不接受 reasoning 作为输入 ⇒ 丢弃。
                     // 丢弃不打断合并：调用之间穿插 reasoning 是 Codex 的常态形状。
+                    //
+                    // ★ `compaction`：客户端压缩后的**加密摘要**（`encrypted_content`，
+                    //   OpenAI 侧签发，本网关与 WB 上游都解不开）。丢弃是唯一正确选择——
+                    //   当正文保留只会把 base64 当历史塞进 prompt。代价要说清：压缩点之前
+                    //   的前情对模型不可见（2026-11-09 在 Codex 会话 rollout 里确认这类
+                    //   item 真实存在且每轮回传）。别把它「修」成透传。
+                    Some("compaction") => {}
+                    // ★ `additional_tools`：developer 角色的**增量工具声明**（压缩后重新
+                    //   声明工具用）。工具清单由请求体顶层 `tools` 全量下发，历史里这份是
+                    //   补丁 ⇒ 丢弃不会缺工具（[`additional_tools_items_are_dropped_safely`]）。
+                    Some("additional_tools") => {}
                     _ => {}
                 }
             }
@@ -1620,6 +1631,43 @@ mod tests {
         assert_eq!(upstream["tools"].as_array().unwrap().len(), 1);
         assert_eq!(upstream["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(upstream["tool_choice"]["function"]["name"], "get_weather");
+    }
+
+    /// Codex 会把 `compaction`（加密摘要）与 `additional_tools`（增量工具声明）回传到
+    /// `input` 里。两者都必须**被丢弃且不产生消息**：
+    ///
+    /// - `compaction.encrypted_content` 是 base64 密文，漏进正文等于把几万字符当历史
+    ///   发给上游（白烧上下文窗口，且模型读到一堆乱码）；
+    /// - `additional_tools` 只是 `tools` 顶层的补丁，变成消息会破坏 role 序列。
+    #[test]
+    fn compaction_and_additional_tools_items_are_dropped_safely() {
+        let body = json!({
+            "model": "m",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "function", "name": "exec"}]
+                },
+                {"type": "message", "role": "user", "content": "hi"},
+                {"type": "compaction", "id": "cmp_1", "encrypted_content": "gAAAAABsecret"},
+                {"type": "message", "role": "assistant", "content": "ok"}
+            ]
+        });
+        let upstream = to_upstream_request(&body);
+        let messages = upstream["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            2,
+            "只有两条真消息：加密摘要与增量工具都不该变成消息"
+        );
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        let flattened = serde_json::to_string(messages).unwrap();
+        assert!(
+            !flattened.contains("gAAAAABsecret"),
+            "加密摘要**不得**进入上游正文：{flattened}"
+        );
     }
 
     /// issue #119：并行的多个 `function_call` 若各自产出一条 assistant 消息，上游按
