@@ -58,6 +58,10 @@ use buddy_switch_core::modules::qoder::region::{self, QoderRegion};
 use buddy_switch_core::modules::qoder::web_proxy;
 use buddy_switch_core::modules::qoder::web_session;
 use buddy_switch_core::modules::qoder::web_usage;
+// ★ 必须按 `cfg(target_os)` 引入：下面只在 Windows 的 `data_directory` 分支用到它。
+//   无条件 `use` 会让 macOS / Linux 构建报 `unused import`，而 CI 把警告当错误
+//   （v2026.11.91845 就是这样挂掉 mac-arm64 / linux-x64 两个 job 的）。
+#[cfg(target_os = "windows")]
 use buddy_switch_core::modules::runtime_log;
 
 /// 登录窗 label 的前缀；实际 label 由 [`login_label`] 按**区域 + 账号**派生。
