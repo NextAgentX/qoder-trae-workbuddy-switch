@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { closeAuthPage, openAuthPage } from "@/lib/auth-open";
 import { useT } from "@/lib/i18n";
 import type { AccountMeta, Region } from "@/lib/types";
 import { useAccountsStore } from "@/stores/accounts";
@@ -24,10 +25,12 @@ interface Props {
   region?: Region;
 }
 
-/** OAuth 扫码登录采集：发起 → 打开浏览器 → 轮询采集结果 → 入库。 */
+/** OAuth 扫码登录采集：发起 → 打开授权页（默认应用内）→ 轮询采集结果 → 入库。 */
 export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
   const t = useT();
   const reconcileAccounts = useAccountsStore((s) => s.reconcileAccounts);
+  /** 授权窗身份：与区域绑定，两个区域并行登录时互不导航覆盖。 */
+  const authKey = `wb-${region ?? "cn"}`;
 
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -59,6 +62,9 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
       try {
         const res = await api.oauthStatus(loginId, region);
         if (res.done) {
+          /* 令牌已经由后端轮询取回 ⇒ 授权窗的使命结束。
+             不关的话用户会以为「还在等」，而且它挡在主窗口前面。 */
+          void closeAuthPage(authKey);
           if (res.result) {
             await reconcileAccounts(region);
             if (!cancelled) setResult(res.result);
@@ -80,7 +86,7 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [loginId, reconcileAccounts, region]);
+  }, [authKey, loginId, reconcileAccounts, region]);
 
   async function start() {
     setBusy(true);
@@ -90,9 +96,10 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
       setLoginId(res.loginId);
       setUri(res.verificationUri);
       setExpiresIn(res.expiresIn ?? null);
-      /* 自动开浏览器是**尽力而为**：服务器 / 容器里没有 GUI，失败不能算登录失败 ——
-         面板里的链接与二维码才是完整路径（issue #62）。 */
-      void openInBrowser(res.verificationUri).catch(() => {});
+      /* 打开授权页是**尽力而为**：服务器 / 容器里没有 GUI，失败不能算登录失败 ——
+         面板里的链接与二维码才是完整路径（issue #62）。
+         桌面端默认走**应用内授权窗**（公共设置 `auth_in_app`），失败自动退回系统浏览器。 */
+      void openAuthPage(authKey, res.verificationUri).catch(() => {});
     } catch (e) {
       setError(api.asError(e));
     } finally {
@@ -156,21 +163,4 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
       </DialogContent>
     </Dialog>
   );
-}
-
-/** WebUI 使用浏览器新标签页，Tauri 使用系统 opener。 */
-async function openInBrowser(url: string): Promise<void> {
-  if (api.isWebui()) {
-    // 浏览器环境没有 Tauri 注入的 invoke；window.open 被拦截时由弹窗中的
-    // 原生链接作为兜底，因此这里不把拦截视为 OAuth 失败。
-    try {
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch {
-      // 忽略自动弹窗失败；弹窗中已展示的原生链接仍可点击。
-    }
-    return;
-  }
-
-  const { openUrl } = await import("@tauri-apps/plugin-opener");
-  return openUrl(url);
 }

@@ -6,6 +6,7 @@
 //! |:---|:---|:---|
 //! | 主题 / 语言 / 作用域快捷键 / 自动检查更新 | 只有渲染层 | `localStorage`（见 `lib/theme.ts` 等） |
 //! | **关闭窗口时是否隐藏到托盘** | **宿主（Rust）** | 本模块的 `app_prefs.json` |
+//! | **账号授权是否在应用内完成** | **宿主（建授权窗）+ 渲染层（兜底按钮）** | 本模块的 `app_prefs.json` |
 //! | **首次启动的风险确认时间** | 只有渲染层 | 本模块的 `app_prefs.json`（**刻意的例外**，见下） |
 //!
 //! 最后一行是本模块**唯一**偏离「只放宿主也读的偏好」这条界线的项：`legal_consent_at`
@@ -50,11 +51,18 @@ pub fn app_prefs_file() -> PathBuf {
 ///
 /// `legal_consent_at = 0`：**0 表示尚未确认**首次启动的风险提示（epoch 毫秒，非零即已确认）。
 /// 默认必须是 0 —— 把默认值写成「已同意」等于替用户签字，与免责声明的本意正相反。
+///
+/// `auth_in_app = true`：账号授权**默认在应用内完成**（内嵌窗口载授权页），不跳出系统浏览器。
+/// 默认开的理由：授权页是自有域名（无第三方 OAuth 的 embedded-webview 限制），内嵌路径
+/// 少一次应用切换、且授权窗口的登录态留在本进程里，后续查账号数据不必反复登录。
+/// ★ 它只是**默认路径**，不是硬约束：任何一步失败（窗口建不起来 / 用户点「用浏览器打开」）
+/// 都必须能退回系统浏览器，否则一次建窗失败就等于「登不了账号」。
 pub fn default_app_prefs() -> Value {
     json!({
         "close_to_tray": true,
         "watch_agent_sessions": false,
-        "legal_consent_at": 0
+        "legal_consent_at": 0,
+        "auth_in_app": true
     })
 }
 
@@ -128,6 +136,17 @@ pub fn watch_agent_sessions() -> bool {
         .unwrap_or(false)
 }
 
+/// 账号授权是否默认在**应用内**完成（内嵌授权窗）而不是跳系统浏览器。
+///
+/// 读者是宿主（`src-tauri` 的授权窗命令）与渲染层（登录对话框的兜底按钮），两边都读
+/// 同一份文件 ⇒ 不会出现「设置里显示内嵌、实际跳了浏览器」。脏值一律回落默认 `true`。
+pub fn auth_in_app() -> bool {
+    load_app_prefs()
+        .get("auth_in_app")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,10 +171,37 @@ mod tests {
             "0 = 未确认风险提示；默认写成已同意等于替用户签字"
         );
         assert_eq!(
+            d["auth_in_app"],
+            json!(true),
+            "账号授权默认在应用内完成；失败路径由调用方退回系统浏览器"
+        );
+        assert_eq!(
             d.as_object().unwrap().len(),
-            3,
+            4,
             "每加一个键都要同步这条断言"
         );
+    }
+
+    /// `auth_in_app()` 真值表：默认**开**（应用内授权），脏值回落开。
+    ///
+    /// 方向与 `watch_agent_sessions` 相反：这里默认开不会造成外部副作用（只是换个
+    /// 承载方式，且失败可退回浏览器）；默认关反而会让「新增的默认体验」对老用户无效。
+    #[test]
+    fn auth_in_app_真值表() {
+        let cases: [(Value, bool); 5] = [
+            (json!({ "auth_in_app": true }), true),
+            (json!({ "auth_in_app": false }), false),
+            (json!({ "auth_in_app": "false" }), true), // 字符串不是布尔 ⇒ 默认（开）
+            (json!({}), true),                         // 缺字段 ⇒ 默认（开）
+            (json!([]), true),                         // 非对象 ⇒ 默认（开）
+        ];
+        for (input, want) in cases {
+            let got = normalize_app_prefs(&input)
+                .get("auth_in_app")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            assert_eq!(got, want, "输入 {input} 应得 {want}");
+        }
     }
 
     #[test]
@@ -168,7 +214,7 @@ mod tests {
         assert_eq!(stringy["close_to_tray"], json!(true));
         // 未知键丢弃（防止把别的模块的配置误存进来）
         let extra = normalize_app_prefs(&json!({ "close_to_tray": false, "theme": "dark" }));
-        assert_eq!(extra.as_object().unwrap().len(), 3, "只认已知的三个键");
+        assert_eq!(extra.as_object().unwrap().len(), 4, "只认已知的四个键");
         assert!(extra.get("theme").is_none());
         // 非对象输入 ⇒ 全默认
         assert_eq!(normalize_app_prefs(&json!("nope")), default_app_prefs());

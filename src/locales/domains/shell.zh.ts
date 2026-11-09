@@ -155,6 +155,12 @@ export const zh = {
   "appSettings.tray.closeToTray.description": "关闭主窗口后隐藏到托盘并继续运行；关掉此项则点关闭即退出应用",
   "appSettings.tray.saveMismatch": "设置未生效：后端回读值与请求值不一致，请重试",
 
+  "appSettings.auth.title": "账号授权",
+  "appSettings.auth.inApp.label": "在应用内完成账号授权",
+  "appSettings.auth.inApp.description":
+    "登录时在应用内窗口打开授权页，不跳出系统浏览器；关掉则改用系统浏览器。两种方式都会把授权结果记到本机，之后查账号数据不必重复登录。",
+  "appSettings.auth.saveMismatch": "设置未生效：后端回读值与请求值不一致，请重试",
+
   "appSettings.update.title": "自动更新",
   "appSettings.update.auto.label": "自动检查更新",
   "appSettings.update.auto.description": "每 30 分钟检查一次；关闭后仍可在下方手动检查",

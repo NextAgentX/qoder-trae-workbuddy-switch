@@ -2410,6 +2410,28 @@ pub fn set_app_prefs(prefs: Value) -> Result<Value, String> {
     app_prefs::save_app_prefs(&prefs).map_err(|e| e.to_string())
 }
 
+/// POST /api/auth/webview/open —— 在应用内打开账号授权页（公共设置 `auth_in_app`）。
+///
+/// `key` 是窗口身份（`wb-cn` / `trae-…` / `qoder-…`）：多平台并行登录时互不覆盖。
+/// `url` 由后端校验（只允许 https / 本机回环），前端不需要自己判。
+///
+/// ⚠️ 调用方（三个登录对话框）**必须**在失败时退回系统浏览器 —— 这个命令是默认路径，
+/// 不是唯一路径。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn auth_webview_open(
+    app: tauri::AppHandle,
+    key: String,
+    url: String,
+) -> Result<Value, String> {
+    crate::auth_webview::open(&app, key, url)
+}
+
+/// POST /api/auth/webview/close —— 关闭该 `key` 的授权窗（幂等）。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn auth_webview_close(app: tauri::AppHandle, key: String) -> Result<Value, String> {
+    crate::auth_webview::close(&app, key)
+}
+
 // ---------------------------------------------------------------------------
 // 运行日志（仅桌面端命令面；webui 有同名路由，见 server api.rs）
 // ---------------------------------------------------------------------------
@@ -5590,16 +5612,27 @@ pub async fn qoder_pro_pack_status(scope: String, uid: String) -> Result<Value, 
 // `commands::<name>` 形态认作「已登记」，直接写 `qoder_web::<name>` 会被判未登记
 // （构建全绿、桌面端 command not found 的那类静默失效）。
 
-/// POST /api/qoder/web/login-open —— 打开（或前置）Qoder 网页端登录窗。
+/// POST /api/qoder/web/login-open —— 打开（或前置）**该账号**的 Qoder 网页端登录窗。
+///
+/// ★ 必须带 `uid`：登录窗与 Cookie 槽位都按账号分家，#155 之前只按区域开一个窗，
+/// 登录第二个账号会顶掉第一个。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn qoder_web_login_open(app: tauri::AppHandle, scope: String) -> Result<Value, String> {
-    crate::qoder_web::login_open(&app, scope).await
+pub async fn qoder_web_login_open(
+    app: tauri::AppHandle,
+    scope: String,
+    uid: String,
+) -> Result<Value, String> {
+    crate::qoder_web::login_open(&app, scope, uid).await
 }
 
-/// POST /api/qoder/web/login-close —— 关闭登录窗（幂等）。
+/// POST /api/qoder/web/login-close —— 关闭**该账号**的登录窗（幂等）。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn qoder_web_login_close(app: tauri::AppHandle) -> Result<Value, String> {
-    crate::qoder_web::login_close(&app).await
+pub async fn qoder_web_login_close(
+    app: tauri::AppHandle,
+    scope: String,
+    uid: String,
+) -> Result<Value, String> {
+    crate::qoder_web::login_close(&app, scope, uid).await
 }
 
 /// POST /api/qoder/web/credit-packs/probe —— 收割会话 Cookie 并探一次逐包接口。
@@ -5618,15 +5651,17 @@ pub async fn qoder_web_session_status(scope: String, uid: String) -> Result<Valu
     crate::qoder_web::session_status(scope, uid).await
 }
 
-/// GET /api/qoder/web/session/window-cookies —— 登录窗里现有的 Cookie **名称与条数**（只读、不打上游）。
+/// GET /api/qoder/web/session/window-cookies —— **该账号**登录窗里现有的 Cookie
+/// **名称与条数**（只读、不打上游）。
 ///
 /// 前端轮询它来发现「用户已经在窗口里登录完了」（`fingerprint` 变化）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn qoder_web_window_cookies(
     app: tauri::AppHandle,
     scope: String,
+    uid: String,
 ) -> Result<Value, String> {
-    crate::qoder_web::window_cookies(&app, scope).await
+    crate::qoder_web::window_cookies(&app, scope, uid).await
 }
 
 /// GET /api/qoder/web/credit-packs —— 读**已缓存**会话取逐包明细（渲染用，不弹窗）。
@@ -5635,10 +5670,10 @@ pub async fn qoder_web_credit_packs(scope: String, uid: String) -> Result<Value,
     crate::qoder_web::credit_packs(scope, uid).await
 }
 
-/// POST /api/qoder/web/session/logout —— 清除本地会话缓存（幂等；「退出网页登录」）。
+/// POST /api/qoder/web/session/logout —— 清除**该账号**的本地会话缓存（幂等）。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn qoder_web_session_logout(scope: String) -> Result<Value, String> {
-    crate::qoder_web::session_logout(scope).await
+pub async fn qoder_web_session_logout(scope: String, uid: String) -> Result<Value, String> {
+    crate::qoder_web::session_logout(scope, uid).await
 }
 
 /// GET /api/qoder/web/proxy —— 读出站代理配置（逐包取数用；空 = 直连）。

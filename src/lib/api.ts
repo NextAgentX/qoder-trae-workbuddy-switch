@@ -665,6 +665,10 @@ const ROUTES: Record<string, Route> = {
   qoder_web_session_logout: { method: "POST", path: "/api/qoder/web/session/logout" },
   qoder_web_proxy_get: { method: "GET", path: "/api/qoder/web/proxy" },
   qoder_web_proxy_set: { method: "POST", path: "/api/qoder/web/proxy" },
+  // 内嵌授权窗（公共设置 `auth_in_app`）。桌面端专属：headless 形态返回结构化拒绝，
+  // 且**不影响登录**（授权页照常能在系统浏览器里完成）。
+  auth_webview_open: { method: "POST", path: "/api/auth/webview/open" },
+  auth_webview_close: { method: "POST", path: "/api/auth/webview/close" },
   // Qoder API 网关管理面（网关本体走独立端口 57895，见 src/pages/QoderApiServicePage）。
   // ⚠️ **一个监听、两个区域**：状态 / 清单两条按 `scope` 看对应的那本账号库（fail-closed）；
   //   配置与监听是否起来是两区域共用的事实（故 config 不带 scope）。
@@ -2942,8 +2946,15 @@ export function relaunchApp(): Promise<void> {
 export function getAppPrefs(): Promise<AppPrefs> {
   if (demoModeEnabled) return call("get_app_prefs");
   /* webui 没有宿主进程，`app_prefs.json` 无人维护 ⇒ 这里给「未确认风险」的默认形状，
-     风险确认弹层在 webui 下不渲染（见 `legal-consent-dialog.tsx`）。 */
-  if (!isDesktop()) return Promise.resolve({ close_to_tray: true, legal_consent_at: 0 });
+     风险确认弹层在 webui 下不渲染（见 `legal-consent-dialog.tsx`）。
+     `auth_in_app` 给 `false`：webui 没有内嵌窗口，授权只能在浏览器里做。 */
+  if (!isDesktop())
+    return Promise.resolve({
+      close_to_tray: true,
+      legal_consent_at: 0,
+      auth_in_app: false,
+      watch_agent_sessions: false,
+    });
   return call("get_app_prefs");
 }
 
@@ -2954,6 +2965,37 @@ export function setAppPrefs(prefs: AppPrefs): Promise<AppPrefs> {
   if (demoModeEnabled) return call("set_app_prefs", { prefs: prefs as unknown as Record<string, unknown> });
   if (!isDesktop()) return Promise.resolve(prefs);
   return call("set_app_prefs", { prefs: prefs as unknown as Record<string, unknown> });
+}
+
+// ---------------------------------------------------------------------------
+// 内嵌授权窗（公共设置 `auth_in_app`）
+// ---------------------------------------------------------------------------
+//
+// 三个平台的登录都是「授权页 URL + 后端轮询取令牌」，所以把授权页从系统浏览器搬到
+// 应用内窗口，链路其余部分不用改。**这仍是默认路径而非唯一路径**：调用方必须在
+// 失败时退回系统浏览器（见 `lib/auth-open.ts`）。
+
+/** 打开（或复用）`key` 对应的授权窗；`reused = true` 表示窗口已存在、这次只是导航。 */
+export interface AuthWebviewOpenResult {
+  opened: boolean;
+  reused: boolean;
+  url: string;
+  label: string;
+}
+
+/**
+ * 在应用内打开账号授权页。
+ *
+ * ★ `key` 是窗口身份（`wb-cn` / `trae-…` / `qoder-…`）：多平台并行登录时互不覆盖。
+ * ★ `url` 由后端做形状校验（只允许 https / 本机回环），前端不需要自己判。
+ */
+export function authWebviewOpen(key: string, url: string): Promise<AuthWebviewOpenResult> {
+  return call<AuthWebviewOpenResult>("auth_webview_open", { key, url });
+}
+
+/** 关闭该 `key` 的授权窗（幂等：没开也返回 `closed: false`）。 */
+export function authWebviewClose(key: string): Promise<{ closed: boolean; label: string }> {
+  return call<{ closed: boolean; label: string }>("auth_webview_close", { key });
 }
 
 // ---------------------------------------------------------------------------
@@ -4040,16 +4082,25 @@ export interface QoderWebCreditProbe {
   message?: string;
 }
 
-/** 打开（或前置）Qoder 网页端登录窗，供用户登录一次。 */
+/**
+ * 打开（或前置）**该账号**的 Qoder 网页端登录窗，供用户登录一次。
+ *
+ * ★ 必须带 `uid`：登录窗与 Cookie 槽位都按账号分家，多账号可以各开一个窗并行登录；
+ * 不带 uid 就会「登录 B 顶掉 A」（#155）。
+ */
 export function qoderWebLoginOpen(
   scope: Scope,
-): Promise<{ opened: boolean; url: string }> {
-  return call<{ opened: boolean; url: string }>("qoder_web_login_open", { scope });
+  uid: string,
+): Promise<{ opened: boolean; url: string; label?: string }> {
+  return call<{ opened: boolean; url: string; label?: string }>("qoder_web_login_open", {
+    scope,
+    uid,
+  });
 }
 
-/** 关闭 Qoder 网页端登录窗（已关闭 ⇒ `closed=false`，不报错）。 */
-export function qoderWebLoginClose(): Promise<{ closed: boolean }> {
-  return call<{ closed: boolean }>("qoder_web_login_close", {});
+/** 关闭**该账号**的 Qoder 网页端登录窗（已关闭 ⇒ `closed=false`，不报错）。 */
+export function qoderWebLoginClose(scope: Scope, uid: string): Promise<{ closed: boolean }> {
+  return call<{ closed: boolean }>("qoder_web_login_close", { scope, uid });
 }
 
 /** 收割会话 Cookie 并探一次逐包接口（取证；命中即缓存，供下次免登录）。 */
@@ -4175,19 +4226,27 @@ export function qoderWebProxySet(
 }
 
 /**
- * 读登录窗里现有的 Cookie **名称与条数**（只读、不打上游）。
+ * 读**该账号**登录窗里现有的 Cookie **名称与条数**（只读、不打上游）。
  *
  * 登录窗开着时轮询它：`fingerprint` 变化 ⇒ 用户在窗口里登录完了 ⇒ 再调一次
  * {@link qoderWebCreditPacksProbe} 认领会话。副作用：后端会顺手把这份 Cookie
  * 暂存在内存里，于是渲染路径（{@link qoderWebCreditPacks}）立刻就能用上它。
+ *
+ * ★ 带 `uid`：多账号可能同时开着多个登录窗，不带 uid 读到的是「某个别人的窗口」。
  */
-export function qoderWebWindowCookies(scope: Scope): Promise<QoderWebWindowCookies> {
-  return call<QoderWebWindowCookies>("qoder_web_window_cookies", { scope });
+export function qoderWebWindowCookies(
+  scope: Scope,
+  uid: string,
+): Promise<QoderWebWindowCookies> {
+  return call<QoderWebWindowCookies>("qoder_web_window_cookies", { scope, uid });
 }
 
-/** 清除本地网页会话（「退出网页登录」；幂等）。 */
-export function qoderWebSessionLogout(scope: Scope): Promise<{ cleared: boolean }> {
-  return call<{ cleared: boolean }>("qoder_web_session_logout", { scope });
+/** 清除**该账号**的本地网页会话（「退出网页登录」；幂等）。 */
+export function qoderWebSessionLogout(
+  scope: Scope,
+  uid: string,
+): Promise<{ cleared: boolean }> {
+  return call<{ cleared: boolean }>("qoder_web_session_logout", { scope, uid });
 }
 
 /** 限额护栏视图（`GET /api/qoder/gateway/quota`）。 */

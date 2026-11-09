@@ -838,6 +838,82 @@ is_content_blocked(...) || (status == 400 && sanitized && is_channel_invalid(...
   命中率算成 9% 而不是 90%），**只对一条维度求和**（四条维度的合计相同，混着加会把
   同一个请求算四遍）。门禁 `scripts/check-cache-hit.mjs` 钉这三条。
 
+### D54 Qoder 网页会话（逐包明细）**按账号**分窗口、分暂存、分文件 —— ✅ **已落地（2026-11-09，issue #155）**
+
+**结论**：`uid` 是这条链路的唯一键，三处都必须按它分家，缺一处就「登录第二个账号顶掉第一个」：
+
+1. **登录窗**：label = `qoder-web-login-{区域}-{uid 指纹}`（`qoder_web::login_label`），
+   且每个窗口一份**独立 webview 数据目录** —— Windows 用 `WebviewWindowBuilder::data_directory`
+   （每账号一个 WebView2 user data folder），macOS / Linux 用 `incognito(true)`
+   （wry 分别落到 `nonPersistentDataStore` / ephemeral `WebContext`）。
+2. **内存暂存**：`HashMap<区域+uid, StagedCookies>`；收割与认领都按 uid 取放，
+   `clear_staged` 只清该账号。关窗收割的互斥位也从单个 `AtomicBool` 改成按 label 的集合。
+3. **落盘**：`web_session.{区域}.{uid 指纹}.json`（旧单文件 `web_session.{区域}.json`
+   首次命中即迁移后删除）。
+
+**理由**：cookie store 是**进程级共享**的，单窗口 = 单会话罐；而旧落盘每区域只有一个文件，
+登录 B 直接覆盖 A，读取时 uid 不匹配还会 `clear` 掉整份 —— 多账号用户永远只有最后一个能看逐包。
+
+- **不选「串行登录，靠落盘区分」的代价**：只要还是单窗口 + 共享 cookie store，
+  用户在 A 的窗口里登 B，A 的 cookie 就被上游会话替换；收割到的永远是「最后登录的那个人」。
+  想真正并行就必须让每个窗口的存储分家。
+- **不统一用 `data_directory` 的原因**：tauri 文档明确它只在 **Windows** 生效；
+  macOS / Linux 必须走 `incognito`。两者互斥（`incognito` 会让 wry 忽略 `data_directory`），
+  只能按平台二选一。
+- **`incognito` 的代价**：窗口关闭即丢 cookie —— 本链路本来就「收割后立刻落盘」，
+  无实质影响；换来的是一行代码覆盖两个平台。
+- **文件名必须带 uid 指纹**：`uid` 可能含 `/`、`:` 等字符，归一后也可能撞车；
+  指纹用自写 FNV-1a 而**不是** `DefaultHasher`（后者不保证跨 Rust 版本稳定，
+  升级工具链会让所有已落盘会话「找不到」= 让用户重登一遍）。
+- **归属不符时只清暂存、不清已落盘**（与 D53 同属「别把一次失误放大成数据丢失」）：
+  用户在 A 的窗口里登了 B，说明这份**暂存**是别人的；但 A 已落盘的会话是当时通过
+  `owner_matches` 验证过的，不能因为一次登错窗口就删掉。
+
+**定了会动什么**：`web_session.rs`（`file_for` / `save` / `load` / `clear` 全部收 `uid` +
+迁移）、`qoder_web.rs`（label 派生、窗口隔离、暂存分槽）、`commands.rs` 四站通道
+（`login_open` / `login_close` / `window_cookies` / `session_logout` 收 `uid`）、
+`api.ts` 与 `use-qoder-web-packs.ts`（轮询与退出都带 uid，退出只清该账号的缓存）。
+
+### D55 账号授权**默认在应用内完成**（公共设置 `auth_in_app`），系统浏览器只作兜底 —— ✅ **已落地（2026-11-09）**
+
+**结论**：三个平台（WorkBuddy / Trae / Qoder）的登录都改成「授权页开在应用内窗口」。
+公共设置 `app_prefs.json` 新增 `auth_in_app`，**默认 `true`**；关掉则回到系统浏览器。
+授权页的打开收口到 `lib/auth-open.ts::openAuthPage`，三个登录弹窗共用它，
+内嵌窗本体是 `src-tauri/src/auth_webview.rs`（label = `auth-web-{key}`）。
+
+**理由**：三平台登录是**同一形状** —— 后端算出授权页 URL（`verificationUri`）→ 用户在页面
+里登录并同意 → **后端轮询**取回令牌入库。也就是说「谁把页面画出来」与登录成败无关：
+授权页只是普通 HTTPS 页面，完成判据在后端轮询里，不在浏览器回调里。所以把页面搬进
+webview 窗口，链路其余部分一个字都不用改（Trae 的 `127.0.0.1:<port>` 回调同理 ——
+webview 里跳回环地址，本地监听照样收到）。
+
+- **为什么不按平台各写一套开关**：三个弹窗原本各有一份逐字相同的 `openInBrowser`；
+  再各加一条「读设置」的分支，必然出现「某个平台忘了读」——**界面上完全看不出来**，
+  用户只会觉得「这个平台怎么老跳浏览器」。
+- **为什么默认开**：授权页是自有域名（没有第三方 OAuth 的 embedded-webview 限制），
+  内嵌路径少一次应用切换；授权窗口的登录态留在本进程里，后续查账号数据不必反复登录。
+- **★ 它只是默认路径，不是硬约束**：`auth_webview_open` 可能失败（宿主没有 webview /
+  URL 没过形状校验 / 建窗异常）⇒ 调用方一律退回系统浏览器。选反的代价是：
+  一次建窗异常就变成「登不了账号」，而这条路径没有任何备用入口。
+- **URL 形状校验是安全边界**：只允许 `https`（与 `http` 回环，给本地联调）。
+  `file:` / `data:` / `javascript:` 一律拒绝 —— 这个命令的参数来自渲染层，
+  不能让它把任意本地文件或脚本塞进一个带 Tauri IPC 能力的窗口。
+- **窗口按 `key` 分家**（`wb-cn` / `trae-<variant>` / `qoder-<scope>`）：多平台、多区域、
+  多程序位并行登录时互不导航覆盖；同一 key 再次发起是**导航**而不是新建窗
+  （否则每次点登录都堆一个窗）。
+- **不复用 `qoder_web` 登录窗**：那个窗的关闭要**先收割 Cookie 再销毁**，
+  把「关窗要不要等收割」渗进授权路径，会把简单的事弄成时序问题。
+
+**定了会动什么**：`app_prefs.rs`（默认值 + `auth_in_app()` 读盘 + 单测四格真值表）/
+`auth_webview.rs`（新）/ `commands.rs` + `lib.rs` 注册 / `api.rs` 两条桌面专属路由 /
+`api.ts`（`authWebviewOpen` / `authWebviewClose`）/ `lib/auth-open.ts`（新，三弹窗共用）/
+三个登录弹窗（打开 + 终态关窗）/ 设置页 `AuthCard` / `AppPrefs` 类型与 demo 态。
+
+**已知待真机验证**：Trae 授权页会主动探 `http://127.0.0.1:<port>` 判断客户端在线，
+webview 里属 HTTPS 页面发起的回环 HTTP 请求 —— 依赖平台把 loopback 当作可信源
+（Chromium / WebKit 均默认放行）。若某个平台不放行，症状是页面一直停在「认证中」，
+处理方式就是关掉该设置（退回浏览器）而不是改代码。
+
 ---
 
 一句话总结这 28 条的内在一致性：

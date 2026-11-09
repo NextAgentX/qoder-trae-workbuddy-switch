@@ -458,6 +458,105 @@ function StartupCard({ variant }: { variant: AppSettingsVariant }) {
   );
 }
 
+/**
+ * 账号授权（仅桌面端）—— 一个开关：**在应用内完成账号授权**。
+ *
+ * ## 为什么要有一个「公共」设置
+ *
+ * 三个平台（WorkBuddy / Trae / Qoder）的登录是同一形状：后端算出授权页 URL → 用户
+ * 在页面里登录并同意 → 后端轮询取回令牌入库。把「页面开在哪」抽成一处偏好，
+ * 三个登录弹窗都读它，就不会出现「某个平台忘了读设置」这种**界面上看不出来**的漂移。
+ *
+ * ## 为什么默认开
+ *
+ * 授权页是自有域名（没有第三方 OAuth 的 embedded-webview 限制），内嵌路径少一次
+ * 应用切换；而且授权窗口的登录态留在本进程里，后续查账号数据不必反复登录。
+ * ★ 它只是**默认路径**：`lib/auth-open.ts` 在开窗失败时一律退回系统浏览器 ——
+ * 一次建窗异常不该变成「登不了账号」。
+ *
+ * 载体是 `app_prefs.json`（`auth_in_app`）而不是 `localStorage`：宿主侧的授权窗命令
+ * 也要读同一份值，两边读同一处才不会「设置显示内嵌、实际跳了浏览器」。
+ */
+function AuthCard({ variant }: { variant: AppSettingsVariant }) {
+  const t = useT();
+  const [inApp, setInApp] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getAppPrefs()
+      .then((prefs) => {
+        if (!cancelled) setInApp(prefs.auth_in_app);
+      })
+      .catch((e) => {
+        if (!cancelled) setMsg({ type: "err", text: api.asError(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function onToggle(value: boolean) {
+    if (busy || inApp === null) return;
+    const previous = inApp;
+    // 乐观更新：开关必须立刻跟手（真值在文件里，下一轮登录才读）。
+    setInApp(value);
+    setBusy(true);
+    setMsg(null);
+    try {
+      /* 先读回完整偏好再写：`set_app_prefs` 按**已知键**归一化，只传 `auth_in_app`
+         会把 `legal_consent_at`（风险确认时间）和 `close_to_tray` 冲回默认值。 */
+      const current = await api.getAppPrefs();
+      const saved = await api.setAppPrefs({ ...current, auth_in_app: value });
+      // 按回读值渲染：非法值会被后端归一成默认值，回显请求值会与真实行为分叉。
+      setInApp(saved.auth_in_app);
+      if (saved.auth_in_app !== value) {
+        setMsg({ type: "err", text: t("appSettings.auth.saveMismatch") });
+      }
+    } catch (e) {
+      setInApp(previous);
+      setMsg({ type: "err", text: api.asError(e) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const label = t("appSettings.auth.inApp.label");
+
+  return (
+    <SettingsGroup id="settings-auth" title={t("appSettings.auth.title")} variant={variant}>
+      <GroupBody variant={variant}>
+        <SettingsFieldRow
+          className="border-b-0"
+          stacked={variant === "plain"}
+          label={label}
+          description={t("appSettings.auth.inApp.description")}
+          htmlFor="auth-in-app"
+        >
+          <Switch
+            id="auth-in-app"
+            checked={inApp ?? true}
+            disabled={busy || inApp === null}
+            onCheckedChange={(v) => void onToggle(v)}
+            aria-label={label}
+          />
+        </SettingsFieldRow>
+
+        {msg && (
+          <Alert
+            variant={msg.type === "err" ? "destructive" : "default"}
+            className="!w-auto mx-4 my-4 sm:mx-5"
+          >
+            <AlertDescription>{msg.text}</AlertDescription>
+          </Alert>
+        )}
+      </GroupBody>
+    </SettingsGroup>
+  );
+}
+
 /** 外观：主题选择（持久化到 localStorage）。 */
 function AppearanceCard({ variant }: { variant: AppSettingsVariant }) {
   const t = useT();
@@ -769,6 +868,7 @@ export function AppSettingsGroups({ variant = "card" }: { variant?: AppSettingsV
       <AppearanceCard variant={variant} />
       <ShortcutsCard variant={variant} />
       {api.isDesktop() || api.isDemoMode() ? <StartupCard variant={variant} /> : null}
+      {api.isDesktop() || api.isDemoMode() ? <AuthCard variant={variant} /> : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard variant={variant} />}
       <ScopeVisibilityCard />
       <CreditsAutoRefreshCard />

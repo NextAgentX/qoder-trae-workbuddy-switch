@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { closeAuthPage, openAuthPage } from "@/lib/auth-open";
 import { useT } from "@/lib/i18n";
 import { traeVariantLabel, type TraeAccount } from "@/lib/trae-types";
 import { useTraeVariant } from "@/lib/use-trae-variant";
@@ -75,6 +76,8 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
    */
   const [variant] = useTraeVariant();
   const variantLabel = traeVariantLabel(variant);
+  /** 授权窗身份（按变体分家：三个程序位可以同时各登一个）。 */
+  const authKey = `trae-${variant}`;
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -175,6 +178,9 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
           // **先落定、再改界面**：此后任何 effect 重跑都会在入口处直接返回，
           // 不会再发第二次轮询（终端态只能被读一次）。
           settledRef.current = true;
+          /* 令牌已经由后端回调/轮询取回 ⇒ 授权窗的使命结束（不关会挡住主窗口，
+             也会让用户以为「还在等」）。 */
+          void closeAuthPage(authKey);
           if (res.account) {
             // 同时校 `!timedOutRef.current`：若后端耗时超过前端 310s 才成功
             // （慢换 token / 时钟偏移），此时界面**已经**因超时置了 error。
@@ -208,7 +214,7 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
     };
     // 依赖里**只有**决定会话身份的两个值。`onSuccess` 走 ref（见 `onSuccessRef`），
     // 放进依赖会让父级每次重渲染都重跑本 effect —— 那正是本次修掉的缺陷。
-  }, [open, loginId]);
+  }, [authKey, open, loginId]);
 
   // 前端独立超时：会话开始时起算，到点给明确文案并停轮询。
   //
@@ -284,8 +290,9 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
       setUri(res.verificationUri);
       setPort(res.port);
       setExpiresIn(res.expiresIn ?? null);
-      // 按当前宿主能力打开验证页
-      await openInBrowser(res.verificationUri);
+      // 按公共设置打开验证页：桌面端默认内嵌授权窗，失败自动退回系统浏览器。
+      // 打开失败**不是登录失败**（链接与二维码在弹窗里，远程部署照常可用）。
+      void openAuthPage(authKey, res.verificationUri).catch(() => {});
     } catch (e) {
       setError(api.asError(e));
     } finally {
@@ -481,23 +488,6 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
       </DialogContent>
     </Dialog>
   );
-}
-
-/** WebUI 使用浏览器新标签页，Tauri 使用系统 opener。 */
-async function openInBrowser(url: string): Promise<void> {
-  if (api.isWebui()) {
-    // 浏览器环境没有 Tauri 注入的 invoke；window.open 被拦截时由弹窗中的
-    // 原生链接作为兜底，因此这里不把拦截视为 OAuth 失败。
-    try {
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch {
-      // 忽略自动弹窗失败；弹窗中已展示的原生链接仍可点击。
-    }
-    return;
-  }
-
-  const { openUrl } = await import("@tauri-apps/plugin-opener");
-  return openUrl(url);
 }
 
 /**

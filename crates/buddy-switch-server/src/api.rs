@@ -616,6 +616,18 @@ fn api_routes() -> Router {
             "/api/qoder/web/session/logout",
             post(api_qoder_web_desktop_only),
         )
+        // ---- 内嵌授权窗（公共设置 `auth_in_app`）----
+        // ★ 仅桌面端：它就是一个 webview 窗口。headless 形态没有 `Webview`，但**不是缺陷**
+        //   —— 授权页本来就能在系统浏览器里完成（令牌由后端轮询取回），
+        //   所以这里只拒绝「在应用内开窗」这一动作，登录流程在浏览器里照常可用。
+        .route(
+            "/api/auth/webview/open",
+            post(api_auth_webview_desktop_only),
+        )
+        .route(
+            "/api/auth/webview/close",
+            post(api_auth_webview_desktop_only),
+        )
         // ---- Qoder 逐包出站代理（issue #111 收尾）----
         // ★ 这是**纯配置**，不是「仅桌面端可用」：headless 服务端只要有会话文件同样要取
         //   逐包，代理通道（国际版按 IP 判地区）对它是同等需要的能力 ⇒ 真实读写。
@@ -5390,6 +5402,18 @@ async fn api_qoder_web_proxy_set(Json(body): Json<Value>) -> Response {
 async fn api_qoder_web_desktop_only() -> Response {
     json_err(
         "Qoder 逐包明细需要桌面版：当前运行的是一体化服务端/命令行形态，没有内嵌浏览器，无法采集网页会话。聚合额度（剩余/已用/总量）在任意形态都可用。".to_string(),
+        StatusCode::BAD_REQUEST,
+    )
+}
+
+/// POST /api/auth/webview/{open,close} —— 内嵌授权窗是宿主能力（webui 无此窗口）。
+///
+/// 与上面 Qoder 的拒绝不同，这里的拒绝**不影响登录**：授权页照样可以在系统浏览器里完成，
+/// 令牌由后端轮询取回。所以文案要引导用户「继续在浏览器里登录」，而不是「该功能不可用」。
+async fn api_auth_webview_desktop_only() -> Response {
+    json_err(
+        "应用内授权窗仅在桌面端可用：当前形态请继续在浏览器里完成授权，登录结果会自动回到本页。"
+            .to_string(),
         StatusCode::BAD_REQUEST,
     )
 }

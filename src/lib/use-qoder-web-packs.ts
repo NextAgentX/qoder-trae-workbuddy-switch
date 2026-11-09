@@ -48,9 +48,9 @@ export interface QoderWebPacksController {
   load: (scope: Scope, uid: string, force?: boolean) => Promise<void>;
   /** 「读取逐包明细」：先 probe 认领会话，再刷新该账号。返回是否真拿到。 */
   read: (scope: Scope, uid: string) => Promise<boolean>;
-  /** 「退出网页登录」：清掉本机会话缓存。 */
-  logout: (scope: Scope, uid?: string) => Promise<void>;
-  /** 「登录 Qoder 网页端」：开独立窗口 + 两段式轮询认领。 */
+  /** 「退出网页登录」：清掉**该账号**的本机会话缓存。 */
+  logout: (scope: Scope, uid: string) => Promise<void>;
+  /** 「登录 Qoder 网页端」：开该账号的独立窗口 + 两段式轮询认领。 */
   login: (scope: Scope, uid: string) => Promise<void>;
 }
 
@@ -148,19 +148,26 @@ export function useQoderWebPacks(t: Translate): QoderWebPacksController {
   );
 
   /**
-   * 「退出网页登录」（清除本机会话缓存）。
+   * 「退出网页登录」（清除**该账号**的会话缓存）。
    *
    * 为什么必须有：会话一旦落盘，用户从界面没有任何办法清掉它（#111 复核 §2.6）。
    * 一份等价于完整身份凭据的 Cookie 不能只靠「删文件」才能退出。
+   *
+   * ★ 只清这一个账号（#155）：多账号场景下退出 A 不能顺手把 B 的明细从界面抹掉。
    */
   const logout = useCallback(
-    async (scope: Scope, uid?: string) => {
+    async (scope: Scope, uid: string) => {
       try {
-        await api.qoderWebSessionLogout(scope);
-        setPacks({});
-        fetchedAt.current = {};
+        await api.qoderWebSessionLogout(scope, uid);
+        const key = qoderPackKey(scope, uid);
+        setPacks((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        delete fetchedAt.current[key];
         toast.success(t("qoder.page.accounts.web.logoutDone"));
-        if (uid) await load(scope, uid, true);
+        await load(scope, uid, true);
       } catch (e) {
         toast.error(api.asError(e));
       }
@@ -169,31 +176,33 @@ export function useQoderWebPacks(t: Translate): QoderWebPacksController {
   );
 
   /**
-   * 「登录 Qoder 网页端」：开一个独立窗口让用户登录一次。
+   * 「登录 Qoder 网页端」：为该账号开一个独立窗口让用户登录一次。
    *
    * 逐包明细只存在于网页端私有接口，只认浏览器会话 Cookie，而本仓 Qoder 的设备码登录
    * **从不产生网页会话**。登录态落在本地缓存后，以后取逐包就不必再登录。
+   *
+   * ★ 窗口与轮询都带 `uid`（#155）：多账号可以各开一个窗并行登录，互不顶替。
    */
   const login = useCallback(
     async (scope: Scope, uid: string) => {
       try {
-        await api.qoderWebLoginOpen(scope);
+        await api.qoderWebLoginOpen(scope, uid);
         toast.success(t("qoder.page.accounts.web.loginToast"));
       } catch (e) {
         toast.error(api.asError(e));
         return;
       }
       /* 基线指纹：开窗那一刻的 cookie 集合。之后「与它不同」= 登录态变了。 */
-      const baseline = await api.qoderWebWindowCookies(scope).catch(() => null);
+      const baseline = await api.qoderWebWindowCookies(scope, uid).catch(() => null);
       let seen = baseline?.fingerprint ?? "";
       let probes = 0;
       /* 最多等 2 分钟（60 × 2s）：再长说明用户没打算现在登录，没必要一直转。 */
       for (let attempt = 0; attempt < 60; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 2000));
-        const current = await api.qoderWebWindowCookies(scope).catch(() => null);
+        const current = await api.qoderWebWindowCookies(scope, uid).catch(() => null);
         if (!current) continue; // 单次失败不终止（窗口可能正处在导航中）
         if (!current.windowOpen) {
-          /* 窗口被关了 —— 「登录完直接关窗」是最常见的操作序列。
+          /* 该账号的窗口被关了 —— 「登录完直接关窗」是最常见的操作序列。
              关窗前后端已兜底收割（`install_close_harvest`），此时 `pending` 为真才值得
              探一次；否则说明用户根本没登录，别白发一次注定 401 的请求。 */
           const status = await api.qoderWebSessionStatus(scope, uid).catch(() => null);

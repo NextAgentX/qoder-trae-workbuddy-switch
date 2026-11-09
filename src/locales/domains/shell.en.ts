@@ -162,6 +162,13 @@ export const en = {
   "appSettings.tray.saveMismatch":
     "Setting not applied: the read-back value differs from the requested one. Try again.",
 
+  "appSettings.auth.title": "Account authorization",
+  "appSettings.auth.inApp.label": "Complete sign-in inside the app",
+  "appSettings.auth.inApp.description":
+    "Opens the authorization page in an in-app window instead of your system browser; turn off to use the browser. Either way the result is recorded on this device, so account data can be refreshed without signing in again.",
+  "appSettings.auth.saveMismatch":
+    "Setting not applied: the read-back value differs from the requested one. Try again.",
+
   "appSettings.update.title": "Updates",
   "appSettings.update.auto.label": "Check for updates automatically",
   "appSettings.update.auto.description":

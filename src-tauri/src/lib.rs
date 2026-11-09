@@ -1,5 +1,9 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod commands;
+// 内嵌授权窗（公共设置 `auth_in_app`）：三平台登录默认不跳系统浏览器。
+// ⚠️ 与 `qoder_web` 同款：不加 `#[cfg(desktop)]`（命令名写进无条件编译的
+//    `generate_handler!`）；「仅桌面端」由 server 侧路由给结构化拒绝。
+mod auth_webview;
 mod gateway;
 // Qoder 网关（第三个平台，默认 57895）：独立端口，不与另三个 merge（axum 同路径 merge 会 panic）。
 mod qoder_gateway;
@@ -818,6 +822,10 @@ pub fn run() {
             commands::qoder_web_proxy_get,
             commands::qoder_web_proxy_set,
             commands::qoder_web_session_logout,
+            // 内嵌授权窗（公共设置 `auth_in_app`）：账号授权默认在应用内完成。
+            // ⚠️ 仅桌面端；server 侧同名路由返回结构化拒绝。
+            commands::auth_webview_open,
+            commands::auth_webview_close,
             commands::trae_merge_legacy_regions,
             commands::trae_save_login,
             commands::trae_backup_profile,

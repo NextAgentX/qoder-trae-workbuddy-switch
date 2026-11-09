@@ -14,6 +14,10 @@
 //!    请重新登录」—— 两者在 UI 上的动作完全不同。
 //! 3. ★ **归属必须记下来**：Cookie 是浏览器级的，同一台机器上可能先后登过不同账号。
 //!    读取方必须比对 `uid`，不一致就当作没有（见 [`WebSession::matches_uid`]）。
+//! 4. ★★ **按账号一份文件**（`web_session.{区域}.{uid}.json`）：原先每个区域只有一个
+//!    `web_session.{区域}.json`，登录第二个账号会**覆盖**第一个 —— 多账号用户永远只有
+//!    最后一个能看逐包。文件必须按 `uid` 分家，读取也不得因为「不是这个账号」而删掉
+//!    别人的会话（那是跨账号的误伤，见 [`load`]）。
 //!
 //! ## 为什么不做加密
 //!
@@ -94,9 +98,53 @@ impl WebSession {
     }
 }
 
-/// 会话文件的路径（与账号库同目录，按区域分家）。
-pub fn file_for(region: QoderRegion) -> PathBuf {
+/// 会话文件的路径（与账号库同目录，按**区域 + 账号**分家）。
+///
+/// ★ 文件名里的 `uid` 经过 [`uid_file_token`] 归一：`uid` 可能含 `/`、`:` 之类不能进
+/// 文件名的字符，且不同 `uid` 归一后可能撞车 —— 所以尾部固定追加 uid 的稳定指纹。
+pub fn file_for(region: QoderRegion, uid: &str) -> PathBuf {
+    paths::qoder_dir().join(format!(
+        "web_session.{}.{}.json",
+        region.as_str(),
+        uid_file_token(uid)
+    ))
+}
+
+/// 旧版路径（每区域只有一份会话）。**只为迁移保留**，别在新代码里写它。
+fn legacy_file_for(region: QoderRegion) -> PathBuf {
     paths::qoder_dir().join(format!("web_session.{}.json", region.as_str()))
+}
+
+/// 把 `uid` 压成可进文件名的片段：只留 `[a-z0-9_-]`，尾随稳定指纹防撞车。
+///
+/// ★ 指纹用自实现的 FNV-1a，**不用** `DefaultHasher`：后者不保证跨 Rust 版本稳定，
+/// 升级工具链就会让所有已落盘的会话「找不到」= 让用户重新登录一遍。
+pub fn uid_file_token(uid: &str) -> String {
+    let trimmed = uid.trim().to_ascii_lowercase();
+    let mut slug: String = trimmed
+        .chars()
+        .take(48)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if slug.is_empty() {
+        slug.push_str("uid");
+    }
+    format!("{slug}-{:08x}", fnv1a32(trimmed.as_bytes()))
+}
+
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 /// 落盘到指定路径（测试注入用；生产走 [`save`]）。
@@ -132,19 +180,50 @@ pub fn clear_at(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|error| format!("删除网页会话失败: {error}"))
 }
 
-/// 落盘（生产入口）。
-pub fn save(region: QoderRegion, session: &WebSession) -> Result<(), String> {
-    save_to(&file_for(region), session)
+/// 落盘（生产入口；同账号覆盖写）。
+pub fn save(region: QoderRegion, uid: &str, session: &WebSession) -> Result<(), String> {
+    if !session.matches_uid(uid) {
+        // 写错槽位比写失败更糟：会把 A 的凭据挂到 B 的账号下。
+        return Err("网页会话的归属与 uid 不一致，拒绝落盘".to_string());
+    }
+    save_to(&file_for(region, uid), session)
 }
 
 /// 读取（生产入口；**不判保鲜期**，由调用方用 [`WebSession::is_fresh`]）。
-pub fn load(region: QoderRegion) -> Option<WebSession> {
-    load_from(&file_for(region))
+///
+/// 旧版单文件（`web_session.{区域}.json`）在首次命中时**就地迁移**到按账号的文件：
+/// 升级不该让已经登过网页端的用户再登一次。
+pub fn load(region: QoderRegion, uid: &str) -> Option<WebSession> {
+    load_migrating(&file_for(region, uid), &legacy_file_for(region), uid)
 }
 
-/// 清除（生产入口；幂等）。
-pub fn clear(region: QoderRegion) -> Result<(), String> {
-    clear_at(&file_for(region))
+/// [`load`] 的路径版（测试注入用）：按账号槽位读取，旧单文件命中即迁移。
+///
+/// ★ 两条都要 uid 校验：槽位由 uid 推导，但文件内容是外部可改的 —— 内容归属不匹配
+/// 一律当「没有」，且**不删**旧文件（它可能是另一个账号的会话）。
+fn load_migrating(path: &Path, legacy: &Path, uid: &str) -> Option<WebSession> {
+    if let Some(session) = load_from(path) {
+        return session.matches_uid(uid).then_some(session);
+    }
+    let session = load_from(legacy)?;
+    if !session.matches_uid(uid) {
+        return None;
+    }
+    let _ = save_to(path, &session);
+    let _ = clear_at(legacy);
+    Some(session)
+}
+
+/// 清除（生产入口；幂等）。只清这一个账号，**不碰**同区域其他账号的会话。
+pub fn clear(region: QoderRegion, uid: &str) -> Result<(), String> {
+    clear_at(&file_for(region, uid))?;
+    let legacy = legacy_file_for(region);
+    if let Some(session) = load_from(&legacy) {
+        if session.matches_uid(uid) {
+            clear_at(&legacy)?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -262,5 +341,74 @@ mod tests {
         // 空 cookie 的文件也当没有（半写状态）
         std::fs::write(&path, r#"{"uid":"u1","cookie":"  ","savedAtMs":0}"#).unwrap();
         assert!(load_from(&path).is_none());
+    }
+
+    /// 文件名 token 必须**稳定**：升级 Rust 后旧文件还得认得出来（`DefaultHasher`
+    /// 不保证跨版本稳定，所以实现里刻意自写 FNV-1a）。
+    #[test]
+    fn uid_token_is_stable_and_collision_resistant() {
+        assert_eq!(uid_file_token("abc-123"), uid_file_token(" ABC-123 "));
+        assert_eq!(uid_file_token("ABC-123"), uid_file_token("abc-123"));
+        assert_ne!(uid_file_token("a/b"), uid_file_token("a:b"));
+        assert_ne!(uid_file_token("u1"), uid_file_token("u2"));
+        // 形状固定：slug + '-' + 8 位十六进制指纹
+        let token = uid_file_token("abc-123");
+        assert!(token.starts_with("abc-123-"), "token 形状不对: {token}");
+        assert_eq!(token.len(), "abc-123-".len() + 8);
+        assert!(token["abc-123-".len()..]
+            .chars()
+            .all(|c| c.is_ascii_hexdigit()));
+        // 非法字符不得进文件名
+        let token = uid_file_token("user:1/../../etc");
+        assert!(
+            token
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
+            "文件名 token 含非法字符: {token}"
+        );
+        // 超长 uid 必须截断（否则可能撞上文件系统上限）
+        assert!(uid_file_token(&"x".repeat(500)).len() <= 48 + 1 + 8);
+    }
+
+    /// 每个账号一份文件：登录 B 不得覆盖 A，退出 B 不得顺手删掉 A。
+    #[test]
+    fn sessions_are_per_uid_and_legacy_file_migrates_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_path = dir.path().join(uid_file_token("uid-a") + ".json");
+        let b_path = dir.path().join(uid_file_token("uid-b") + ".json");
+        let legacy = dir.path().join("web_session.cn.json");
+
+        save_to(&a_path, &session("uid-a", 1_000)).unwrap();
+        save_to(&b_path, &session("uid-b", 2_000)).unwrap();
+        assert_eq!(load_from(&a_path).unwrap().uid, "uid-a", "B 不得覆盖 A");
+        assert_eq!(load_from(&b_path).unwrap().uid, "uid-b");
+
+        clear_at(&b_path).unwrap();
+        assert!(load_from(&b_path).is_none());
+        assert!(load_from(&a_path).is_some(), "退出 B 不得连带删掉 A");
+
+        // 旧版单文件：uid 匹配 ⇒ 迁到按账号槽位并删除旧文件
+        // （用**空**槽位测迁移：已有槽位时 `load_migrating` 会直接返回槽位里的那份，
+        //  不会去读旧文件，这是设计而非缺陷。）
+        let fresh_a = dir.path().join("fresh-a.json");
+        save_to(&legacy, &session("uid-a", 3_000)).unwrap();
+        let migrated = load_migrating(&fresh_a, &legacy, "uid-a").expect("应读到并迁移");
+        assert_eq!(migrated.cookie, "a=1; b=2");
+        assert!(!legacy.exists(), "迁移后旧文件应删除");
+        assert!(load_from(&fresh_a).is_some());
+
+        // 旧文件是别人的会话 ⇒ 读不到，且**不得**删除（等它自己的 uid 来认领）
+        let fresh_b = dir.path().join("fresh-b.json");
+        save_to(&legacy, &session("uid-b", 4_000)).unwrap();
+        assert!(
+            load_migrating(&fresh_b, &legacy, "uid-c").is_none(),
+            "归属不符读不出"
+        );
+        assert!(legacy.exists(), "别人的旧会话不得被顺手删掉");
+
+        // 槽位里是别的账号的内容 ⇒ 当「没有」（外部可改，fail-closed）
+        let hostile = dir.path().join("hostile.json");
+        save_to(&hostile, &session("uid-z", 5_000)).unwrap();
+        assert!(load_migrating(&hostile, &legacy, "uid-a").is_none());
     }
 }

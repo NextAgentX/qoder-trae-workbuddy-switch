@@ -1552,6 +1552,21 @@ export interface AppPrefs {
   /** 关闭窗口时隐藏到托盘并保持后台运行；false = 关闭即退出。 */
   close_to_tray: boolean;
   /**
+   * 账号授权是否默认在**应用内**完成（内嵌授权窗），不跳出系统浏览器。
+   *
+   * 默认 `true`。★ 它只是默认路径，不是硬约束：`auth-open.ts` 在开窗失败时会退回
+   * 系统浏览器 —— 否则一次建窗失败就等于「登不了账号」。webui / 无内嵌窗口的形态
+   * 恒为 `false`（那里没有别的选择）。
+   */
+  auth_in_app: boolean;
+  /**
+   * 是否开启外部 Agent 会话监听（给别的客户端装 hook）。默认 `false`。
+   *
+   * 存在这里是因为**宿主**要在「装/卸 hook」时读它；跟随 `set_app_prefs` 一起读写，
+   * 免得一次开关切换把它冲回默认值。
+   */
+  watch_agent_sessions: boolean;
+  /**
    * 首次启动「风险确认」的时间戳（epoch 毫秒）；**0 = 尚未确认**。
    *
    * 它只有渲染层读，却**刻意**存在后端而不是 `localStorage`：清一次站点数据就会

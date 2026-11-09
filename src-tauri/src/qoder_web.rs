@@ -32,10 +32,20 @@
 //! 两者都把 Cookie **暂存进进程内存**（[`stage_cookies`]），于是**不需要 `AppHandle`
 //! 的渲染路径**（[`credit_packs`]）也能用上刚登录的那份会话 —— 这是原来那个闭环依赖
 //! （缓存为空 ⇒ 走不到写缓存的那一行）的解药。
+//!
+//! ## 多账号（#155，别退回单窗口 / 单文件）
+//!
+//! 用户会同时挂多个 Qoder 账号，每个都要看自己的逐包。三处**都**必须按账号分家，缺一处
+//! 就会「登录 B 顶掉 A」：
+//!
+//! 1. 窗口：label 由 [`login_label`] 按区域 + uid 派生，且每个窗口一份独立 webview 数据
+//!    目录（Windows `data_directory` / 其他平台 `incognito`）—— 否则 cookie store 共享；
+//! 2. 暂存：`HashMap<区域+uid, …>`，收割与认领都按 uid 取放；
+//! 3. 落盘：`web_session.{区域}.{uid}.json`（见 `buddy_switch_core::…::web_session`）。
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
@@ -48,59 +58,126 @@ use buddy_switch_core::modules::qoder::region::{self, QoderRegion};
 use buddy_switch_core::modules::qoder::web_proxy;
 use buddy_switch_core::modules::qoder::web_session;
 use buddy_switch_core::modules::qoder::web_usage;
+use buddy_switch_core::modules::runtime_log;
 
-/// 登录窗的 label。
+/// 登录窗 label 的前缀；实际 label 由 [`login_label`] 按**区域 + 账号**派生。
 ///
-/// 一个窗口足够：两区域名不同，cookie store 按域隔离，不会互相污染。
-/// 换区域时**导航**而不是新开窗口 —— 用户不该看到两个 Qoder 登录窗。
-pub const LOGIN_LABEL: &str = "qoder-web-login";
+/// ★ 为什么必须每账号一个窗口（#155）：cookie store 是**进程级共享**的，单个窗口意味着
+/// 登录第二个账号就顶掉第一个 —— 多账号用户的逐包明细永远只剩最后一个。窗口分家还不够，
+/// 每个窗口的 webview 数据目录也必须分家（见 [`ensure_login_window`]），否则两个窗口
+/// 共用同一份 cookie 罐，照样互相顶。
+pub const LOGIN_LABEL_PREFIX: &str = "qoder-web-login";
+
+/// 某账号登录窗的 label。
+///
+/// 含 `uid` 的稳定指纹（[`web_session::uid_file_token`]）：窗口 label 与 Cookie 槽位用
+/// **同一套**推导，两边不可能对不上。
+pub fn login_label(region: QoderRegion, uid: &str) -> String {
+    format!(
+        "{LOGIN_LABEL_PREFIX}-{}-{}",
+        region.as_str(),
+        web_session::uid_file_token(uid)
+    )
+}
 
 /// 登录窗尺寸（网页端用量页是桌面版布局，窄了会挤成两行）。
 const WINDOW_WIDTH: f64 = 1024.0;
 const WINDOW_HEIGHT: f64 = 780.0;
 
-/// 确保登录窗存在并导航到该区域的用量页。
+/// uid 的归一形式（与 [`buddy_switch_core::modules::qoder::web_session::WebSession::matches_uid`]
+/// 一致：trim + 小写）。暂存键、窗口 label、Cookie 槽位都靠它对齐。
+fn uid_key(uid: &str) -> String {
+    uid.trim().to_ascii_lowercase()
+}
+
+/// uid 必填校验（网页会话的**归属**就是它，缺了等于不知道给谁存）。
+fn require_uid(uid: &str) -> Result<(), String> {
+    if uid_key(uid).is_empty() {
+        return Err("缺少 uid".to_string());
+    }
+    Ok(())
+}
+
+/// 确保**该账号**的登录窗存在并导航到该区域的用量页。
+///
+/// ## 多账号隔离（#155）
+///
+/// 同一个 `Webview` 进程里，cookie store 默认是共享的：给第二个账号开窗，两个窗口读到的
+/// 是同一份 Cookie ⇒ 谁最后登录谁赢。隔离手段按平台分：
+///
+/// - **Windows**：`data_directory` 给每个账号一份 WebView2 user data folder（wry 以它作
+///   `WebContext` 的 key，profile 完全分家）；
+/// - **macOS / Linux**：`data_directory` 不支持（tauri 文档明确），改用 `incognito`——
+///   wry 在 macOS 用 `nonPersistentDataStore`、Linux 用 ephemeral `WebContext`，同样是
+///   每窗口一份。窗口关闭即丢 Cookie 无所谓：收割后就落盘了。
+///
+/// ⚠️ 两条不能混用：`incognito` 会**忽略** `data_directory`（wry 语义），所以只能二选一。
 fn ensure_login_window<R: Runtime>(
     app: &AppHandle<R>,
     region: QoderRegion,
+    uid: &str,
 ) -> Result<WebviewWindow<R>, String> {
     let url = web_usage::usage_page_url(region);
     let parsed: Url = url
         .parse()
         .map_err(|error| format!("登录页地址非法: {error}"))?;
+    let label = login_label(region, uid);
 
-    if let Some(window) = app.get_webview_window(LOGIN_LABEL) {
-        // 已存在：**只在区域变了时才导航**。
-        //
-        // ⚠️ 无条件 `navigate` 会把用户正在填的登录表单刷掉 —— 前端每次点击都会走这里，
-        //    「点两下按钮就把输了一半的账号密码清空」是必然被报的 bug。用 host 判定区域
-        //    是否真的换了（两区域的 website 域名不同：qoder.com.cn / qoder.com）。
-        let same_region = window
-            .url()
-            .map(|current| current.host_str() == parsed.host_str())
-            .unwrap_or(false);
-        if !same_region {
-            let _ = window.navigate(parsed);
-        }
+    if let Some(window) = app.get_webview_window(&label) {
         let _ = window.show();
         let _ = window.set_focus();
         return Ok(window);
     }
 
-    let window = WebviewWindowBuilder::new(app, LOGIN_LABEL, WebviewUrl::External(parsed))
-        .title("登录 Qoder 网页端（用于读取逐包明细）")
+    let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(parsed))
+        .title(format!(
+            "登录 Qoder 网页端（{} · 读取逐包明细）",
+            region.as_str()
+        ))
         .inner_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         .min_inner_size(720.0, 560.0)
-        .center()
+        .center();
+
+    #[cfg(target_os = "windows")]
+    {
+        // 每个账号一份 WebView2 user data folder。建目录失败就只能退回共享 profile
+        // （多账号会互相顶），所以记一行运行时日志，别让它静默降级。
+        match app.path().app_data_dir() {
+            Ok(dir) => {
+                let profile = dir.join("qoder-web-profiles").join(format!(
+                    "{}-{}",
+                    region.as_str(),
+                    web_session::uid_file_token(uid)
+                ));
+                if let Err(error) = std::fs::create_dir_all(&profile) {
+                    runtime_log::warn(
+                        "qoder-web",
+                        format!("建 profile 目录失败，多账号隔离将失效: {error}"),
+                    );
+                } else {
+                    builder = builder.data_directory(profile);
+                }
+            }
+            Err(error) => runtime_log::warn(
+                "qoder-web",
+                format!("取 appDataDir 失败，多账号隔离将失效: {error}"),
+            ),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        builder = builder.incognito(true);
+    }
+
+    let window = builder
         .build()
         .map_err(|error| format!("打开 Qoder 登录窗失败: {error}"))?;
     // ★ 关窗前兜底收割（#111 复核 P1）：没有它，「登录完直接关窗」= 白登录。
-    CLOSE_HARVESTING.store(false, Ordering::SeqCst);
-    install_close_harvest(&window, region);
+    install_close_harvest(&window, region, uid);
     Ok(window)
 }
 
-/// 读登录窗里现有的 Cookie **名称与条数**（本地命令，**不打上游**）。
+/// 读**某个账号**登录窗里现有的 Cookie **名称与条数**（本地命令，**不打上游**）。
 ///
 /// 前端在登录窗开着时轮询它：`fingerprint` 变了 ⇒ 用户在窗口里完成了登录 ⇒ 再去探一次
 /// 逐包。为什么不让前端每 3 秒直接调 probe：probe 一旦拿到非空 Cookie 就会真打上游，
@@ -112,10 +189,12 @@ fn ensure_login_window<R: Runtime>(
 pub async fn window_cookies<R: Runtime>(
     app: &AppHandle<R>,
     scope: String,
+    uid: String,
 ) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
-    let Some(window) = app.get_webview_window(LOGIN_LABEL) else {
+    require_uid(&uid)?;
+    let Some(window) = app.get_webview_window(&login_label(region, &uid)) else {
         return Ok(json!({
             "windowOpen": false,
             "cookieCount": 0,
@@ -131,7 +210,7 @@ pub async fn window_cookies<R: Runtime>(
             "fingerprint": "",
         }));
     };
-    stage_cookies(region, &header, &names);
+    stage_cookies(region, &uid, &header, &names);
     Ok(json!({
         "windowOpen": true,
         // ⚠️ 只给名称、条数与指纹，**不给值**。
@@ -186,6 +265,9 @@ const STAGED_TTL_MS: i64 = 10 * 60 * 1000;
 /// ★ 为什么要有它：落盘需要 `uid`（归属校验），而**窗口关闭事件里不知道用户在登哪个
 /// 账号**。所以关窗前只能先暂存，等随后的 probe（带 uid）来认领。`Debug` 手写，
 /// 永不出原文。
+///
+/// ★ 按账号分槽（#155）：单槽时两个窗口并行登录会互相覆盖 —— A 收割的 Cookie 被 B 顶掉，
+/// 随后 A 的 probe 拿 B 的会话去认领，必然是「归属不符」。
 struct StagedCookies {
     region: QoderRegion,
     header: String,
@@ -203,39 +285,47 @@ impl std::fmt::Debug for StagedCookies {
     }
 }
 
-fn staged_slot() -> &'static Mutex<Option<StagedCookies>> {
-    static SLOT: std::sync::OnceLock<Mutex<Option<StagedCookies>>> = std::sync::OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
+/// 暂存槽的键：区域 + uid（uid 归一为小写，与 `matches_uid` 的语义一致）。
+fn staged_key(region: QoderRegion, uid: &str) -> String {
+    format!("{}:{}", region.as_str(), uid_key(uid))
 }
 
-/// 暂存一份刚收割到的 Cookie（空串直接忽略；同一区域后写覆盖先写）。
-fn stage_cookies(region: QoderRegion, header: &str, names: &[String]) {
-    if header.trim().is_empty() {
+fn staged_slot() -> &'static Mutex<HashMap<String, StagedCookies>> {
+    static SLOT: std::sync::OnceLock<Mutex<HashMap<String, StagedCookies>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 暂存一份刚收割到的 Cookie（空串直接忽略；同账号后写覆盖先写）。
+fn stage_cookies(region: QoderRegion, uid: &str, header: &str, names: &[String]) {
+    if header.trim().is_empty() || uid_key(uid).is_empty() {
         return;
     }
     let mut guard = match staged_slot().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    *guard = Some(StagedCookies {
-        region,
-        header: header.to_string(),
-        names: names.to_vec(),
-        staged_at_ms: web_usage_now_ms(),
-    });
+    guard.insert(
+        staged_key(region, uid),
+        StagedCookies {
+            region,
+            header: header.to_string(),
+            names: names.to_vec(),
+            staged_at_ms: web_usage_now_ms(),
+        },
+    );
 }
 
-/// 取暂存（按区域、判保鲜期）。**不清除** —— 认领方拿到 uid 校验通过后才落盘。
-fn staged_cookies(region: QoderRegion) -> Option<(String, Vec<String>, i64)> {
-    let guard = match staged_slot().lock() {
+/// 取暂存（按区域 + 账号、判保鲜期）。**不清除** —— 认领方拿到 uid 校验通过后才落盘。
+fn staged_cookies(region: QoderRegion, uid: &str) -> Option<(String, Vec<String>, i64)> {
+    let mut guard = match staged_slot().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let staged = guard.as_ref()?;
-    if staged.region != region {
-        return None;
-    }
+    let key = staged_key(region, uid);
+    let staged = guard.get(&key)?;
     if web_usage_now_ms().saturating_sub(staged.staged_at_ms) >= STAGED_TTL_MS {
+        guard.remove(&key);
         return None;
     }
     Some((
@@ -245,13 +335,15 @@ fn staged_cookies(region: QoderRegion) -> Option<(String, Vec<String>, i64)> {
     ))
 }
 
-/// 丢弃暂存（认领完成 / 判定为别人的会话之后）。
-fn clear_staged() {
+/// 丢弃**该账号**的暂存（认领完成 / 判定为别人的会话之后）。
+///
+/// ★ 不能清整张表：同区域的另一个账号可能正等着它的 probe 来认领。
+fn clear_staged(region: QoderRegion, uid: &str) {
     let mut guard = match staged_slot().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    *guard = None;
+    guard.remove(&staged_key(region, uid));
 }
 
 /// Cookie 集合的指纹：只用于判断「集合变没变」（前端据此决定要不要探一次上游）。
@@ -280,10 +372,31 @@ async fn harvest<R: Runtime>(
     Some((header, names))
 }
 
-/// 「正在关窗前收割」的互斥位：连点两次 × 时不重复起两个收割任务。
-static CLOSE_HARVESTING: AtomicBool = AtomicBool::new(false);
+/// 「正在关窗前收割」的标记集合：连点两次 × 时同一个窗口不重复起两个收割任务。
+///
+/// ★ 按**窗口 label** 记（#155）：多账号会有多个登录窗，用一个全局 `AtomicBool` 的话
+/// 关 A 窗时正在收割，B 窗的关闭请求会被无限期 `prevent_close`（看起来「× 按不动」）。
+fn harvesting_slots() -> &'static Mutex<HashSet<String>> {
+    static SLOTS: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
-/// 给登录窗装「关窗前先收割」的钩子。
+fn try_begin_harvest(label: &str) -> bool {
+    match harvesting_slots().lock() {
+        Ok(mut guard) => guard.insert(label.to_string()),
+        Err(poisoned) => poisoned.into_inner().insert(label.to_string()),
+    }
+}
+
+fn end_harvest(label: &str) {
+    let mut guard = match harvesting_slots().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.remove(label);
+}
+
+/// 给**某账号**的登录窗装「关窗前先收割」的钩子。
 ///
 /// ★ 为什么必须拦：用户登录完**直接关窗**是最自然的操作。窗口一销毁，本进程就再没有
 /// 任何能调用 `cookies_for_url` 的句柄，那份会话就白登录了（#111 复核 §2.5）。
@@ -291,50 +404,73 @@ static CLOSE_HARVESTING: AtomicBool = AtomicBool::new(false);
 /// ★ 为什么是 `prevent_close` + 异步再关：`cookies()` 在**事件处理器里同步调用会在
 /// Windows 上死锁**（wry#583）。所以先拦住，起任务收割，再用 `destroy()` 关 ——
 /// `destroy()` 不触发 `CloseRequested`，不会自己把自己拦住。
-fn install_close_harvest<R: Runtime>(window: &WebviewWindow<R>, region: QoderRegion) {
+fn install_close_harvest<R: Runtime>(window: &WebviewWindow<R>, region: QoderRegion, uid: &str) {
     let handle = window.clone();
+    let label = window.label().to_string();
+    let uid = uid.to_string();
     window.on_window_event(move |event| {
         let WindowEvent::CloseRequested { api, .. } = event else {
             return;
         };
-        if CLOSE_HARVESTING.swap(true, Ordering::SeqCst) {
+        if !try_begin_harvest(&label) {
             // 已在收割：继续拦（否则这次会抢在收割完成前把窗口销毁）。
             api.prevent_close();
             return;
         }
         api.prevent_close();
         let handle = handle.clone();
+        let uid = uid.clone();
+        let label = label.clone();
         tauri::async_runtime::spawn(async move {
             if let Some((header, names)) = harvest(handle.clone(), region).await {
-                stage_cookies(region, &header, &names);
+                stage_cookies(region, &uid, &header, &names);
             }
-            CLOSE_HARVESTING.store(false, Ordering::SeqCst);
+            end_harvest(&label);
             let _ = handle.destroy();
         });
     });
 }
 
-/// 打开（或前置）Qoder 网页端登录窗。
+/// 打开（或前置）**某账号**的 Qoder 网页端登录窗。
 ///
 /// 前端入口：账号卡 / 抽屉额度区的「登录 Qoder 网页端以获取逐包明细」按钮。
 ///
+/// ★ 必须带 `uid`：窗口按账号分家（[`login_label`]），cookie 槽位也按账号分家 ——
+/// 只按区域开窗的话，登第二个账号会顶掉第一个（#155）。
+///
 /// ⚠️ 本模块只提供实现；`#[tauri::command]` 的薄包装在 `commands.rs`
 /// （`scripts/check-api-contract.cjs` 只认 `commands::<name>` 形态的登记，写在别处会被判「未登记」）。
-pub async fn login_open<R: Runtime>(app: &AppHandle<R>, scope: String) -> Result<Value, String> {
+pub async fn login_open<R: Runtime>(
+    app: &AppHandle<R>,
+    scope: String,
+    uid: String,
+) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
-    let window = ensure_login_window(app, region)?;
+    require_uid(&uid)?;
+    let window = ensure_login_window(app, region, &uid)?;
     let _ = window.show();
     let _ = window.set_focus();
     Ok(json!({
         "opened": true,
         "url": web_usage::usage_page_url(region),
+        // 多账号：同一时刻可能开着多个窗，前端按 label 区分（也是「谁在登」的唯一凭据）。
+        "label": login_label(region, &uid),
     }))
 }
 
-/// 关闭登录窗（已关闭 ⇒ 幂等成功）。
-pub async fn login_close<R: Runtime>(app: &AppHandle<R>) -> Result<Value, String> {
-    let closed = match app.get_webview_window(LOGIN_LABEL) {
+/// 关闭**某账号**的登录窗（已关闭 ⇒ 幂等成功）。
+///
+/// ★ 只关这一个：多账号场景下「退出 A 的登录窗」不能把 B 的窗一起关掉。
+pub async fn login_close<R: Runtime>(
+    app: &AppHandle<R>,
+    scope: String,
+    uid: String,
+) -> Result<Value, String> {
+    let scope = resolve_scope_param(Some(&scope))?;
+    let region = require_qoder_region(scope)?;
+    require_uid(&uid)?;
+    let closed = match app.get_webview_window(&login_label(region, &uid)) {
         Some(window) => {
             window
                 .close()
@@ -366,20 +502,18 @@ pub async fn credit_packs_probe<R: Runtime>(
 ) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
-    if uid.trim().is_empty() {
-        return Err("缺少 uid".to_string());
-    }
+    require_uid(&uid)?;
 
-    // ① 登录窗（可能没开 —— 没开不等于失败，下面还有暂存与本地缓存）。
+    // ① 该账号的登录窗（可能没开 —— 没开不等于失败，下面还有暂存与本地缓存）。
     let mut names: Vec<String> = Vec::new();
     let mut header = String::new();
     let mut source = "none";
-    if let Some(window) = app.get_webview_window(LOGIN_LABEL) {
+    if let Some(window) = app.get_webview_window(&login_label(region, &uid)) {
         // ★★ 必须离开当前线程读 cookie：Windows 上 `cookies()` 在同步上下文会死锁
         //    （Tauri Known issues / wry#583）。`harvest` 内部即 `spawn_blocking`。
         if let Some((header_from_window, window_names)) = harvest(window, region).await {
             // ★ 顺手暂存：探针万一因网络抖动失败，这份会话也不会随窗口一起消失。
-            stage_cookies(region, &header_from_window, &window_names);
+            stage_cookies(region, &uid, &header_from_window, &window_names);
             header = header_from_window;
             names = window_names;
             source = "window";
@@ -388,18 +522,18 @@ pub async fn credit_packs_probe<R: Runtime>(
 
     // ② 关窗前暂存（用户刚登录完就把窗口关了 —— 最自然的操作序列）。
     if header.is_empty() {
-        if let Some((staged_header, staged_names, _)) = staged_cookies(region) {
+        if let Some((staged_header, staged_names, _)) = staged_cookies(region, &uid) {
             header = staged_header;
             names = staged_names;
             source = "staged";
         }
     }
 
-    // ③ 本地缓存（保鲜 + uid 归属双重校验）。
+    // ③ 本地缓存（保鲜 + uid 归属双重校验；**只读该账号自己的槽位**）。
     if header.is_empty() {
         let now = web_usage_now_ms();
-        if let Some(session) = web_session::load(region) {
-            if session.is_fresh(now) && session.matches_uid(&uid) {
+        if let Some(session) = web_session::load(region, &uid) {
+            if session.is_fresh(now) {
                 header = session.cookie;
                 names = session.cookie_names;
                 source = "stored";
@@ -422,7 +556,7 @@ pub async fn credit_packs_probe<R: Runtime>(
         Err(error) => {
             // ★ 只有「上游明确拒绝」才清缓存；网络抖动不清（否则一次抖动就掉登录态）。
             if error.unauthorized {
-                let _ = web_session::clear(region);
+                let _ = web_session::clear(region, &uid);
             }
             return Err(error.message);
         }
@@ -433,6 +567,7 @@ pub async fn credit_packs_probe<R: Runtime>(
         let now = web_usage_now_ms();
         let _ = web_session::save(
             region,
+            &uid,
             &web_session::WebSession {
                 uid: uid.trim().to_string(),
                 cookie: header,
@@ -442,11 +577,12 @@ pub async fn credit_packs_probe<R: Runtime>(
             },
         );
         // 已落盘 ⇒ 内存里那份暂存没有用处了（留着只会让下次读到一份更旧的副本）。
-        clear_staged();
+        clear_staged(region, &uid);
     } else {
-        // ★ 归属不符 ⇒ 这是**别人的**会话，绝不能留在本机、更不能显示给当前账号。
-        let _ = web_session::clear(region);
-        clear_staged();
+        // ★ 归属不符 ⇒ 用户在这个窗口里登了**另一个**账号。
+        //    只丢这份暂存（它确实是别人的），**不动**已落盘的会话：落盘那份是当时
+        //    通过 `owner_matches` 验证过的，不能因为一次登错窗口就把它删掉（#155）。
+        clear_staged(region, &uid);
     }
     Ok(json!({
         "hasSession": true,
@@ -481,21 +617,13 @@ pub async fn credit_packs_probe<R: Runtime>(
 pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
-    if uid.trim().is_empty() {
-        return Err("缺少 uid".to_string());
-    }
+    require_uid(&uid)?;
     let now = web_usage_now_ms();
-    let stored = web_session::load(region);
+    // ★ 只读该账号自己的槽位（#155）：别的账号的会话既不能用，也不该被这次读取牵连。
+    let stored = web_session::load(region, &uid);
     let had_stored = stored.is_some();
-    if let Some(session) = stored.as_ref() {
-        if !session.matches_uid(&uid) {
-            // 缓存里是**别人的**会话 ⇒ 既不能用也不能留。
-            let _ = web_session::clear(region);
-            return Ok(unavailable("session_mismatch"));
-        }
-    }
 
-    // ① 已落盘的会话（uid 匹配 + 保鲜）；② 否则关窗前 / 轮询时暂存的会话。
+    // ① 已落盘的会话（保鲜）；② 否则关窗前 / 轮询时暂存的会话。
     let candidate: Option<(String, Vec<String>, i64, bool)> =
         match stored.filter(|s| s.is_fresh(now)) {
             Some(session) => Some((
@@ -504,7 +632,7 @@ pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
                 session.saved_at_ms,
                 true,
             )),
-            None => staged_cookies(region)
+            None => staged_cookies(region, &uid)
                 .map(|(header, names, staged_at)| (header, names, staged_at, false)),
         };
     let Some((header, names, saved_at_ms, from_store)) = candidate else {
@@ -520,8 +648,8 @@ pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
         Ok(raw) => raw,
         Err(error) => {
             if error.unauthorized {
-                let _ = web_session::clear(region);
-                clear_staged();
+                let _ = web_session::clear(region, &uid);
+                clear_staged(region, &uid);
                 return Ok(unavailable("session_expired"));
             }
             // 上游抖动 / 网络问题**不清缓存**（否则一次抖动就掉登录态）。
@@ -531,14 +659,15 @@ pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
         }
     };
     if !web_usage::owner_matches(&raw, &uid) {
-        // ★ 归属不符 ⇒ 这份 Cookie 属于别的账号：缓存与暂存都要清掉（fail-closed）。
-        let _ = web_session::clear(region);
-        clear_staged();
+        // ★ 归属不符 ⇒ 这份 Cookie 属于别的账号：只清该账号的槽位与暂存（fail-closed）。
+        let _ = web_session::clear(region, &uid);
+        clear_staged(region, &uid);
         return Ok(unavailable("session_mismatch"));
     }
     // 会话被上游接受 ⇒ 落盘（暂存那份顺便认领，之后不必再依赖内存）。
     let _ = web_session::save(
         region,
+        &uid,
         &web_session::WebSession {
             uid: uid.trim().to_string(),
             cookie: header,
@@ -548,7 +677,7 @@ pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
         },
     );
     if !from_store {
-        clear_staged();
+        clear_staged(region, &uid);
     }
     let packs = web_usage::parse_credit_packs(&raw);
     Ok(json!({
@@ -565,21 +694,23 @@ fn unavailable(reason: &str) -> Value {
     json!({ "available": false, "reason": reason, "packs": Vec::<Value>::new() })
 }
 
-/// 当前区域有没有可用的网页会话（前端据此决定显示「登录」按钮还是「已登录」）。
+/// 该账号有没有可用的网页会话（前端据此决定显示「登录」按钮还是「已登录」）。
 ///
-/// 返回 `hasSession`（新鲜且 uid 匹配）、`expired`（有缓存但过期/换过账号）、
-/// `pending`（关窗前收割到、还没被 uid 认领的会话）。
-/// 三者**不是**一件事：过期要引导重新登录，匹配要引导清除，pending 只要「读一次」。
+/// 返回 `hasSession`（新鲜）、`expired`（有缓存但过期）、`pending`（关窗前收割到、
+/// 还没被 uid 认领的会话）。三者**不是**一件事：过期要引导重新登录，pending 只要「读一次」。
+///
+/// ★ 按 uid 判（#155）：同区域两个账号各有各的槽位，互不影响。
 pub async fn session_status(scope: String, uid: String) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
+    require_uid(&uid)?;
     let now = web_usage_now_ms();
-    let stored = web_session::load(region);
+    let stored = web_session::load(region, &uid);
     let has_session = stored
         .as_ref()
-        .map(|session| session.is_fresh(now) && session.matches_uid(&uid))
+        .map(|session| session.is_fresh(now))
         .unwrap_or(false);
-    let staged = staged_cookies(region).is_some();
+    let staged = staged_cookies(region, &uid).is_some();
     let payload = serde_json::json!({
         "hasSession": has_session,
         "expired": !has_session && stored.is_some(),
@@ -600,13 +731,14 @@ pub async fn session_status(scope: String, uid: String) -> Result<Value, String>
     Ok(payload)
 }
 
-/// 清除本地会话缓存（「退出网页登录」；幂等）。
-pub async fn session_logout(scope: String) -> Result<Value, String> {
+/// 清除**该账号**的本地会话缓存（「退出网页登录」；幂等）。
+pub async fn session_logout(scope: String, uid: String) -> Result<Value, String> {
     let scope = resolve_scope_param(Some(&scope))?;
     let region = require_qoder_region(scope)?;
-    web_session::clear(region)?;
+    require_uid(&uid)?;
+    web_session::clear(region, &uid)?;
     // 内存里那份也要清：否则「退出登录」之后逐包还能从暂存读到（用户会认为没退掉）。
-    clear_staged();
+    clear_staged(region, &uid);
     Ok(json!({ "cleared": true }))
 }
 
@@ -641,7 +773,7 @@ fn web_usage_now_ms() -> i64 {
 // 本模块的绝大多数逻辑依赖 `Webview`（真机才能跑），能单测的只有这两条**纯函数级**
 // 约束。它们各自钉住一个曾经会静默失效的点：
 // ① 指纹只用于「变没变」，**绝不能**把 Cookie 值带给前端；
-// ② 关窗前暂存必须按区域隔离、且空值不得覆盖已有会话（否则一次匿名收割就把刚登录的抹掉）。
+// ② 关窗前暂存必须按「区域 + 账号」隔离、且空值不得覆盖已有会话（否则一次匿名收割就把刚登录的抹掉）。
 
 #[cfg(test)]
 mod tests {
@@ -664,35 +796,68 @@ mod tests {
     }
 
     #[test]
-    fn staged_cookies_are_region_scoped_and_ignore_empty() {
-        clear_staged();
-        assert!(staged_cookies(QoderRegion::Cn).is_none());
+    fn staged_cookies_are_account_scoped_and_ignore_empty() {
+        clear_staged(QoderRegion::Cn, "u1");
+        clear_staged(QoderRegion::Cn, "u2");
+        assert!(staged_cookies(QoderRegion::Cn, "u1").is_none());
 
         stage_cookies(
             QoderRegion::Cn,
+            "u1",
             "a=1; b=2",
             &["a".to_string(), "b".to_string()],
         );
-        let (header, names, staged_at) = staged_cookies(QoderRegion::Cn).expect("同区域应能读到");
+        let (header, names, staged_at) =
+            staged_cookies(QoderRegion::Cn, "u1").expect("同账号应能读到");
         assert_eq!(header, "a=1; b=2");
         assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
         assert!(staged_at > 0);
         assert!(
-            staged_cookies(QoderRegion::Global).is_none(),
+            staged_cookies(QoderRegion::Global, "u1").is_none(),
             "别的区域不得读到本区域的会话"
+        );
+        assert!(
+            staged_cookies(QoderRegion::Cn, "u2").is_none(),
+            "别的账号不得读到本账号的会话"
         );
 
         // 空 Cookie（窗口刚开、还没登录）不得覆盖已有暂存。
-        stage_cookies(QoderRegion::Cn, "   ", &[]);
+        stage_cookies(QoderRegion::Cn, "u1", "   ", &[]);
         assert!(
-            staged_cookies(QoderRegion::Cn).is_some(),
+            staged_cookies(QoderRegion::Cn, "u1").is_some(),
             "空 cookie 不得覆盖已有会话"
         );
 
-        clear_staged();
+        // ★ 多账号并行：清 u1 不得牵连 u2（否则先认领完 A，B 的会话就丢了）。
+        stage_cookies(QoderRegion::Cn, "u2", "c=3", &["c".to_string()]);
+        clear_staged(QoderRegion::Cn, "u1");
         assert!(
-            staged_cookies(QoderRegion::Cn).is_none(),
+            staged_cookies(QoderRegion::Cn, "u1").is_none(),
             "清除后必须读不到"
         );
+        assert!(
+            staged_cookies(QoderRegion::Cn, "u2").is_some(),
+            "清 A 的暂存不得连带清掉 B"
+        );
+        clear_staged(QoderRegion::Cn, "u2");
+    }
+
+    #[test]
+    fn login_label_is_per_account_and_per_region() {
+        let a = login_label(QoderRegion::Cn, "uid-a");
+        assert_eq!(a, login_label(QoderRegion::Cn, "UID-A "), "大小写/空白归一");
+        assert_ne!(
+            a,
+            login_label(QoderRegion::Cn, "uid-b"),
+            "不同账号必须不同窗口"
+        );
+        assert_ne!(
+            a,
+            login_label(QoderRegion::Global, "uid-a"),
+            "不同区域必须不同窗口"
+        );
+        assert!(a.starts_with(LOGIN_LABEL_PREFIX));
+        // 同一账号的窗口 label 与会话文件名用同一套归一 ⇒ 永远对得上
+        assert!(a.ends_with(&web_session::uid_file_token("uid-a")));
     }
 }

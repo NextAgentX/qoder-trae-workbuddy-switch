@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { closeAuthPage, openAuthPage } from "@/lib/auth-open";
 import { useT } from "@/lib/i18n";
 import type { Scope } from "@/lib/scope";
 
@@ -47,6 +48,8 @@ interface Props {
 
 export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Props) {
   const t = useT();
+  /** 授权窗身份（按作用域分家：两个区域可以同时各登一个）。 */
+  const authKey = `qoder-${scope}`;
 
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -78,6 +81,8 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
         const res = await api.qoderOauthStatus(scope, loginId);
         if (cancelled) return;
         if (res.done) {
+          /* 令牌已入库 ⇒ 关掉授权窗（不关会挡住主窗口，也让用户以为还在等）。 */
+          void closeAuthPage(authKey);
           if (res.result) {
             // ★ 展示名走卡片的**唯一回落链**（`qoderAccountName`），与列表 / 抽屉同一份。
             const name = res.result.nickname || res.result.name || res.result.uid || "";
@@ -99,7 +104,7 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [open, loginId, scope, onCollected, t]);
+  }, [authKey, open, loginId, scope, onCollected, t]);
 
   async function start() {
     setBusy(true);
@@ -109,8 +114,9 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
       setLoginId(res.loginId);
       setUri(res.verificationUri);
       setExpiresIn(res.expiresIn ?? null);
-      /* 尽力而为：容器里没有 GUI，开不起来不算失败 —— 链接与二维码才是完整路径。 */
-      void openInBrowser(res.verificationUri).catch(() => {});
+      /* 尽力而为：容器里没有 GUI，开不起来不算失败 —— 链接与二维码才是完整路径。
+         桌面端默认走**应用内授权窗**（公共设置 `auth_in_app`），失败自动退回系统浏览器。 */
+      void openAuthPage(authKey, res.verificationUri).catch(() => {});
     } catch (e) {
       setError(api.asError(e));
     } finally {
@@ -163,18 +169,4 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
       </DialogContent>
     </Dialog>
   );
-}
-
-/** WebUI 用浏览器新标签页；桌面端用系统 opener（与 WB 的 `openInBrowser` 同款分流）。 */
-async function openInBrowser(url: string): Promise<void> {
-  if (api.isWebui()) {
-    try {
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch {
-      // 忽略自动弹窗失败；弹层里的原生链接仍可点。
-    }
-    return;
-  }
-  const { openUrl } = await import("@tauri-apps/plugin-opener");
-  return openUrl(url);
 }

@@ -165,7 +165,7 @@ let demoActiveCliAccountId = accountSeeds[5].id;
  * 若 `get` 恒返回常量，演示站里把开关关掉、重开抽屉又变回开 —— 看起来像开关坏了。
  * 后端那一侧的真值是文件，这里就对应「进程内的一份」。
  */
-let demoAppPrefs = { close_to_tray: true, legal_consent_at: 0 };
+let demoAppPrefs = { close_to_tray: true, legal_consent_at: 0, auth_in_app: true };
 
 // Counts and relative model roles follow anonymous aggregates from the sanitized local cache.
 // No upstream request row or identifier is copied into this fixture.
@@ -3478,12 +3478,18 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
     // 「清除缓存」的只读扫描（清除动作是写操作，由 DemoAction 统一拦截）。
     case "cache_scan": return demoCacheScan();
     case "set_app_prefs": {
-      const raw = (args?.prefs as { close_to_tray?: unknown } | undefined)?.close_to_tray;
-      /* 每次只改 `close_to_tray`，其余键保持原值 —— 与后端「部分字段写入不会
+      const next = (args?.prefs ?? {}) as {
+        close_to_tray?: unknown;
+        auth_in_app?: unknown;
+      };
+      /* 只改**传进来的**已知布尔键，其余键保持原值 —— 与后端「部分字段写入不会
          抹掉其它已知键」的语义一致（同意时间戳不能被一次开关切换清掉）。 */
       demoAppPrefs = {
-        close_to_tray: typeof raw === "boolean" ? raw : true,
+        close_to_tray:
+          typeof next.close_to_tray === "boolean" ? next.close_to_tray : demoAppPrefs.close_to_tray,
         legal_consent_at: demoAppPrefs.legal_consent_at,
+        auth_in_app:
+          typeof next.auth_in_app === "boolean" ? next.auth_in_app : demoAppPrefs.auth_in_app,
       };
       return { ...demoAppPrefs };
     }
