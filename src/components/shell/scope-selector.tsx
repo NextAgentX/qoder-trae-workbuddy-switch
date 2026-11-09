@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useT } from "@/lib/i18n";
+import { AGGREGATE_SHORTCUT_HINT } from "@/lib/scope-shortcuts";
 import { SCOPES, type Scope, scopeParts } from "@/lib/scope";
 import type { Product } from "@/lib/platforms/registry";
 import type { ScopeStatus, ScopeStatusMap } from "@/lib/use-scope-status";
@@ -177,6 +178,11 @@ export function ScopeSelector({
                 <span className="truncate text-[11px] text-muted-foreground">
                   {aggregateSub(aggregateTotal, aggregateAttention)}
                 </span>
+              </span>
+              {/* 与 6 个作用域项的 `⌘N` 同位。文案来自 `AGGREGATE_SHORTCUT_HINT` —— 与
+                  `App.tsx` 的全局键**同源**，改键位只需改那一处，提示不会与实现漂移。 */}
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                {AGGREGATE_SHORTCUT_HINT}
               </span>
             </DropdownMenuItem>
             <div className="my-1 h-px bg-border" />

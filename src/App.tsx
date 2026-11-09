@@ -23,7 +23,11 @@ import { demoModeEnabled, pagesDemoHostingEnabled } from "@/lib/demo-mode";
 import { useT } from "@/lib/i18n";
 import { scopeLabel } from "@/lib/command-palette";
 import type { TranslationKey } from "@/locales/zh";
-import { planScopeShortcuts, scopeShortcutTarget } from "@/lib/scope-shortcuts";
+import {
+  AGGREGATE_SHORTCUT_CODE,
+  planScopeShortcuts,
+  scopeShortcutTarget,
+} from "@/lib/scope-shortcuts";
 import { useVisibleScopes } from "@/lib/scope-visibility";
 import { useShortcutsEnabled } from "@/lib/shortcut-preference";
 import { getSidebarCollapsed, setSidebarCollapsed } from "@/lib/sidebar";
@@ -890,6 +894,35 @@ function Layout() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [shortcutPlan, currentDest, navigate]);
+
+  /**
+   * `Ctrl` + 反引号键（数字 `1` 左边那枚）⇒ 跳到**聚合页签**（`/aggregate`）。
+   *
+   * 与 `⌘B` / `⌘K` / `⌘1..N` 同族同规则：必须带修饰键、`alt`/`shift` 一律不接、
+   * 输入框内不接（§1.10）。
+   *
+   * ⚠️ 键位读 `AGGREGATE_SHORTCUT_CODE`（物理键，`lib/scope-shortcuts.ts`）——
+   * **不许在这里硬编码字面量**：门禁断言本文件不出现该字面量，改键位只改常量。
+   * `event.key` 只作兜底（少量环境不填 `code`）；不能反过来只认字符 —— 非美式布局上
+   * 这枚键产出的不一定是反引号。
+   * ⚠️ 已在聚合页时**直接 return**（不导航、也不 `preventDefault`）：目标就是当前页，
+   * 任何动作都是噪音，也不该顺手吞掉别人的键。这里**比 `⌘1..N` 更严格** —— 后者对
+   * 「已是当前作用域」会 `navigate` 同一路径，凭空 push 一条重复历史；本键不写历史。
+   * ⚠️ 不受「作用域快捷键」开关控制：那个开关只作用于 `⌘1..N`，而聚合不是第 7 个
+   * 作用域（见 `lib/scope-shortcuts.ts` 的说明），`⌘B` / `⌘K` 同样不受它控制。
+   */
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.code !== AGGREGATE_SHORTCUT_CODE && event.key !== "`") return;
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      if (isTypingTarget(event.target)) return;
+      if (bareShell) return; // 已在聚合页 ⇒ 无操作
+      event.preventDefault();
+      navigate("/aggregate");
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [bareShell, navigate]);
 
   /**
    * 切作用域（顶栏作用域菜单的唯一入口）：写「上次作用域」记忆 + 导航到
