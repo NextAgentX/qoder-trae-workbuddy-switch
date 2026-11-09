@@ -712,6 +712,9 @@ export function expiryBuckets(expiry: CreditExpiry, now: number = Date.now()): E
   }));
   for (const resource of expiry.resources ?? []) {
     if (resource.expired) continue;
+    /* 剩余 <= 0 的包累加进去只是加 0，但会让「这一档有没有到期积分」的判断依赖无关数据；
+       与 `isUsablePack` 同一口径，直接跳过。 */
+    if (!(resource.remaining > 0)) continue;
     if (resource.expireAt == null) continue;
     const diff = resource.expireAt - now;
     if (diff <= 0) continue;

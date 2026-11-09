@@ -43,6 +43,7 @@ import { CreditGapNote, CreditLedgerTable, LEDGER_CLIENT_COLOR, LEDGER_GATEWAY_C
 import type { UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
 import { balanceCaption, singleSideCaption } from "@/lib/chart-caption";
+import { isUsablePack, packIsExpired } from "@/lib/credit-packs";
 import { formatDate } from "@/lib/format";
 import { CREDITS_UPSTREAM_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
@@ -237,6 +238,8 @@ export default function CreditStatsPage({
   }, [creditMap]);
 
   const buckets = useMemo(() => expiryBuckets(mergedExpiry), [mergedExpiry]);
+  /* 一次渲染只取一次「现在」：下面逐个账号判过期都用它，避免同一屏出现两个「今天」。 */
+  const creditNow = Date.now();
   const hasExpiry = buckets.some((bucket) => bucket.value > 0);
   const expiringTotal = useMemo(
     () => Object.values(creditMap).reduce((sum, entry) => sum + (entry?.expiringSoonRemaining ?? 0), 0),
@@ -560,7 +563,16 @@ export default function CreditStatsPage({
                 <div className="divide-y divide-border/60">
                   {stats.accounts.map((account) => {
                     const entry = creditMap[account.accountId];
-                    const resources = entry?.resources ?? [];
+                    /* 明细只列「未过期且还有剩余」的包：与徽章 / 表格的可用积分口径一致，
+                       已用完或已失效的包不再占一行（账号总额仍是后端口径，见上方那一格）。 */
+                    const resources = (entry?.resources ?? []).filter(
+                      (resource) =>
+                        isUsablePack(resource.remaining, resource.total) &&
+                        !packIsExpired(
+                          { expired: resource.expired, expireAtMs: resource.expireAt },
+                          creditNow,
+                        ),
+                    );
                     const name = displayText(account.accountName) || account.accountId;
                     return (
                       <div key={account.accountId} className="min-w-0 px-4 py-3 sm:px-5">
