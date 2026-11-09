@@ -347,20 +347,23 @@ pub struct CreditPackage {
     pub expiring_soon: bool,
 }
 
-/// 「临期」的判定窗口（秒）—— **14 天**。
+/// 「临期」的判定窗口（秒）—— **7 天**。
 ///
-/// ## 为什么从 7 天放宽到 14 天（issue #83 · 3）
+/// ## 为什么统一下来（2026-11-09）
 ///
-/// 7 天作为「再不用就浪费了」的告警太紧：多数人一周才打开一次这个工具，
-/// 7 天窗口常常在用户下一次打开之前就滑过去了 —— 徽标从来没亮过，积分就过期了。
+/// 三个平台此前是**两个口径**：WorkBuddy 7 天（`credits.rs::EXPIRING_SOON_DAYS`）、
+/// Trae / Qoder 14 天。同一批「10 天后到期」的积分，在 WB 分区不标黄、在 Trae / Qoder
+/// 分区标黄 —— 用户在三处来回看，只会认为其中一个在撒谎。现统一为 7 天，三处同值。
 ///
-/// 为什么不是 30 天：大部分积分包的有效期本身就在 30 天内，30 天窗口会让**几乎所有**
-/// 包都显示「临期」⇒ 这个信号失去区分度，用户会学会无视它。14 天是「两次使用间隔
-/// 的两倍左右」，既能在真正浪费前提醒，又不至于天天红。
+/// 历史：issue #83 · 3 曾把这里从 7 天放宽到 14 天（理由是「多数人一周才打开一次工具，
+/// 7 天窗口常常在用户下次打开之前就滑过去了」）。那条理由单独看成立，但它只在 Trae 一侧
+/// 生效，代价就是口径分裂 —— 统一口径优先于单平台的宽松度。
 ///
 /// ⚠️ 这是**产品口径**，不是技术常量：改它等于改文案的承诺
 /// （`trae.comp.card.chip.expiring` 写的是「N 天内过期」，由本窗口决定 N 的上界）。
-const EXPIRING_SOON_SECS: i64 = 14 * 24 * 3600;
+/// 前端镜像常量 `src/lib/credit-expiry.ts::TRAE_EXPIRING_SOON_MS` 与
+/// `src/lib/qoder-packs.ts::EXPIRING_SOON_MS` **必须同值**（跨语言不能共享常量）。
+const EXPIRING_SOON_SECS: i64 = 7 * 24 * 3600;
 
 /// 「这份响应里**一个可解析的额度包都没有**」的原因前缀（issue #186）。
 ///
@@ -1415,13 +1418,12 @@ mod tests {
         assert!(!packages[1].expiring_soon);
     }
 
-    /// ★ 临期窗口的**边界**（issue #83 · 3）：14 天以内算临期，超过不算。
+    /// ★ 临期窗口的**边界**：7 天以内算临期，超过不算。
     ///
-    /// 这条用例的价值不在于「验证一个常量」，而在于把**产品口径**钉住：
-    /// 窗口从 7 天放宽到 14 天是刻意的（7 天常常在用户下次打开之前就滑过去了）。
-    /// 变异：把 `EXPIRING_SOON_SECS` 改回 7 天 ⇒ 13 天那条变红；改成 30 天 ⇒ 15 天那条变红。
+    /// 这条用例的价值不在于「验证一个常量」，而在于把**产品口径**钉住（三平台同值）：
+    /// 变异：把 `EXPIRING_SOON_SECS` 改成 6 天 ⇒ 7 天那条变红；改回 14 天 ⇒ 8 天那条变红。
     #[test]
-    fn expiring_soon_window_is_fourteen_days() {
+    fn expiring_soon_window_is_seven_days() {
         let now = 1_000_000_i64;
         let pack = |days: i64| {
             serde_json::json!({
@@ -1429,10 +1431,10 @@ mod tests {
                 "expire_time": now + days * 24 * 3600,
             })
         };
-        let near = parse_credit_packages(&[pack(13)], now);
-        assert!(near[0].expiring_soon, "13 天后到期应算临期（窗口 14 天）");
-        let far = parse_credit_packages(&[pack(15)], now);
-        assert!(!far[0].expiring_soon, "15 天后到期不应算临期（窗口 14 天）");
+        let edge = parse_credit_packages(&[pack(7)], now);
+        assert!(edge[0].expiring_soon, "7 天后到期应算临期（窗口 7 天，边界含等号）");
+        let far = parse_credit_packages(&[pack(8)], now);
+        assert!(!far[0].expiring_soon, "8 天后到期不应算临期（窗口 7 天）");
     }
 
     /// ★★ 护栏（issue #7）：「最早到期」**不得**由已用完的包决定。
