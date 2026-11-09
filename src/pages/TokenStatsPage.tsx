@@ -63,6 +63,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { ChartFrame } from "@/components/usage/chart-frame";
 import { CumulativeArea } from "@/components/usage/cumulative-area";
 import { compactTokens, exactTokens } from "@/components/usage/format";
@@ -91,6 +92,7 @@ import type {
   ApiKeyRecord,
 } from "@/lib/types";
 import { useRefreshAction } from "@/lib/use-refresh-action";
+import { useSlowLoading } from "@/lib/use-slow-loading";
 import { useScope } from "@/lib/use-scope";
 import {
   SESSION_RENDER_LIMIT,
@@ -676,6 +678,9 @@ export default function TokenStatsPage({
   const [reload, setReload] = useState(0);
   /* 三处「重试 / 刷新」出口（错误 Alert、两种空态）共用同一个 reload 触发 ⇒ 共用一个实例。 */
   const { busy: reloadBusy, run: runReload } = useRefreshAction();
+  /* ★ 慢加载提示（issue #188）：统计页一次拉整本流水，是最容易「等很久又看不出在等」的一页。
+     8s 仍在骨架态就加一行提示 + 重试（复用错误分支的 reload 出口，不另造一套）。 */
+  const slowLoading = useSlowLoading(loading);
   const [gatewayTrend, setGatewayTrend] = useState<GatewayTokenTrend | null>(
     () => gatewayTrendCache.get(region) ?? null,
   );
@@ -797,6 +802,12 @@ export default function TokenStatsPage({
 
       {loading && !stats ? (
         <div className="space-y-4" aria-busy="true">
+          {slowLoading ? (
+            <SlowLoadHint
+              onRetry={() => void runReload(() => setReload((value) => value + 1))}
+              retrying={reloadBusy}
+            />
+          ) : null}
           <Skeleton className="h-24 w-full" />
           <Skeleton className="h-64 w-full" />
           <Skeleton className="h-40 w-full" />
