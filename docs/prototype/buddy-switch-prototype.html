@@ -3954,11 +3954,13 @@ function viewOverview() {
   const expired = s.accounts.filter((a) => a.expired);
   const relogin = s.accounts.filter((a) => a.needsRelogin);
   const notChecked = s.accounts.filter((a) => !a.checkedIn && !a.expired);
-  const expiring = s.accounts.filter((a) => a.expiring > 0 && a.expireInDays <= 5);
+  /* 窗口 = 7 天：与后端 `EXPIRING_SOON_DAYS` / 前端 `TRAE_EXPIRING_SOON_MS` 同值。
+     此前这里写 5 天，于是概览说「5 天内过期」、账号页徽章按 7 天标黄 —— 同一件事两个窗口。 */
+  const expiring = s.accounts.filter((a) => a.expiring > 0 && a.expireInDays <= 7);
   if (relogin.length) todos.push({ tone: "bad", title: `${relogin.length} 个账号需要重新登录`, desc: relogin.map((a) => a.name).join("、"), act: "去处理", dest: "accounts" });
   if (expired.length) todos.push({ tone: "bad", title: `${expired.length} 个账号凭据已过期`, desc: expired.map((a) => a.name).join("、"), act: "去处理", dest: "accounts" });
   if (notChecked.length) todos.push({ tone: "warn", title: `${notChecked.length} 个账号今日未签到`, desc: notChecked.map((a) => a.name).join("、"), act: "一键签到", run: "batch-checkin" });
-  if (expiring.length) todos.push({ tone: "warn", title: `${expiring.length} 个账号的积分将在 5 天内过期`, desc: `共 ${fmt(expiring.reduce((x, a) => x + a.expiring, 0))} 积分`, act: "查看", dest: "accounts" });
+  if (expiring.length) todos.push({ tone: "warn", title: `${expiring.length} 个账号的积分将在 7 天内过期`, desc: `共 ${fmt(expiring.reduce((x, a) => x + a.expiring, 0))} 积分`, act: "查看", dest: "accounts" });
   if (!s.running) todos.push({ tone: "info", title: "客户端当前未运行", desc: "账号切换需要客户端在运行状态", act: "去设置", dest: "settings" });
   if (!s.accounts.length) todos.push({ tone: "info", title: "这个作用域还没有账号", desc: "先添加一个账号才能使用", act: "添加账号", run: "add-account" });
 
@@ -5488,14 +5490,15 @@ function viewUsage() {
     const totalIn = daily.reduce((s, d) => s + d.inAmt, 0);
     const totalOut = daily.reduce((s, d) => s + d.outAmt, 0);
     const exp = e.expiry.filter((x) => x.value > 0);
-    const expiring5 = allAcc.reduce((x, a) => x + a.expiring, 0);
+    /* 语义是「窗口内到期的积分合计」（= 产品的 `expiringSoonRemaining`，窗口 7 天）。 */
+    const expiringInWindow = allAcc.reduce((x, a) => x + a.expiring, 0);
 
     body = `${creditsHeadBar()}
       <div class="grid g4" style="margin-bottom:16px">
         ${statTile("可用积分合计", fmt(e.curTotal), `${allAcc.length} 个账号`)}
         ${statTile("区间消耗", fmtCredit(totalOut), "余额差值 · 权威口径")}
         ${statTile("区间入账", "+" + fmt(totalIn), "签到奖励")}
-        ${statTile("即将过期", fmt(expiring5), exp.length ? `最早 ${exp[0].day} 天后` : "5 天内无到期")}
+        ${statTile("即将过期", fmt(expiringInWindow), exp.length ? `最早 ${exp[0].day} 天后` : "7 天内无到期")}
       </div>
       <div class="note-strip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
         <span>上面四张是<b>余额口径</b>：账号余额快照的差值，<b>天然不重复</b>，但拆不到来源。下面按请求累加，能拆来源，<b>会重复</b>。</span></div>
