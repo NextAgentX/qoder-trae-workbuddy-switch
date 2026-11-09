@@ -40,6 +40,9 @@ const STUBS = {
     useCallback: (fn) => fn,
     useMemo: (fn) => fn(),
     useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+    /* 门禁不渲染组件：只要 import 能取到函数即可（`aggregate-*-pref` 的 hook 若在
+       门禁里被调用，缺这个会 `undefined is not a function`）。直接取一次快照。 */
+    useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
   },
   "react-router-dom": {
     useSearchParams: () => [new URLSearchParams(), () => {}],
@@ -3029,6 +3032,7 @@ const scopeShortcutsLib = loadTs(path.join(ROOT, "src/lib/scope-shortcuts.ts"));
 const paletteActionsLib = loadTs(path.join(ROOT, "src/lib/palette-actions.ts"));
 const shortcutPrefLib = loadTs(path.join(ROOT, "src/lib/shortcut-preference.ts"));
 const drawerTabLib = loadTs(path.join(ROOT, "src/lib/drawer-tab-preference.ts"));
+const aggregateModeLib = loadTs(path.join(ROOT, "src/lib/aggregate-view-mode-pref.ts"));
 const firstRunLib = loadTs(path.join(ROOT, "src/lib/first-run.ts"));
 const accountSearchLib = loadTs(path.join(ROOT, "src/lib/account-search.ts"));
 
@@ -3964,6 +3968,105 @@ check("★ issue #49 抽屉页签记忆：每账号一键 · 记住的不可用�
     }
   }
   return "每账号一键 · 可用则用 / 不可用回落 · 回落不写盘 · 异常安全 · 三处调用点已传键";
+});
+
+check("★ 聚合视图模式（分组 / 平铺）记住选择：默认 group · 非法值回落 · 页面走 hook", () => {
+  /* 可证伪点：
+     ① 缺失键 ⇒ group（不是空白 / 未定义）；
+     ② 写 flat 后读回 flat，且键名逐字 `buddy-switch:v1:aggregate-view-mode`（换键即静默失联）；
+     ③ 非法值（手改 / 旧版本残留）⇒ 回落 group，不崩；
+     ④ 页面**必须**用 `useAggregateMode()`，且不得再本地声明 `type AggregateMode`
+        —— 两处定义会漂移：lib 加了新模式、页面还按旧的两值判断。 */
+  const mem = memStorage();
+  if (aggregateModeLib.readAggregateMode(mem) !== "group") throw new Error("缺失键应默认 group");
+  aggregateModeLib.writeAggregateMode(mem, "flat");
+  if (aggregateModeLib.readAggregateMode(mem) !== "flat") throw new Error("写入 flat 后应读回 flat");
+  if (mem.getItem("buddy-switch:v1:aggregate-view-mode") !== "flat") {
+    throw new Error("键必须是 `buddy-switch:v1:aggregate-view-mode`");
+  }
+  mem.setItem("buddy-switch:v1:aggregate-view-mode", "sideways");
+  if (aggregateModeLib.readAggregateMode(mem) !== "group") throw new Error("非法值应回落 group");
+  const boom = {
+    getItem: () => {
+      throw new Error("disabled");
+    },
+    setItem: () => {
+      throw new Error("disabled");
+    },
+  };
+  if (aggregateModeLib.readAggregateMode(boom) !== "group") throw new Error("存储异常应读成 group");
+  aggregateModeLib.writeAggregateMode(boom, "flat"); // 不应抛
+  const page = readCode("src/pages/AggregateAccountsPage.tsx");
+  if (!/useAggregateMode\(\)/.test(page)) {
+    throw new Error("聚合页没有用 `useAggregateMode()` —— 分组/平铺的选择不会被记住");
+  }
+  if (/type AggregateMode\s*=/.test(page)) {
+    throw new Error("聚合页又本地声明了 `AggregateMode` —— 与 lib 两处定义会漂移");
+  }
+  if (!/subscribeAggregateModeStorage\(\)/.test(page)) {
+    throw new Error(
+      "聚合页没有订阅 `subscribeAggregateModeStorage()` —— 跨标签不同步，且 tsc 抓不到（import 可一并删掉）",
+    );
+  }
+  return "默认 group · 写读一致 · 非法值/异常回落 · 页面走 hook + 订阅且无本地类型";
+});
+
+check("★ 聚合视图模式：注册订阅的两个方向（存储不可用保留内存 / 可用时同步外部值）", () => {
+  /* 可证伪点（两个方向都必须成立，否则修一头坏一头）：
+     A. 存储抛异常时**无条件**清缓存 ⇒ `readAggregateMode` 回落 `group` ⇒ 把用户刚选的
+        `flat` 悄悄重置（P9 回归）。用假 `window` 跑真代码：写盘失败 → 注册订阅 → 仍须 flat。
+     B. 反过来，若怕 A 而**永不清缓存** ⇒ 别的标签写的值永远读不到，跨标签同步失效。
+        所以还要验：盘上是 flat、内存是 group 时，注册订阅后快照须变成 flat。 */
+  /* ── A：存储不可用 ⇒ 保留内存值 ── */
+  global.window = {
+    localStorage: {
+      getItem() {
+        throw new Error("storage disabled");
+      },
+      setItem() {
+        throw new Error("storage disabled");
+      },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  try {
+    aggregateModeLib.setAggregateMode("flat"); // 写盘失败，但内存应为 flat
+    const off = aggregateModeLib.subscribeAggregateModeStorage();
+    const [mode] = aggregateModeLib.useAggregateMode(); // STUB 的 useSyncExternalStore 直接取快照
+    off();
+    if (mode !== "flat") {
+      throw new Error(`A: 存储不可用时注册订阅把内存值重置成了 ${mode} —— 用户的平铺选择被吞`);
+    }
+  } finally {
+    delete global.window;
+  }
+  /* ── B：存储可用 ⇒ 读到别的标签写的值 ── */
+  const disk = new Map([["buddy-switch:v1:aggregate-view-mode", "group"]]);
+  global.window = {
+    localStorage: {
+      getItem: (key) => (disk.has(key) ? disk.get(key) : null),
+      setItem: (key, value) => {
+        disk.set(key, value);
+      },
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  try {
+    aggregateModeLib.setAggregateMode("group"); // 内存与盘都是 group
+    disk.set("buddy-switch:v1:aggregate-view-mode", "flat"); // 模拟别的标签写入（绕过本进程缓存）
+    const off = aggregateModeLib.subscribeAggregateModeStorage();
+    const [mode] = aggregateModeLib.useAggregateMode();
+    off();
+    if (mode !== "flat") {
+      throw new Error(`B: 存储可用时未同步到别的标签的值（读到 ${mode}）—— 跨标签同步失效`);
+    }
+  } finally {
+    delete global.window;
+    aggregateModeLib.setAggregateMode("group"); // 恢复默认，避免污染后续断言
+  }
+  return "不可用 ⇒ 保留内存值 · 可用 ⇒ 读到外部值";
 });
 
 check("★ P6 首次引导：默认显示、关闭后持久化不再显示", () => {
