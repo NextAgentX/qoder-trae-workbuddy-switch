@@ -40,7 +40,7 @@ import type {
   DetailStat,
 } from "@/components/account-detail-drawer";
 import { formatAbsoluteTime } from "@/lib/catalog-source";
-import { secondsToMs, toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
+import { packIsExpired, secondsToMs, toDetailPacks, type CreditPackTexts } from "@/lib/credit-packs";
 import { packState } from "@/lib/qoder-packs";
 import { displayText } from "@/lib/display-text";
 import { formatCredits } from "@/components/usage/format";
@@ -54,6 +54,23 @@ export interface AggregateDetailContext {
   credit?: CreditExpiry;
   /** Trae / Qoder 的积分（卡片上那个「剩余 / 总额」）。 */
   credits?: { remaining: number | null; total: number | null } | null;
+  /**
+   * 7 天窗口内到期的积分之和（详情页积分块的副文本用它）。
+   *
+   * ★ 单独一个字段而不是在装配层现算：WB 要读 `credit.expiringSoonRemaining`、
+   * Trae 要跑 `summarizeExpiring(..., { unit: "s" })`、Qoder 要跑 `qoderExpiringSummary` ——
+   * 三个来源在页面侧各算一次，装配层只负责排版。
+   */
+  expiringAmount?: number | null;
+  /**
+   * 判定「过期 / 临期」的**同一个**「现在」（epoch 毫秒）。
+   *
+   * ★ 装配层已经算好了这一个值（`expiringAmount` 也是用它算的），资源包明细必须复用它：
+   * 各取一次 `Date.now()` 会让同一次渲染里出现两个「今天」——跨秒时同一批包可能
+   * 在余额块被判「临期」、在明细里被判「已过期」，同一屏两个答案。
+   * 缺席 ⇒ 回落到 `Date.now()`（门禁与旧调用方不强制传）。
+   */
+  now?: number;
   /** 今日 Token（缺席 = 未知，**不当 0**）。 */
   todayTokens?: number | null;
   /** 今日是否已签到（`null` / 缺席 = 未知）。 */
@@ -156,23 +173,28 @@ export function aggregateDetailStats(
   if (account.platform === "workbuddy") {
     const credit = ctx.credit;
     if (credit?.ok && typeof credit.totalRemaining === "number") {
-      const total =
-        credit.resources && credit.resources.length > 0
-          ? credit.resources.reduce((sum, item) => sum + (Number.isFinite(item.total) ? item.total : 0), 0)
-          : null;
+      /* `null` / `undefined` = 装配层没拿到临期金额（未知）⇒ **不渲染副文本**。
+         写成 0 会与「只给有真值的项」这条口径打架：同一格的主值都只在有真值时才出，
+         副文本却报一个 0 —— 等于把「不知道」说成「没有」。 */
+      const soon = ctx.expiringAmount;
       stats.push({
         key: "credits",
         label: t("wbAccounts.card.metric.credits"),
         valueText: formatCredits(credit.totalRemaining),
-        subText: total === null ? undefined : `/ ${formatCredits(total)}`,
+        subText:
+          soon == null ? undefined : t("shared.detail.creditsExpiring", { amount: formatCredits(soon) }),
+        tone: soon != null && soon > 0 ? "warn" : undefined,
       });
     }
   } else if (ctx.credits && ctx.credits.remaining != null) {
+    const soon = ctx.expiringAmount;
     stats.push({
       key: "credits",
       label: t("wbAccounts.card.metric.credits"),
       valueText: formatCredits(ctx.credits.remaining),
-      subText: ctx.credits.total == null ? undefined : `/ ${formatCredits(ctx.credits.total)}`,
+      subText:
+        soon == null ? undefined : t("shared.detail.creditsExpiring", { amount: formatCredits(soon) }),
+      tone: soon != null && soon > 0 ? "warn" : undefined,
     });
   }
 
@@ -334,25 +356,37 @@ export function aggregateDetailPacks(
   ctx: AggregateDetailContext,
 ): DetailPack[] {
   const { t } = ctx;
+  /* 判定「过期」的时刻：**复用装配层那一个**（见 `AggregateDetailContext.now`）。
+     各分支自己 `Date.now()` 会让同一次渲染出现两个「今天」——同一批包可能在余额块
+     被判「临期」、在明细里被判「已过期」。 */
+  const now = ctx.now ?? Date.now();
 
   if (account.platform === "workbuddy") {
     const resources = ctx.credit?.ok ? (ctx.credit.resources ?? []) : [];
+    /* ★ 与渠道页抽屉同口径：后端 `totalRemaining` 已排除过期额度，这里也要剔掉过期包，
+       否则「顶部余额」与「明细合计」对不上。Trae / Qoder 分支不这么做 —— 它们的账号级
+       余额口径没改，过期包仍应列在明细里。 */
     return toDetailPacks(
-      resources.map((item) => ({
-        key: `${item.packageCode ?? "pack"}-${item.expireAt ?? "none"}`,
-        name:
-          displayText(item.packageName) ||
-          displayText(item.packageCode) ||
-          t("aggregate.detail.packFallbackName"),
-        total: item.total,
-        remaining: item.remaining,
-        used: item.used,
-        /* WB 是**毫秒**（后端 `parse_timestamp_ms`）。 */
-        expireAtMs: item.expireAt,
-        expired: item.expired,
-        expiringSoon: item.expiringSoon,
-      })),
+      resources
+        .filter(
+          (item) => !packIsExpired({ expired: item.expired, expireAtMs: item.expireAt }, now),
+        )
+        .map((item) => ({
+          key: `${item.packageCode ?? "pack"}-${item.expireAt ?? "none"}`,
+          name:
+            displayText(item.packageName) ||
+            displayText(item.packageCode) ||
+            t("aggregate.detail.packFallbackName"),
+          total: item.total,
+          remaining: item.remaining,
+          used: item.used,
+          /* WB 是**毫秒**（后端 `parse_timestamp_ms`）。 */
+          expireAtMs: item.expireAt,
+          expired: item.expired,
+          expiringSoon: item.expiringSoon,
+        })),
       AGGREGATE_PACK_TEXTS(t),
+      now,
     );
   }
 
@@ -375,13 +409,13 @@ export function aggregateDetailPacks(
         expiringSoon: item.expiringSoon,
       })),
       AGGREGATE_PACK_TEXTS(t),
+      now,
     );
   }
 
   if (account.platform === "qoder") {
     const packs = ctx.qoderPacks;
     if (!packs?.available) return [];
-    const now = Date.now();
     return toDetailPacks(
       packs.packs.map((pack, index) => {
         const state = packState(pack, now);
@@ -394,7 +428,7 @@ export function aggregateDetailPacks(
           /* Qoder 是**毫秒**（`expiresAtMs`）。 */
           expireAtMs: pack.expiresAtMs ?? null,
           expired: state === "expired",
-          /* Qoder 上游没有临期标记 ⇒ 用 `packState` 的窗口（14 天，与卡片浮层同源）。 */
+          /* Qoder 上游没有临期标记 ⇒ 用 `packState` 的窗口（7 天，与卡片浮层同源）。 */
           expiringSoon: state === "expiring",
         };
       }),
@@ -423,7 +457,7 @@ function AGGREGATE_PACK_TEXTS(t: Translate): CreditPackTexts {
       expired
         ? t("aggregate.detail.packExpired")
         : expireAtMs !== null
-          ? formatAbsoluteTime(expireAtMs)
+          ? t("aggregate.detail.packExpiresAt", { when: formatAbsoluteTime(expireAtMs) })
           : t("aggregate.detail.packForever"),
   };
 }
