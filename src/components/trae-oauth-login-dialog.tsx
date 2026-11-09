@@ -76,8 +76,10 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
    */
   const [variant] = useTraeVariant();
   const variantLabel = traeVariantLabel(variant);
-  /** 授权窗身份（按变体分家：三个程序位可以同时各登一个）。 */
+  /** 授权窗的命名键（仅用于 label / 诊断）：每次点「登录」都会开一个新窗口。 */
   const authKey = `trae-${variant}`;
+  /** 本次授权窗的 label（关窗凭据）；不能用 authKey 关窗。 */
+  const authLabelRef = useRef<string | null>(null);
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -154,6 +156,13 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
     }
   }, [open]);
 
+  /* 用户关掉弹窗 = 放弃这次登录 ⇒ 把授权窗一起收掉，别留孤儿窗口。 */
+  useEffect(() => {
+    if (open) return;
+    void closeAuthPage(authLabelRef.current);
+    authLabelRef.current = null;
+  }, [open]);
+
   // 轮询登录结果
   useEffect(() => {
     // 父组件是**无条件挂载**本弹窗、只切 `open`；`loginId` 只在 `open` 变 true
@@ -180,7 +189,8 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
           settledRef.current = true;
           /* 令牌已经由后端回调/轮询取回 ⇒ 授权窗的使命结束（不关会挡住主窗口，
              也会让用户以为「还在等」）。 */
-          void closeAuthPage(authKey);
+          void closeAuthPage(authLabelRef.current);
+          authLabelRef.current = null;
           if (res.account) {
             // 同时校 `!timedOutRef.current`：若后端耗时超过前端 310s 才成功
             // （慢换 token / 时钟偏移），此时界面**已经**因超时置了 error。
@@ -292,7 +302,14 @@ export function TraeOAuthLoginDialog({ open, onOpenChange, onSuccess, clientless
       setExpiresIn(res.expiresIn ?? null);
       // 按公共设置打开验证页：桌面端默认内嵌授权窗，失败自动退回系统浏览器。
       // 打开失败**不是登录失败**（链接与二维码在弹窗里，远程部署照常可用）。
-      void openAuthPage(authKey, res.verificationUri).catch(() => {});
+      // ★ 每次发起都开新窗：先关掉上一轮残留的那个。
+      void closeAuthPage(authLabelRef.current);
+      authLabelRef.current = null;
+      void openAuthPage(authKey, res.verificationUri)
+        .then((label) => {
+          authLabelRef.current = label;
+        })
+        .catch(() => {});
     } catch (e) {
       setError(api.asError(e));
     } finally {

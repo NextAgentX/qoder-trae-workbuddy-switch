@@ -16,7 +16,7 @@
  * 这里只负责「把后端给的 URL 打开」。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AuthLinkPanel } from "@/components/auth-link-panel";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -48,8 +48,10 @@ interface Props {
 
 export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Props) {
   const t = useT();
-  /** 授权窗身份（按作用域分家：两个区域可以同时各登一个）。 */
+  /** 授权窗的命名键（仅用于 label / 诊断）：每次点「登录」都会开一个新窗口。 */
   const authKey = `qoder-${scope}`;
+  /** 本次授权窗的 label（关窗凭据）；不能用 authKey 关窗。 */
+  const authLabelRef = useRef<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -70,6 +72,13 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
     setCollectedName(null);
   }, [open]);
 
+  /* 用户关掉弹窗 = 放弃这次登录 ⇒ 把授权窗一起收掉，别留孤儿窗口。 */
+  useEffect(() => {
+    if (open) return;
+    void closeAuthPage(authLabelRef.current);
+    authLabelRef.current = null;
+  }, [open]);
+
   /** 轮询：只在拿到 loginId 后启动，`done` 即停。 */
   useEffect(() => {
     if (!open || !loginId) return;
@@ -82,7 +91,8 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
         if (cancelled) return;
         if (res.done) {
           /* 令牌已入库 ⇒ 关掉授权窗（不关会挡住主窗口，也让用户以为还在等）。 */
-          void closeAuthPage(authKey);
+          void closeAuthPage(authLabelRef.current);
+          authLabelRef.current = null;
           if (res.result) {
             // ★ 展示名走卡片的**唯一回落链**（`qoderAccountName`），与列表 / 抽屉同一份。
             const name = res.result.nickname || res.result.name || res.result.uid || "";
@@ -115,8 +125,15 @@ export function QoderOAuthDialog({ open, onOpenChange, scope, onCollected }: Pro
       setUri(res.verificationUri);
       setExpiresIn(res.expiresIn ?? null);
       /* 尽力而为：容器里没有 GUI，开不起来不算失败 —— 链接与二维码才是完整路径。
-         桌面端默认走**应用内授权窗**（公共设置 `auth_in_app`），失败自动退回系统浏览器。 */
-      void openAuthPage(authKey, res.verificationUri).catch(() => {});
+         桌面端默认走**应用内授权窗**（公共设置 `auth_in_app`），失败自动退回系统浏览器。
+         ★ 每次发起都开新窗：先关掉上一轮残留的那个。 */
+      void closeAuthPage(authLabelRef.current);
+      authLabelRef.current = null;
+      void openAuthPage(authKey, res.verificationUri)
+        .then((label) => {
+          authLabelRef.current = label;
+        })
+        .catch(() => {});
     } catch (e) {
       setError(api.asError(e));
     } finally {

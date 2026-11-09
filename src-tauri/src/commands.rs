@@ -2410,13 +2410,14 @@ pub fn set_app_prefs(prefs: Value) -> Result<Value, String> {
     app_prefs::save_app_prefs(&prefs).map_err(|e| e.to_string())
 }
 
-/// POST /api/auth/webview/open —— 在应用内打开账号授权页（公共设置 `auth_in_app`）。
+/// POST /api/auth/webview/open —— 在应用内打开**一个新的**账号授权窗（`auth_in_app`）。
 ///
-/// `key` 是窗口身份（`wb-cn` / `trae-…` / `qoder-…`）：多平台并行登录时互不覆盖。
+/// `key` 只用于 label 命名与诊断（`wb-cn` / `trae-…` / `qoder-…`）：**每次调用都新建
+/// 窗口 + 独立数据目录**，多账号并行登录互不覆盖（见 `auth_webview` 模块头的教训）。
 /// `url` 由后端校验（只允许 https / 本机回环），前端不需要自己判。
 ///
-/// ⚠️ 调用方（三个登录对话框）**必须**在失败时退回系统浏览器 —— 这个命令是默认路径，
-/// 不是唯一路径。
+/// ⚠️ 调用方**必须**保存返回的 `label`，并在登录出结果或用户取消时用它调
+/// `auth_webview_close`；同时开窗失败要退回系统浏览器（默认路径，不是唯一路径）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn auth_webview_open(
     app: tauri::AppHandle,
@@ -2426,10 +2427,10 @@ pub async fn auth_webview_open(
     crate::auth_webview::open(&app, key, url)
 }
 
-/// POST /api/auth/webview/close —— 关闭该 `key` 的授权窗（幂等）。
+/// POST /api/auth/webview/close —— 关闭某个授权窗（按 open 返回的 `label`；幂等）。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn auth_webview_close(app: tauri::AppHandle, key: String) -> Result<Value, String> {
-    crate::auth_webview::close(&app, key)
+pub async fn auth_webview_close(app: tauri::AppHandle, label: String) -> Result<Value, String> {
+    crate::auth_webview::close(&app, label)
 }
 
 // ---------------------------------------------------------------------------

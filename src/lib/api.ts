@@ -2975,27 +2975,27 @@ export function setAppPrefs(prefs: AppPrefs): Promise<AppPrefs> {
 // 应用内窗口，链路其余部分不用改。**这仍是默认路径而非唯一路径**：调用方必须在
 // 失败时退回系统浏览器（见 `lib/auth-open.ts`）。
 
-/** 打开（或复用）`key` 对应的授权窗；`reused = true` 表示窗口已存在、这次只是导航。 */
+/**
+ * 打开**一个新的**授权窗；返回值里的 `label` 是关窗凭据。
+ *
+ * ★ 每次调用都新建窗口 + 独立数据目录（多账号并行登录、互不覆盖）。
+ * ★ `key` 只用于 label 命名与诊断（`wb-cn` / `trae-…` / `qoder-…`）。
+ * ★ `url` 由后端做形状校验（只允许 https / 本机回环），前端不需要自己判。
+ */
 export interface AuthWebviewOpenResult {
   opened: boolean;
-  reused: boolean;
   url: string;
   label: string;
 }
 
-/**
- * 在应用内打开账号授权页。
- *
- * ★ `key` 是窗口身份（`wb-cn` / `trae-…` / `qoder-…`）：多平台并行登录时互不覆盖。
- * ★ `url` 由后端做形状校验（只允许 https / 本机回环），前端不需要自己判。
- */
+/** 在应用内打开账号授权页（公共设置 `auth_in_app`）。 */
 export function authWebviewOpen(key: string, url: string): Promise<AuthWebviewOpenResult> {
   return call<AuthWebviewOpenResult>("auth_webview_open", { key, url });
 }
 
-/** 关闭该 `key` 的授权窗（幂等：没开也返回 `closed: false`）。 */
-export function authWebviewClose(key: string): Promise<{ closed: boolean; label: string }> {
-  return call<{ closed: boolean; label: string }>("auth_webview_close", { key });
+/** 关闭某个授权窗（按 [`authWebviewOpen`] 返回的 `label`；幂等，没开也 OK）。 */
+export function authWebviewClose(label: string): Promise<{ closed: boolean; label: string }> {
+  return call<{ closed: boolean; label: string }>("auth_webview_close", { label });
 }
 
 // ---------------------------------------------------------------------------

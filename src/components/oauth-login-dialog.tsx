@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AuthLinkPanel } from "@/components/auth-link-panel";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -29,8 +29,10 @@ interface Props {
 export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
   const t = useT();
   const reconcileAccounts = useAccountsStore((s) => s.reconcileAccounts);
-  /** 授权窗身份：与区域绑定，两个区域并行登录时互不导航覆盖。 */
+  /** 授权窗的命名键（仅用于 label / 诊断）：每次点「登录」都会开一个新窗口。 */
   const authKey = `wb-${region ?? "cn"}`;
+  /** 本次授权窗的 label（关窗凭据）。★ 不能用 authKey 关窗 —— 它对应的是一类窗口，不是一个。 */
+  const authLabelRef = useRef<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [loginId, setLoginId] = useState<string | null>(null);
@@ -52,6 +54,13 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
     }
   }, [open]);
 
+  /* 用户关掉弹窗 = 放弃这次登录 ⇒ 把授权窗一起收掉，别留孤儿窗口。 */
+  useEffect(() => {
+    if (open) return;
+    void closeAuthPage(authLabelRef.current);
+    authLabelRef.current = null;
+  }, [open]);
+
   // 轮询采集结果
   useEffect(() => {
     if (!loginId) return;
@@ -64,7 +73,8 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
         if (res.done) {
           /* 令牌已经由后端轮询取回 ⇒ 授权窗的使命结束。
              不关的话用户会以为「还在等」，而且它挡在主窗口前面。 */
-          void closeAuthPage(authKey);
+          void closeAuthPage(authLabelRef.current);
+          authLabelRef.current = null;
           if (res.result) {
             await reconcileAccounts(region);
             if (!cancelled) setResult(res.result);
@@ -98,8 +108,15 @@ export function OAuthLoginDialog({ open, onOpenChange, region }: Props) {
       setExpiresIn(res.expiresIn ?? null);
       /* 打开授权页是**尽力而为**：服务器 / 容器里没有 GUI，失败不能算登录失败 ——
          面板里的链接与二维码才是完整路径（issue #62）。
-         桌面端默认走**应用内授权窗**（公共设置 `auth_in_app`），失败自动退回系统浏览器。 */
-      void openAuthPage(authKey, res.verificationUri).catch(() => {});
+         桌面端默认走**应用内授权窗**（公共设置 `auth_in_app`），失败自动退回系统浏览器。
+         ★ 每次发起都开**新窗**：上一轮那个（如果还在）先关掉，避免两个授权页叠着。 */
+      void closeAuthPage(authLabelRef.current);
+      authLabelRef.current = null;
+      void openAuthPage(authKey, res.verificationUri)
+        .then((label) => {
+          authLabelRef.current = label;
+        })
+        .catch(() => {});
     } catch (e) {
       setError(api.asError(e));
     } finally {

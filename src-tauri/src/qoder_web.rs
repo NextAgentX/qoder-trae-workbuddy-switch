@@ -58,10 +58,6 @@ use buddy_switch_core::modules::qoder::region::{self, QoderRegion};
 use buddy_switch_core::modules::qoder::web_proxy;
 use buddy_switch_core::modules::qoder::web_session;
 use buddy_switch_core::modules::qoder::web_usage;
-// ★ 必须按 `cfg(target_os)` 引入：下面只在 Windows 的 `data_directory` 分支用到它。
-//   无条件 `use` 会让 macOS / Linux 构建报 `unused import`，而 CI 把警告当错误
-//   （v2026.11.91845 就是这样挂掉 mac-arm64 / linux-x64 两个 job 的）。
-#[cfg(target_os = "windows")]
 use buddy_switch_core::modules::runtime_log;
 
 /// 登录窗 label 的前缀；实际 label 由 [`login_label`] 按**区域 + 账号**派生。
@@ -159,6 +155,16 @@ fn ensure_login_window<R: Runtime>(
                         format!("建 profile 目录失败，多账号隔离将失效: {error}"),
                     );
                 } else {
+                    // ★ 每次开窗记一行「这个窗口用的是哪份 profile」：多账号互相顶的
+                    //   报障第一手证据就是这里两个窗口指向同一个目录（或没有这一行）。
+                    runtime_log::info(
+                        "qoder-web",
+                        format!(
+                            "登录窗 {label} · 区域={} · uid={uid} · profile={}",
+                            region.as_str(),
+                            profile.display()
+                        ),
+                    );
                     builder = builder.data_directory(profile);
                 }
             }
@@ -170,6 +176,15 @@ fn ensure_login_window<R: Runtime>(
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // `data_directory` 只在 Windows 生效；其它平台靠 incognito 拿每窗口一份的
+        // nonPersistent / ephemeral 数据存储（wry 语义）。
+        runtime_log::info(
+            "qoder-web",
+            format!(
+                "登录窗 {label} · 区域={} · uid={uid} · 数据存储=incognito",
+                region.as_str()
+            ),
+        );
         builder = builder.incognito(true);
     }
 

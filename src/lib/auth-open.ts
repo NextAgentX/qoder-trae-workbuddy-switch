@@ -37,11 +37,13 @@ export async function openInSystemBrowser(url: string): Promise<void> {
 /**
  * 打开账号授权页：按设置决定「应用内窗口」还是「系统浏览器」。
  *
- * @param key 窗口身份（`wb-cn` / `trae-<variant>` / `qoder-<scope>`）——
- *            多平台并行登录时互不导航覆盖。
+ * @param key 只用于窗口 label 命名与诊断（`wb-cn` / `trae-<variant>` / `qoder-<scope>`）。
+ *            ★ **不是**「窗口身份」—— 每次调用都会开一个**新**窗口（多账号并行登录、
+ *            互不覆盖；旧实现按 key 复用窗口，导致第二个账号的登录页顶掉第一个）。
  * @param url 后端给的 `verificationUri`。
+ * @returns 应用内窗口的 `label`（关窗凭据）；走了系统浏览器则 `null`。
  */
-export async function openAuthPage(key: string, url: string): Promise<void> {
+export async function openAuthPage(key: string, url: string): Promise<string | null> {
   if (api.isDesktop() && !api.isDemoMode()) {
     let inApp = true;
     try {
@@ -53,8 +55,8 @@ export async function openAuthPage(key: string, url: string): Promise<void> {
     }
     if (inApp) {
       try {
-        await api.authWebviewOpen(key, url);
-        return;
+        const opened = await api.authWebviewOpen(key, url);
+        return opened.label || null;
       } catch (e) {
         // 宿主没建成窗（或 URL 被形状校验拒绝）⇒ 退回浏览器，登录流程不受影响。
         console.warn("[auth] 应用内授权窗打开失败，改用系统浏览器:", api.asError(e));
@@ -62,13 +64,14 @@ export async function openAuthPage(key: string, url: string): Promise<void> {
     }
   }
   await openInSystemBrowser(url);
+  return null;
 }
 
-/** 关闭该 `key` 的授权窗（幂等；非桌面端 / 演示模式是空操作）。 */
-export async function closeAuthPage(key: string): Promise<void> {
-  if (!api.isDesktop() || api.isDemoMode()) return;
+/** 关闭授权窗（幂等；`label` 为空 / 非桌面端 / 演示模式都是空操作）。 */
+export async function closeAuthPage(label: string | null | undefined): Promise<void> {
+  if (!label || !api.isDesktop() || api.isDemoMode()) return;
   try {
-    await api.authWebviewClose(key);
+    await api.authWebviewClose(label);
   } catch {
     /* 关不掉只是留个窗，令牌已经由后端轮询取回 —— 不打扰用户。 */
   }
