@@ -1,4 +1,4 @@
-import { ExternalLink, Star } from "lucide-react";
+import { ExternalLink, Heart, Star } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useT } from "@/lib/i18n";
@@ -24,6 +24,14 @@ const DONATE_CHANNELS: { key: string; nameKey: TranslationKey; image: string }[]
   { key: "wechat", nameKey: "wbSettings.donate.wechat", image: donateWechat },
   { key: "alipay", nameKey: "wbSettings.donate.alipay", image: donateAlipay },
 ];
+
+/**
+ * 爱发电主页（**账号级**，覆盖作者 GitHub 下的所有项目，不限于 Buddy Switch）。
+ *
+ * 只此一处使用，因此不做成 `lib/` 常量 —— 与 `GITHUB_*` 不同，它不参与更新检查、
+ * 不被任何其它模块读取。
+ */
+const IFDIAN_URL = "https://ifdian.net/a/NextAgentX";
 
 /**
  * 打赏入口：点击后弹出收款码。
@@ -76,7 +84,21 @@ export function DonateDialog({
             </figure>
           ))}
         </div>
-        {/* ★ Star 引导：放在收款码下方、动作条上方 —— 打开这个弹层的人正处在「愿意支持」
+        {/* ★ 爱发电：唯一「不扫码」的通道，做成**条状**而不是第三张码 ——
+            它没有收款码图，硬塞进两列 grid 会破等高，且它的主页里本来就带支付入口。
+            位置紧跟收款码：这是「已经决定掏钱」的人的第二选择（境外用户往往只有这一条路）。 */}
+        <button
+          type="button"
+          onClick={() => void openReleaseUrl(IFDIAN_URL)}
+          className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 rounded-lg border border-border bg-muted/30 px-3 py-2 text-[12.5px] leading-relaxed text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+        >
+          <Heart className="size-3.5 shrink-0 text-rose-500" aria-hidden="true" />
+          <span>{t("wbSettings.donate.ifdianLead")}</span>
+          <span className="shrink-0 font-medium text-primary">
+            {t("wbSettings.donate.ifdianCta")}
+          </span>
+        </button>
+        {/* ★ Star 引导：放在两条打赏入口下方、动作条上方 —— 打开这个弹层的人正处在「愿意支持」
             的意愿峰值，而 Star 对他是**零成本**动作，转化率天然高于打赏。
             链接指向仓库首页（Star 按钮在那里），不直连 `/stargazers`（那是名单，不是动作）。 */}
         <button

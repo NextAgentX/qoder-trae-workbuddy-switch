@@ -272,9 +272,11 @@ export const en = {
   // ---- Donate dialog ----
   "wbSettings.donate.trigger": "Buy the author a drink",
   "wbSettings.donate.title": "Support Buddy Switch",
-  "wbSettings.donate.desc": "Buddy Switch is free and open source. If it helped you, you can scan the code to buy the author a drink.",
+  "wbSettings.donate.desc": "Buddy Switch is free and open source. If it helped you, you can buy the author a drink by scanning a code or via Afdian.",
   "wbSettings.donate.wechat": "WeChat Pay",
   "wbSettings.donate.alipay": "Alipay",
+  "wbSettings.donate.ifdianLead": "You can also support me via Afdian",
+  "wbSettings.donate.ifdianCta": "Open the Afdian page",
   "wbSettings.donate.qrAlt": "{name} QR code",
   "wbSettings.donate.repoHome": "Project home",
   "wbSettings.donate.starLead": "Finding it useful? A star costs you nothing and keeps the project alive",

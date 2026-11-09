@@ -458,6 +458,8 @@ Buddy Switch is free, open source, and licensed for noncommercial use only. If i
   </tr>
 </table>
 
+Or support via **[Afdian](https://ifdian.net/a/NextAgentX)**.
+
 No money needed either: **starring the repo** helps just as much — it is the main reason this project keeps getting maintained.
 
 > **Donations are unrelated to functionality**: every feature is the same for everyone, and donating **does not unlock, affect or change** any feature or licence. Donations are voluntary gifts: not a purchase, subscription, paid service, commercial licence or support commitment, and they create no consideration of any kind; donating buys no priority response, custom development or extra entitlement. Licensing and terms of use remain governed solely by [LICENSE](./LICENSE) — see [License](#license).

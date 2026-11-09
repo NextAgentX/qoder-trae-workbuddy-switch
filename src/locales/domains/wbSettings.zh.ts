@@ -279,9 +279,11 @@ export const zh = {
   // ---- 打赏弹框 ----
   "wbSettings.donate.trigger": "请作者喝杯饮料",
   "wbSettings.donate.title": "支持 Buddy Switch",
-  "wbSettings.donate.desc": "Buddy Switch 免费开源。如果它帮到了你，可以扫码请作者喝杯饮料。",
+  "wbSettings.donate.desc": "Buddy Switch 免费开源。如果它帮到了你，可以扫码或走爱发电请作者喝杯饮料。",
   "wbSettings.donate.wechat": "微信支付",
   "wbSettings.donate.alipay": "支付宝",
+  "wbSettings.donate.ifdianLead": "也可以通过爱发电支持",
+  "wbSettings.donate.ifdianCta": "打开爱发电主页",
   "wbSettings.donate.qrAlt": "{name}收款码",
   "wbSettings.donate.repoHome": "项目主页",
   "wbSettings.donate.starLead": "觉得好用？顺手给项目点个 Star（零成本，是继续维护最大的动力）",
