@@ -15,6 +15,7 @@ import { ImportSessionsDialog } from "@/components/sessions/import-sessions-dial
 import { SessionReplicaView } from "@/components/sessions/session-replica-view";
 import { UnifyReplicasDialog } from "@/components/sessions/unify-replicas-dialog";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -33,6 +34,7 @@ import type {
 } from "@/lib/types";
 import { useRefreshAction } from "@/lib/use-refresh-action";
 import { useScope } from "@/lib/use-scope";
+import { useSlowLoading } from "@/lib/use-slow-loading";
 import { useSessionsStore } from "@/stores/sessions";
 
 /**
@@ -78,6 +80,9 @@ export default function SessionsPage() {
   const unifyItems = useSessionsStore((s) => s.unifyItems);
   /* 错误态「重试」的进行中态（按钮态，同 `syncBusy` 用 Loader2 的语言）。 */
   const { busy: retryBusy, run: runRetry } = useRefreshAction();
+  /* ★ 慢加载提示（issue #188）：超过 8s 仍在骨架态 ⇒ 加一行「仍在加载 + 重试」。
+     骨架能表达「正在取」，表达不了「已经等了很久」—— 慢加载与卡死原本在界面上完全一样。 */
+  const slowLoading = useSlowLoading(loading);
 
   /* region 变化即重载（副本按 region 分文件，P8 ✅ #2）。 */
   useEffect(() => {
@@ -478,6 +483,9 @@ export default function SessionsPage() {
       {loading ? (
         // 区块首次加载 → 骨架（与全应用一致的状态语言，§3.6）。
         <div className="flex flex-col gap-3" aria-busy="true">
+          {slowLoading ? (
+            <SlowLoadHint onRetry={() => void runRetry(() => load(region))} retrying={retryBusy} />
+          ) : null}
           <Skeleton className="h-16 rounded-xl" />
           <Skeleton className="h-16 rounded-xl" />
           <Skeleton className="h-16 rounded-xl" />

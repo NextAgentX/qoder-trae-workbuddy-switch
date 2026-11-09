@@ -3,6 +3,7 @@ import { ArrowRight, Check, Download, Info, Loader2, MessageSquare, Pencil, Refr
 
 import { avatarTone, formatCredits } from "@/components/account-card";
 import { AccountGroupPicker } from "@/components/account-group-picker";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import type { AccountRefreshKind } from "@/lib/account-refresh";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +21,7 @@ import {
 } from "@/lib/drawer-tab-preference";
 import { useT } from "@/lib/i18n";
 import { useRefreshAction } from "@/lib/use-refresh-action";
+import { useSlowLoading } from "@/lib/use-slow-loading";
 import { cn } from "@/lib/utils";
 
 /**
@@ -400,6 +402,12 @@ export function AccountDetailDrawer({
   const savedRemark = displayText(remark)?.trim() || "";
   const canEdit = !featuresDisabled && Boolean(onSaveRemark);
 
+  /* ★ 慢加载提示（issue #188）：抽屉的骨架画在 `bg-card` 上，数据一直不来时
+     用户只能看到一段不动的占位，与「卡死」无法区分。
+     ⚠️ 刻意**不给重试按钮**：抽屉拿到的刷新出口是 `onRefreshPart(kind)`（按部分刷），
+     而这里等的是整块概览 —— 猜一个 kind 给它等于让按钮刷错东西。宁可只陈述事实。 */
+  const slowLoading = useSlowLoading(loading);
+
   /* 分组编辑器：**与备注编辑器完全同构**（同一套 editing / draft / saving / autoEdit 语义），
      只是状态与渲染分开 —— 两个字段各自独立编辑，互不干扰。仅在调用方注入 `onSaveGroup`
      时渲染（未注入 = 不显示该区块，见 `Props.group` 的注释）。 */
@@ -736,6 +744,7 @@ export function AccountDetailDrawer({
           {loading ? (
             // 区块级加载态：**不是**按钮态，所以用骨架屏而不是 Loader2。
             <div className="space-y-3" aria-busy="true" aria-label={t("shared.drawer.loading")}>
+              {slowLoading ? <SlowLoadHint /> : null}
               <Skeleton className="h-4 w-24" />
               <Skeleton className="h-14 w-full" />
               <Skeleton className="h-4 w-20" />

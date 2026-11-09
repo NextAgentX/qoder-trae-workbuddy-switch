@@ -909,4 +909,7 @@ export const en = {
   "shared.srv.localUnavailableDesc": "Use \"Browser authorization\" or \"Paste credentials\" instead; or export a backup on a machine that has the client and import it here",
   "shared.srv.oauthTitle": "Browser authorization",
   "shared.srv.oauthDesc": "Generates a link and QR code; authorize on any device, the server collects the result",
+  // Slow-load hint (slow-load-hint.tsx, issue #188): states "still waiting", no fake percentage.
+  "shared.slowLoad.hint": "Still loading — slower than usual",
+  "shared.slowLoad.retry": "Retry",
 };

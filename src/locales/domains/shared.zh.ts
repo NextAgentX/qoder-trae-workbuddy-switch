@@ -1018,4 +1018,8 @@ export const zh = {
   "shared.srv.localUnavailableDesc": "改用「浏览器授权登录」或「粘贴授权凭据」；也可以在装了客户端的机器上导出备份再导入",
   "shared.srv.oauthTitle": "浏览器授权登录",
   "shared.srv.oauthDesc": "生成链接与二维码，用任意设备浏览器授权，服务端自己收结果",
+  /* 慢加载提示（`slow-load-hint.tsx`，issue #188）。措辞只陈述「还在等」，不给百分比 ——
+     本仓拿不到进度，编一个反而误导。 */
+  "shared.slowLoad.hint": "仍在加载 · 比平时慢",
+  "shared.slowLoad.retry": "重试",
 } as const;
