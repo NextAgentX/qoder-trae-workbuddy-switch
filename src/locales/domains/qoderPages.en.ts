@@ -18,11 +18,7 @@ export const en = {
     "Read-only probe of the desktop app and CLI sessions. No client file is modified.",
   "qoder.page.accounts.import.result": "{imported} added, {updated} updated",
   "qoder.page.accounts.import.none": "Neither source has an importable account",
-  "qoder.page.accounts.addDrawer.notInstalled":
-    "Neither source was detected. Sign in with the official client first, or paste a PAT directly.",
 
-  "qoder.page.accounts.source.desktop": "Qoder desktop",
-  "qoder.page.accounts.source.cli": "Qoder CLI",
   "qoder.page.accounts.source.missing": "Not found",
   "qoder.page.accounts.source.unreadable": "Unreadable",
   "qoder.page.accounts.source.empty": "No account inside",
@@ -118,8 +114,6 @@ export const en = {
   "qoder.page.accounts.switch.cancel": "Cancel",
   "qoder.page.accounts.switch.done": "Switched to {name}",
   "qoder.page.accounts.switch.backup": "Previous sign-in state backed up to {path}",
-  "qoder.page.accounts.group.label": "Group",
-  "qoder.page.accounts.group.placeholder": "Leave empty for ungrouped",
   "qoder.page.accounts.group.saved": "Group saved",
   "qoder.page.accounts.group.missing": "This account is no longer in the library — group not saved",
   "qoder.page.accounts.toolbar.group.group": "By group",
@@ -127,11 +121,8 @@ export const en = {
   "qoder.page.accounts.toolbar.programBucket.none": "Not signed in to any program slot",
   "qoder.page.accounts.toolbar.groupBucket.ungrouped": "Ungrouped",
   "qoder.page.accounts.card.setGroup": "Set group",
-  "qoder.page.accounts.refresh.batchPartial": "{ok} refreshed, {fail} failed",
 
   // ── Usage (unit is credits, not tokens) ──
-  "qoder.page.usage.title": "Usage",
-  "qoder.page.usage.subtitle": "{scope} · last {days} days · unit {unit}",
   "qoder.page.usage.unit.credits": "Credits",
   "qoder.page.usage.sourceNote":
     "Data comes from the local Qoder client session records. Qoder bills in credits and the client records a token count of 0 — so this view reports credits, not tokens.",
@@ -179,7 +170,6 @@ export const en = {
   "qoder.page.usage.creditsView.partial": "{n} accounts failed (others shown as usual)",
   "qoder.page.usage.creditsView.reload": "Query again",
   "qoder.page.usage.trend": "Daily credits",
-  "qoder.page.usage.byModel": "By model",
   "qoder.page.usage.empty.title": "No usage in this window",
   "qoder.page.usage.empty.description": "No request in the local client session records falls inside this window.",
   "qoder.page.usage.missing.title": "No client session records found",
@@ -187,11 +177,6 @@ export const en = {
     "There is no Qoder client session directory on this machine ({path}) — install the client and have at least one conversation.",
   "qoder.page.usage.loadFailed": "Failed to read usage",
   "qoder.page.usage.recheck": "Reload",
-  "qoder.page.usage.window.label": "Window",
-  "qoder.page.usage.window.d7": "Last 7 days",
-  "qoder.page.usage.window.d30": "Last 30 days",
-  "qoder.page.usage.window.d90": "Last 90 days",
-  "qoder.page.usage.window.all": "All",
   "qoder.page.usage.creditsValue": "{value} credits",
   "qoder.page.usage.caption": "{total} credits total · {peak} peak day",
 
@@ -201,12 +186,9 @@ export const en = {
     "Authorize Qoder in your browser; the account is collected here automatically. The two realms use different authorization pages, chosen by the current scope.",
   "qoder.page.accounts.oauth.start": "Start sign-in",
   "qoder.page.accounts.oauth.starting": "Starting…",
-  "qoder.page.accounts.oauth.waiting": "Waiting for the browser to finish authorization…",
   "qoder.page.accounts.oauth.collected": "Account collected: {name}",
   "qoder.page.accounts.oauth.failed": "Sign-in failed",
   "qoder.page.accounts.oauth.close": "Close",
-  "qoder.page.accounts.oauth.entry": "Device-code sign-in",
-  "qoder.page.accounts.oauth.entryDesc": "Authorize in a browser — useful when the Qoder client is not installed",
 
   // ── Recycle bin (soft delete) ──
   "qoder.page.accounts.trash.restored": "Restored {name}",
@@ -276,13 +258,8 @@ export const en = {
 
 
   "qoder.page.accounts.metric.plan": "Plan",
-  "qoder.page.accounts.credits.loading": "Loading quota…",
-  "qoder.page.accounts.checkin.action": "Check in",
-  "qoder.page.accounts.checkin.already": "{name} already checked in today",
   "qoder.page.accounts.checkin.done": "{name} checked in",
-  "qoder.page.accounts.checkin.batchDone": "Checked in {n} accounts",
   "qoder.page.accounts.checkin.batchPartial": "{ok} succeeded, {fail} failed",
-  "qoder.page.accounts.checkin.resultOk": "{n} checked in",
   "qoder.page.accounts.checkin.resultFail": "{n} failed",
   "qoder.page.accounts.pro.title": "Pro upgrade pack",
   "qoder.page.accounts.pro.desc": "One-time perk: claim +1800 credits",
@@ -296,11 +273,6 @@ export const en = {
   "qoder.page.accounts.refresh.batchDone": "Refreshed tokens for {n} accounts",
 
   "qoder.page.accounts.toolbar.sort.credits": "Credit balance",
-  "qoder.page.accounts.toolbar.group.source": "By source",
-  "qoder.page.accounts.toolbar.group.checkin": "By check-in",
-  "qoder.page.accounts.toolbar.checkinBucket.checkedIn": "Checked in today",
-  "qoder.page.accounts.toolbar.checkinBucket.notCheckedIn": "Not checked in",
-  "qoder.page.accounts.toolbar.checkinBucket.unknown": "Check-in state unknown",
 
   "qoder.page.pending.title": "This page is not wired for Qoder yet",
   "qoder.page.pending.description":

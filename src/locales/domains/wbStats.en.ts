@@ -6,8 +6,6 @@
  */
 export const en = {
   // ---- Token statistics ----
-  "wbStats.token.pageTitle": "Token statistics",
-  "wbStats.token.bothRegions": "(CN + Global)",
   "wbStats.token.refresh": "Refresh stats",
   /* P3: `wbStats.token.scopeAria` removed (region selector moved to the sidebar). */
   "wbStats.token.loadFailed": "Failed to load statistics",
@@ -17,7 +15,6 @@ export const en = {
   "wbStats.credit.unnamedResource": "Unnamed resource pack",
   "wbStats.credit.noCurrentResource": "No current resource pack collected yet.",
   "wbStats.credit.creditDetailTitle": "Credit details",
-  "wbStats.credit.pageTitle": "Credit statistics",
   /* P3: `wbStats.credit.scopeAria` removed (same reason). */
   "wbStats.credit.overviewAria": "Credit overview",
 
@@ -27,7 +24,6 @@ export const en = {
   "wbStats.gateway.savedDisabled": "Gateway saved (listening disabled)",
   "wbStats.gateway.portRange": "Port must be an integer between 1 and 65535",
   "wbStats.gateway.title": "API service",
-  "wbStats.gateway.desc": "Expose WorkBuddy's model quota to local tools via OpenAI / Anthropic-compatible endpoints.",
   "wbStats.gateway.opFail": "Operation failed",
   "wbStats.gateway.enableGateway": "Enable API gateway",
   "wbStats.gateway.enableDesc": "Once enabled, local AI tools can call WorkBuddy models via the address below.",
@@ -42,7 +38,6 @@ export const en = {
   "wbStats.gateway.running": "Running",
   "wbStats.gateway.stopped": "Stopped",
   "wbStats.gateway.addr": "Access address",
-  "wbStats.gateway.regionSwitchAria": "Switch between the CN and Global versions",
   "wbStats.gateway.copy": "Copy",
   "wbStats.gateway.baseUrlCopied": "Base URL copied",
   "wbStats.gateway.allowLanTitle": "Allow LAN access",
@@ -63,7 +58,6 @@ export const en = {
   "wbStats.gateway.poolEntries": "Account pool",
   "wbStats.gateway.poolEntryCount": "{count} entries",
   "wbStats.gateway.view": "View",
-  "wbStats.gateway.modelList": "Model list",
   "wbStats.gateway.sourceLive": "Live",
   "wbStats.gateway.sourceCached": "Saved",
   "wbStats.gateway.sourceBuiltin": "Built-in",
@@ -162,7 +156,6 @@ export const en = {
   "wbStats.gateway.deleteDesc": "Delete the revoked key \"{name}\"? This cannot be undone.",
   "wbStats.gateway.restoreTitle": "Restore API Key",
   "wbStats.gateway.restoreDesc": "After restoring, \"{name}\" becomes usable again immediately. It is the same key (its plaintext is unchanged), so no client reconfiguration is needed.",
-  "wbStats.gateway.requestLog": "Request log (last 50)",
   "wbStats.gateway.clear": "Clear",
   "wbStats.gateway.cleared": "Log cleared",
   "wbStats.gateway.clearFail": "Clear failed",
@@ -212,7 +205,6 @@ export const en = {
   "wbStats.table.actions": "Actions",
 
   // ---- Credit statistics (added) ----
-  "wbStats.credit.bothRegions": "(CN + Global)",
   "wbStats.credit.refresh": "Refresh stats",
   "wbStats.credit.headBarHint": "Credit balances come from upstream; refresh manually",
   "wbStats.credit.refreshCredits": "Refresh credits",
@@ -288,7 +280,6 @@ export const en = {
   "wbStats.usage.trend.formulaSubset": "Gateway {gateway} + direct client {direct}",
   "wbStats.usage.trend.formulaAdditive": "Client {client} + gateway {gateway} − overlap {overlap}",
   "wbStats.usage.trend.ledgerCaption": "Bar height is each book's own value, never netted — the overlap is only subtracted in Combined (see Reconcile)",
-  "wbStats.usage.trend.recon": "Reconcile",
   "wbStats.usage.recon.title": "Reconcile · client ↔ gateway",
   "wbStats.usage.recon.subtitle": "Find the same request in both books and subtract it once",
   "wbStats.usage.recon.verdict.independent": "The two books are basically independent",
@@ -311,11 +302,6 @@ export const en = {
   "wbStats.usage.recon.sampleTime": "Time",
   "wbStats.usage.recon.sampleModel": "Model",
   "wbStats.usage.recon.sampleTokens": "Tokens",
-  "wbStats.usage.recon.sampleWhy": "Why it did not match",
-  "wbStats.usage.recon.sampleWhyModel": "Model absent from the gateway book",
-  "wbStats.usage.recon.sampleWhyGap": "No gateway row of the same model nearby",
-  "wbStats.usage.recon.sampleWhyTokens": "Token counts differ",
-  "wbStats.usage.recon.close": "Close",
   "wbStats.usage.models.clientBook": "Client ledger",
   "wbStats.usage.models.gatewayBook": "Gateway ledger",
   "wbStats.usage.models.clientBookHint": "Local session logs · excludes relayed requests",
@@ -330,7 +316,6 @@ export const en = {
   "wbStats.usage.models.colRequests": "Requests",
   "wbStats.usage.models.colCacheHit": "Cache hit",
   "wbStats.usage.models.colFailed": "Failed",
-  "wbStats.usage.models.dailyTitle": "Daily tokens by model",
   "wbStats.usage.models.clientNoFail": "The client ledger does not record failures — session logs only keep rows that were written",
   "wbStats.usage.models.gatewayFail": "{n} failures are counted in requests; shares are computed within the gateway book",
   "wbStats.usage.sessions.gatewayNote": "The gateway relays request by request and keeps no session id — so this view switches to by-account / by-endpoint under the gateway ledger.",
@@ -340,19 +325,13 @@ export const en = {
   "wbStats.usage.sessions.byEndpoint": "By endpoint",
   "wbStats.usage.sessions.accountHint": "Accounts are attributed by the exact uid in the log; display names are for reading only",
   "wbStats.usage.sessions.endpointHint": "The same data is listed row by row under Gateway → request log",
-  "wbStats.usage.credits.balanceCaliber": "Balance caliber",
   "wbStats.usage.credits.requestCaliber": "Request caliber",
   "wbStats.usage.credits.caliberNote": "The four tiles above are the balance caliber: differences of account balance snapshots — never duplicated, but not attributable to a source. Below is the request caliber: summed per request, attributable, and it does duplicate.",
-  "wbStats.usage.credits.byRequest": "Request-caliber total",
   "wbStats.usage.credits.gap": "Gap between the two calibers",
   "wbStats.usage.credits.gapBody": "Balance {billed} − request {request} (client {client} + gateway {gateway} − overlap {overlap}) = gap {gap}",
   "wbStats.usage.credits.gapHint": "The gap is unattributed usage: other devices, or requests that never reached a local log. It is never spread across sources — doing so would be inventing data.",
   "wbStats.usage.credits.dailyHint": "Sum of the per-request credit (client jsonl / gateway usage.credit). Two books in two colours, never netted.",
   "wbStats.usage.trend.total": "Total tokens",
-  "wbStats.usage.trend.totalTitle": "Client session logs only. Gateway traffic is listed separately as “Gateway tokens” — the two are never summed, since overlapping setups record the same request twice.",
-  "wbStats.usage.trend.gatewayTokens": "Gateway tokens",
-  "wbStats.usage.trend.gatewayTokensHint": "Gateway log only",
-  "wbStats.usage.trend.gatewayTokensTitle": "Requests relayed by the local gateway only. Direct client usage is not counted here, so the two figures are never summed.",
   "wbStats.usage.trend.avg": "Daily average",
   "wbStats.usage.trend.avgHint": "Averaged by calendar day",
   "wbStats.usage.trend.peak": "Peak",
@@ -366,8 +345,6 @@ export const en = {
   "wbStats.usage.trend.heatmapDesc": "Brighter = busier (relative intensity, not absolute)",
   "wbStats.usage.trend.heatmapAria": "Usage intensity heatmap for 7 weekdays × 24 hours",
   "wbStats.usage.trend.totalSegment": "Total",
-  "wbStats.usage.trend.gatewayTitle": "Gateway usage by day",
-  "wbStats.usage.trend.gatewayAria": "Gateway usage by day bar chart",
   "wbStats.usage.trend.gatewaySegment": "Gateway",
 
   // "Count gateway" toggle on the usage page (keys referenced by `src/lib/usage-gateway.ts`).

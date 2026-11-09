@@ -8,7 +8,6 @@ export const en = {
   // =====================================================================
   // gateway/trae-model-list.tsx —— model list
   // =====================================================================
-  "trae.gateway.models.title": "Model list",
   "trae.gateway.models.summary": "{count} total · default {model}",
   "trae.gateway.models.note": "This list is read from the Trae client's local cache (pushed by upstream), so it follows the client's refresh; the exposed list (/v1/models) follows the API key's owned client, and the two clients differ.",
   "trae.gateway.models.empty": "No model data yet.",
@@ -39,7 +38,6 @@ export const en = {
   // =====================================================================
   // gateway/trae-request-log.tsx —— request log
   // =====================================================================
-  "trae.gateway.log.title": "Request log (last 50)",
   "trae.gateway.log.clear": "Clear",
   "trae.gateway.log.refresh": "Refresh",
   "trae.gateway.log.empty": "No requests yet. Once the gateway is running, every call from a client is recorded here (metadata only by default, no bodies).",

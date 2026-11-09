@@ -16,7 +16,6 @@ export const en = {
 
   // ---- Page: settings ----
   "wbSettings.page.title": "Settings",
-  "wbSettings.page.subtitle": "Auto check-in, permission check and gateway configuration. Appearance, launch at login and auto-update are app-level settings — see \"General\" at the bottom of the sidebar.",
 
   // ---- Auto check-in ----
   "wbSettings.checkin.groupTitle": "Auto check-in",
@@ -238,12 +237,9 @@ export const en = {
   "wbSettings.update.connecting": "Connecting to the public releases update source…",
   "wbSettings.update.downloadingLabel": "Downloading update package",
   "wbSettings.update.downloading": "Downloading…",
-  "wbSettings.update.downloadUrlLabel": "Download URL (click to download manually)",
   "wbSettings.update.readyToRestart": "v{version} is ready and takes effect after the app restarts.",
   "wbSettings.update.unknownError": "Unknown update error",
-  "wbSettings.update.openRelease": "Open GitHub Releases",
   "wbSettings.update.retry": "Retry",
-  "wbSettings.update.closeNow": "Close now",
   "wbSettings.update.restarting": "Restarting…",
   "wbSettings.update.restartNow": "Restart now",
 

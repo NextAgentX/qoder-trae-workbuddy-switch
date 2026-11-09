@@ -7,10 +7,6 @@
 export const en = {
   // ---- Page: account management ----
   "wbAccounts.page.title": "Accounts",
-  "wbAccounts.page.regionSwitchAria": "Switch between the CN and Global versions",
-  "wbAccounts.page.subtitle": "Manage {product} accounts, credits and check-in status for both the CN and global versions; the two account stores stay isolated.",
-  "wbAccounts.page.addTitle": "Add & migrate accounts",
-  "wbAccounts.page.addSubtitle": "Quickly add a new account, or restore from an existing environment",
   "wbAccounts.page.oauthAdd": "Add via OAuth scan",
   "wbAccounts.page.exportTitle": "Export account backup",
   "wbAccounts.page.loadFailed": "Failed to load",
@@ -20,7 +16,6 @@ export const en = {
   "wbAccounts.page.autoTravel": "Auto travel",
   "wbAccounts.page.autoTravelSaving": "Saving auto travel setting",
   "wbAccounts.page.refreshCredits": "Check in and refresh all accounts' credits",
-  "wbAccounts.page.statusLoggedIn": "Signed in: {name}",
   "wbAccounts.page.cliTitle": "CodeBuddy CLI integration",
   "wbAccounts.page.cliDescEnvOverride": "A process environment variable CODEBUDDY_AUTH_TOKEN was detected. It overrides settings.json; please delete it from the Windows user or system environment variables, then restart this app and CodeBuddy CLI.",
   "wbAccounts.page.cliDescEnvSyncPending": "The Windows CLI auth config is out of sync with the current account token. After you update auth, the latest token is written; the current running session won't switch — it takes effect after ACP reloads the session or you restart the CLI.",
@@ -45,16 +40,8 @@ export const en = {
   "wbAccounts.page.mismatchEnvVar": "Environment variable",
 
   // ---- Common status words (shared across components) ----
-  "wbAccounts.common.running": "Running",
-  "wbAccounts.common.notRunning": "Not running",
-  "wbAccounts.common.connected": "Connected",
-  "wbAccounts.common.notConnected": "Not connected",
-  "wbAccounts.common.needsUpgrade": "Upgrade required",
-  "wbAccounts.common.currentAccount": "Current account: {name}",
   "wbAccounts.common.unknownAccount": "Unknown account",
   "wbAccounts.common.notLoggedIn": "Not signed in",
-  "wbAccounts.common.notDetected": "Not detected",
-  "wbAccounts.common.notInstalled": "Not installed",
 
   // ---- Empty state (not installed / not signed in) ----
   "wbAccounts.empty.notDetected": "WorkBuddy {version} not detected",
@@ -76,7 +63,6 @@ export const en = {
 
   // ---- Account card ----
   "wbAccounts.card.forever": "Valid indefinitely",
-  "wbAccounts.card.expirySuffix": "expires",
   "wbAccounts.card.arrivingSoon": "Arriving soon",
   "wbAccounts.card.remainingHM": "{hours}h {minutes}m left",
   "wbAccounts.card.remainingH": "{hours}h left",
@@ -131,27 +117,22 @@ export const en = {
   "wbAccounts.card.metric.todayTokensGateway": "Gateway in {input} · out {output}",
   "wbAccounts.card.metric.todayTokensTruncated": "Part of today's gateway log may have been trimmed; the gateway figure is a lower bound (real usage is higher)",
   "wbAccounts.card.metric.todayTokensOverlap": "Client and gateway are logged independently; the same request may be counted twice",
-  "wbAccounts.card.editGroup": "Set group",
   "wbAccounts.card.manageAria": "Manage account {name}",
   "wbAccounts.card.moreActions": "More account actions",
   "wbAccounts.card.refreshToken": "Refresh token",
   "wbAccounts.card.manualCheckin": "Manual check-in",
-  "wbAccounts.card.editRemark": "Edit remark",
   "wbAccounts.card.deleteAccount": "Delete account",
   "wbAccounts.card.setCurrentWorkbuddy": "Set as WorkBuddy current account",
   "wbAccounts.card.setCurrentWorkbuddyRestart": "Set as WorkBuddy current account (restarts WorkBuddy)",
   "wbAccounts.card.switchIde": "Switch to CodeBuddy IDE",
   "wbAccounts.card.switchIdeRestart": "Switch to CodeBuddy IDE (restarts the IDE)",
-  "wbAccounts.card.ideNotDetected": "CodeBuddy IDE not detected",
   "wbAccounts.card.switchingIde": "Switching CodeBuddy IDE",
   "wbAccounts.card.setCurrentCli": "Set as CodeBuddy CLI current account",
   // issue #109: with the CLI on the local gateway, switching accounts no longer applies.
   "wbAccounts.card.cliGatewayMode":
     "The CLI now goes through the local gateway, which picks accounts by model. To switch per account, switch back to direct upstream in Settings → CodeBuddy CLI.",
   "wbAccounts.card.switchingCli": "Switching CodeBuddy CLI current account",
-  "wbAccounts.card.connectCliFirst": "Connect CodeBuddy CLI first",
   // P4: remark editor moved to the shared drawer; only the card entry point stays.
-  "wbAccounts.card.viewDetail": "View details",
   "wbAccounts.card.selectAria": "Select account {name}",
   "wbAccounts.card.guideIdeSetting": "CodeBuddy IDE not detected — click to configure the IDE path in settings",
   "wbAccounts.card.guideCliSetting": "CodeBuddy CLI not connected — click to finish setup in settings",
@@ -162,7 +143,6 @@ export const en = {
   "wbAccounts.card.creditPackFallback": "credit pack",
   "wbAccounts.card.setCurrent": "Set as current",
   "wbAccounts.card.switching": "Switching…",
-  "wbAccounts.card.cliCurrent": "CLI current",
   // P4: pack details moved from the in-card dialog to the shared drawer.
   // 2026-10-12: the in-card "big number row + expiring soon" block was removed to match the
   // prototype card (top / chips / metrics / actions only).
@@ -199,7 +179,6 @@ export const en = {
   "wbAccounts.dialog.migrateConnectors": "Migrate connector config",
   "wbAccounts.dialog.migrateConnectorsDescSame": "Merge the current account's connector config into the target account; recursively merge same-named entries, dedupe duplicates, and auto-back up the original before overwriting",
   "wbAccounts.dialog.migrateConnectorsDescCross": "Merge {from}'s current account connector config into {to}'s target account; recursively merge same-named entries, dedupe duplicates, and auto-back up the original before overwriting",
-  "wbAccounts.dialog.loadingSessions": "Loading sessions…",
   "wbAccounts.dialog.noSessionsCurrent": "Current account has no sessions",
   "wbAccounts.dialog.noSessionsNoCurrent": "No signed-in account detected; can't list sessions",
   "wbAccounts.dialog.selectKind": "Select {label}",
@@ -219,7 +198,6 @@ export const en = {
   "wbAccounts.dialog.checkNow": "Check now",
   "wbAccounts.dialog.cancel": "Cancel",
   "wbAccounts.dialog.continue": "Continue",
-  "wbAccounts.dialog.confirmSwitch": "Confirm switch",
   "wbAccounts.dialog.permissionChecking": "Checking…",
   "wbAccounts.dialog.permissionOk": "✓ Access granted, you can switch again",
   "wbAccounts.dialog.permissionFailDir": "✗ {error} ({dir})",
@@ -318,7 +296,6 @@ export const en = {
   "wbAccounts.dialog.oauthDesc": "Open the verification link in a browser; after scanning to authorize, the account is collected and stored automatically.",
   "wbAccounts.dialog.oauthStart": "Start scan sign-in",
   "wbAccounts.dialog.oauthStarting": "Starting sign-in…",
-  "wbAccounts.dialog.oauthWaiting": "Waiting for scan authorization; please complete it in the browser…",
   "wbAccounts.dialog.oauthCollected": "Account collected: {name}",
   "wbAccounts.dialog.oauthLoginFail": "Sign-in failed",
   "wbAccounts.dialog.oauthClose": "Close",
@@ -418,7 +395,6 @@ export const en = {
   "wbAccounts.table.status": "Status",
   "wbAccounts.table.credits": "Credits",
   "wbAccounts.table.todayTokens": "Today's tokens",
-  "wbAccounts.table.expiry": "Expiry",
   /* issue #69: credit expiry and token expiry are **different things** — the column names must differ. */
   "wbAccounts.table.creditExpiry": "Credit expiry",
   "wbAccounts.table.creditExpiryDays": "{value} days",
@@ -440,7 +416,6 @@ export const en = {
   "wbAccounts.limits.window.7": "Last 7 days",
   "wbAccounts.limits.window.30": "Last 30 days",
   "wbAccounts.limits.window.all": "All",
-  "wbAccounts.limits.loading": "Reading rate-limit records…",
   "wbAccounts.limits.loadFailed": "Failed to load",
   "wbAccounts.limits.empty": "No rate-limit records in the selected range.",
   "wbAccounts.limits.subtitleNoLedger": "This platform has no client log to infer from, so only **probe** results are listed here (same data as the gateway rate-limit probe); reset times come from the upstream.",

@@ -16,7 +16,6 @@ export const zh = {
   "skillManager.title": "Skill 管理",
   "skillManager.description": "扫描国内版 / 国际版的 skills 目录：启停、跨区搬迁、从本地导入。",
 
-  "skillManager.loading": "加载中…",
   "skillManager.reload": "刷新",
   "skillManager.openDir": "打开目录",
   "skillManager.error": "加载失败：{message}",
@@ -28,8 +27,6 @@ export const zh = {
   "skillManager.count": "共 {n} 个",
   "skillManager.version": "v{version}",
 
-  "skillManager.enabled": "已启用",
-  "skillManager.disabled": "已停用",
   /** 开关的无障碍标签；`name` 由调用点传入。 */
   "skillManager.toggle.aria": "启用 / 停用 {name}",
   "skillManager.toggle.failed": "切换失败：{message}",
@@ -45,7 +42,6 @@ export const zh = {
 
   "skillManager.copyCross": "从对侧区域搬迁",
   "skillManager.copyCross.source": "源：{source}",
-  "skillManager.copyCross.running": "搬迁中…",
   "skillManager.copyCross.done": "搬迁完成",
   "skillManager.copyCross.none": "没有需要搬迁的 skill",
   "skillManager.copyCross.copied": "新增 {n}",
@@ -56,7 +52,6 @@ export const zh = {
 
   "skillManager.import": "从本地导入",
   "skillManager.import.placeholder": "目录或 .zip 的完整路径",
-  "skillManager.import.running": "导入中…",
   "skillManager.import.done": "已导入 {name}",
   "skillManager.import.identical": "{name} 已存在且内容一致，已跳过",
   "skillManager.import.conflict": "{name} 已存在且内容不同，已保留目标侧",

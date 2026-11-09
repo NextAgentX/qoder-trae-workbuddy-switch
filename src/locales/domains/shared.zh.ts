@@ -58,7 +58,6 @@ export const zh = {
   /* P3：`shared.region.scope.aria` 已删除（区域选择器上移到侧栏）。
      页面内只剩「合并」这个**视图参数**开关。 */
   "shared.region.combine.aria": "合并国内版与国际版查看",
-  "shared.region.combine.label": "合并国内版与国际版",
   /* P3：合并态由「开关」改为 `.seg` 双按钮（原型 `viewUsage` 的 params 段）。 */
   "shared.region.combine.only": "仅本作用域",
   "shared.region.combine.all": "合并全部作用域",
@@ -73,7 +72,6 @@ export const zh = {
   "shared.poolStatus.excluded": "已排除",
 
   // ---- 网关账号池卡（components/gateway/account-pool-card.tsx，两侧共用）----
-  "shared.gateway.pool.title": "账号池",
   /* P3：接入片段的**字段标签**统一在这里（原来 WB 与 Trae 各有一套）。
      ⚠️ 只有**自然语言标签**放这儿；片段里的键名（`apiProvider` 等）是外部工具读取的
      契约，保持英文硬编码，翻译了会粘贴失败。 */
@@ -235,7 +233,6 @@ export const zh = {
   "shared.gateway.fallback.field.fromLocked": "主模型不可改。要换主模型请删掉这条链重配 —— 改 from 等于换了一条链。",
   "shared.gateway.fallback.field.crossModelPlaceholder": "填目标平台的模型 id",
   "shared.gateway.fallback.field.thisScope": "本区域",
-  "shared.gateway.fallback.field.crossPlatformPending": "跨平台仅 WorkBuddy 支持",
   "shared.gateway.fallback.field.targets": "备选模型（按顺序尝试）",
   "shared.gateway.fallback.field.targetsHint": "最多 {max} 个（含主模型共 {hops} 跳）。已禁用 / 上游不可用的模型不会出现在这里。",
   "shared.gateway.fallback.capsNote": "带图片的请求会自动跳过不支持图片输入的备选；工具调用 / 结构化输出 / 上下文窗口本版不校验，由备选自己决定接受还是拒绝。",
@@ -275,8 +272,6 @@ export const zh = {
   "shared.gateway.fallback.saveOkDesc": "立即生效，无需重启网关",
   "shared.gateway.fallback.needTarget": "至少选一个备选模型",
   "shared.gateway.fallback.needTargetDesc": "只配主模型不构成降级链",
-  "shared.gateway.fallback.enabledToast": "已启用降级",
-  "shared.gateway.fallback.disabledToast": "已关闭降级",
   "shared.gateway.probe.title": "限流探测",
   "shared.gateway.probe.badge": "账号 × 模型 实探",
   "shared.gateway.probe.expand": "展开",
@@ -437,8 +432,6 @@ export const zh = {
   //   那个时刻是猜的，加「约」是为了不让人拿它当承诺。
   "shared.gateway.pool.modelCoolingBadge": "{count} 个模型限流 · {time} 解冻",
   "shared.gateway.pool.modelCoolingBadgeApprox": "{count} 个模型限流 · 约 {time} 解冻",
-  "shared.gateway.pool.modelCoolingHint":
-    "{models} 处于模型级冷却（只影响这些模型，其它模型仍可用），最早 {time} 解冻。",
   // 徽标 tooltip 的逐模型行（issue #88 缺口 4.2）：名称 · 剩余 · 是否兜底 · 上游声明时刻。
   "shared.gateway.pool.modelCoolingRow": "{model} · 剩 {remaining}{fallback}{upstream}",
   // 上游**文案**里声明的恢复时刻（只在与实际冷却截止不同时出现 —— 例如被 24h 截断）。
@@ -628,8 +621,6 @@ export const zh = {
   "shared.demo.trae.pack.checkinBonus": "签到赠送包",
   "shared.demo.trae.pack.cnPlan": "国内套餐包",
   "shared.demo.trae.pack.trial": "试用包",
-  "shared.demo.trae.cooldown.rateLimited": "请求过于频繁，请稍后再试",
-  "shared.demo.trae.cooldown.sessionDead": "会话已失效，需重新登录",
   "shared.demo.trae.cooldown.reasonRateLimited": "请求过于频繁",
   "shared.demo.trae.cooldown.reasonSessionDead": "会话已失效",
   // ---- Trae：签到 ----
@@ -741,8 +732,6 @@ export const zh = {
   "shared.cardMenu.needLoginHint": "凭据已失效，先重新登录才能签到",
   "shared.cardMenu.busy": "刷新中…",
   "shared.cardMenu.done": "已更新",
-  "shared.cardMenu.checkinDone": "今日已签到",
-  "shared.cardMenu.checkinNeedsLogin": "需先登录",
   // 单项刷新的结果（四项各自一句，别用「已刷新」糊住 —— 用户要知道刷的是哪一层）。
   "shared.refreshPart.credits": "积分已刷新",
   "shared.refreshPart.tokens": "今日 Token 已刷新",
@@ -805,7 +794,6 @@ export const zh = {
   "shared.drawer.snapshot.time": "最近修改",
   "shared.drawer.snapshot.size": "大小",
   "shared.drawer.snapshot.files": "{n} 个文件",
-  "shared.drawer.snapshot.empty": "该账号还没有快照",
   // 备注区（就地编辑）—— 语义与卡片时代的备注编辑器一致，只是搬进了抽屉。
   "shared.drawer.remark.title": "备注",
   "shared.drawer.remark.placeholder": "例如：DS4.1 额度 · 10/03 解禁",
@@ -814,10 +802,6 @@ export const zh = {
   "shared.drawer.remark.add": "添加备注",
   // 分组区（就地编辑，与备注区**同构**；仅在调用方注入 `onSaveGroup` 时渲染）。
   "shared.drawer.group.title": "分组",
-  "shared.drawer.group.placeholder": "输入自定义分组名（留空即移出分组）",
-  "shared.drawer.group.aria": "{name} 的分组",
-  "shared.drawer.group.editAria": "编辑 {name} 的分组",
-  "shared.drawer.group.add": "设置分组",
   // 分组选择器（可新建）：既有的组列出来、最后一枚是「新建分组」。
   "shared.drawer.group.picker.aria": "{name} 的分组",
   "shared.drawer.group.picker.unassigned": "未分组",
@@ -862,7 +846,6 @@ export const zh = {
   "shared.drawer.checkin.result.already": "已签到",
   "shared.drawer.checkin.result.fail": "失败",
   "shared.drawer.checkin.result.none": "未签到",
-  "shared.drawer.checkin.historyEmpty": "暂无签到记录",
   // 详情区块全空时的空态（四要素里的 title / description；出口由调用方以 ReactNode 注入）。
   "shared.drawer.empty.title": "暂无详情",
   "shared.drawer.empty.description": "该账号暂时没有可展示的详情；可重新检测后再试。",
@@ -966,7 +949,6 @@ export const zh = {
   "shared.authPanel.remaining": "剩余 {time}",
   "shared.authPanel.expired": "已超时",
   "shared.authPanel.expiredDesc": "这条链接已作废，重新生成一条",
-  "shared.authPanel.regenerate": "重新生成",
   "shared.authPanel.step1": "用手机或任意电脑的浏览器打开上面的链接。",
   "shared.authPanel.step2": "登录并点「授权」—— 不需要在这台机器上装客户端。",
   "shared.authPanel.step3": "本窗口自动收到结果，账号直接进账号库。",
@@ -995,25 +977,15 @@ export const zh = {
   "shared.srv.capOff.usage": "客户端用量扫描 —— 数据源是客户端会话文件",
   "shared.srv.capOff.sessions": "会话浏览与复制 —— 同上",
   "shared.srv.traeNote": "Trae 例外：授权与续期都依赖客户端里的设备私钥，纯浏览器登录走不通 —— 点「浏览器授权登录」看两条现实路径。",
-  "shared.srv.help.title": "无客户端说明",
-  "shared.srv.help.whyTitle": "为什么「没客户端」不是故障",
-  "shared.srv.help.why1": "账号库里存的是凭据（access / refresh token），网关转发、签到、积分统计都只用它。客户端在不在同一台机器上，对这三件事没有影响。",
-  "shared.srv.help.why2": "旧版把「未检测到客户端」渲染成红字 + 只留「重新检测 / 从本机导入」，等于告诉服务器用户「你用不了」—— 那是把一种部署形态当成了错误。",
-  "shared.srv.help.moveTitle": "想把另一台机器上的账号搬过来",
   "shared.srv.help.moveDesc": "在那台机器上导出备份（JSON），回到这里用「导入备份文件」。备份里含凭据，导入后刷新与网关立即生效，不需要再登录一次。",
   "shared.srv.paste.title": "粘贴授权凭据",
   "shared.srv.paste.desc": "从任意一台装了客户端的机器复制凭据，或在浏览器授权后手工粘贴。本机不需要装客户端。",
-  "shared.srv.paste.whyTitle": "为什么可以手工粘贴",
-  "shared.srv.paste.whyDesc": "账号库存的就是凭据本身，「从本机导入」只是替你去客户端目录里读一次。入库之后，刷新、签到、网关走的是同一条路。",
   "shared.srv.paste.verify": "验证并添加",
   "shared.srv.paste.empty": "凭据是空的",
   "shared.srv.paste.emptyDesc": "把 auth 文件内容或 refresh_token 粘进来",
-  "shared.srv.paste.failed": "凭据校验失败",
   "shared.srv.paste.ok": "已添加 {name}",
   "shared.srv.paste.okDesc": "凭据已入库 · 刷新与网关立即生效",
   "shared.srv.paste.hint.wb": "粘贴 auth/workbuddy-desktop-ai.info 里的 JSON（access_token / refresh_token）",
-  "shared.srv.paste.hint.trae": "粘贴 refresh_token，或授权页跳回的那串回调链接",
-  "shared.srv.paste.hint.qoder": "粘贴 Qoder 的个人访问令牌（PAT）",
   "shared.srv.localUnavailable": "本机没有客户端可读",
   "shared.srv.localUnavailableDesc": "改用「浏览器授权登录」或「粘贴授权凭据」；也可以在装了客户端的机器上导出备份再导入",
   "shared.srv.oauthTitle": "浏览器授权登录",

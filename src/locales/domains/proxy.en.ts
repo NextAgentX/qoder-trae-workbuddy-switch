@@ -57,7 +57,6 @@ export const en = {
   "proxy.guide.title": "How to turn it on (one manual step)",
   "proxy.guide.why":
     "The client reads its proxy from its own settings file (not the system proxy, not an environment variable). The app cannot change it for you (and should not touch your settings).",
-  "proxy.guide.envLabel": "Set in the client's settings",
   "proxy.guide.restart": "Restart the client for it to take effect.",
   "proxy.guide.copy": "Copy",
   "proxy.guide.copied": "Copied",

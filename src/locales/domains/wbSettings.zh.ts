@@ -23,7 +23,6 @@ export const zh = {
 
   // ---- 页面：设置 ----
   "wbSettings.page.title": "设置",
-  "wbSettings.page.subtitle": "自动签到、权限检测与网关配置。外观、开机自启与自动更新属应用级设置，见侧栏底部「通用设置」。",
 
   // ---- 自动签到 ----
   "wbSettings.checkin.groupTitle": "自动签到",
@@ -245,12 +244,9 @@ export const zh = {
   "wbSettings.update.connecting": "正在连接公开 Release 更新源…",
   "wbSettings.update.downloadingLabel": "下载更新包",
   "wbSettings.update.downloading": "下载中…",
-  "wbSettings.update.downloadUrlLabel": "下载地址（点击可手动下载）",
   "wbSettings.update.readyToRestart": "v{version} 已准备完成，重启应用后生效。",
   "wbSettings.update.unknownError": "未知更新错误",
-  "wbSettings.update.openRelease": "打开 GitHub Release",
   "wbSettings.update.retry": "重试",
-  "wbSettings.update.closeNow": "立即关闭",
   "wbSettings.update.restarting": "正在重启…",
   "wbSettings.update.restartNow": "立即重启",
 

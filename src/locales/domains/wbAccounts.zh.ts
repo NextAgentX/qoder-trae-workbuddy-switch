@@ -12,10 +12,6 @@ export const zh = {
   // ---- 页面：账号管理 ----
   // 与原型 `viewAccounts` 的 h1（`buddy-switch-prototype.html:2432`）一致：短标题「账号」。
   "wbAccounts.page.title": "账号",
-  "wbAccounts.page.regionSwitchAria": "切换国内版 / 国际版",
-  "wbAccounts.page.subtitle": "分别管理国内版与国际版 {product} 账号、积分和签到状态，两版账号库互相隔离。",
-  "wbAccounts.page.addTitle": "添加与迁移账号",
-  "wbAccounts.page.addSubtitle": "快速接入新账号，或从已有环境恢复",
   "wbAccounts.page.oauthAdd": "OAuth 扫码添加",
   "wbAccounts.page.exportTitle": "导出账号备份",
   "wbAccounts.page.loadFailed": "加载失败",
@@ -25,7 +21,6 @@ export const zh = {
   "wbAccounts.page.autoTravel": "自动旅行",
   "wbAccounts.page.autoTravelSaving": "正在保存自动旅行设置",
   "wbAccounts.page.refreshCredits": "签到并刷新全部账号积分",
-  "wbAccounts.page.statusLoggedIn": "已登录: {name}",
   "wbAccounts.page.cliTitle": "CodeBuddy CLI 接入",
   "wbAccounts.page.cliDescEnvOverride": "检测到进程环境变量 CODEBUDDY_AUTH_TOKEN。它会覆盖 settings.json；请先从 Windows 用户或系统环境变量中删除它，再重启本应用与 CodeBuddy CLI。",
   "wbAccounts.page.cliDescEnvSyncPending": "Windows CLI 认证配置与当前账号 Token 已脱节。点击更新认证后写入最新 Token；当前运行会话不会切换，请由 ACP 重新加载会话或重启 CLI 后生效。",
@@ -50,16 +45,8 @@ export const zh = {
   "wbAccounts.page.mismatchEnvVar": "环境变量",
 
   // ---- 通用状态词（多组件复用） ----
-  "wbAccounts.common.running": "运行中",
-  "wbAccounts.common.notRunning": "未运行",
-  "wbAccounts.common.connected": "已接入",
-  "wbAccounts.common.notConnected": "未接入",
-  "wbAccounts.common.needsUpgrade": "需升级",
-  "wbAccounts.common.currentAccount": "当前账号: {name}",
   "wbAccounts.common.unknownAccount": "未知账号",
   "wbAccounts.common.notLoggedIn": "未登录",
-  "wbAccounts.common.notDetected": "未检测到",
-  "wbAccounts.common.notInstalled": "未安装",
 
   // ---- 空态（未安装/未登录） ----
   // ⚠️ 标题**必须**按 `installed` 分叉：客户端已安装但没登录态时说「未检测到」，
@@ -86,7 +73,6 @@ export const zh = {
 
   // ---- 账号卡片 ----
   "wbAccounts.card.forever": "长期有效",
-  "wbAccounts.card.expirySuffix": "到期",
   "wbAccounts.card.arrivingSoon": "即将到达",
   "wbAccounts.card.remainingHM": "剩余 {hours} 小时 {minutes} 分钟",
   "wbAccounts.card.remainingH": "剩余 {hours} 小时",
@@ -162,29 +148,24 @@ export const zh = {
   // 客户端既写自己的会话日志、又被指向本网关，两处会各记一次 ⇒ 合计**可能重复计数**。
   // 两侧都非零时才出现（一侧为 0 时合计就是另一侧，无歧义）。
   "wbAccounts.card.metric.todayTokensOverlap": "客户端与网关为两条独立记录，同一请求可能被重复计数",
-  "wbAccounts.card.editGroup": "设置分组",
   "wbAccounts.card.manageAria": "管理账号 {name}",
   "wbAccounts.card.moreActions": "更多账号操作",
   "wbAccounts.card.refreshToken": "刷新 Token",
   "wbAccounts.card.manualCheckin": "手动签到",
-  "wbAccounts.card.editRemark": "编辑备注",
   "wbAccounts.card.deleteAccount": "删除账号",
   "wbAccounts.card.setCurrentWorkbuddy": "设为 WorkBuddy 当前账号",
   "wbAccounts.card.setCurrentWorkbuddyRestart": "设为 WorkBuddy 当前账号（会重启 WorkBuddy）",
   "wbAccounts.card.switchIde": "切换到 CodeBuddy IDE",
   "wbAccounts.card.switchIdeRestart": "切换到 CodeBuddy IDE（会重启 IDE）",
-  "wbAccounts.card.ideNotDetected": "未检测到 CodeBuddy IDE",
   "wbAccounts.card.switchingIde": "正在切换 CodeBuddy IDE",
   "wbAccounts.card.setCurrentCli": "设为 CodeBuddy CLI 当前账号",
   // issue #109：CLI 走本机网关时，切号语义上已不存在（选号由网关按模型决定）。
   "wbAccounts.card.cliGatewayMode":
     "CLI 已走本机网关，选号由网关按模型决定。要按账号切换，请先在「设置 → CodeBuddy CLI」切回直连上游。",
   "wbAccounts.card.switchingCli": "正在切换 CodeBuddy CLI 当前账号",
-  "wbAccounts.card.connectCliFirst": "请先接入 CodeBuddy CLI",
   // P4：备注编辑器与「查看详情」入口。
   // 备注编辑器已迁入**共享**抽屉，占位符 / 无障碍标签改由 `shared.drawer.remark.*` 提供；
   // 卡片只保留「更多 → 编辑备注」这个入口（打开抽屉并进入编辑态）。
-  "wbAccounts.card.viewDetail": "查看详情",
   "wbAccounts.card.selectAria": "选择账号 {name}",
   // 未检测到的程序位：**点击引导到设置**（§3.3 规则 1），而不是摆一枚点不动的灰按钮。
   "wbAccounts.card.guideIdeSetting": "未检测到 CodeBuddy IDE，点击前往设置配置 IDE 路径",
@@ -196,7 +177,6 @@ export const zh = {
   "wbAccounts.card.creditPackFallback": "积分包",
   "wbAccounts.card.setCurrent": "设为当前",
   "wbAccounts.card.switching": "切换中…",
-  "wbAccounts.card.cliCurrent": "CLI 当前",
   // P4：积分包明细从卡片内 Dialog 迁入**共享抽屉**，以下键改由 `AccountsPage` 装配
   // `DetailPack` 时使用。
   // ⚠️ 2026-10-12：卡片上的「大数字行 + 近期到期」整块已按原型删除（原型卡片只有
@@ -237,7 +217,6 @@ export const zh = {
   "wbAccounts.dialog.migrateConnectors": "迁移连接器配置",
   "wbAccounts.dialog.migrateConnectorsDescSame": "合并当前账号的连接器配置到目标账号；同名条目递归合并、重复项去重，改写前自动备份原文",
   "wbAccounts.dialog.migrateConnectorsDescCross": "把 {from} 当前账号的连接器配置合并到 {to} 目标账号；同名条目递归合并、重复项去重，改写前自动备份原文",
-  "wbAccounts.dialog.loadingSessions": "加载会话…",
   "wbAccounts.dialog.noSessionsCurrent": "当前账号暂无会话",
   "wbAccounts.dialog.noSessionsNoCurrent": "未检测到当前登录账号，无法列出会话",
   "wbAccounts.dialog.selectKind": "选择 {label}",
@@ -257,7 +236,6 @@ export const zh = {
   "wbAccounts.dialog.checkNow": "立即检测",
   "wbAccounts.dialog.cancel": "取消",
   "wbAccounts.dialog.continue": "继续",
-  "wbAccounts.dialog.confirmSwitch": "确认切换",
   "wbAccounts.dialog.permissionChecking": "检测中…",
   "wbAccounts.dialog.permissionOk": "✓ 授权成功，可以重新切换了",
   "wbAccounts.dialog.permissionFailDir": "✗ {error}（{dir}）",
@@ -355,7 +333,6 @@ export const zh = {
   "wbAccounts.dialog.oauthDesc": "在浏览器中打开验证链接，扫码授权后将自动采集账号并入库。",
   "wbAccounts.dialog.oauthStart": "开始扫码登录",
   "wbAccounts.dialog.oauthStarting": "正在发起登录…",
-  "wbAccounts.dialog.oauthWaiting": "正在等待扫码授权，请在浏览器完成操作…",
   "wbAccounts.dialog.oauthCollected": "已采集账号：{name}",
   "wbAccounts.dialog.oauthLoginFail": "登录失败",
   "wbAccounts.dialog.oauthClose": "关闭",
@@ -466,7 +443,6 @@ export const zh = {
   "wbAccounts.table.status": "状态",
   "wbAccounts.table.credits": "积分",
   "wbAccounts.table.todayTokens": "今日 Token",
-  "wbAccounts.table.expiry": "到期",
   /* issue #69：积分到期与 Token 到期是**两件事**，列名必须区分。 */
   "wbAccounts.table.creditExpiry": "积分到期",
   "wbAccounts.table.creditExpiryDays": "{value} 天",
@@ -487,7 +463,6 @@ export const zh = {
   "wbAccounts.limits.window.7": "近 7 天",
   "wbAccounts.limits.window.30": "近 30 天",
   "wbAccounts.limits.window.all": "全部",
-  "wbAccounts.limits.loading": "正在读取限流记录…",
   "wbAccounts.limits.loadFailed": "读取失败",
   "wbAccounts.limits.empty": "所选范围内没有限流记录。",
   /* 无「客户端限流台账」的平台（Qoder / Trae）：同一张卡、同一套行与时间口径，

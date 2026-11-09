@@ -27,11 +27,7 @@ export const en = {
   "clientSettings.slot.traeCodeGlobal": "TraeCode",
   // Hook install targets (CLI clients; see HOOK_FILE_SLOTS in client_settings) —
   // they never appear on the proxy settings page; these keys only serve `displayKey` echo.
-  "clientSettings.slot.claude": "Claude Code",
-  "clientSettings.slot.codebuddy": "CodeBuddy",
   // Trae's **hooks file** slots (`hooks.json`, not `settings.json`).
-  "clientSettings.slot.traeHooksCn": "Trae (CN) hooks",
-  "clientSettings.slot.traeHooksGlobal": "Trae (Global) hooks",
 
   "clientSettings.status.installed": "Installed",
   "clientSettings.status.notInstalled": "Not installed",

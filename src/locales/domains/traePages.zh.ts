@@ -16,7 +16,6 @@ export const zh = {
   // TraeAccountsPage.tsx —— 「账号管理」页
   // =====================================================================
   "trae.page.accounts.title": "账号",
-  "trae.page.accounts.subtitle": "管理 {line} 账号的登录凭据、签到与登录态切换。与 WorkBuddy 的账号库彼此独立。",
   "trae.page.accounts.loadFailed": "无法读取 Trae 数据",
 
   // ---- 通用 action 结果提示 ----
@@ -82,8 +81,6 @@ export const zh = {
   "trae.page.accounts.importLocalFailed": "导入本机账号失败",
 
   // ---- 「添加与迁移账号」横幅 ----
-  "trae.page.accounts.addTitle": "添加与迁移账号",
-  "trae.page.accounts.addSubtitle": "快速接入新账号，或从已有环境恢复",
   "trae.page.accounts.oauthLogin": "OAuth 网页登录",
   "trae.page.accounts.pasteJwt": "粘贴 JWT",
   "trae.page.accounts.pasteJwtTitle": "手动粘贴 Cloud-IDE-JWT（兜底方式，优先用上方网页登录）",
@@ -100,8 +97,6 @@ export const zh = {
   "trae.page.accounts.storageJsonMissing": "（目录存在，但 storage.json 还没生成 —— 客户端从未完成首次登录）",
 
   // ---- 账号工具栏 ----
-  "trae.page.accounts.sectionTitle": "账号",
-  "trae.page.accounts.countAria": "{count} 个账号",
   /* ★ 列表区**不再有可见标题**（原型 `viewAccounts` 的列表区没有「账号 N」标题，
      计数由页头副标题表达）⇒ 语义改由 `section` 的 `aria-label` 承担，与 WorkBuddy 一致。 */
   "trae.page.accounts.sectionAria": "账号列表（{count} 个）",
@@ -202,7 +197,6 @@ export const zh = {
   // TraeSettingsPage.tsx —— 「设置」页
   // =====================================================================
   "trae.page.settings.title": "设置",
-  "trae.page.settings.subtitle": "客户端定位、本地端口、签到策略，以及登录态快照与运行日志。Trae 的配置与 WorkBuddy 分开保存，互不影响。",
   "trae.page.settings.loadFailed": "无法读取 Trae 配置",
   "trae.page.settings.cancel": "取消",
   "trae.page.settings.refresh": "刷新",

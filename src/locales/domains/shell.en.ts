@@ -13,7 +13,6 @@
  */
 export const en = {
   // ---- App shell / sidebar ----
-  "app.name": "Buddy Switch",
   "app.demoBadge": "Demo",
   "product.workbuddy": "WorkBuddy",
   /* issue #44: "TraeWork" is the retired legacy program line (each region now ships a single
@@ -27,12 +26,9 @@ export const en = {
   /* Short labels, mirroring the prototype's `DESTINATIONS` (buddy-switch-prototype.html:1139-1146). */
   "nav.accounts": "Accounts",
   "nav.usage": "Usage",
-  "nav.tokenStats": "Token usage",
-  "nav.credits": "Credits",
   "nav.apiService": "Gateway",
   "nav.settings": "Settings",
 
-  "sidebar.version": "Version",
   // Brand block tagline (prototype `.brand-text i`, `buddy-switch-prototype.html:163`).
   "sidebar.brand.tagline": "Multi-platform account manager",
   "sidebar.running": "{product} running",
@@ -92,7 +88,6 @@ export const en = {
   "palette.description": "Search accounts, pages, and actions across scopes; press Enter to go.",
   "palette.aria": "Command palette",
   "palette.placeholder": "Search accounts, pages, or actions…",
-  "palette.loading": "Loading accounts…",
   "palette.results": "{count} results",
   "palette.empty.title": "No matches",
   "palette.empty.description": "Try a different keyword, or clear the search to see everything.",
@@ -192,7 +187,6 @@ export const en = {
   "appSettings.update.doneTitle": "Update check complete",
   "appSettings.update.foundDetail": "Version v{latest} is available (current v{current})",
   "appSettings.update.upToDate": "You are on the latest version v{current}",
-  "appSettings.update.installNow": "Update now",
   /* The settings entry opens the notes dialog first instead of downloading (see UPDATE-NOTES-ARCH.md). */
   "appSettings.update.viewNotes": "View release notes",
 
@@ -283,7 +277,6 @@ export const en = {
   "gateway.subnav.logs": "Request logs",
 
   // ---- 统一网关（第三个产品线 · 跨作用域）----
-  "gateway.subnav.unified": "Unified gateway",
   /* Gateway **type** switch (the two types are orthogonal to the section list). */
   "gateway.type.label": "Gateway type",
   "gateway.type.independent": "Standalone",
@@ -340,7 +333,6 @@ export const en = {
   "unifiedGateway.allowLanDesc": "On 0.0.0.0, any device on your network can call models through this machine and spend your account credits. The default is loopback only.",
   "unifiedGateway.confirmOpen": "Expose on LAN",
   "unifiedGateway.confirm": "Confirm",
-  "unifiedGateway.nsCount": "{count} of {total} enabled",
   "unifiedGateway.pool.empty": "No namespace enabled",
   "unifiedGateway.pool.emptyHint": "Pools are picked by namespace — enable one in the Namespaces section first.",
   "unifiedGateway.pool.count": "{count} pools",
@@ -377,15 +369,10 @@ export const en = {
   "unifiedGateway.health.disabled": "Disabled",
   "unifiedGateway.health.disabledHint": "This gateway does not enable the namespace; calls return 400.",
   "unifiedGateway.title": "Unified gateway",
-  "unifiedGateway.running": "Running",
-  "unifiedGateway.stopped": "Stopped",
   "unifiedGateway.crossScope": "This gateway spans all scopes; the scope selector above does not affect it.",
-  "unifiedGateway.summary": "{namespaces} namespaces · {keys} active keys · listening on {addr}",
   "unifiedGateway.enable": "Enable the unified gateway",
   "unifiedGateway.enableHint": "One namespaced entry — every platform and version through a single provider",
   "unifiedGateway.bindAddr": "Bind address",
-  "unifiedGateway.bindLan": "Allow LAN",
-  "unifiedGateway.bindLoopback": "Loopback only",
   "unifiedGateway.port": "Port",
   "unifiedGateway.portHint": "Restart required. Avoid the ports already taken: UI 57890 · WorkBuddy 57891 · unified 57892 · hook 57893 · Trae 57894 · Qoder 57895",
   "unifiedGateway.portInvalid": "Invalid port: enter an integer between 1 and 65535",
@@ -395,7 +382,6 @@ export const en = {
   "unifiedGateway.showLess": "Hide extra program lines",
   "unifiedGateway.keepOne": "Keep at least one namespace enabled",
   "unifiedGateway.nsOff": "Disabled on this gateway — calls return 400",
-  "unifiedGateway.keysTitle": "Unified keys",
   "unifiedGateway.createKey": "Create key",
   "unifiedGateway.noKeys": "No unified keys yet",
   "unifiedGateway.noKeysHint": "One key can authorize several namespaces at once (e.g. WorkBuddy CN plus Trae CN).",
@@ -439,10 +425,6 @@ export const en = {
   // ⚠️ Corrected after measuring on 2026-10-14: WorkBuddy DOES keep its own runtime logs
   //    (`~/.workbuddy/logs/`: per-day folders plus `automation.log`). The earlier wording
   //    pointed users at the gateway page, which shows THIS tool's request log — a different thing.
-  "settings.logs.emptyTitle": "No runtime log in this section",
-  "settings.logs.emptyBody":
-    "This section only holds this tool's settings and backup entries; WorkBuddy's own runtime logs live in a logs subdirectory of its data dir (not surfaced here yet).",
-  "settings.logs.emptyAction": "Open gateway settings",
 
   // ---- Settings "Logs" section · runtime log card (runtime-log-card.tsx) ----
   // ⚠️ This is THIS TOOL's own log (gateway startup, account switch, background tasks, panics).

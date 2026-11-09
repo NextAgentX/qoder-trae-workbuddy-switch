@@ -26,11 +26,8 @@ export const zh = {
   /* 总数还没取到时**不显示数字**（显示 0 是撒谎）。 */
   "aggregate.scopeMenu.entrySubUnknown": "跨 {scopes} 个作用域",
   "aggregate.scopeMenu.entryAttention": "{n} 个需处理",
-  "aggregate.scopeMenu.hint":
-    "作用域决定「我现在管的是哪一套账号」。选「聚合」看全部 {scopes} 个作用域的账号；选任一作用域回到它的账号页。",
 
   // ---- 顶栏运行态 ----
-  "aggregate.topbar.runningScopes": "{n} 个作用域运行中",
 
   // ---- 工具栏 ----
   "aggregate.toolbar.searchPlaceholder": "筛选账号（昵称 / 备注 / 邮箱）",
@@ -66,7 +63,6 @@ export const zh = {
   "aggregate.empty.filtered.action": "显示全部账号",
   "aggregate.empty.none.title": "还没有任何账号",
   "aggregate.empty.none.desc": "先在某个作用域里添加账号，聚合视图会把它们自动汇总到这里。",
-  "aggregate.empty.none.action": "打开作用域菜单",
   "aggregate.empty.search.title": "没有匹配的账号",
   "aggregate.empty.search.desc": "试试换个关键词，或清空搜索框。",
   "aggregate.empty.search.action": "清空搜索",
@@ -90,7 +86,6 @@ export const zh = {
 
   // ---- Q3 方案 C：新增账号提示 ----
   "aggregate.newcomer.title": "{n} 个账号不在当前筛选中",
-  "aggregate.newcomer.note": "本次新增",
   "aggregate.newcomer.add": "加入筛选",
   "aggregate.newcomer.ignore": "忽略",
 
@@ -100,23 +95,17 @@ export const zh = {
   "aggregate.batch.acrossScopesHint": "批量动作会作用到这些作用域",
 
   // ---- 卡片「更多」菜单头部 ----
-  "aggregate.menu.head": "{name} · {scope}",
 
   // ---- toast ----
-  "aggregate.toast.entered": "已进入聚合视图",
-  "aggregate.toast.enteredDesc": "{n} 个账号 · {scopes} 个作用域铺在一屏",
-  "aggregate.toast.left": "已离开聚合视图，进入 {scope}",
   "aggregate.toast.filtered": "已筛选：显示 {shown} / {total} 个账号",
   "aggregate.toast.filteredDesc": "关闭应用后仍会保留这次筛选",
   "aggregate.toast.showAll": "已显示全部账号",
   "aggregate.toast.filterCleared": "筛选偏好已清除",
   "aggregate.toast.newcomerAdded": "已加入筛选（原有筛选保持不变）",
-  "aggregate.toast.retried": "已重新加载 {scope}",
   "aggregate.toast.refreshed": "已刷新 {n} 个作用域",
   "aggregate.toast.refreshedDesc": "{n} 个账号的状态已更新",
   /* ⚠️ 聚合页上**唯一会离开聚合页**的卡片动作（WB 程序位未装 ⇒ 去设置诊断）。
      文案必须标明，不能装作没这回事（issue #50 R3）。 */
-  "aggregate.toast.guideLeavesAggregate": "⚠️ 这一项会离开聚合页（诊断区是单作用域页面）",
 
   // ---- 详情抽屉（装配见 `lib/aggregate-detail.ts`）----
   "aggregate.detail.checkin": "签到",
@@ -150,7 +139,6 @@ export const zh = {
   /* 到期列的前缀式（与渠道页同一个形状 `到期 {when}`），但**不跨域借用**渠道页词条。 */
   "aggregate.detail.packExpiresAt": "到期 {when}",
   "aggregate.detail.packForever": "长期有效",
-  "aggregate.detail.groupSaved": "分组已保存",
 
   // ---- 导出（按作用域：导出命令是单 scope 的）----
   "aggregate.export.button": "导出",

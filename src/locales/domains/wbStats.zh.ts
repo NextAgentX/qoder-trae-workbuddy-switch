@@ -10,8 +10,6 @@
  */
 export const zh = {
   // ---- Token 统计 ----
-  "wbStats.token.pageTitle": "Token 统计",
-  "wbStats.token.bothRegions": "（国内版 + 国际版）",
   "wbStats.token.refresh": "刷新统计",
   /* P3：`wbStats.token.scopeAria` 已删除 —— 区域选择器上移到侧栏后不再需要（按 zh.ts 约定 3）。 */
   "wbStats.token.loadFailed": "统计加载失败",
@@ -22,7 +20,6 @@ export const zh = {
   "wbStats.credit.noCurrentResource": "尚未采集当前资源包。",
   // 请求用量明细：表头排序 + 分页
   "wbStats.credit.creditDetailTitle": "积分明细",
-  "wbStats.credit.pageTitle": "积分统计",
   /* P3：`wbStats.credit.scopeAria` 已删除 —— 同上。 */
   "wbStats.credit.overviewAria": "积分总览",
 
@@ -34,7 +31,6 @@ export const zh = {
   "wbStats.gateway.savedDisabled": "网关已保存（未启用监听）",
   "wbStats.gateway.portRange": "端口需为 1-65535 之间的整数",
   "wbStats.gateway.title": "API 服务",
-  "wbStats.gateway.desc": "把 WorkBuddy 的模型额度以 OpenAI / Anthropic 兼容接口提供给本机工具。",
   "wbStats.gateway.opFail": "操作失败",
   "wbStats.gateway.enableGateway": "启用 API 网关",
   "wbStats.gateway.enableDesc": "开启后本机 AI 工具可通过下方地址调用 WorkBuddy 模型。",
@@ -49,7 +45,6 @@ export const zh = {
   "wbStats.gateway.running": "运行中",
   "wbStats.gateway.stopped": "已停止",
   "wbStats.gateway.addr": "接入地址",
-  "wbStats.gateway.regionSwitchAria": "切换国内版 / 国际版",
   "wbStats.gateway.copy": "复制",
   "wbStats.gateway.baseUrlCopied": "Base URL 已复制",
   "wbStats.gateway.allowLanTitle": "允许局域网访问",
@@ -72,7 +67,6 @@ export const zh = {
   "wbStats.gateway.poolEntries": "账号池",
   "wbStats.gateway.poolEntryCount": "{count} 个条目",
   "wbStats.gateway.view": "查看",
-  "wbStats.gateway.modelList": "模型列表",
   /* 来源徽标（三级）—— `lib/catalog-source.ts` 的 `BADGE_KEY` 逐字引用。
      徽标前的「来源」标签本身走 `shared.gateway.sourceBar.sourceLabel`（两平台同形）。 */
   "wbStats.gateway.sourceLive": "实时",
@@ -181,7 +175,6 @@ export const zh = {
   "wbStats.gateway.deleteDesc": "确定删除已吊销的「{name}」？此操作不可撤销。",
   "wbStats.gateway.restoreTitle": "恢复 API Key",
   "wbStats.gateway.restoreDesc": "恢复后「{name}」立即重新可用，库中存的是同一把 Key（明文未变），客户端无需改配置。",
-  "wbStats.gateway.requestLog": "请求日志（最近 50 条）",
   "wbStats.gateway.clear": "清空",
   "wbStats.gateway.cleared": "日志已清空",
   "wbStats.gateway.clearFail": "清空失败",
@@ -236,7 +229,6 @@ export const zh = {
   "wbStats.table.actions": "操作",
 
   // ---- 积分统计（补全） ----
-  "wbStats.credit.bothRegions": "（国内版 + 国际版）",
   "wbStats.credit.refresh": "刷新统计",
   "wbStats.credit.headBarHint": "积分余额来自上游，可手动刷新",
   "wbStats.credit.refreshCredits": "刷新积分",
@@ -317,7 +309,6 @@ export const zh = {
   "wbStats.usage.trend.formulaSubset": "网关 {gateway} + 直连客户端 {direct}",
   "wbStats.usage.trend.formulaAdditive": "客户端 {client} + 网关 {gateway} − 重叠 {overlap}",
   "wbStats.usage.trend.ledgerCaption": "柱高是两本账各自的值，不做扣减 —— 重叠只在「合计」里扣（见对账）",
-  "wbStats.usage.trend.recon": "对账",
   "wbStats.usage.recon.title": "对账 · 客户端 ↔ 网关",
   "wbStats.usage.recon.subtitle": "把两本账里「同一个请求」找出来，从合计里扣掉",
   "wbStats.usage.recon.verdict.independent": "两本账基本独立",
@@ -340,11 +331,6 @@ export const zh = {
   "wbStats.usage.recon.sampleTime": "时间",
   "wbStats.usage.recon.sampleModel": "模型",
   "wbStats.usage.recon.sampleTokens": "Token",
-  "wbStats.usage.recon.sampleWhy": "为什么没对上",
-  "wbStats.usage.recon.sampleWhyModel": "模型不在网关账本",
-  "wbStats.usage.recon.sampleWhyGap": "附近没有同模型的网关记录",
-  "wbStats.usage.recon.sampleWhyTokens": "token 数不符",
-  "wbStats.usage.recon.close": "关闭",
   "wbStats.usage.models.clientBook": "客户端账本",
   "wbStats.usage.models.gatewayBook": "网关账本",
   "wbStats.usage.models.clientBookHint": "扫本机会话日志 · 不含网关转发",
@@ -359,7 +345,6 @@ export const zh = {
   "wbStats.usage.models.colRequests": "请求",
   "wbStats.usage.models.colCacheHit": "命中率",
   "wbStats.usage.models.colFailed": "失败",
-  "wbStats.usage.models.dailyTitle": "每日 Token · 按模型",
   "wbStats.usage.models.clientNoFail": "客户端账本不记请求失败 —— 会话日志只留成功落盘的条目",
   "wbStats.usage.models.gatewayFail": "{n} 次失败已计入请求数；占比按网关合计算",
   "wbStats.usage.sessions.gatewayNote": "网关是逐请求转发，日志里没有会话 ID —— 所以这个视图在网关账本下换成按账号 / 按端点。",
@@ -369,19 +354,13 @@ export const zh = {
   "wbStats.usage.sessions.byEndpoint": "按端点",
   "wbStats.usage.sessions.accountHint": "账号按日志里的精确 uid 归属，展示名仅作显示",
   "wbStats.usage.sessions.endpointHint": "同一份数据在「网关 → 请求日志」里逐条可查",
-  "wbStats.usage.credits.balanceCaliber": "余额口径",
   "wbStats.usage.credits.requestCaliber": "请求口径",
   "wbStats.usage.credits.caliberNote": "上面四张是余额口径：账号余额快照的差值，天然不重复，但拆不到来源。下面按请求累加，能拆来源，会重复。",
-  "wbStats.usage.credits.byRequest": "请求口径合计",
   "wbStats.usage.credits.gap": "两个口径的差额",
   "wbStats.usage.credits.gapBody": "余额口径 {billed} − 请求口径 {request}（客户端 {client} + 网关 {gateway} − 重叠 {overlap}）＝ 差额 {gap}",
   "wbStats.usage.credits.gapHint": "差额 = 未归因消耗：别的设备 / 没落本地日志的请求。它不会被摊到任何来源上 —— 摊了就是编数据。",
   "wbStats.usage.credits.dailyHint": "每条请求自带的 credit 累加（客户端 jsonl / 网关 usage.credit）。两本账分色，柱高不做扣减。",
   "wbStats.usage.trend.total": "区间总 Token",
-  "wbStats.usage.trend.totalTitle": "仅统计客户端会话日志；网关用量单独列为「网关 Token」，两者不加总（配置重叠时同一请求会各记一次）",
-  "wbStats.usage.trend.gatewayTokens": "网关 Token",
-  "wbStats.usage.trend.gatewayTokensHint": "仅网关日志",
-  "wbStats.usage.trend.gatewayTokensTitle": "仅统计本机网关转发的请求；客户端亲用时不会计入，故两项不加总",
   "wbStats.usage.trend.avg": "日均",
   "wbStats.usage.trend.avgHint": "按自然日平均",
   "wbStats.usage.trend.peak": "峰值",
@@ -396,8 +375,6 @@ export const zh = {
   "wbStats.usage.trend.heatmapAria": "一周七天 × 24 小时的使用强度热力图",
   "wbStats.usage.trend.totalSegment": "合计",
   // 网关逐日图（**独立小图**，不并进主堆叠柱 —— 见 TokenStatsPage 文件头「为什么」）。
-  "wbStats.usage.trend.gatewayTitle": "网关逐日用量",
-  "wbStats.usage.trend.gatewayAria": "网关逐日用量柱状图",
   "wbStats.usage.trend.gatewaySegment": "网关",
 
   // 用量页「计入网关」开关（文案键由 `src/lib/usage-gateway.ts` 的语义表引用）。

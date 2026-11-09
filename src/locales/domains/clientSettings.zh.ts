@@ -38,11 +38,7 @@ export const zh = {
   "clientSettings.slot.traeCodeGlobal": "TraeCode",
   // hook 安装目标（CLI 系，见 client_settings 的 HOOK_FILE_SLOTS）——
   // 它们**不进代理设置页**，这两个键只服务后端 `displayKey` 的回显。
-  "clientSettings.slot.claude": "Claude Code",
-  "clientSettings.slot.codebuddy": "CodeBuddy",
   // Trae 的 **hooks 文件**槽位（`hooks.json`，不是 `settings.json`）。
-  "clientSettings.slot.traeHooksCn": "Trae（国内版）hooks",
-  "clientSettings.slot.traeHooksGlobal": "Trae（国际版）hooks",
 
   "clientSettings.status.installed": "已安装",
   "clientSettings.status.notInstalled": "未安装",
