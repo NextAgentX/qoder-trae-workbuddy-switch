@@ -72,6 +72,7 @@ import { formatDate } from "@/lib/format";
 import { regionDescriptor } from "@/lib/region";
 import { scopeOf } from "@/lib/scope";
 import { useRefreshAction } from "@/lib/use-refresh-action";
+import { useSlowLoading } from "@/lib/use-slow-loading";
 import type {
   AccountMeta,
   AccountTokenTodayEntry,
@@ -259,6 +260,9 @@ function RegionPanel({ region }: { region: Region }) {
   const accounts = useAccountsStore((s) => (region === "cn" ? s.accounts : s.global.accounts));
   const status = useAccountsStore((s) => (region === "cn" ? s.status : s.global.status));
   const loading = useAccountsStore((s) => (region === "cn" ? s.loading : s.global.loading));
+  /* ★ 慢加载提示（issue #188）：本页 loading 来自 store，**没有**可按区触发的重载入口
+     ⇒ 只传 `slow`，不传 `onReload`（不摆一个点了没反应的死按钮）。 */
+  const slowLoading = useSlowLoading(loading);
   const error = useAccountsStore((s) => (region === "cn" ? s.error : s.global.error));
   const creditMap = useAccountsStore((s) => (region === "cn" ? s.creditMap : s.global.creditMap));
   const creditLoadingMap = useAccountsStore((s) => (region === "cn" ? s.creditLoadingMap : s.global.creditLoadingMap));
@@ -2285,6 +2289,7 @@ function RegionPanel({ region }: { region: Region }) {
            原先挂在这里的「⋯」溢出菜单已删除，其余入口改由「添加账号」抽屉承载
            （见下方 `<AddAccountDrawer moreTools={…}>`）。 */
         loading={loading}
+        slow={slowLoading}
         /* 首屏空态（未安装 / 未登录）：整块替换工具栏与列表（原型 `emptyBlock` 也不带工具栏）。 */
         emptyState={
           showEmpty ? (

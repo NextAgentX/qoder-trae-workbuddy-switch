@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 
 import { asError } from "@/lib/api";
+import { useSlowLoading } from "@/lib/use-slow-loading";
 import { useResourceStore, type ResourceEntry, type ResourceLoadOptions } from "@/stores/resources";
 
 /**
@@ -22,6 +23,14 @@ export interface CachedResource<T> {
   data: T | undefined;
   /** **仅在没有可用值**时为 true。有旧值时后台刷新不会让页面退回骨架屏。 */
   loading: boolean;
+  /**
+   * 「这次首屏加载已经超过 `slowAfterMs`（默认 8s）」—— 供 `<SlowLoadHint>` 使用。
+   *
+   * 与 `loading` 的分工：#188 之前界面只有「正在取」和「取完了」，请求既不返回也不报错时
+   * 两者完全一样 ⇒ 慢加载与卡死在用户眼里不可区分。`slow` 只是**时长事实**，
+   * 不是超时：它不取消请求、也不表示失败（失败仍由 `error` 表达）。
+   */
+  slow: boolean;
   /**
    * 是否有请求在飞（含**有旧值时的后台刷新**与轮询）。
    *
@@ -77,7 +86,11 @@ export interface CachedResource<T> {
 export function useCachedResource<T>(
   key: string | null,
   loader: () => Promise<T>,
-  options?: ResourceLoadOptions,
+  /**
+   * `freshMs` 之外还可以传 `slowAfterMs`（慢加载提示阈值）。
+   * ⚠️ 两者都**不会**透传给 `load()`：本文件只从中挑 `freshMs`，其余字段仅 hook 自用。
+   */
+  options?: ResourceLoadOptions & { slowAfterMs?: number },
 ): CachedResource<T> {
   const entry = useResourceStore((s) => (key === null ? undefined : s.entries[key])) as
     | ResourceEntry<T>
@@ -119,10 +132,15 @@ export function useCachedResource<T>(
 
   const data = entry?.value;
 
+  // 出错且无值时不留在 loading：让页面渲染错误提示 + 空态，而不是永远转圈。
+  const loading = key !== null && data === undefined && entry?.error == null;
+  /* ⚠️ 必须在 `loading` 定稿后调用，且**无条件**调用（hook 顺序）。 */
+  const slow = useSlowLoading(loading, options?.slowAfterMs ?? 8000);
+
   return {
     data,
-    // 出错且无值时不留在 loading：让页面渲染错误提示 + 空态，而不是永远转圈。
-    loading: key !== null && data === undefined && entry?.error == null,
+    loading,
+    slow,
     pending: entry?.pending === true,
     error: entry?.error == null ? null : asError(entry.error),
     at: entry?.at ?? 0,

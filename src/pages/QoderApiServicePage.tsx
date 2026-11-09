@@ -45,6 +45,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { gatewayOpenAiBaseUrl } from "@/lib/gateway-url";
@@ -185,6 +186,7 @@ export default function QoderApiServicePage() {
   const {
     data: snapshot,
     loading,
+    slow,
     error,
     refresh: loadAll,
     patch,
@@ -478,6 +480,7 @@ export default function QoderApiServicePage() {
       <div className="mx-auto w-full max-w-[1240px] px-7 pt-[26px] pb-[60px]">
         {header}
         <div className="space-y-4" aria-busy="true">
+          {slow ? <SlowLoadHint onRetry={() => void loadAll()} /> : null}
           <Skeleton className="h-[34px] w-[186px]" />
           <Skeleton className="h-32 w-full" />
           <Skeleton className="h-64 w-full" />

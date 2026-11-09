@@ -56,6 +56,7 @@ import {
 } from "@/components/account-list-parts";
 import { AccountTable, type AccountColumn } from "@/components/account-table";
 import { AccountToolbar, type ToolbarOption } from "@/components/account-toolbar";
+import { SlowLoadHint } from "@/components/slow-load-hint";
 import { EmptyState } from "@/components/ui/empty-state";
 import type { AccountViewMode } from "@/lib/account-list-view";
 import { useT } from "@/lib/i18n";
@@ -102,6 +103,16 @@ export interface AccountWorkbenchProps<T> {
   /* ────────── 首屏 ────────── */
   /** 首次加载中（且一个账号都没有）⇒ 骨架。 */
   loading: boolean;
+  /**
+   * 首屏加载已超过阈值（由调用点用 `useSlowLoading` 算）⇒ 骨架上方追加一行
+   * 「仍在加载 + 重试」（issue #188）。骨架能表达「正在取」，表达不了「已经等了很久」。
+   */
+  slow?: boolean;
+  /**
+   * 上面那行的重试出口。**拿不到真实刷新入口就别传** —— 空回调渲染出的死按钮
+   * 比没有按钮更坏（WB 账号页即如此：它的 loading 来自 store，没有可按区触发的 reload）。
+   */
+  onReload?: () => void;
   /**
    * 首屏空态（「未安装 / 未登录」那一屏）。**非 null 且 `totalCount === 0` 时，
    * 整块替换**工具栏 + 列表（照原型的 `emptyBlock`：空态不带工具栏）。
@@ -204,6 +215,8 @@ export function AccountWorkbench<T>({
   addAction,
   onOpenRecycleBin,
   loading,
+  slow = false,
+  onReload,
   emptyState,
   notices,
   checkinResult,
@@ -232,8 +245,16 @@ export function AccountWorkbench<T>({
 }: AccountWorkbenchProps<T>) {
   const t = useT();
 
-  /* 首屏：加载中 → 骨架（列数 / 圆角 / 间距与真实栅格逐值一致，见 `AccountsSkeleton`）。 */
-  if (loading && totalCount === 0) return <AccountsSkeleton />;
+  /* 首屏：加载中 → 骨架（列数 / 圆角 / 间距与真实栅格逐值一致，见 `AccountsSkeleton`）。
+     加载久了（`slow`）在骨架上方补一行提示 —— 慢与卡死原本在界面上完全一样。 */
+  if (loading && totalCount === 0) {
+    return (
+      <div className="space-y-3">
+        {slow ? <SlowLoadHint onRetry={onReload} /> : null}
+        <AccountsSkeleton />
+      </div>
+    );
+  }
   /* 首屏空态（未安装 / 未登录）：整块替换，**不带**工具栏（原型 `emptyBlock` 也不带）。 */
   if (totalCount === 0 && emptyState) return <>{emptyState}</>;
 
