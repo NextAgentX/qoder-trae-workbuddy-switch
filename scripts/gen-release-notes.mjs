@@ -274,8 +274,27 @@ function render({ tag, prev, commits, repo }) {
   } else if (repo) {
     footer.push("", "---", "", `**提交历史**：https://github.com/${repo}/commits/${tag}`);
   }
+  // 资产名与平台的对应关系只有 CI 知道，而 Releases 的资产列表是**按名字排序**的：
+  // `buddy-switch-cli-darwin-arm64` 这类裸二进制会排在 `BuddySwitch_…dmg` 前面，
+  // 用户在那里认不出该下哪个。所以把「装哪个文件」直接写进正文。
+  // 反例：v2026.11.101809 之前正文只有一句「macOS（DMG，Apple Silicon / Intel）」，
+  // 没有具体文件名，用户下到了 `buddy-switch-darwin-arm64`（裸 Mach-O），
+  // 反馈「下载的 mac 版根本不是 dmg，无法安装」。
+  const version = (tag || "").replace(/^v/, "") || "<版本>";
   footer.push(
-    "**安装包**：Windows（NSIS）· macOS（DMG，Apple Silicon / Intel）· Linux（deb / AppImage）；桌面端也可在应用内直接更新。",
+    "",
+    "**装哪个文件**：",
+    "",
+    "| 平台 | 安装包 |",
+    "|:--|:--|",
+    `| macOS Apple Silicon（arm64） | \`BuddySwitch_${version}_aarch64.dmg\` |`,
+    `| macOS Intel（x86_64） | \`BuddySwitch_${version}_x86_64.dmg\` |`,
+    `| Windows x64 | \`BuddySwitch_${version}_x64-setup.exe\` |`,
+    `| Linux x64 | \`BuddySwitch_${version}_amd64.deb\` / \`BuddySwitch_${version}_amd64.AppImage\` |`,
+    "",
+    "> `buddy-switch-cli-*` 是 webui 形态的**命令行程序**（裸二进制），**不是安装包**：没有 `.app` / `.dmg` 外壳，macOS 上双击打不开，需要 `chmod +x` 后在终端运行。只想用桌面 App 就下上表里对应的安装包。",
+    "",
+    "桌面端也可在应用内直接更新。",
     "**许可**：PolyForm Noncommercial 1.0.0 —— 源码公开（source-available）· 非商业使用。",
     "",
   );
