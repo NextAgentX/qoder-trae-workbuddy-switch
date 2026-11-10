@@ -170,12 +170,16 @@ const maskEmail = (email) => {
 const fmt = (n) => Number(n || 0).toLocaleString("zh-CN");
 /* 资源包数量：最多两位小数、去掉多余的 0（1000 → 1,000；30.86 → 30.86；6 → 6）。 */
 const fmtQty = (n) => Number(Number(n || 0).toFixed(2)).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
-/* 到期时刻：MM-DD HH:mm —— 资源包最多几十天到期，再带年份是噪声。 */
-function fmtMonthDay(ts) {
+/* 到期时刻：YYYY-MM-DD HH:mm —— 与产品 `lib/catalog-source.ts::formatAbsoluteTime` 同形状。
+   ★ 此前原型只到「MM-DD」（理由是「资源包最多几十天到期，再带年份是噪声」），
+     而产品用的是全日期 + 「到期 {when}」前缀（`aggregate.detail.packExpiresAt`）。
+     同一个到期时刻在原型与产品里两个格式 ⇒ 下一个人照原型实现就回退成短格式，
+     跨年时更会看成今年。原型是设计真值 ⇒ 跟产品。 */
+function fmtDateTime(ts) {
   const d = new Date(ts);
   if (!Number.isFinite(ts) || Number.isNaN(d.getTime())) return "";
   const p = (n) => String(n).padStart(2, "0");
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n || 0));
 
@@ -4921,13 +4925,13 @@ function packsHtml(a) {
   const sumLeft = packs.reduce((sum, p) => sum + p.remaining, 0);
   const sumAll = packs.reduce((sum, p) => sum + p.total, 0);
   const nearest = packs[0];
-  const nearestText = nearest.expireAt ? fmtMonthDay(nearest.expireAt) : `${nearest.expireInDays} 天后`;
+  const nearestText = nearest.expireAt ? fmtDateTime(nearest.expireAt) : `${nearest.expireInDays} 天后`;
   return `<div class="pk-sum">共 ${packs.length} 个包 · 剩余 <b>${fmtQty(sumLeft)}</b> / ${fmtQty(sumAll)} · 最近 ${nearestText} 到期</div>
     <div class="pk-list">
       ${packs.map((p) => {
         const pct = p.total > 0 ? Math.max(0, Math.min(100, (p.remaining / p.total) * 100)) : 0;
         const soon = p.expireAt ? p.expireAt - now <= 7 * 86400000 : p.expireInDays <= 7;
-        const expText = p.expireAt ? `到期 ${fmtMonthDay(p.expireAt)}` : `${p.expireInDays} 天后过期`;
+        const expText = p.expireAt ? `到期 ${fmtDateTime(p.expireAt)}` : `${p.expireInDays} 天后过期`;
         return `<div class="pk">
           <div class="pk-top">
             <span class="pk-name">${esc(p.name)}</span>
@@ -5060,7 +5064,9 @@ function drawerStats(a) {
   return `<div class="acct-stats">
     ${drawerStatTile(a, "credits", "积分",
       `${fmt(a.credits)}`,
-      a.expiring ? `7 天内到期 ${fmt(a.expiring)} 积分` : "无临期积分",
+      /* ★ 与产品一致（#193）：副文本是**警示**，0 是常态不是信息 ⇒ 整行不渲染。
+         产品侧闸门是 `credit-expiry.ts::expiringSubtextAmount`（> 0 才给金额）。 */
+      a.expiring ? `7 天内到期 ${fmt(a.expiring)} 积分` : "",
       a.expiring ? "warn" : "")}
     ${drawerStatTile(a, "tokens", "今日 Token", fmtTok(a.todayTokens), `累计 ${fmtTok(a.totalTokens)}`)}
     ${drawerStatTile(a, "checkin", "今日签到", a.checkedIn ? "已签到" : "未签到", `近 7 天 ${okDays}/${hist.length || 0}`)}

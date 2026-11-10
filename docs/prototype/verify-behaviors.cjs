@@ -2316,7 +2316,14 @@ async function boot(query) {
 
   check("★★ 指标块的「临期积分」与积分页的临期包必须一致（不能一个说无、一个摆着）", () => {
     /* 这条守的是**数据口径**：临期积分若手写在账号上、而包明细是另一份数据，
-       两边迟早打架（修复前 a2 就是「指标块说无临期积分，积分页有个 10-20 到期的包」）。 */
+       两边迟早打架（修复前 a2 就是「指标块说无临期积分，积分页有个 10-20 到期的包」）。
+
+       ★ 2026-11-10：原型跟产品对齐后，判据从「有没有写『无临期积分』」改成
+         **「副文本报没报临期」**这一件事的两向检查 ——
+         · 有临期包 ⇒ 副文本必须报出临期（否则指标块漏报，用户以为没有要过期的）；
+         · 无临期包 ⇒ 副文本不得报临期（否则又是「一个说无、一个摆着」）。
+         产品侧的口径是「副文本是警示，0 是常态不渲染」（`credit-expiry.ts::expiringSubtextAmount`），
+         所以原型在无临期时**整行不写**，而不是写一句「无临期积分」占位。 */
     const ids = wD.eval("curScope().accounts.map((a) => a.id)");
     let soonAccounts = 0;
     for (const id of ids) {
@@ -2325,9 +2332,9 @@ async function boot(query) {
       const sub = tile.querySelector(".sub").textContent.trim();
       gotoTabOf(id, "credits");
       const soonRows = [...drawerBody().querySelectorAll(".pk")].filter((r) => r.querySelector(".pk-bar > i").classList.contains("warn"));
-      if (soonRows.length && /无临期积分/.test(sub))
-        throw new Error(`${id}：指标块说「无临期积分」，积分页却有 ${soonRows.length} 个临期包`);
-      if (!soonRows.length && !/无临期积分/.test(sub))
+      if (soonRows.length && !/7 天内到期/.test(sub))
+        throw new Error(`${id}：积分页有 ${soonRows.length} 个临期包，指标块副文本却没报临期（"${sub}"）`);
+      if (!soonRows.length && /7 天内到期/.test(sub))
         throw new Error(`${id}：积分页没有临期包，指标块却说「${sub}」`);
       if (soonRows.length) soonAccounts++;
     }
