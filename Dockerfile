@@ -45,6 +45,13 @@ RUN npm ci
 # ⚠️ `npm run build`（不是 `build:fast`）：它带 `tsc` 类型检查与**全部**契约门禁
 # （api 契约 / docker / store 选择器 / 作用域注册表 / npm 平台表 / hook 来源 / Pages base）。
 # 镜像与发布走同一条路径，否则容器里跑的可能是一份类型就不通过的前端。
+#
+# ★ 这里**没有** Chrome：原型的浏览器依赖动态检查（`verify-cc-switch-bridge.cjs`）
+#   在无浏览器时只「跳过」而不判失败（`REQUIRE_BROWSER_CHECKS` 未置）——
+#   那是环境事实，不该把镜像构建拖垮。2026-11-10 实测：该套件以退出码 1 结束 ⇒
+#   `npm run build` 失败 ⇒ **镜像发不出去**，而失败原因与镜像内容毫无关系。
+#   「动态检查必须真的执行」这条硬要求落在 pr-check（ubuntu runner 自带 Chrome，
+#   那里置 `REQUIRE_BROWSER_CHECKS=1`），不在镜像构建里。
 COPY . .
 RUN npm run build
 

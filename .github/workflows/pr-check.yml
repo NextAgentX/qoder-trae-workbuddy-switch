@@ -25,6 +25,13 @@ jobs:
   frontend:
     name: Frontend typecheck + contract checks
     runs-on: ubuntu-latest
+    # ★ 原型的**浏览器依赖**动态检查必须真的执行：ubuntu runner 自带 Chrome，
+    #   缺了就以退出码 1 判红（`verify-cc-switch-bridge.cjs` 的动态检查）。
+    #   没有这个变量时，套件在**无浏览器**的环境（镜像构建 / 无浏览器的开发机）
+    #   只会「跳过」—— 那是环境事实，不该把整条构建拖垮（2026-11-10 实测：
+    #   Dockerfile 里的 `npm run build` 因该套件退出码 1 而失败，镜像发不出去）。
+    env:
+      REQUIRE_BROWSER_CHECKS: "1"
     steps:
       - uses: actions/checkout@v4
 
