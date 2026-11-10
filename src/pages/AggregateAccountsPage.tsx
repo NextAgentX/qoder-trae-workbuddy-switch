@@ -992,7 +992,7 @@ export default function AggregateAccountsPage() {
             /* 程序位：**没取到就不传** ⇒ 卡片整行不渲染（不是画一排「未检测到」的灰胶囊）。 */
             /* ★ issue #89 · C2：逐包明细来自 `get_trae_credits` 的 `packages[uid]`，
                账号视图只带聚合积分。与渠道页同样**合并进 account 对象**再交给卡片，
-               否则指标行的 `/Y` 与「N 积分 M 天内过期」chip 在这里常缺。 */
+               否则积分指标与「最近到期 N天 · M 积分」徽章在这里常缺。 */
             account={{
               ...item.data,
               creditPackages:
