@@ -329,6 +329,26 @@ fn inject_prompt_cache_key(
     );
 }
 
+/// Rebind a gateway-generated placeholder cache key after the relay has selected
+/// the account. Client-supplied cache keys are preserved verbatim.
+pub fn rebind_prompt_cache_key(source: &str, uid: &str, conversation_id: Option<&str>) -> String {
+    let Ok(mut body) = serde_json::from_str::<Value>(source) else {
+        return source.to_string();
+    };
+    let Some(object) = body.as_object_mut() else {
+        return source.to_string();
+    };
+    let generated_without_uid = object
+        .get("prompt_cache_key")
+        .and_then(Value::as_str)
+        .is_some_and(|key| key.starts_with("wb2a--"));
+    if generated_without_uid {
+        object.remove("prompt_cache_key");
+    }
+    inject_prompt_cache_key(object, uid, conversation_id);
+    serde_json::to_string(&body).unwrap_or_else(|_| source.to_string())
+}
+
 /// 派生缓存键：`wb2a-<uid8>-<hash16>`。空 uid 的 uid8 段为 `-`。
 pub fn prompt_cache_key(uid: &str, conversation_id: &str) -> String {
     let uid8: String = uid.chars().take(8).collect();

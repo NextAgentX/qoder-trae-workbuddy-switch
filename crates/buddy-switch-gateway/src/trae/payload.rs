@@ -437,6 +437,14 @@ fn uuid_like() -> String {
 /// 返回 `None` 表示连指纹都拼不出，调用方退回随机 UUID。
 fn conversation_identity_source(object: &Map<String, Value>) -> Option<String> {
     // 1-2：客户端自带标识，加类型前缀防止不同来源的值意外撞车。
+    if let Some(value) = object
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(format!("session:{value}"));
+    }
     for (prefix, field) in [
         ("cache_key:", "prompt_cache_key"),
         ("metadata:", "metadata"),

@@ -47,6 +47,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Qoder's upstream session id should remain stable across turns of the same
+/// client conversation, while remaining isolated per selected account.
+fn stable_upstream_session_id(uid: &str, conversation: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("qoder-session|{uid}|{conversation}").as_bytes());
+    let mut bytes: [u8; 16] = digest[..16].try_into().expect("SHA-256 has enough bytes");
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 /// OpenAI 形态错误体。
 fn openai_error(status: StatusCode, code: &str, message: &str) -> Response {
     (
@@ -330,6 +341,53 @@ pub async fn chat_for_region(
         }
     }
 
+    let mut response_state_chain = None;
+    let body = if protocol == Protocol::Responses {
+        let parsed: Value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                return protocol_error(
+                    protocol,
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    &format!("请求体不是合法 JSON：{error}"),
+                );
+            }
+        };
+        let state_scope = format!(
+            "qoder:{}:{}:{}",
+            region.as_str(),
+            key.as_deref().map(|actor| actor.scope).unwrap_or("local"),
+            key.as_deref()
+                .map(|actor| actor.key_id.as_str())
+                .unwrap_or("anonymous"),
+        );
+        let (prepared, transcript) =
+            match crate::protocol::responses::prepare_request_with_state(&parsed, &state_scope) {
+                Ok(prepared) => prepared,
+                Err(message) => {
+                    return protocol_error(
+                        protocol,
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        &message,
+                    );
+                }
+            };
+        let Ok(encoded) = serde_json::to_vec(&prepared) else {
+            return protocol_error(
+                protocol,
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "请求体无法序列化",
+            );
+        };
+        response_state_chain = Some((state_scope, transcript));
+        Bytes::from(encoded)
+    } else {
+        body
+    };
+
     // ★ 降级链（P13）：主模型失败且命中触发条件时，改用备选模型重发。
     //
     //   hop 循环放在**这里**（而不是 `chat_for_region_once` 内部）：三个协议入口
@@ -343,12 +401,14 @@ pub async fn chat_for_region(
     let origin_model = qoder_model_of(&state, region, &body, protocol).await;
     if origin_model.is_empty() {
         // 模型还没定（清单为空）⇒ 交给 `_once` 走它自己的「未指定模型」错误路径。
-        return chat_for_region_once(state, region, body, protocol, key).await;
+        return chat_for_region_once(state, region, body, protocol, key, response_state_chain)
+            .await;
     }
     let fallback = crate::routes::fallback::FallbackLoop::plan(scope, &origin_model).await;
     // 没有可用链 ⇒ 走原路径（绝大多数用户是这一条）。
     if fallback.len() <= 1 {
-        return chat_for_region_once(state, region, body, protocol, key).await;
+        return chat_for_region_once(state, region, body, protocol, key, response_state_chain)
+            .await;
     }
     let raw_body = String::from_utf8_lossy(&body).to_string();
     let mut hop = 0usize;
@@ -391,7 +451,15 @@ pub async fn chat_for_region(
             ))
             .await
         } else {
-            chat_for_region_once(state.clone(), hop_region, hop_body, protocol, key.clone()).await
+            chat_for_region_once(
+                state.clone(),
+                hop_region,
+                hop_body,
+                protocol,
+                key.clone(),
+                response_state_chain.clone(),
+            )
+            .await
         };
         if response.status().is_success() {
             let mut response = response;
@@ -463,6 +531,7 @@ pub async fn chat_for_region_once(
     protocol: Protocol,
     // ★ issue #76：调用方的 Key（`None` = 无 Key 的调用 ⇒ 不判配额、不过白名单、不记账）。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
+    response_state_chain: Option<(String, Vec<Value>)>,
 ) -> Response {
     let started = Instant::now();
     // ★ issue #76：配额判定已**上移到 `chat_for_region`**（降级循环之外）——
@@ -551,9 +620,17 @@ pub async fn chat_for_region_once(
     // 出站请求体（每轮换号都要重建：`aliyun_user_type` 属账号上下文）。
     // `structured` 由网关显式决定（而不是在 `build_chat_body` 里再判一次）：
     // 自动降级需要「强制文本模式」重发，判定必须只有一处。
-    let build_encoded = |user_type: &str, structured: bool| -> Result<String, String> {
-        let body_value =
+    let build_encoded = |user_type: &str, structured: bool, uid: &str| -> Result<String, String> {
+        let mut body_value =
             api::build_chat_body_with_structured(&openai_payload, &meta, user_type, structured)?;
+        if let (Some(conversation), Some(object)) =
+            (sticky_key.as_deref(), body_value.as_object_mut())
+        {
+            object.insert(
+                "session_id".into(),
+                Value::String(stable_upstream_session_id(uid, conversation)),
+            );
+        }
         Ok(cosy::qoder_encode(body_value.to_string().as_bytes()))
     };
 
@@ -642,7 +719,7 @@ pub async fn chat_for_region_once(
         就是**误判**，会让该模型 6 小时内都退回文本模式（正是 issue #72 要修的乱码）。 */
         let mut degrade_pending = false;
         'attempt: loop {
-            let encoded = match build_encoded("", structured) {
+            let encoded = match build_encoded("", structured, &uid) {
                 Ok(encoded) => encoded,
                 Err(error) => {
                     return protocol_error(
@@ -715,6 +792,7 @@ pub async fn chat_for_region_once(
                         responses_custom.clone(),
                         inflight,
                         key.clone(),
+                        response_state_chain.clone(),
                         // ★ issue #129：首帧后失败也要解绑粘性（否则重跑仍撞同一个号）。
                         sticky_key.clone(),
                         // ★ issue #139：Anthropic 出口 `message_start` 的输入 token
@@ -740,6 +818,7 @@ pub async fn chat_for_region_once(
                         responses_custom.clone(),
                         inflight,
                         key.clone(),
+                        response_state_chain.clone(),
                     )
                     .await
                 };
@@ -1026,6 +1105,7 @@ async fn stream_relay(
     inflight: super::pool::InflightGuard,
     // ★ issue #76：本密钥（流结束时按 token 记账）。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
+    response_state_chain: Option<(String, Vec<Value>)>,
     // ★ issue #129：会话粘性键（流中途失败时解绑 —— 否则重跑仍撞同一个号）。
     sticky_key: Option<String>,
     // ★ issue #139：Anthropic 出口 `message_start` 的输入 token 估算（0 = 不估）。
@@ -1083,11 +1163,18 @@ async fn stream_relay(
         ),
         // Responses 事件流：`response.created` … `response.completed`（**不补 `[DONE]`**，
         // 上游那一条会被本层吞掉 —— 见 `protocol::responses::ResponsesSseStream`）。
-        Protocol::Responses => Box::pin(crate::protocol::responses::ResponsesSseStream::new(
-            tapped,
-            stream_model.clone(),
-            responses_custom,
-        )),
+        Protocol::Responses => {
+            let stream = crate::protocol::responses::ResponsesSseStream::new(
+                tapped,
+                stream_model.clone(),
+                responses_custom,
+            );
+            let stream = match response_state_chain.clone() {
+                Some((scope, transcript)) => stream.with_state_chain(scope, transcript),
+                None => stream,
+            };
+            Box::pin(stream)
+        }
     };
 
     tokio::spawn(async move {
@@ -1199,6 +1286,7 @@ async fn aggregate_relay(
     _inflight: super::pool::InflightGuard,
     // ★ issue #76：本密钥（聚合完成后按 token 记账）。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
+    response_state_chain: Option<(String, Vec<Value>)>,
 ) -> Response {
     let aggregated = sse::aggregate(response.bytes_stream(), allowed_tools.as_ref()).await;
     let usage = aggregated.usage.clone();
@@ -1275,21 +1363,35 @@ async fn aggregate_relay(
     let chat = || chat_completion_of(&aggregated, chat_id, model, usage.clone());
     match protocol {
         // 非流式 Responses 对象：形状由 `protocol::responses` 唯一构造（与 WB 那条线同源）。
-        Protocol::Responses => axum::Json(crate::protocol::responses::to_response_object_from(
-            &crate::protocol::responses::ResponsesParts {
-                content: &aggregated.content,
-                reasoning: &aggregated.reasoning,
-                tool_calls: &aggregated.tool_calls,
-                model: aggregated.model.as_deref(),
-                created_at: aggregated.created,
-                input_tokens: prompt_tokens,
-                output_tokens: completion_tokens,
-                custom: &responses_custom,
-                raw_usage: usage.as_ref(),
-            },
-            model,
-        ))
-        .into_response(),
+        Protocol::Responses => {
+            let object = crate::protocol::responses::to_response_object_from(
+                &crate::protocol::responses::ResponsesParts {
+                    content: &aggregated.content,
+                    reasoning: &aggregated.reasoning,
+                    tool_calls: &aggregated.tool_calls,
+                    model: aggregated.model.as_deref(),
+                    created_at: aggregated.created,
+                    input_tokens: prompt_tokens,
+                    output_tokens: completion_tokens,
+                    custom: &responses_custom,
+                    raw_usage: usage.as_ref(),
+                },
+                model,
+            );
+            if let (Some((scope, transcript)), Some(response_id), Some(output)) = (
+                response_state_chain.as_ref(),
+                object.get("id").and_then(Value::as_str),
+                object.get("output").and_then(Value::as_array),
+            ) {
+                crate::protocol::responses::remember_response_state(
+                    scope,
+                    response_id,
+                    transcript,
+                    output,
+                );
+            }
+            axum::Json(object).into_response()
+        }
         Protocol::OpenAi => axum::Json(chat()).into_response(),
         Protocol::Anthropic => {
             let message = crate::protocol::anthropic::message_from_response(&chat(), model);

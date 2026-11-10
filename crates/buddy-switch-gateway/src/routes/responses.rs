@@ -123,7 +123,24 @@ pub async fn responses_for_region(
         }
     }
 
-    /* freeform（custom）工具名：从**原始**请求体取（转换后已降级成 function，`type` 丢了）。 */
+    // `previous_response_id` 只能在同一 API Key 与区域的内存状态中解析。
+    let response_scope = format!(
+        "{}:{:?}:{}",
+        key.as_deref().map(|actor| actor.scope).unwrap_or("local"),
+        region,
+        key.as_deref()
+            .map(|actor| actor.key_id.as_str())
+            .unwrap_or("anonymous"),
+    );
+    let (parsed, response_transcript) =
+        match crate::protocol::responses::prepare_request_with_state(&parsed, &response_scope) {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                return openai_error(crate::error::GatewayError::BadRequest(message));
+            }
+        };
+
+    /* freeform（custom）工具名：从当前请求体取（转换后已降级成 function，`type` 丢了）。 */
     let responses_custom =
         std::sync::Arc::new(crate::protocol::responses::custom_tool_names(&parsed));
 
@@ -322,6 +339,7 @@ pub async fn responses_for_region(
                         model.clone(),
                         responses_custom,
                     )
+                    .with_state_chain(response_scope, response_transcript.clone())
                     // ★ issue #129：开关开启时，收尾发 `error` 事件而不是 `response.completed`。
                     .with_failover(Some(failure), &account),
                 )
@@ -375,6 +393,17 @@ pub async fn responses_for_region(
                         .await;
                 }
                 let object = to_response_object(&accumulator, &model, &responses_custom);
+                if let (Some(response_id), Some(output)) = (
+                    object.get("id").and_then(serde_json::Value::as_str),
+                    object.get("output").and_then(serde_json::Value::as_array),
+                ) {
+                    crate::protocol::responses::remember_response_state(
+                        &response_scope,
+                        response_id,
+                        &response_transcript,
+                        output,
+                    );
+                }
                 state.log.record(
                     RequestMeta {
                         endpoint: "/v1/responses",
@@ -390,7 +419,12 @@ pub async fn responses_for_region(
                         total_ms: started.elapsed().as_millis() as i64,
                         prompt_tokens: accumulator.prompt_tokens.unwrap_or(0),
                         completion_tokens: accumulator.completion_tokens.unwrap_or(0),
-                        cached_tokens: 0,
+                        cached_tokens: accumulator
+                            .raw_usage
+                            .as_ref()
+                            .map(crate::protocol::usage_tap::cached_tokens_from_usage)
+                            .and_then(|tokens| u64::try_from(tokens).ok())
+                            .unwrap_or(0),
                         credit: accumulator.credit.unwrap_or(0.0),
                         stream: false,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。

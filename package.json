@@ -2,7 +2,7 @@
   "name": "buddy-switch-rust",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
-  "version": "2026.11.80959",
+  "version": "2026.11.101809",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -436,6 +436,7 @@ pub async fn chat_for_variant(
                 key.as_deref(),
                 // chat 入口没有 custom 工具概念。
                 None,
+                None,
             )
             .await
         } else {
@@ -658,6 +659,7 @@ pub async fn messages_for_variant(
                 key.as_deref(),
                 // Anthropic 入口没有 custom 工具概念。
                 None,
+                None,
             )
             .await
         } else {
@@ -785,6 +787,24 @@ pub async fn responses_for_variant(
         );
     };
 
+    let response_state_scope = format!(
+        "trae:{}:{}:{}",
+        variant.as_str(),
+        key.as_deref().map(|actor| actor.scope).unwrap_or("local"),
+        key.as_deref()
+            .map(|actor| actor.key_id.as_str())
+            .unwrap_or("anonymous"),
+    );
+    let (parsed, response_transcript) = match crate::protocol::responses::prepare_request_with_state(
+        &parsed,
+        &response_state_scope,
+    ) {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            return openai_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message);
+        }
+    };
+
     /* freeform（custom）工具名必须从**原始**请求体取：转换之后它们已被降级成普通
     function，`type` 没了，名字还在但语义丢失 —— 出站要靠这份集合还原成
     `custom_tool_call` 事件/条目。 */
@@ -792,7 +812,16 @@ pub async fn responses_for_variant(
         std::sync::Arc::new(crate::protocol::responses::custom_tool_names(&parsed));
 
     // Responses 请求 → 上游 chat 形态。
-    let upstream = crate::protocol::responses::to_upstream_request(&parsed);
+    let mut upstream = crate::protocol::responses::to_upstream_request(&parsed);
+    // The Trae adapter derives its provider conversation IDs from this identity;
+    // keep it available internally until prepare_llm_chat_body replaces session_id.
+    if upstream.get("session_id").and_then(Value::as_str).is_none() {
+        if let Some(session_id) = crate::protocol::responses::session_identity_of(&parsed) {
+            if let Some(object) = upstream.as_object_mut() {
+                object.insert("session_id".into(), Value::String(session_id.to_string()));
+            }
+        }
+    }
     let Ok(encoded) = serde_json::to_vec(&upstream) else {
         return openai_error(
             StatusCode::BAD_REQUEST,
@@ -901,6 +930,7 @@ pub async fn responses_for_variant(
                 hop_variant,
                 key.as_deref(),
                 Some(responses_custom.clone()),
+                Some((response_state_scope.clone(), response_transcript.clone())),
             )
             .await
         } else {
@@ -926,14 +956,23 @@ pub async fn responses_for_variant(
                     // Responses 形状实现（两条上游共用 `to_response_object_from`）。
                     let accumulator =
                         crate::protocol::openai::CompletionAccumulator::from_response(&payload);
-                    json_response(
-                        StatusCode::OK,
-                        crate::protocol::responses::to_response_object(
-                            &accumulator,
-                            &hop_model,
-                            responses_custom.as_ref(),
-                        ),
-                    )
+                    let object = crate::protocol::responses::to_response_object(
+                        &accumulator,
+                        &hop_model,
+                        responses_custom.as_ref(),
+                    );
+                    if let (Some(response_id), Some(output)) = (
+                        object.get("id").and_then(Value::as_str),
+                        object.get("output").and_then(Value::as_array),
+                    ) {
+                        crate::protocol::responses::remember_response_state(
+                            &response_state_scope,
+                            response_id,
+                            &response_transcript,
+                            output,
+                        );
+                    }
+                    json_response(StatusCode::OK, object)
                 }
                 Err(failure) => openai_error(
                     StatusCode::from_u16(failure.status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -999,6 +1038,7 @@ async fn stream_chat(
     // chat / messages 传 `None`（它们没有这个概念）。由**原始**请求体取，
     // 转换后 `type` 已被降级成 function，拿不回来。
     responses_custom: Option<std::sync::Arc<HashSet<String>>>,
+    response_state_chain: Option<(String, Vec<Value>)>,
 ) -> Response {
     // ★ issue #76：允许名单整轮算一次，选号与失败兜底共用（理由见 `attempt_once`）。
     let allowed = key.and_then(|actor| allowed_uids_for(&actor.policy, variant));
@@ -1079,7 +1119,12 @@ async fn stream_chat(
                     anthropic_sse_response(rx, model, estimated)
                 } else if is_responses_endpoint(endpoint) {
                     // Responses 事件流：内层是同一条 OpenAI SSE，逐事件重编。
-                    responses_sse_response(rx, model, responses_custom.clone())
+                    responses_sse_response(
+                        rx,
+                        model,
+                        responses_custom.clone(),
+                        response_state_chain,
+                    )
                 } else {
                     sse_response(rx)
                 };
@@ -1279,13 +1324,8 @@ fn anthropic_wants_stream(parsed: &Value) -> bool {
 ///
 /// 变体进键是必须的：两条产品线的账号库**分家**，粘到一起会指向另一条线的账号。
 fn sticky_key_of(parsed: &Value, variant: TraeVariant, model: &str) -> Option<String> {
-    session_headers::conversation_id_of(parsed)
-        // ★ 必须 trim：`conversation_id_of` 只排除**空串**，纯空白（`"   "`）会漏过来。
-        // 直接拿它当键的话，所有「填了空白」的客户端会**共用同一个绑定**
-        // （表现为不同对话互相串号），而且不报错。WorkBuddy 侧的 `sticky_key_of` 同样 trim。
-        .map(|conversation| conversation.trim().to_string())
-        .filter(|conversation| !conversation.is_empty())
-        .map(|conversation| sticky::sticky_key(variant.as_str(), model, &conversation))
+    crate::protocol::responses::session_identity_of(parsed)
+        .map(|conversation| sticky::sticky_key(variant.as_str(), model, conversation))
 }
 
 /// 合并两个偏好来源，得到本次选号的偏好 uid。
@@ -1913,20 +1953,24 @@ fn responses_sse_response(
     rx: mpsc::Receiver<Result<Bytes, std::io::Error>>,
     model: &str,
     custom: Option<std::sync::Arc<HashSet<String>>>,
+    state_chain: Option<(String, Vec<Value>)>,
 ) -> Response {
     let inner = Box::pin(sse::stream_from_receiver(rx));
+    let stream = crate::protocol::responses::ResponsesSseStream::new(
+        inner,
+        model.to_string(),
+        custom.unwrap_or_default(),
+    );
+    let stream = match state_chain {
+        Some((scope, transcript)) => stream.with_state_chain(scope, transcript),
+        None => stream,
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .header(header::CACHE_CONTROL, "no-cache")
         .header("X-Accel-Buffering", "no")
-        .body(Body::from_stream(
-            crate::protocol::responses::ResponsesSseStream::new(
-                inner,
-                model.to_string(),
-                custom.unwrap_or_default(),
-            ),
-        ))
+        .body(Body::from_stream(stream))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 

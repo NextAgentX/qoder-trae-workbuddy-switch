@@ -17,8 +17,8 @@
 //! | `tool_choice` | 字符串原样；`{type:"function",name}` → 具名；`none` 原样 |
 //! | `temperature` / `top_p` / `max_output_tokens` / `parallel_tool_calls` | 直通（`max_output_tokens` → `max_tokens`） |
 //!
-//! **不支持**（忽略而非报错，客户端可自行降级）：`previous_response_id`（本网关无服务端
-//! 会话状态）、`store`、`include`、`background`、`stream_options`、文件/音频输入。
+//! **不支持**（忽略而非报错，客户端可自行降级）：`store`、`include`、`background`、
+//! `stream_options`、文件/音频输入。WorkBuddy、Trae、Qoder 的 Responses 路由都由短期内存状态链处理。
 //!
 //! # 上游恒为流式
 //!
@@ -28,7 +28,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use futures_util::Stream;
@@ -297,6 +299,10 @@ pub fn to_upstream_request(body: &Value) -> Value {
     if let Some(model) = body.get("model") {
         out.insert("model".to_string(), model.clone());
     }
+    // Preserve the client-provided prefix-cache identity through protocol translation.
+    if let Some(cache_key) = body.get("prompt_cache_key") {
+        out.insert("prompt_cache_key".to_string(), cache_key.clone());
+    }
     for key in [
         "temperature",
         "top_p",
@@ -326,7 +332,8 @@ pub fn to_upstream_request(body: &Value) -> Value {
         }
     }
     if let Some(input) = body.get("input") {
-        input_to_messages(input, &mut messages);
+        let trimmed = trim_input_history(input);
+        input_to_messages(&trimmed, &mut messages);
     }
     out.insert("messages".to_string(), Value::Array(messages));
 
@@ -400,6 +407,192 @@ pub fn to_upstream_request(body: &Value) -> Value {
     }
 
     Value::Object(out)
+}
+
+/// Responses clients commonly resend the entire conversation on every turn.
+/// Cap historical input while keeping instruction items and the newest full
+/// user turn intact; older turns are admitted whole, newest first.
+const MAX_INPUT_HISTORY_BYTES: usize = 64 * 1024;
+
+fn trim_input_history(input: &Value) -> Value {
+    let Some(items) = input.as_array() else {
+        return input.clone();
+    };
+    let encoded_size = |item: &Value| serde_json::to_vec(item).map_or(0, |bytes| bytes.len());
+    let total_size: usize = items.iter().map(encoded_size).sum();
+    if total_size <= MAX_INPUT_HISTORY_BYTES {
+        return input.clone();
+    }
+
+    // Keep system/developer items outside the removable user-turn groups.
+    let is_instruction = |item: &Value| {
+        let role = item.get("role").and_then(Value::as_str).unwrap_or_default();
+        role == "system" || role == "developer"
+    };
+    let mut instruction_indices = HashSet::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        if is_instruction(item) {
+            instruction_indices.insert(index);
+            continue;
+        }
+        let item_type = item.get("type").and_then(Value::as_str);
+        let starts_user_turn = matches!(item_type, Some("message") | None)
+            && item.get("role").and_then(Value::as_str) == Some("user");
+        if starts_user_turn || groups.is_empty() {
+            groups.push(Vec::new());
+        }
+        groups.last_mut().expect("group was created").push(index);
+    }
+
+    let mut keep = instruction_indices;
+    let mut used_bytes: usize = keep.iter().map(|index| encoded_size(&items[*index])).sum();
+    // The newest turn is mandatory even when it alone exceeds the budget.
+    for group in groups.iter().rev() {
+        let group_bytes: usize = group.iter().map(|index| encoded_size(&items[*index])).sum();
+        let is_latest = groups.last() == Some(group);
+        if !is_latest && used_bytes.saturating_add(group_bytes) > MAX_INPUT_HISTORY_BYTES {
+            // Keep a contiguous suffix of complete turns; older turns cannot leapfrog a skipped one.
+            break;
+        }
+        used_bytes = used_bytes.saturating_add(group_bytes);
+        keep.extend(group.iter().copied());
+    }
+
+    Value::Array(
+        items
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| keep.contains(index))
+            .map(|(_, item)| item.clone())
+            .collect(),
+    )
+}
+
+const RESPONSE_STATE_TTL: Duration = Duration::from_secs(60 * 60);
+const RESPONSE_STATE_CAPACITY: usize = 256;
+const MAX_RESPONSE_STATE_BYTES: usize = 512 * 1024;
+
+struct ResponseStateEntry {
+    transcript: Vec<Value>,
+    updated_at: Instant,
+}
+
+static RESPONSE_STATES: OnceLock<Mutex<HashMap<(String, String), ResponseStateEntry>>> =
+    OnceLock::new();
+
+fn response_states() -> &'static Mutex<HashMap<(String, String), ResponseStateEntry>> {
+    RESPONSE_STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Expand `previous_response_id` into the bounded transcript used for this turn.
+pub fn prepare_request_with_state(
+    body: &Value,
+    scope: &str,
+) -> Result<(Value, Vec<Value>), String> {
+    let current_input = match body.get("input") {
+        Some(Value::String(text)) => {
+            vec![json!({"type": "message", "role": "user", "content": text})]
+        }
+        Some(Value::Array(items)) => items.clone(),
+        _ => Vec::new(),
+    };
+    let previous_id = body
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    let mut transcript = if let Some(previous_id) = previous_id {
+        let mut states = response_states()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        states.retain(|_, entry| entry.updated_at.elapsed() < RESPONSE_STATE_TTL);
+        states
+            .get(&(scope.to_string(), previous_id.to_string()))
+            .map(|entry| entry.transcript.clone())
+            .ok_or_else(|| {
+                format!("previous_response_id '{previous_id}' was not found or has expired")
+            })?
+    } else {
+        Vec::new()
+    };
+    transcript.extend(current_input);
+    let bounded = trim_input_history(&Value::Array(transcript));
+    let transcript = bounded.as_array().cloned().unwrap_or_default();
+
+    let mut prepared = body.clone();
+    if previous_id.is_some() {
+        if let Some(object) = prepared.as_object_mut() {
+            object.insert("input".to_string(), Value::Array(transcript.clone()));
+        }
+    }
+    Ok((prepared, transcript))
+}
+
+/// Keep response state volatile, scoped, expiring, and bounded by count/history size.
+pub fn remember_response_state(
+    scope: &str,
+    response_id: &str,
+    transcript: &[Value],
+    output: &[Value],
+) {
+    if response_id.is_empty() {
+        return;
+    }
+    let mut messages = transcript.to_vec();
+    messages.extend(output.iter().cloned());
+    let bounded = trim_input_history(&Value::Array(messages));
+    let Some(transcript) = bounded.as_array() else {
+        return;
+    };
+    let serialized_bytes: usize = transcript
+        .iter()
+        .map(|item| {
+            serde_json::to_vec(item).map_or(MAX_RESPONSE_STATE_BYTES + 1, |bytes| bytes.len())
+        })
+        .sum();
+    if serialized_bytes > MAX_RESPONSE_STATE_BYTES {
+        return;
+    }
+    let entry = ResponseStateEntry {
+        transcript: transcript.clone(),
+        updated_at: Instant::now(),
+    };
+    let mut states = response_states()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    states.retain(|_, old| old.updated_at.elapsed() < RESPONSE_STATE_TTL);
+    if states.len() >= RESPONSE_STATE_CAPACITY {
+        if let Some(oldest) = states
+            .iter()
+            .min_by_key(|(_, value)| value.updated_at)
+            .map(|(key, _)| key.clone())
+        {
+            states.remove(&oldest);
+        }
+    }
+    states.insert((scope.to_string(), response_id.to_string()), entry);
+}
+
+/// Stable client session identity shared by Responses gateway adapters.
+/// Blank values are ignored so whitespace cannot bind unrelated conversations together.
+pub fn session_identity_of(body: &Value) -> Option<&str> {
+    [
+        body.get("session_id").and_then(Value::as_str),
+        body.get("conversation_id").and_then(Value::as_str),
+        body.get("metadata")
+            .and_then(|metadata| metadata.get("session_id"))
+            .and_then(Value::as_str),
+        body.get("metadata")
+            .and_then(|metadata| metadata.get("conversation_id"))
+            .and_then(Value::as_str),
+        body.get("prompt_cache_key").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
 }
 
 /// 展开 Responses 的 `input`（字符串或 items 数组）到 chat `messages`。
@@ -853,6 +1046,9 @@ pub struct ResponsesSseStream<S> {
     usage: Option<Value>,
     /// 声明为 custom（freeform）的工具名：这些调用要按 `custom_tool_call` 事件输出。
     custom: std::sync::Arc<HashSet<String>>,
+    /// 请求 transcript + scope，用于只在正常完成时保存 `previous_response_id` 状态。
+    state_chain: Option<(String, Vec<Value>)>,
+    failed: bool,
     /// ★ issue #129：账号故障自动切换的失败信号（`None` = 开关关闭 / 未接入）。
     failover: Option<ResponsesFailover>,
 }
@@ -888,8 +1084,15 @@ impl<S> ResponsesSseStream<S> {
             tool_calls: Vec::new(),
             usage: None,
             custom,
+            state_chain: None,
+            failed: false,
             failover: None,
         }
+    }
+
+    pub fn with_state_chain(mut self, scope: String, transcript: Vec<Value>) -> Self {
+        self.state_chain = Some((scope, transcript));
+        self
     }
 
     /// ★ issue #129：接入失败信号（`None` = 保持原行为）。
@@ -1208,6 +1411,7 @@ impl<S> ResponsesSseStream<S> {
             return;
         }
         self.finished = true;
+        self.failed = true;
         self.ensure_started();
         let account = self
             .failover
@@ -1454,6 +1658,16 @@ impl<S> ResponsesSseStream<S> {
                 build_responses_usage(self.usage.as_ref(), input_tokens, output_tokens),
             );
         }
+        if !self.failed {
+            if let Some((scope, transcript)) = self.state_chain.as_ref() {
+                let output = response
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                remember_response_state(scope, &self.response_id, transcript, output);
+            }
+        }
         self.push_event(
             "response.completed",
             json!({"type": "response.completed", "response": response}),
@@ -1515,6 +1729,7 @@ where
                 }
                 Poll::Ready(Some(Err(error))) => {
                     eprintln!("[gateway] Responses 上游 SSE 流中途异常: {error:?}");
+                    this.failed = true;
                     /* ★ issue #129 §3.3：断流是**账号级失败**，不是「模型说完了」。
                     开关开启时发 `error` 事件（可重试）而不是 `finish()` 补
                     `response.completed`。 */
@@ -1571,6 +1786,87 @@ mod tests {
             .filter_map(|event| event.get("type").and_then(Value::as_str))
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn previous_response_id_restores_transcript_only_within_its_scope() {
+        let scope = format!("state-chain-test:{}", uuid::Uuid::new_v4());
+        let response_id = new_id("resp");
+        let prior_input = json!({"type": "message", "role": "user", "content": "first"});
+        let prior_output = json!({
+            "id": new_id("msg"),
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "answer"}],
+        });
+        remember_response_state(
+            &scope,
+            &response_id,
+            std::slice::from_ref(&prior_input),
+            std::slice::from_ref(&prior_output),
+        );
+
+        let (prepared, transcript) = prepare_request_with_state(
+            &json!({"previous_response_id": response_id, "input": "next"}),
+            &scope,
+        )
+        .expect("same scope must resume the response");
+        assert_eq!(prepared["input"][0], prior_input);
+        assert_eq!(prepared["input"][1], prior_output);
+        assert_eq!(prepared["input"][2]["content"], "next");
+        assert_eq!(transcript, prepared["input"].as_array().unwrap().clone());
+
+        let other_scope = format!("state-chain-other:{}", uuid::Uuid::new_v4());
+        assert!(prepare_request_with_state(
+            &json!({"previous_response_id": response_id, "input": "must not leak"}),
+            &other_scope,
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_stream_persists_state_but_broken_stream_does_not() {
+        let scope = format!("state-chain-stream:{}", uuid::Uuid::new_v4());
+        let transcript = vec![json!({"type": "message", "role": "user", "content": "hi"})];
+        let stream = ResponsesSseStream::new(
+            futures_util::stream::iter(vec![
+                chunk("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}] }\n\n"),
+                chunk("data: [DONE]\n\n"),
+            ]),
+            "m".to_string(),
+            empty_custom(),
+        )
+        .with_state_chain(scope.clone(), transcript);
+        let events = collect_events(stream).await;
+        let response_id = events
+            .iter()
+            .find(|event| event["type"] == "response.completed")
+            .and_then(|event| event["response"]["id"].as_str())
+            .expect("completed response must include its id")
+            .to_string();
+        assert!(prepare_request_with_state(
+            &json!({"previous_response_id": response_id, "input": "next"}),
+            &scope,
+        )
+        .is_ok());
+
+        let broken_scope = format!("state-chain-broken:{}", uuid::Uuid::new_v4());
+        let broken_chunks: Vec<Result<Bytes, std::io::Error>> =
+            vec![Err(std::io::Error::other("connection reset"))];
+        let broken_stream = ResponsesSseStream::new(
+            futures_util::stream::iter(broken_chunks),
+            "m".to_string(),
+            empty_custom(),
+        )
+        .with_state_chain(broken_scope.clone(), vec![]);
+        let broken_id = broken_stream.response_id.clone();
+        let _ = collect_events(broken_stream).await;
+        assert!(prepare_request_with_state(
+            &json!({"previous_response_id": broken_id, "input": "next"}),
+            &broken_scope,
+        )
+        .is_err());
     }
 
     #[test]

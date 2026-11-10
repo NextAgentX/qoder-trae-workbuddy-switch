@@ -1115,6 +1115,15 @@ async fn relay_once(
         // ★ 出站按 `kind` 分派 —— **治理层（本函数其余部分：选号 / 在途 / 冷却 / 熔断 / 换号）完全共用**。
         let result = match &request.kind {
             RelayKind::Llm => {
+                let prepared_body = if uid.is_empty() {
+                    request.prepared_body.clone()
+                } else {
+                    outbound::rebind_prompt_cache_key(
+                        &request.prepared_body,
+                        &uid,
+                        request.conversation_id.as_deref(),
+                    )
+                };
                 // 会话头族 + 派生设备标识（**LLM 专用**：业务请求不适用，故放在本分支内）。
                 let mut extra = session_headers::conversation_headers(&context, &message_id);
                 if !uid.is_empty() {
@@ -1125,7 +1134,7 @@ async fn relay_once(
                     .chat_stream_with(
                         request.region,
                         &account_value,
-                        &request.prepared_body,
+                        &prepared_body,
                         None,
                         Some(&extra),
                     )

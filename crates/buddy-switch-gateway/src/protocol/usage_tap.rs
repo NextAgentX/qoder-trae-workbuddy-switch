@@ -129,6 +129,23 @@ pub fn extract_usage(frame: &Value) -> Option<UsageReport> {
     })
 }
 
+/// Read cached input tokens from a raw upstream usage object using the same aliases
+/// as `extract_usage`. This is also used by non-streaming response loggers.
+pub fn cached_tokens_from_usage(usage: &Value) -> i64 {
+    usage
+        .get("prompt_cache_hit_tokens")
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+        })
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .or_else(|| usage.get("cached_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0)
+}
+
 /// **流内错误**回调（P0-3 的流式半边）。
 ///
 /// `UsageTap` 本来就在**逐帧**旁听每一块字节（为了找 `usage`），顺手判一下

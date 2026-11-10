@@ -38,7 +38,7 @@
 | 想知道某功能当初为什么这么做 | [`specs/DECISIONS.md`](specs/DECISIONS.md)（D1–D46） |
 | 加新交互（先原型、后代码） | [`prototype/`](prototype/) → `index.html` 可直接打开 |
 | 账号页「客户端限流」怎么和网关「限流探测」联动（同一份数据 + 两处入口） | [`prototype/limit-link-proto.html`](prototype/limit-link-proto.html)（可点设计稿，**已落地**）+ [`prototype/verify-limit-link.mjs`](prototype/verify-limit-link.mjs)（34 条行为校验）+ [`specs/MODEL-LIMIT-PROBE-PLAN.md`](specs/MODEL-LIMIT-PROBE-PLAN.md) §5.9（口径） |
-| 查这版改了什么 | [`releases/`](releases/) |
+| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.101809`](releases/v2026.11.101809.md)） |
 
 ---
 
@@ -98,7 +98,7 @@
 | [`POOL-PICK-EXCLUDE-PLAN.md`](specs/POOL-PICK-EXCLUDE-PLAN.md) | 账号池选号 Bug + 「排除账号」方案 | 待拍板 |
 | [`CLIENTLESS-AUTH-PLAN.md`](specs/CLIENTLESS-AUTH-PLAN.md) | 无客户端部署（服务器 / 容器）的登录授权与网关可用性（issue #62） | 待拍板 · 原型已出 |
 | [`KEY-PERMISSION-UI-DESIGN.md`](specs/KEY-PERMISSION-UI-DESIGN.md) | 密钥访问权限管理：token 配额 + 可访问账号白名单（issue #76） | 已实现（`KeyActor` 统一四条产品线） |
-| [`CACHE-HIT-RATE-PLAN.md`](specs/CACHE-HIT-RATE-PLAN.md) | 缓存命中率：三平台 × 两本账（客户端 + 网关）的取数、口径、迁移与 UI | 待拍板 · 预研完成 |
+| [`CACHE-HIT-RATE-PLAN.md`](specs/CACHE-HIT-RATE-PLAN.md) | 缓存命中率：三平台 × 两本账（客户端 + 网关）的取数、口径、迁移与 UI | P0/P2 已落地；Codex 会话缓存连续性修复；P1/P3 待实施 |
 
 ---
 

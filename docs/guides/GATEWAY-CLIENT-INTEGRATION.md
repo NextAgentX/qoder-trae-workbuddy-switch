@@ -289,8 +289,9 @@ setx BUDDY_SWITCH_KEY "sk-wb-..."
 - `base_url` **必须带 `/v1`**：Codex 会自己拼 `/responses` 或 `/chat/completions`。
 - **Responses 支持的是一个子集**（网关侧 `protocol/responses.rs` 已写清边界）：
   - 支持：`input`（字符串 / items 数组）、`instructions`、扁平 `tools`、`tool_choice`、`temperature` / `top_p` / `max_output_tokens` / `parallel_tool_calls`。
-  - **忽略而非报错**：`previous_response_id`、`store`、`include`、`background`、`stream_options`、文件 / 音频输入。
-  - 其中 `previous_response_id` 要特别注意：本网关**无服务端会话状态**，依赖它做续写的调用会**静默丢上下文**。Codex 默认 `store: false`、每轮发全量历史，因此正常对话不受影响；但如果你在别处显式用了服务端会话续写，请改用 `wire_api = "chat"`。
+  - **忽略而非报错**：`store`、`include`、`background`、`stream_options`、文件 / 音频输入。`store` 不会开启持久化存储；Responses 状态只由网关在进程内短期保存。
+  - `previous_response_id` 已由 WorkBuddy、Trae、Qoder 三条 Responses 路由支持：状态按 API Key 与区域隔离（Trae 还区分客户端变体），最多保留 256 条、单条 transcript 上限 512 KiB、1 小时过期；只有成功完成且 transcript 未超限的响应会保存。超限时本轮响应仍会返回，但不会保存续接状态；后续使用该 ID 会返回 400。网关重启、状态过期或被容量淘汰后，该 ID 也会返回 400；跨 Key / 区域 / Trae 变体续接同样会返回 400。状态不是持久会话存储。
+  - Responses 历史输入还会按 64 KiB 预算裁剪：保留 system/developer 指令和最新完整 user turn，再尽量保留较新的完整旧轮次。因此超长对话可能不再包含较早历史；Codex 若发送 `compaction` 项，该项也无法还原为上游可读内容。
 - `reasoning` 项在 **WB 路径**会被丢弃（上游不接受）；**Qoder 路径**会翻成上游的思考档位 ⇒ `model_reasoning_effort` 生效。
 
 ### 3.2 Claude Code

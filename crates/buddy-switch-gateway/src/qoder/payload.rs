@@ -31,20 +31,7 @@ pub fn wants_stream(parsed: &Value) -> bool {
 /// —— 它本身就是「同一段会话复用同一前缀」的语义，与粘性同目的；
 /// 都没有 ⇒ `None`，调用方整段跳过粘性——绝不退化成轮级键）。
 pub fn sticky_key_of(parsed: &Value) -> Option<String> {
-    if let Some(metadata) = parsed.get("metadata") {
-        for key in ["conversation_id", "session_id"] {
-            if let Some(value) = metadata.get(key).and_then(Value::as_str) {
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-    parsed
-        .get("prompt_cache_key")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    crate::protocol::responses::session_identity_of(parsed).map(str::to_string)
 }
 
 /// Responses 请求（`POST /v1/responses`）→ 上游 chat 形态。
