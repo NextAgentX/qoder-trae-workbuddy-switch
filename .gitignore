@@ -11,6 +11,11 @@ node_modules
 dist
 dist-*
 dist-ssr
+# ★ 带**点**的旧构建产物目录（如 `dist.old-1794213163/`）：`dist-*` 匹配不到
+#   （点不是短横线），曾以未跟踪文件的形式躺在工作树里，有被 `git add -A` 带进
+#   仓库的风险（4.9MB 的构建输出）。这类目录是**构建脚本改名留下的旧产物**，
+#   不进版本库。
+dist.old-*
 *.local
 
 # Rust / Tauri 构建产物（workspace target）
