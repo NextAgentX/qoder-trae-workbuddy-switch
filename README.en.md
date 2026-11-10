@@ -211,6 +211,8 @@ flowchart TB
 | Windows x64 | `BuddySwitch_<version>_x64-setup.exe` | Run the installer |
 | Linux x64 | `BuddySwitch_<version>_amd64.deb` / `.AppImage` | Install the `.deb`, or make the AppImage executable and run it |
 
+> **Picked the wrong file?** The release also ships `buddy-switch-cli-*` — those are the **command-line (webui) binaries**, **not installers**. They have no extension and are ~30 MB; double-clicking does nothing (the download drops the execute bit). To use one, `chmod +x` it first — see [local WebUI fallback](docs/guides/LINUX-WEBUI-FALLBACK.md). Desktop installers always carry a `.dmg` / `-setup.exe` / `.deb` / `.AppImage` extension.
+
 **webui (build from source)**: the frontend bundle is embedded into the server **at compile time** (`rust-embed`), so the order matters.
 
 ```bash

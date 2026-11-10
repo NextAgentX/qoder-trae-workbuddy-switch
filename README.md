@@ -209,6 +209,8 @@ flowchart TB
 | Windows x64 | `BuddySwitch_<版本>_x64-setup.exe` | 运行安装程序 |
 | Linux x64 | `BuddySwitch_<版本>_amd64.deb` / `.AppImage` | 装 `.deb`，或给 AppImage 加执行权限后直接运行 |
 
+> **下错了？** Release 资产列表里还有 `buddy-switch-cli-*` 文件，那是 **webui 形态的命令行程序**（裸二进制），**不是安装包**。它的特征是没有扩展名、30 MB 上下，下载后双击打不开（下载过程会丢掉执行位）—— 要用它得先 `chmod +x`，见 [本机 WebUI 备用方案](docs/guides/LINUX-WEBUI-FALLBACK.md)。桌面 App 一定带 `.dmg` / `-setup.exe` / `.deb` / `.AppImage` 扩展名。
+
 **webui（源码构建）**：前端产物在**编译期**被服务端嵌入（`rust-embed`），所以顺序不能反。
 
 ```bash

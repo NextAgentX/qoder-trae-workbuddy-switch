@@ -13,15 +13,15 @@
 ### 当前可用：从 GitHub Releases 下载裸二进制
 
 在 [Releases](https://github.com/NextAgentX/qoder-trae-workbuddy-switch/releases/latest) 资产里取对应平台的
-`buddy-switch-<platform>-<arch>`（Windows 带 `.exe`），直接运行即可：
+`buddy-switch-cli-<platform>-<arch>`（Windows 带 `.exe`），直接运行即可：
 
 ```bash
 # macOS / Linux
-chmod +x ./buddy-switch-darwin-arm64
-./buddy-switch-darwin-arm64          # 启动本地服务 + 自动打开浏览器
-./buddy-switch-darwin-arm64 serve    # 只起服务，不开浏览器（--port 指定端口）
-./buddy-switch-darwin-arm64 status   # 终端查看当前账号
-./buddy-switch-darwin-arm64 version  # 版本号
+chmod +x ./buddy-switch-cli-darwin-arm64
+./buddy-switch-cli-darwin-arm64          # 启动本地服务 + 自动打开浏览器
+./buddy-switch-cli-darwin-arm64 serve    # 只起服务，不开浏览器（--port 指定端口）
+./buddy-switch-cli-darwin-arm64 status   # 终端查看当前账号
+./buddy-switch-cli-darwin-arm64 version  # 版本号
 ```
 
 > macOS 未签名会触发 Gatekeeper：先执行 `xattr -d com.apple.quarantine <二进制路径>`。
