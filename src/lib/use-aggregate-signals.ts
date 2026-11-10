@@ -98,7 +98,7 @@ export interface ScopeSignals {
    * ★ issue #89 · C2：账号视图（`list_account_views_for`）只带聚合积分，包粒度明细在
    * `get_trae_credits` 的 `packages[uid]` 里。渠道页把它**合并进 account 对象**再交给卡片；
    * 聚合页此前直接用账号对象自带的 `creditPackages`（未刷新过积分时为 `null`）
-   * ⇒ 指标行的 `/Y` 与「N 积分 M 天内过期」chip 在聚合页常缺。
+   * ⇒ 积分指标与「最近到期 N天 · M 积分」徽章在聚合页常缺（#189 起指标行已无分母）。
    *
    * 每个作用域**一次**调用（不是逐账号），符合本层的取数纪律 ①。
    */

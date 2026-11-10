@@ -555,16 +555,20 @@ const activeProductCount = programSlots.filter((slot) => slot.active).length;
 const isCurrentAccount = programSlots.some((slot) => slot.active);
 
   /**
-   * 指标行（原型 `.acct-metrics`，`buddy-switch-prototype.html:341` / `accountCard` :2510-2514）：
-   * `积分 <b>当前</b>/<b>总额</b> · 今日 <b>42.1K</b> · 2 分钟前`。
+   * 指标行（原型 `.acct-metrics`，`demo-app.js` 的 `.acct-metrics`）：
+   * `积分 <b>当前</b> · 今日 <b>42.1K</b> · 2 分钟前`（**无分母**，见下）。
    *
    * ⚠️★ 2026-10-10 **口径修正**：原先这里显示的是 `已用/总额`（由 `resources[].used` 汇总），
    * 而原型显示的是 `当前/总额`（`a.credits/a.creditsTotal`，即「剩余 / 总额」）。
-   * 同一个「积分 x/y」在两处含义不同 ⇒ 用户按原型对不上数。现在改为**剩余/总额**。
+   * 同一个「积分 x/y」在两处含义不同 ⇒ 用户按原型对不上数。
+   *
+   * ⚠️★ 2026-11-09 **再去分母**：指标行现在只显示**剩余值**（`积分 1,240`）。
+   * 那个分母是「上次快照余额」，比分子还小时看起来像超额使用；且它与「总额」不是一回事。
+   * 逐包的「剩余 / 总量」仍在**抽屉的资源包明细**里（那是另一个形状，不是同一格）。
+   * 原型同步去掉了分母（`demo-app.js` 的 `.acct-metrics`）。
    *
    * 三项都来自**真实数据源**，逐项按诚实边界渲染：
-   * - **积分 剩余/总额**：剩余取 `credit.totalRemaining`；总额由 `resources[].total` 汇总；
-   *   未就绪 ⇒ 值渲染「—」；
+   * - **积分 剩余值**：取 `credit.totalRemaining`（可用口径，已剔除过期包）；未就绪 ⇒ 渲染「—」；
    * - **今日 Token**：`get_account_token_today` 按账号聚合；账号**缺席** ⇒ 「—」（**绝不当 0**）；
    *   网关日志的**今日**部分可能被裁（`todayTokensTruncated`）⇒ 下界 `≥N`，明细与下界说明放 tooltip；
    *   客户端 / 网关**两侧都非零** ⇒ 明细追加「可能重复计数」说明（两条独立记录，无 join 键可去重）；
@@ -680,13 +684,14 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
   );
 
   /**
-   * 「N 积分 M 天内过期」——原型 `.acct-chips` 的第三条（`buddy-switch-prototype.html:2507`）：
-   * `a.expiring ? <span class="badge warn">${fmt(a.expiring)} 积分 ${a.expireInDays} 天后过期</span> : ""`。
+   * 「最近到期 {N天|N小时} · {金额} 积分」——原型 `.acct-chips` 的第三条
+   * （`demo-app.js` 的 `expiringChipText()`；徽章只在**最快那批**存在时渲染）。
    *
    * ★ 2026-11-09 **口径修正**：徽章只报**最快到期的那一批** —— 天数与金额同批
    * （`summarizeExpiring` 的 `soonestDays` / `soonestAmount`）。
    * 此前「金额 = 全部临期之和」配「天数 = 最晚那一刻」会让徽章说成「2 天内过期」，
    * 而实际上明天就有一批要作废。逐批明细（最快排第一、绝对时刻）放进 tooltip。
+   * ★ 粒度（≤48 小时说小时）由 `remainingSpan` 唯一决定，卡片与账号表格列同源。
    *
    * ⚠️ 窗口不再是前端自设的 3 天，而是**后端的 `expiringSoon`（7 天）**——统计页 / 总览页
    * 读的就是同一口径（`expiringSoonRemaining`），卡片若另设窗口，同一件事会出现两个数字。

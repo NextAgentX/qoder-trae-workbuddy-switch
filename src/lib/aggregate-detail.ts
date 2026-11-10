@@ -53,7 +53,7 @@ export interface AggregateDetailContext {
   t: Translate;
   /** WorkBuddy 的积分快照（store `creditMap` 的对应 region）。 */
   credit?: CreditExpiry;
-  /** Trae / Qoder 的积分（卡片上那个「剩余 / 总额」）。 */
+  /** Trae / Qoder 的积分（卡片上那个「剩余值」，**无分母**）。 */
   credits?: { remaining: number | null; total: number | null } | null;
   /**
    * 7 天窗口内到期的积分之和（详情页积分块的副文本用它）。
