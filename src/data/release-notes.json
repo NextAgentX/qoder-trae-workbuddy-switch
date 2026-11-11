@@ -3,9 +3,23 @@
   "publishedAt": "2026-11-11T09:49:00+08:00",
   "sections": [
     {
-      "title": "网关会话缓存",
+      "title": "网关会话与连接",
       "items": [
-        "修复 Codex Responses 请求只携带 prompt_cache_key 时未绑定会话账号的问题，减少同一对话切换上游账号造成的缓存冷启动。"
+        "修复 Codex Responses 请求只携带 prompt_cache_key 时未绑定会话账号的问题，减少同一对话切换上游账号造成的缓存冷启动。",
+        "WorkBuddy 网关上游默认直连，避免残留的系统代理环境变量拦截请求；可按需启用系统代理，环境代理请求失败时会回退直连。"
+      ]
+    },
+    {
+      "title": "按模型设置默认思考档",
+      "items": [
+        "WorkBuddy 与 Qoder 网关支持为模型设置默认思考档。客户端未指定档位时才应用默认值；客户端明确传入的档位会保留。",
+        "非 DeepSeek 模型只在已知支持思考档时发送 reasoning_effort，避免把 DeepSeek 专用字段发给其它模型。"
+      ]
+    },
+    {
+      "title": "下载与安装",
+      "items": [
+        "Release 中的命令行裸二进制统一使用 buddy-switch-cli-* 名称，和桌面安装包区分；发布说明直接列出各平台安装包文件名。"
       ]
     }
   ],
