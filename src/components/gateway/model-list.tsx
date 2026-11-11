@@ -316,6 +316,7 @@ export function ModelList({ region, className }: { region: Region; className?: s
     else next[modelKey] = effort;
     try {
       await saveConfig({ ...config, model_efforts: next });
+              toast.success(t("shared.gateway.models.effortSaved"));
     } catch (error) {
       toast.error(t("shared.gateway.models.effortSaveFailed"), {
         description: String(error),

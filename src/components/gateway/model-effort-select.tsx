@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
-import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -89,7 +88,6 @@ export function ModelEffortSelect({
                   onSelect={() => {
                     onChange(modelId, effort);
                     setOpen(false);
-                    toast.success(t("shared.gateway.models.effortSaved"));
                   }}
                 >
                   <Check
