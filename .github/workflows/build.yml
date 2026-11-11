@@ -295,6 +295,10 @@ jobs:
 
       # 前端构建产物（CLI 二进制 rust-embed 嵌入 + Tauri App 使用）
       - name: Build frontend
+        # macOS ARM runner 偶发比其他平台慢，原型门禁的默认 180s 会误杀。
+        # 仅放宽该 runner；其他构建仍保留 3 分钟的挂起保护。
+        env:
+          CHECK_PROTO_TIMEOUT_MS: ${{ matrix.name == 'mac-arm64' && '600000' || '180000' }}
         run: |
           npm install
           npm run build
