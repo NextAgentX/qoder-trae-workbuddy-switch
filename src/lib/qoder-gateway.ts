@@ -46,6 +46,8 @@ export const DEFAULT_QODER_GATEWAY_CONFIG: QoderGatewayConfig = {
   modelDailyTokenLimit: 0,
   // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
   autoFailover: false,
+  // 空 map = 不补档（默认行为与加该字段之前逐字节一致）。
+  modelEfforts: {},
 };
 
 /** 网关配置（前端形状）。 */
@@ -79,6 +81,8 @@ export interface QoderGatewayConfig {
    * ⇒ 客户端整步重跑时必然落到另一个号。
    */
   autoFailover: boolean;
+  /** 按模型的默认思考档（模型名 → 档位，如 `{"qmodel_38max": "high"}`）。客户端不传时网关补上。 */
+  modelEfforts?: Record<string, string>;
 }
 
 /** 配置的线上形状（snake_case；写回时用）。 */
@@ -106,6 +110,8 @@ export interface QoderGatewayConfigRaw {
   model_daily_token_limit: number;
   /** ★ issue #129：账号故障时自动切换。 */
   auto_failover: boolean;
+  /** 按模型的默认思考档（snake_case）。客户端不传时网关补上。 */
+  model_efforts?: Record<string, string>;
 }
 
 /**
@@ -355,6 +361,12 @@ export function normalizeQoderGatewayConfig(raw: unknown): QoderGatewayConfig {
     autoFailover:
       asBoolean(read("autoFailover", "auto_failover")) ??
       DEFAULT_QODER_GATEWAY_CONFIG.autoFailover,
+    // model_efforts：对象或空；非对象归一为空。
+    modelEfforts: (function () {
+      const raw = read("modelEfforts", "model_efforts");
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, string>;
+      return {};
+    })(),
   };
 }
 
@@ -383,6 +395,9 @@ export function toQoderGatewayConfigRaw(config: QoderGatewayConfig): QoderGatewa
     daily_credit_limit: config.dailyCreditLimit,
     model_daily_token_limit: config.modelDailyTokenLimit,
     auto_failover: config.autoFailover,
+    // ★ 必须显式带上：Rust 侧是 `#[serde(default)]`，漏传不会报错，只会**静默**变成
+    // 空 map —— 界面上选好的档位保存后消失，看起来像「保存没反应」。
+    model_efforts: config.modelEfforts ?? {},
   };
 }
 

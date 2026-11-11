@@ -6853,6 +6853,9 @@ mod tests {
                 "allow_model_region_prefix",
                 "max_body_mb",
                 "max_context",
+                // WorkBuddy 上游代理方式（#199）与按模型默认思考档（#200）。
+                "upstream_via_proxy",
+                "model_efforts",
                 // ★ issue #129：账号故障时自动切换（WB / Trae / Qoder 三份配置同名）。
                 "auto_failover",
             ])

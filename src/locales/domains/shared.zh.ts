@@ -143,6 +143,11 @@ export const zh = {
   "shared.gateway.models.effortSourceUpstream": "档位来自上游目录声明",
   "shared.gateway.models.effortSourceStatic": "档位来自网关内置档位表（上游未声明，可能与官方客户端不一致）",
   /** issue #65: model effort selection UI */
+  "shared.gateway.models.selectEffort": "选择思考档",
+  "shared.gateway.models.noEffort": "无可用档位",
+  "shared.gateway.models.current": "当前",
+  "shared.gateway.models.effortSaved": "已保存该模型的默认思考档",
+  "shared.gateway.models.effortSaveFailed": "保存默认思考档失败",
   "shared.gateway.models.upstreamProxyTitle": "上游连接方式",
   "shared.gateway.models.upstreamProxyDesc":
     "关闭时直连上游（默认，推荐）。开启后上游请求经系统代理（HTTPS_PROXY）转发；只有所在网络必须靠代理才能到上游时才需要打开。切换后需重启应用生效。",

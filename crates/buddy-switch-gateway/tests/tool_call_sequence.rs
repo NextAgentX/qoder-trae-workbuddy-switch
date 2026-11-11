@@ -76,6 +76,7 @@ fn outbound_messages(inbound: &Value) -> Vec<Value> {
         &OutboundOptions::default(),
         &OutboundMeta::default(),
         false,
+        None,
     );
     serde_json::from_str::<Value>(&prepared)
         .expect("改写结果可解析")
@@ -208,6 +209,7 @@ fn responses_parallel_calls_stay_in_one_assistant_message() {
         &OutboundOptions::default(),
         &OutboundMeta::default(),
         false,
+        None,
     );
     let messages: Vec<Value> = serde_json::from_str::<Value>(&prepared)
         .expect("改写结果可解析")

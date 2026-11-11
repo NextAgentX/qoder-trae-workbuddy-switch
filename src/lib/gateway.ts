@@ -28,6 +28,8 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
   max_context: true,
   // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
   auto_failover: false,
+  // 空 map = 不补档（与加该字段之前的行为逐字节一致）。
+  model_efforts: {},
   // 默认直连：`reqwest` 会读 HTTPS_PROXY，变量残留时会把上游请求全推给本地代理。
   upstream_via_proxy: false,
 };
@@ -263,6 +265,19 @@ export function normalizeGatewayConfig(raw: unknown): GatewayConfig {
       asBoolean(record.auto_failover) ??
       asBoolean(record.autoFailover) ??
       DEFAULT_GATEWAY_CONFIG.auto_failover,
+    // 按模型的默认思考档：只收「字符串 → 字符串」的对象，其余归一为空 map。
+    model_efforts: (function () {
+      const raw =
+        record.model_efforts && typeof record.model_efforts === "object"
+          ? record.model_efforts
+          : record.modelEfforts;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof value === "string" && value.length > 0) out[key] = value;
+      }
+      return out;
+    })(),
     // 上游是否走系统代理：缺键 ⇒ 直连（与后端 `#[serde(default)]` 同口径）。
     upstream_via_proxy:
       asBoolean(record.upstream_via_proxy) ??

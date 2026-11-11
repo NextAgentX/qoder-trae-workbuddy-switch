@@ -317,6 +317,19 @@ export default function QoderApiServicePage() {
     void persist({ port: parsed });
   }
 
+  /**
+   * 模型默认思考档变更 —— **选完即存**（与 `maxContext` 开关同一口径）。
+   *
+   * 不做「先改草稿、再点保存」：项目里其余网关设置都是即时生效，多一个保存
+   * 按钮既不一致，也会出现「改了没点保存 = 白改」这种静默失效。
+   */
+  function onModelEffortChange(modelKey: string, effort: string | null) {
+    const next = { ...(config.modelEfforts ?? {}) };
+    if (effort == null || effort === "") delete next[modelKey];
+    else next[modelKey] = effort;
+    void persist({ modelEfforts: next });
+  }
+
   /** 正在重取护栏视图（只驱动按钮转圈）。 */
   const [refreshingQuota, setRefreshingQuota] = useState(false);
 
@@ -709,6 +722,8 @@ export default function QoderApiServicePage() {
                 onRefresh={() => void onRefreshModels()}
                 maxContext={config.maxContext}
                 onToggleMaxContext={(checked) => void persist({ maxContext: checked })}
+                modelEfforts={config.modelEfforts ?? {}}
+                onModelEffortChange={onModelEffortChange}
               />
             </>
           )}

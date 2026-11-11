@@ -158,6 +158,19 @@ pub struct QoderGatewayConfig {
     /// 与 WB / Trae 两条产品线的同名字段逐字对齐。
     #[serde(alias = "autoFailover")]
     pub auto_failover: bool,
+    /// **按模型的默认思考档**（模型名 → 档位，如 `{"qmodel_38max": "high"}`）。
+    ///
+    /// 语义：客户端**自己没有传** `reasoning_effort`（含 `reasoning.effort` /
+    /// `thinking.effort` / `thinking.level` 四种形态）时，网关补上这里配置的档位。
+    /// 客户端显式传了就**尊重客户端**——这是「默认值」而不是「强制值」，
+    /// 否则用户换个客户端就会莫名被降档。
+    ///
+    /// 空 map = 不补任何档（保持上游默认）——即默认行为与加这个字段之前完全一致。
+    ///
+    /// 档位取值在注入时还要过 [`api::canonical_effort`]：不在官方词表里的值会被丢弃
+    /// （宁可退回上游默认，也不要把非法值发给上游换一个 400）。
+    #[serde(default, alias = "modelEfforts")]
+    pub model_efforts: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for QoderGatewayConfig {
@@ -185,6 +198,8 @@ impl Default for QoderGatewayConfig {
             daily_credit_limit: 0.0,
             model_daily_token_limit: 0,
             auto_failover: false,
+            // 空 map = 不补档（默认行为与加该字段之前逐字节一致）。
+            model_efforts: std::collections::BTreeMap::new(),
         }
     }
 }

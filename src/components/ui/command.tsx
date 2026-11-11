@@ -13,11 +13,10 @@
  * 关闭后焦点归还触发按钮都是 Radix 的默认能力。把 Dialog 留到面板组件里组合，
  * 本文件就只依赖 `cmdk`，职责单一、可复用（将来别的浮层也能用）。
  *
- * ## 为什么只封装这五个
+ * ## 为什么只封装这几个
  *
- * 只导出**被命令面板实际用到**的原语（`Command` / `Input` / `List` / `Group` / `Item`）
- * —— 空态 / 分隔线 / 加载态在面板里各有更合适的实现（`<EmptyState>` / `<Skeleton>`），
- * 多导出的原语只会变成**没人引用的死代码**。
+ * 只导出被产品界面实际用到的原语。`CommandEmpty` 用于可搜索列表的无结果状态；
+ * 其它未使用的 cmdk 原语不导出，避免死代码。
  */
 
 import * as React from "react";
@@ -116,4 +115,18 @@ function CommandItem({
   );
 }
 
-export { Command, CommandInput, CommandList, CommandGroup, CommandItem };
+/** 搜索结果为空时的提示。 */
+function CommandEmpty({
+  className,
+  ...props
+}: React.ComponentProps<typeof CommandPrimitive.Empty>) {
+  return (
+    <CommandPrimitive.Empty
+      data-slot="command-empty"
+      className={cn("py-6 text-center text-sm text-muted-foreground", className)}
+      {...props}
+    />
+  );
+}
+
+export { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty };
