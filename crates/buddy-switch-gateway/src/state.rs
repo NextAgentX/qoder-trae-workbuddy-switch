@@ -114,6 +114,22 @@ pub struct GatewayConfig {
     /// 用户会误以为 300k 就是上限。
     #[serde(alias = "maxContext")]
     pub max_context: bool,
+    /// **上游请求是否走系统代理**（默认 `false` = 直连）。
+    ///
+    /// 为什么默认直连：`reqwest::Client::builder()` 不带 `.no_proxy()` 时会自动读取
+    /// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`。这些变量一旦以 **User 作用域**残留
+    /// （代理客户端关掉后很常见），每一条上游请求都会先去连一个已死或半死的本地代理：
+    /// 端口没了 ⇒ 连接被拒；端口还在但链路坏 ⇒ 代理侧把 TLS 握手中断
+    /// （`UNEXPECTED_EOF_WHILE_READING`）。两种表现都是「**必须开着代理才能用**」。
+    ///
+    /// 实测（2026-11-08）：`www.workbuddy.ai` 直连 0.20s 可用，经本地代理必失败；
+    /// `www.codebuddy.cn` / `qoder.com` 两侧都通。故 WB 与 Qoder / Trae 统一走直连
+    /// （后两者分别在 `qoder/mod.rs` / `trae/mod.rs` 硬编码 `.no_proxy()`）。
+    ///
+    /// 逃生口：若所在网络只有代理能到上游，把本项置 `true`。
+    /// ⚠️ 客户端在网关状态初始化时构建一次 ⇒ **改本项需重启应用生效**。
+    #[serde(default, alias = "upstreamViaProxy")]
+    pub upstream_via_proxy: bool,
 }
 
 impl Default for GatewayConfig {
@@ -136,6 +152,7 @@ impl Default for GatewayConfig {
             allow_model_region_prefix: false,
             max_body_mb: DEFAULT_MAX_BODY_MB,
             max_context: true,
+            upstream_via_proxy: false,
         }
     }
 }
@@ -410,10 +427,16 @@ impl GatewayState {
         环形日志只留 `log_keep` 条（缺省 200），高峰时统计侧会丢量；流水 append-only
         按日分片，窗口怎么滚都不影响它。只给主网关启用 —— Trae / Qoder 有自己的账本。 */
         log.enable_usage_stream(gateway_log_file().with_file_name("gateway_usage"));
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(600))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        // ★ 上游客户端默认 **直连**：`reqwest` 不带 `.no_proxy()` 会读 `HTTPS_PROXY`，
+        //   而该变量常以 User 作用域残留 ⇒ 上游请求被迫走本地代理。实测
+        //   `www.workbuddy.ai` 直连可用、经本地代理被掐断 TLS，表现为「只有开代理才能用」。
+        //   与 Qoder / Trae 同一条纪律（它们硬编码 `.no_proxy()`）；WB 用配置项，
+        //   给「只有代理能到上游」的网络留逃生口。
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(600));
+        if !config.upstream_via_proxy {
+            builder = builder.no_proxy();
+        }
+        let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         let upstream = Arc::new(UpstreamClient::new(http));
         let strategies = Arc::new(RwLock::new(load_strategies()));
 
@@ -532,6 +555,28 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect()
+    }
+
+    /// 上游客户端**默认直连**（`upstream_via_proxy == false`）。
+    ///
+    /// 阳性对照：把 `Default` 里的值改回 `true` ⇒ 本用例必红。这条默认值是有意为之：
+    /// `reqwest` 不带 `.no_proxy()` 会读 `HTTPS_PROXY`，而该变量常以 User 作用域残留，
+    /// 导致「只有开着代理才能用」（实测 `www.workbuddy.ai` 直连可用、经本地代理被掐断）。
+    #[test]
+    fn upstream_client_defaults_to_direct_connection() {
+        let config = GatewayConfig::default();
+        assert!(
+            !config.upstream_via_proxy,
+            "上游默认必须直连，否则会重新被 HTTPS_PROXY 劫持"
+        );
+        // 反序列化缺该键时也必须是直连（旧配置文件里没有这个键）。
+        let parsed: GatewayConfig =
+            serde_json::from_str(r#"{"enabled":true,"port":57891}"#).expect("deserialize");
+        assert!(!parsed.upstream_via_proxy, "旧配置缺键 ⇒ 默认直连");
+        // camelCase 别名必须被接受（前端某些路径会发 camelCase）。
+        let aliased: GatewayConfig =
+            serde_json::from_str(r#"{"upstreamViaProxy":true}"#).expect("deserialize alias");
+        assert!(aliased.upstream_via_proxy, "必须接受 camelCase 别名");
     }
 
     #[test]
@@ -672,6 +717,8 @@ mod tests {
             "allow_model_region_prefix",
             "max_body_mb",
             "max_context",
+            // 上游是否走系统代理（默认 false = 直连，见字段文档）
+            "upstream_via_proxy",
         ]
         .into_iter()
         .collect();

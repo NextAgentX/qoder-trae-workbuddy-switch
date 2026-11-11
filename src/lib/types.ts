@@ -1786,6 +1786,16 @@ export interface GatewayConfig {
    * ⇒ 客户端整步重跑时必然落到另一个号。
    */
   auto_failover: boolean;
+  /**
+   * **上游请求是否走系统代理**（默认 `false` = 直连）。
+   *
+   * 默认直连的原因：`reqwest` 不带 `no_proxy()` 时会自动读 `HTTPS_PROXY` 等变量，
+   * 而这些变量常在代理客户端关闭后仍以 User 作用域残留 ⇒ 每条上游请求都被迫
+   * 走本地代理，表现为「只有开着代理才能用」。
+   *
+   * ⚠️ 后端在网关状态初始化时构建一次 HTTP 客户端 ⇒ **切换后需重启应用生效**。
+   */
+  upstream_via_proxy: boolean;
 }
 
 /* ─────────── 模型降级链（P13）───────────

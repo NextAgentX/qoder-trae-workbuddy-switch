@@ -28,6 +28,8 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
   max_context: true,
   // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
   auto_failover: false,
+  // 默认直连：`reqwest` 会读 HTTPS_PROXY，变量残留时会把上游请求全推给本地代理。
+  upstream_via_proxy: false,
 };
 
 function asString(value: unknown): string | undefined {
@@ -261,6 +263,11 @@ export function normalizeGatewayConfig(raw: unknown): GatewayConfig {
       asBoolean(record.auto_failover) ??
       asBoolean(record.autoFailover) ??
       DEFAULT_GATEWAY_CONFIG.auto_failover,
+    // 上游是否走系统代理：缺键 ⇒ 直连（与后端 `#[serde(default)]` 同口径）。
+    upstream_via_proxy:
+      asBoolean(record.upstream_via_proxy) ??
+      asBoolean(record.upstreamViaProxy) ??
+      DEFAULT_GATEWAY_CONFIG.upstream_via_proxy,
   };
 }
 
