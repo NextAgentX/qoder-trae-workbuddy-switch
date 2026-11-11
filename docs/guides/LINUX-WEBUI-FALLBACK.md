@@ -16,12 +16,12 @@
 ## 从官方 Release 启动（无须编译）
 
 1. 完全退出桌面版（包括托盘）。不要让桌面 App 和 CLI **同时读写同一份数据**。
-2. 从 [GitHub Releases](https://github.com/NextAgentX/qoder-trae-workbuddy-switch/releases/latest) 下载 CLI 裸二进制：Linux x86_64 为 `buddy-switch-linux-x64`，arm64 为 `buddy-switch-linux-arm64`。不要把 `.AppImage` 当成 CLI。
+2. 从 [GitHub Releases](https://github.com/NextAgentX/qoder-trae-workbuddy-switch/releases/latest) 下载 CLI 裸二进制：Linux x86_64 为 `buddy-switch-cli-linux-x64`，arm64 为 `buddy-switch-cli-linux-arm64`。不要把 `.AppImage` 当成 CLI。
 3. 进入下载目录执行（x86_64 示例）：
 
 ~~~bash
-chmod +x ./buddy-switch-linux-x64
-BUDDY_SWITCH_HOME="$HOME" ./buddy-switch-linux-x64 serve \
+chmod +x ./buddy-switch-cli-linux-x64
+BUDDY_SWITCH_HOME="$HOME" ./buddy-switch-cli-linux-x64 serve \
   --host 127.0.0.1 --port 57890 --no-open
 ~~~
 
@@ -44,7 +44,7 @@ curl --noproxy '*' -fsS http://127.0.0.1:57890/api/status >/dev/null &&
 
 ~~~bash
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
-install -m 755 ./buddy-switch-linux-x64 "$HOME/.local/bin/buddy-switch-web"
+install -m 755 ./buddy-switch-cli-linux-x64 "$HOME/.local/bin/buddy-switch-web"
 ~~~
 
 新建 `~/.config/systemd/user/buddy-switch-web.service`：

@@ -588,12 +588,34 @@ jobs:
       #     必须留在 Release 里让用户直接下载，否则 webui 形态等于没有发布途径。
       # ⚠️ 别改成无条件保留：桌面端走 Tauri updater，与这些裸二进制无关，
       #    而 `merge-update-manifests.py` 只 glob `latest-*.json`，留着也不会污染更新清单。
-      - name: Drop npm-only CLI payloads
-        if: vars.PUBLISH_NPM == 'true'
+      #
+      # ★ 保留时必须改名成 `buddy-switch-cli-<platform>`。原名（`buddy-switch-darwin-arm64`）
+      #   在资产列表里和 macOS 安装包**撞车**：没有扩展名、30MB 以上、名字里同时出现
+      #   `darwin` 与 `arm64`，用户会把它当成「mac 版安装包」直接下走，拿到手是一个**裸
+      #   Mach-O 可执行文件** —— 既不是 `.dmg` 也不是 `.app`，下载后还没有执行位，双击
+      #   只会报「无法打开」。加 `-cli-` 后名字自述用途，与安装包的 `BuddySwitch…`（大写开头、
+      #   带 `.dmg` / `-setup.exe` 扩展名）不再混淆。同名问题在 Windows 上一样存在
+      #   （`buddy-switch-win32-x64.exe` 看着像安装程序）。
+      #   ⚠️ 只在**发布前**改名，不动 build job 的 `cli_bin`：`publish-platform` job
+      #   按原名从 artifact 里取文件装进 npm 平台包。
+      - name: Rename or drop npm-only CLI payloads
         run: |
           ls -1 artifacts
-          rm -f artifacts/buddy-switch-*
-          echo "--- after drop ---"
+          if [ "${{ vars.PUBLISH_NPM }}" = "true" ]; then
+            rm -f artifacts/buddy-switch-*
+            echo "--- after drop（npm 通道已开，裸二进制已随平台包发布）---"
+          else
+            # `buddy-switch-<platform>` → `buddy-switch-cli-<platform>`
+            for f in artifacts/buddy-switch-*; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f")
+              case "$base" in
+                buddy-switch-cli-*) continue ;;
+              esac
+              mv -f "$f" "artifacts/buddy-switch-cli-${base#buddy-switch-}"
+            done
+            echo "--- after rename（Release 里 CLI 裸二进制带 -cli- 标记）---"
+          fi
           ls -1 artifacts
 
       - name: Merge updater manifests
