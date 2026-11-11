@@ -3,8 +3,14 @@ import { Check, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { Command, CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
-import { CommandEmpty, CommandList } from "cmdk";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
