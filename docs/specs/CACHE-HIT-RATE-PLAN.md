@@ -12,6 +12,9 @@
 > WorkBuddy 在选号后按实际账号重绑网关生成的空 UID 缓存键；Trae / Qoder 将 Codex 顶层
 > `session_id` 纳入粘性路由，Qoder 上游会话 ID 改为按账号与会话稳定派生；WorkBuddy 非流式
 > Responses 日志记录真实缓存用量。P1/P3 与缓存覆盖度 UI 仍未完成。
+> 2026-11-11 运行日志定位到 WorkBuddy Responses 粘性键仍未覆盖 Codex 仅提供的 `prompt_cache_key`：
+> 同一 API Key / 模型的请求频繁换上游账号，导致缓存前缀冷启动。现已在 Responses 路由以会话 ID / 请求头
+> 优先，并在缺失时回退到 Responses 会话身份（含 `prompt_cache_key`），与 Trae / Qoder 对齐。
 >
 > 2026-11-10 Responses 输入裁剪：共享 Responses → chat 转换器对数组形式的 `input` 限制历史
 > 体积为 64 KiB；始终保留 system/developer 指令与最新完整 user turn，再从新到旧纳入完整旧轮次，

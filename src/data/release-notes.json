@@ -1,18 +1,30 @@
 {
-  "version": "2026.11.101809",
-  "publishedAt": "2026-11-10T18:09:00+08:00",
+  "version": "2026.11.110949",
+  "publishedAt": "2026-11-11T09:49:00+08:00",
   "sections": [
     {
-      "title": "网关会话与缓存",
+      "title": "网关会话缓存",
       "items": [
-        "WorkBuddy、Trae、Qoder 的 Responses 路由支持通过 previous_response_id 续接短期服务端状态；状态按密钥和区域隔离，并有明确的容量与过期限制。",
-        "Responses 历史输入超出预算时按完整轮次裁剪，避免在工具调用链中间截断；接入指南同步说明了续接限制。",
-        "修复 Codex 会话标识与缓存键在网关转换、选号后的连续性，并让 WorkBuddy 非流式 Responses 日志记录上游缓存命中量。",
-        "Qoder 上游会话 ID 按账号与客户端会话稳定派生，跨轮复用会话身份。"
+        "修复 Codex Responses 请求只携带 prompt_cache_key 时未绑定会话账号的问题，减少同一对话切换上游账号造成的缓存冷启动。"
       ]
     }
   ],
   "history": [
+    {
+      "version": "2026.11.101809",
+      "publishedAt": "2026-11-10T18:09:00+08:00",
+      "sections": [
+        {
+          "title": "网关会话与缓存",
+          "items": [
+            "WorkBuddy、Trae、Qoder 的 Responses 路由支持通过 previous_response_id 续接短期服务端状态；状态按密钥和区域隔离，并有明确的容量与过期限制。",
+            "Responses 历史输入超出预算时按完整轮次裁剪，避免在工具调用链中间截断；接入指南同步说明了续接限制。",
+            "修复 Codex 会话标识与缓存键在网关转换、选号后的连续性，并让 WorkBuddy 非流式 Responses 日志记录上游缓存命中量。",
+            "Qoder 上游会话 ID 按账号与客户端会话稳定派生，跨轮复用会话身份。"
+          ]
+        }
+      ]
+    },
     {
       "version": "2026.11.100954",
       "publishedAt": "2026-11-10T09:54:00+08:00",

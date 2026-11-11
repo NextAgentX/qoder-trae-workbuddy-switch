@@ -10,6 +10,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
+use serde_json::Value;
 
 use buddy_switch_core::modules::product::scope_of_wb_region;
 use buddy_switch_core::modules::region::Region;
@@ -156,7 +157,9 @@ pub async fn responses_for_region(
     // ★ issue #150：粘性键不能只认 body 的 `metadata.conversation_id` —— Claude Code
     //   发 `x-claude-code-session-id` 头、Codex 发 body `session_id`，都要认
     //   （见 `session_headers::session_key_of`）。出站 `X-Conversation-ID` 同样用它。
-    let session_key = session_headers::session_key_of(&parsed, &headers);
+    // Codex Responses 可能只提供 `prompt_cache_key`；普通会话键解析器不读它。
+    // 回退到 Responses 共享会话身份，避免 Current 策略每轮重新加权选号。
+    let session_key = session_key_of(&parsed, &headers);
     let turn_key = session_headers::turn_key(&parsed);
     let inbound_request_id = header_of(&headers, "x-conversation-request-id");
     let trace_id = header_of(&headers, "x-trace-id");
@@ -497,4 +500,36 @@ fn header_of(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+/// Responses 会话键：显式会话标识优先，Codex 的 `prompt_cache_key` 兜底。
+fn session_key_of(body: &Value, headers: &HeaderMap) -> Option<String> {
+    session_headers::session_key_of(body, headers)
+        .or_else(|| crate::protocol::responses::session_identity_of(body).map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prompt_cache_key_is_used_when_no_session_id_is_present() {
+        let body = json!({"prompt_cache_key": "codex-session-cache-key"});
+        assert_eq!(
+            session_key_of(&body, &HeaderMap::new()).as_deref(),
+            Some("codex-session-cache-key")
+        );
+    }
+
+    #[test]
+    fn explicit_session_header_precedes_prompt_cache_key() {
+        let body = json!({"prompt_cache_key": "codex-session-cache-key"});
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", "explicit-session".parse().unwrap());
+        assert_eq!(
+            session_key_of(&body, &headers).as_deref(),
+            Some("explicit-session")
+        );
+    }
 }
