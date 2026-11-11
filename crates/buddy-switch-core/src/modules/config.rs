@@ -1152,6 +1152,38 @@ fn http_client() -> &'static reqwest::Client {
     })
 }
 
+/// **强制直连**的客户端（忽略一切代理环境变量）。
+///
+/// 只用于「环境代理连不上」时的兜底重试 —— 见 [`http_request_with_proxy`] 的说明。
+static DIRECT_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn direct_client() -> &'static reqwest::Client {
+    DIRECT_CLIENT.get_or_init(|| {
+        http_client_builder()
+            .no_proxy()
+            .build()
+            .expect("failed to build direct reqwest client")
+    })
+}
+
+/// 当前环境里是否配置了出口代理（大小写都认，Windows 环境变量名不区分大小写，
+/// 但 `std::env::var` 是区分的）。
+fn env_proxy_configured() -> bool {
+    const KEYS: [&str; 6] = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    KEYS.iter().any(|key| {
+        std::env::var(key)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
 /// 通用 HTTP 请求，返回解析后的 JSON。
 ///
 /// 行为对齐 Python 版：
@@ -1176,7 +1208,8 @@ pub async fn http_request_with_proxy(
     proxy: Option<&str>,
 ) -> Value {
     let method = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let client = match proxy.map(str::trim).filter(|value| !value.is_empty()) {
+    let explicit_proxy = proxy.map(str::trim).filter(|value| !value.is_empty());
+    let client = match explicit_proxy {
         Some(proxy) => match http_client_builder()
             .proxy(match reqwest::Proxy::all(proxy) {
                 Ok(proxy) => proxy,
@@ -1189,17 +1222,50 @@ pub async fn http_request_with_proxy(
         },
         None => http_client().clone(),
     };
-    let mut req = client.request(method, url);
-    req = req.header("Content-Type", "application/json");
-    if let Some(h) = headers {
-        for (k, v) in h {
-            req = req.header(k, v);
+
+    /// 发一次（`RequestBuilder` 被 `send()` 消费，重试必须重建）。
+    async fn send_once(
+        client: &reqwest::Client,
+        method: &reqwest::Method,
+        url: &str,
+        body: Option<&Value>,
+        headers: Option<&HashMap<String, String>>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let mut req = client.request(method.clone(), url);
+        req = req.header("Content-Type", "application/json");
+        if let Some(h) = headers {
+            for (k, v) in h {
+                req = req.header(k, v);
+            }
         }
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        req.send().await
     }
-    if let Some(b) = body {
-        req = req.json(&b);
+
+    let mut sent = send_once(&client, &method, url, body.as_ref(), headers).await;
+    /* ★ 代理「半死」时的兜底（2026-10-27 首版 / 2026-11-08 放宽）：
+    `reqwest` 默认读 `HTTPS_PROXY` 等环境变量，而代理进程关掉之后这些变量
+    常常**还留在注册表里**（User 作用域）⇒ 每一条出站请求都先去连一个已经
+    没人监听的端口，2 秒后被拒，界面只看到
+    `error sending request for url (...)`（OAuth 扫码、账号识别全挂）。
+
+    ★ 2026-11-08 修正：首版只认 `is_connect()` / `is_timeout()`，漏掉了**最常
+    见的一种坏法** —— 代理端口活着、TCP 也连上了，但代理链路本身坏了
+    （例如把 `www.workbuddy.ai` 的 TLS 握手中断，表现为
+    `UNEXPECTED_EOF_WHILE_READING`）。这种错误既不是 connect 也不是 timeout，
+    于是兜底不触发，用户看到的现象就是「**必须开着代理才能用**」——
+    其实正好相反：关掉代理直连是通的，走代理才不通。
+
+    现在的判据放宽为「**只要这次请求在拿到 HTTP 响应之前就失败了**」就回落：
+    `send()` 返回 `Err` 必然意味着**没有任何响应字节**到达调用方，重发不会造成
+    「签到两次」这类重复副作用（真正的重复风险在拿到响应之后，那条路径不走这里）。
+    直连也失败时，仍然把**原始**错误报上去（不掩盖真实故障）。 */
+    if sent.is_err() && explicit_proxy.is_none() && env_proxy_configured() {
+        sent = send_once(direct_client(), &method, url, body.as_ref(), headers).await;
     }
-    match req.send().await {
+    match sent {
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();

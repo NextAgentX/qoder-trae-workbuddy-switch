@@ -80,6 +80,8 @@ export function ModelList({ region, className }: { region: Region; className?: s
    * 保存或浅读结束后清空，之后以 store 配置为准。
    */
   const [maxContextDraft, setMaxContextDraft] = useState<boolean | null>(null);
+  /** 「上游连接方式」开关的本地草案值（同上：点击立刻生效，保存后清空）。 */
+  const [upstreamProxyDraft, setUpstreamProxyDraft] = useState<boolean | null>(null);
   /* 限流探测：与探测卡/账号页台账读**同一份**派生数据
      （`useProbeCells(scope)` 实测 + `useProbePassive()` 被动底色）。
      ⚠️ 这里**不许**自己拼 `probe.cells`：后端作业单槽，单格重测会让那一列突然只剩 1 格。 */
@@ -301,7 +303,6 @@ export function ModelList({ region, className }: { region: Region; className?: s
     scope,
     entryOf: (id) => catalogById.get(id),
   });
-
   return (
     <div className={cn(className)}>
       {/* 无卡头 —— 分区名由左栏导航承担（与 Trae / Qoder 侧同口径）。
@@ -317,6 +318,26 @@ export function ModelList({ region, className }: { region: Region; className?: s
               await loadModels(region);
             } finally {
               setMaxContextDraft(null);
+            }
+          })();
+        }}
+      />
+      {/* 上游连接方式：默认**直连**。
+          原因：后端 `reqwest` 不带 `no_proxy()` 时会读 `HTTPS_PROXY`，而该变量在代理
+          客户端关闭后常以 User 作用域残留 ⇒ 上游请求被迫走本地代理，表现为
+          「只有开着代理才能用」（实测 workbuddy.ai 直连可用、经本地代理被掐断 TLS）。
+          复用 `ContextSourceCard`（它已支持标题/描述覆写），不新造组件。 */}
+      <ContextSourceCard
+        title={t("shared.gateway.models.upstreamProxyTitle")}
+        description={t("shared.gateway.models.upstreamProxyDesc")}
+        checked={upstreamProxyDraft ?? config.upstream_via_proxy}
+        onChange={(checked) => {
+          setUpstreamProxyDraft(checked);
+          void (async () => {
+            try {
+              await saveConfig({ ...config, upstream_via_proxy: checked });
+            } finally {
+              setUpstreamProxyDraft(null);
             }
           })();
         }}

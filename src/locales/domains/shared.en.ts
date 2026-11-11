@@ -131,6 +131,10 @@ export const en = {
   "shared.gateway.models.effortNoneUnknown": "This program's model list does not declare thinking levels",
   "shared.gateway.models.effortNoneUnsupported": "This model has no selectable thinking level",
   "shared.gateway.models.effortNoneUndeclared": "Not declared upstream, and the built-in table has no entry",
+  /** issue #65: model effort selection UI */
+  "shared.gateway.models.upstreamProxyTitle": "Upstream connection",
+  "shared.gateway.models.upstreamProxyDesc":
+    "Off = connect to upstream directly (default, recommended). On = send upstream requests through the system proxy (HTTPS_PROXY); only needed when your network can reach upstream solely through a proxy. Takes effect after restarting the app.",
   "shared.gateway.models.effortSourceUpstream": "Levels come from the upstream catalog",
   "shared.gateway.models.effortSourceStatic": "Levels come from the gateway's built-in table (not declared upstream; may lag the official client)",
   "shared.gateway.models.creditsFree": "Free",
@@ -790,6 +794,8 @@ export const en = {
   "shared.checkinResult.skippedNames": "Check-in channel unavailable for: {names}",
   "shared.checkinResult.earned": "+{n} Credits this run",
   "shared.checkinResult.dismiss": "Got it",
+  /** Generic button label */
+  "shared.save": "Save",
   "shared.list.groupCount": "{n}",
 
   // ---- Account list toolbar (components/account-toolbar.tsx, shared) ----

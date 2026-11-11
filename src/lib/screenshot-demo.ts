@@ -747,6 +747,8 @@ function demoGatewayConfig(): GatewayConfig {
     // ★ issue #129：演示站与真实默认一致（关）。开启态要演示的话会改变对外报错语义，
     // 不适合作为默认截图状态。
     auto_failover: false,
+    // 演示态与真实默认一致：上游直连。
+    upstream_via_proxy: false,
   };
 }
 
