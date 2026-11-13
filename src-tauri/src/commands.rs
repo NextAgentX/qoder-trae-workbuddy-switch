@@ -3180,20 +3180,19 @@ pub async fn revive_gateway_account(uid: String) -> Result<Value, String> {
     }
     let revived = pool.revive(&uid);
     drop(pool);
-    let risk_recovered_cn = buddy_switch_gateway::risk_controls::recover_account(
+    buddy_switch_gateway::risk_controls::recover_account(
         &state.risk_store,
         "workbuddy",
         "cn",
         &uid,
     )?;
-    let risk_recovered_global = buddy_switch_gateway::risk_controls::recover_account(
+    buddy_switch_gateway::risk_controls::recover_account(
         &state.risk_store,
         "workbuddy",
         "global",
         &uid,
     )?;
-    let risk_recovered = risk_recovered_cn || risk_recovered_global;
-    Ok(json!({ "ok": true, "revived": revived, "risk_recovered": risk_recovered }))
+    Ok(json!({ "ok": true, "revived": revived, "risk_recovered": true }))
 }
 
 /// 清除某产品、区域下人工确认后的持久化风险暂停/冷却。

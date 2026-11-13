@@ -348,6 +348,8 @@ jobs:
         if: matrix.bundles != ''
         shell: bash
         env:
+          # Tauri 的 beforeBuildCommand 会再次执行 npm run build；也要传入慢 runner 的门禁超时。
+          CHECK_PROTO_TIMEOUT_MS: ${{ matrix.name == 'mac-arm64' && '600000' || '180000' }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
