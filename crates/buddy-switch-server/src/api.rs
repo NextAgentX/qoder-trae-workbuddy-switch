@@ -3652,7 +3652,7 @@ async fn api_gateway_revive_account(Json(body): Json<Value>) -> Response {
         "cn",
         uid,
     ) {
-        Ok(value) => value,
+        Ok(()) => true,
         Err(error) => return json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
     };
     let risk_recovered_global = match buddy_switch_gateway::risk_controls::recover_account(
@@ -3661,7 +3661,7 @@ async fn api_gateway_revive_account(Json(body): Json<Value>) -> Response {
         "global",
         uid,
     ) {
-        Ok(value) => value,
+        Ok(()) => true,
         Err(error) => return json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
     };
     json_ok(
@@ -3705,8 +3705,8 @@ async fn api_gateway_risk_recover(Json(body): Json<Value>) -> Response {
     }
     let store = match platform.as_str() {
         "workbuddy" => crate::gateway_host::shared_state().risk_store,
-        "trae" => crate::trae_gateway::shared_state().risk_store,
-        "qoder" => crate::qoder_gateway::shared_state().risk_store,
+        "trae" => crate::trae_gateway_host::shared_state().risk_store,
+        "qoder" => crate::qoder_gateway_host::shared_state().risk_store,
         _ => unreachable!(),
     };
     match buddy_switch_gateway::risk_controls::recover_account(&store, &platform, &region, uid) {
