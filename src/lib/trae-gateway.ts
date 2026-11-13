@@ -18,7 +18,6 @@ import type {
   TraeGatewayPoolSummary,
   TraeGatewayStatus,
 } from "@/lib/trae-types";
-import { DEFAULT_RISK_CONTROLS_BY_REGION, normalizeRiskControlsByRegion } from "@/lib/risk-controls";
 
 /** 默认配置（与 Rust `TraeGatewayConfig::default` 对齐）。 */
 export const DEFAULT_TRAE_GATEWAY_CONFIG: TraeGatewayConfig = {
@@ -42,7 +41,6 @@ export const DEFAULT_TRAE_GATEWAY_CONFIG: TraeGatewayConfig = {
   maxMode: true,
   // ★ issue #129：账号故障时自动切换，**默认关闭**（与 Rust 默认同口径）。
   autoFailover: false,
-  riskControlsByRegion: DEFAULT_RISK_CONTROLS_BY_REGION,
 };
 
 function asString(value: unknown): string | undefined {
@@ -104,7 +102,6 @@ export function normalizeTraeGatewayConfig(raw: unknown): TraeGatewayConfig {
     autoFailover:
       asBoolean(read("autoFailover", "auto_failover")) ??
       DEFAULT_TRAE_GATEWAY_CONFIG.autoFailover,
-    riskControlsByRegion: normalizeRiskControlsByRegion(read("riskControlsByRegion", "risk_controls_by_region")),
   };
 }
 
@@ -131,7 +128,6 @@ export function toTraeGatewayConfigRaw(config: TraeGatewayConfig): TraeGatewayCo
     capture_enabled: config.captureEnabled,
     max_mode: config.maxMode,
     auto_failover: config.autoFailover,
-    risk_controls_by_region: config.riskControlsByRegion,
   };
 }
 

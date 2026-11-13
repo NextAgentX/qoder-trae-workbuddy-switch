@@ -1,22 +1,24 @@
 //! Gateway integration helpers for the core risk admission store.
 
-use buddy_switch_core::modules::risk_control::{
-    RiskControlSettings, RiskPermit, RiskScope, RiskStore,
-};
+use buddy_switch_core::modules::risk_control::{RiskPermit, RiskScope, RiskStore};
 
 pub fn admit_request(
     store: &Result<RiskStore, String>,
     product: &str,
     region: &str,
     account_id: &str,
-    settings: &RiskControlSettings,
     now_ms: u64,
 ) -> Result<RiskPermit, String> {
+    let settings =
+        buddy_switch_core::modules::risk_control::platform_risk_settings(product, region)?;
+    if !settings.enabled {
+        return Ok(RiskPermit::untracked());
+    }
     let store = store
         .as_ref()
         .map_err(|error| format!("risk state unavailable: {error}"))?;
     let scope = RiskScope::new(product, region)?;
-    store.begin_request_at(&scope, account_id, settings, now_ms)
+    store.begin_request_at(&scope, account_id, &settings, now_ms)
 }
 
 /// Exclude accounts with a persisted pause/cooldown before the pool chooses one.
@@ -34,6 +36,10 @@ pub fn account_blocked(
     let Ok(scope) = RiskScope::new(product, region) else {
         return true;
     };
+    // Persisted pause/cooling is a safety state, not an optional rate limiter.
+    // It must continue to exclude the account even while the shared limiter is
+    // disabled, otherwise turning the UI switch off silently re-enables an
+    // account that the platform has already rejected.
     matches!(
         store.state_at(&scope, account_id, now_ms),
         buddy_switch_core::modules::risk_control::AccountRiskState::Paused { .. }
@@ -49,8 +55,12 @@ pub fn record_rate_limit(
     reason: String,
     reset_at_ms: Option<u64>,
     now_ms: u64,
-    fallback_cooldown_secs: u64,
 ) -> Result<(), String> {
+    let settings =
+        buddy_switch_core::modules::risk_control::platform_risk_settings(product, region)?;
+    if !settings.enabled {
+        return Ok(());
+    }
     let store = store
         .as_ref()
         .map_err(|error| format!("risk state unavailable: {error}"))?;
@@ -60,7 +70,7 @@ pub fn record_rate_limit(
         buddy_switch_core::modules::risk_control::RiskOutcome::RateLimited(reason),
         reset_at_ms,
         now_ms,
-        fallback_cooldown_secs,
+        settings.fallback_cooldown_secs,
     )
 }
 
@@ -72,6 +82,9 @@ pub fn pause_account(
     reason: String,
     now_ms: u64,
 ) -> Result<(), String> {
+    if !buddy_switch_core::modules::risk_control::platform_risk_settings(product, region)?.enabled {
+        return Ok(());
+    }
     let store = store
         .as_ref()
         .map_err(|error| format!("risk state unavailable: {error}"))?;

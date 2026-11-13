@@ -62,6 +62,17 @@ pub fn memory_file_for(region: Region, uid: &str) -> PathBuf {
     memory_dir_for(region).join(format!("{uid}_memory.md"))
 }
 
+/// buddy 智能体个人工作区的长期记忆路径。
+///
+/// 与 [`memory_file_for`] 的「用户记忆档案」不同：当前客户端（5.9.x）里后者
+/// 大多数账号只是空壳模板，真正被智能体读取的是
+/// `~/.workbuddy/user-{uid}-personal/MEMORY.md`（issue #198）。
+pub fn personal_memory_file_for(region: Region, uid: &str) -> PathBuf {
+    crate::modules::session::session_data_dir(region)
+        .join(format!("user-{}-personal", uid.trim()))
+        .join("MEMORY.md")
+}
+
 /// 规范化一行记忆文本，作为去重指纹。返回 `None` 表示该行不参与去重判定
 /// （空行、纯分隔线）。
 ///
@@ -451,6 +462,113 @@ fn backup_target_memory(target_path: &Path, original: &str) -> Option<PathBuf> {
     let dest = dir.join(file_name);
     crate::modules::config::atomic_write(&dest, original).ok()?;
     Some(dest)
+}
+
+/// 合并 buddy 智能体个人工作区里的 `MEMORY.md`（issue #198）。
+///
+/// 与旧档案不同，这里两边都是**纯 markdown**，不解析 RAW_JSON。源文件缺失或只有
+/// 模板/空行时返回 `skipped`，让调用方能区分「没有记忆可迁」与「迁了 0 行」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonalMemoryMergeResult {
+    pub merge: MemoryMergeResult,
+    pub skipped: bool,
+    pub skipped_reason: Option<String>,
+}
+
+impl PersonalMemoryMergeResult {
+    fn skipped(reason: impl Into<String>) -> Self {
+        Self {
+            merge: MemoryMergeResult::default(),
+            skipped: true,
+            skipped_reason: Some(reason.into()),
+        }
+    }
+
+    pub fn changed(&self) -> bool {
+        self.merge.changed()
+    }
+}
+
+/// 判断纯 markdown 记忆是否只有客户端模板而无用户内容。
+fn personal_memory_has_content(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("<!--") || trimmed.starts_with("-->") {
+            return false;
+        }
+        // 客户端空壳只含标题、`> Last updated` / `> Version` 元信息与分隔线。
+        if trimmed.starts_with('#') || trimmed.starts_with('>') || is_separator_line(trimmed) {
+            return false;
+        }
+        true
+    })
+}
+
+/// 合并两个账号的个人工作区 `MEMORY.md`（同版本内）。
+pub fn merge_personal_memory_files(
+    region: Region,
+    source_uid: &str,
+    target_uid: &str,
+) -> Result<PersonalMemoryMergeResult, String> {
+    merge_personal_memory_files_cross(region, source_uid, region, target_uid)
+}
+
+/// 跨版本合并个人工作区 `MEMORY.md`。
+///
+/// 语义与 [`merge_memory_files_cross`] 一致：只写目标、按规范化行去重、改写前备份；
+/// 但源缺失/空壳会明确标记 `skipped`，不再冒充「成功合并 0 行」。
+pub fn merge_personal_memory_files_cross(
+    source_region: Region,
+    source_uid: &str,
+    target_region: Region,
+    target_uid: &str,
+) -> Result<PersonalMemoryMergeResult, String> {
+    let source_uid = source_uid.trim();
+    let target_uid = target_uid.trim();
+    if source_uid.is_empty() {
+        return Err("缺少源账号 uid".to_string());
+    }
+    if target_uid.is_empty() {
+        return Err("缺少目标账号 uid".to_string());
+    }
+    if source_region == target_region && source_uid == target_uid {
+        return Err("源账号与目标账号相同".to_string());
+    }
+
+    let source_path = personal_memory_file_for(source_region, source_uid);
+    if !source_path.is_file() {
+        return Ok(PersonalMemoryMergeResult::skipped(
+            "源账号没有个人工作区 MEMORY.md",
+        ));
+    }
+    let source = std::fs::read_to_string(&source_path)
+        .map_err(|e| format!("读取源个人记忆失败（{}）：{e}", source_path.display()))?;
+    if !personal_memory_has_content(&source) {
+        return Ok(PersonalMemoryMergeResult::skipped(
+            "源账号的个人记忆是空壳模板，没有可迁移内容",
+        ));
+    }
+
+    let target_path = personal_memory_file_for(target_region, target_uid);
+    let target = if target_path.is_file() {
+        std::fs::read_to_string(&target_path)
+            .map_err(|e| format!("读取目标个人记忆失败（{}）：{e}", target_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let (merged, mut merge) = merge_memory_text(&target, &source, &shorten_uid(source_uid));
+    if merge.changed() && target_path.is_file() {
+        merge.backup = backup_target_memory(&target_path, &target);
+    }
+    if merge.changed() {
+        write_memory_atomically(&target_path, &merged)?;
+    }
+    Ok(PersonalMemoryMergeResult {
+        merge,
+        skipped: false,
+        skipped_reason: None,
+    })
 }
 
 /// 写入记忆文件：与 `config::atomic_write` 同源，避免半截文件。

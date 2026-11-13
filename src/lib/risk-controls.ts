@@ -1,6 +1,7 @@
 import type { RiskControlSettings } from "@/lib/types";
 
 export const DEFAULT_RISK_CONTROL_SETTINGS: RiskControlSettings = {
+  enabled: false,
   requests_per_minute: 30,
   max_in_flight_per_account: 1,
   max_in_flight_global: 1,
@@ -9,32 +10,21 @@ export const DEFAULT_RISK_CONTROL_SETTINGS: RiskControlSettings = {
   fallback_cooldown_secs: 60,
 };
 
-export const DEFAULT_RISK_CONTROLS_BY_REGION = {
-  cn: { ...DEFAULT_RISK_CONTROL_SETTINGS },
-  global: { ...DEFAULT_RISK_CONTROL_SETTINGS },
-};
-
-export function normalizeRiskControlsByRegion(value: unknown) {
-  const record = value && typeof value === "object" && !Array.isArray(value)
+export function normalizeRiskControlSettings(value: unknown): RiskControlSettings {
+  const row = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-  const normalize = (raw: unknown): RiskControlSettings => {
-    const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-    const number = (key: keyof RiskControlSettings, fallback: number) => {
-      const candidate = row[key];
-      return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
-    };
-    return {
-      requests_per_minute: number("requests_per_minute", 30),
-      max_in_flight_per_account: number("max_in_flight_per_account", 1),
-      max_in_flight_global: number("max_in_flight_global", 1),
-      min_account_gap_ms: number("min_account_gap_ms", 5000),
-      max_transient_attempts: number("max_transient_attempts", 1),
-      fallback_cooldown_secs: number("fallback_cooldown_secs", 60),
-    };
+  const number = (key: keyof RiskControlSettings, fallback: number) => {
+    const candidate = row[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
   };
   return {
-    cn: normalize(record.cn),
-    global: normalize(record.global),
+    enabled: row.enabled === true,
+    requests_per_minute: number("requests_per_minute", DEFAULT_RISK_CONTROL_SETTINGS.requests_per_minute),
+    max_in_flight_per_account: number("max_in_flight_per_account", DEFAULT_RISK_CONTROL_SETTINGS.max_in_flight_per_account),
+    max_in_flight_global: number("max_in_flight_global", DEFAULT_RISK_CONTROL_SETTINGS.max_in_flight_global),
+    min_account_gap_ms: number("min_account_gap_ms", DEFAULT_RISK_CONTROL_SETTINGS.min_account_gap_ms),
+    max_transient_attempts: number("max_transient_attempts", DEFAULT_RISK_CONTROL_SETTINGS.max_transient_attempts),
+    fallback_cooldown_secs: number("fallback_cooldown_secs", DEFAULT_RISK_CONTROL_SETTINGS.fallback_cooldown_secs),
   };
 }

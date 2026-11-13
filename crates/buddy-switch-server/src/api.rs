@@ -251,6 +251,10 @@ fn api_routes() -> Router {
         .route("/api/switch/progress", get(api_switch_progress))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/replicas", get(api_session_replicas))
+        .route(
+            "/api/sessions/replicas/prune",
+            post(api_prune_session_replicas),
+        )
         // P8 · 安全同步（增量追加）—— **写操作**：只往目标 jsonl 追加，绝不改写已有内容。
         .route("/api/sessions/sync", post(api_session_sync))
         .route("/api/sessions/unify", post(api_session_unify))
@@ -341,6 +345,10 @@ fn api_routes() -> Router {
         .route(
             "/api/gateway/config",
             get(api_gateway_config).post(api_save_gateway_config),
+        )
+        .route(
+            "/api/settings/risk-controls",
+            get(api_risk_control_settings).post(api_save_risk_control_settings),
         )
         .route("/api/proxy/status", get(api_proxy_status))
         .route("/api/proxy/enable", post(api_proxy_enable))
@@ -2531,6 +2539,20 @@ async fn api_session_replicas(RawQuery(query): RawQuery) -> Response {
     json_ok(session::list_replica_groups_for(region))
 }
 
+/// POST /api/sessions/replicas/prune —— remove ledger edges whose target
+/// session no longer exists (issue #203).
+///
+/// Explicit, user-triggered cleanup only. The core decision is fail-safe:
+/// unreadable DB, malformed keys and cross-region keys are retained.
+async fn api_prune_session_replicas(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body.get("region").and_then(Value::as_str));
+    json_ok(session::prune_deleted_replica_edges_for(region))
+}
+
 /// POST /api/sessions/sync —— P8 **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
 ///
 /// 与 Tauri 侧 `commands::sync_session_replicas` **同契约**（两宿主同步）。
@@ -3485,9 +3507,6 @@ async fn api_save_gateway_config(Json(body): Json<Value>) -> Response {
         Ok(config) => config,
         Err(error) => return json_err(format!("配置格式错误: {error}"), StatusCode::BAD_REQUEST),
     };
-    if let Err(error) = config.validate_risk_controls() {
-        return json_err(format!("风控设置无效: {error}"), StatusCode::BAD_REQUEST);
-    }
     if let Err(error) = config.save() {
         return json_err(error, StatusCode::BAD_REQUEST);
     }
@@ -3517,6 +3536,31 @@ async fn api_save_gateway_config(Json(body): Json<Value>) -> Response {
         "running": addr.is_some(),
         "addr": addr,
     }))
+}
+
+async fn api_risk_control_settings() -> Response {
+    match buddy_switch_core::modules::risk_control::load_settings() {
+        Ok(settings) => json_ok(json!(settings)),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_save_risk_control_settings(Json(body): Json<Value>) -> Response {
+    let submitted = body.get("settings").cloned().unwrap_or(body);
+    let settings: buddy_switch_core::modules::risk_control::RiskControlSettings =
+        match serde_json::from_value(submitted) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return json_err(
+                    format!("风控设置格式错误：{error}"),
+                    StatusCode::BAD_REQUEST,
+                )
+            }
+        };
+    match buddy_switch_core::modules::risk_control::save_settings(&settings) {
+        Ok(()) => json_ok(json!(settings)),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
 }
 
 /// GET /api/proxy/status —— P12 C 路（base URL 重定向）的**只读状态**。
@@ -5076,9 +5120,6 @@ async fn api_save_trae_gateway_config(Json(body): Json<Value>) -> Response {
                 return json_err(format!("配置格式错误: {error}"), StatusCode::BAD_REQUEST)
             }
         };
-    if let Err(error) = config.validate_risk_controls() {
-        return json_err(format!("风控设置无效: {error}"), StatusCode::BAD_REQUEST);
-    }
     if let Err(error) = config.save() {
         return json_err(error, StatusCode::BAD_REQUEST);
     }
@@ -8689,9 +8730,6 @@ async fn api_save_qoder_gateway_config(Json(body): Json<Value>) -> Response {
                 return json_err(format!("配置格式错误: {error}"), StatusCode::BAD_REQUEST)
             }
         };
-    if let Err(error) = config.validate_risk_controls() {
-        return json_err(format!("风控设置无效: {error}"), StatusCode::BAD_REQUEST);
-    }
     if let Err(error) = config.save() {
         return json_err(error, StatusCode::BAD_REQUEST);
     }

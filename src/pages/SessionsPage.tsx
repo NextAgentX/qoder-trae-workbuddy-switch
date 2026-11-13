@@ -6,6 +6,7 @@ import {
   Filter,
   GitBranch,
   Loader2,
+  Trash2,
   RefreshCw,
   Upload,
 } from "lucide-react";
@@ -20,6 +21,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import * as api from "@/lib/api";
 import { useT } from "@/lib/i18n";
@@ -328,6 +337,36 @@ export default function SessionsPage() {
    * 那条路径不存在，静态引入会让整页崩（与 `trae-client-import.tsx` 同一纪律）。
    */
   const [bundleBusy, setBundleBusy] = useState(false);
+  /* issue #203: explicit stale-ledger cleanup. Never run automatically: an
+     unreadable DB or a deleted client session is a user-owned state change. */
+  const [pruneOpen, setPruneOpen] = useState(false);
+  const [pruneBusy, setPruneBusy] = useState(false);
+
+  async function runPruneReplicas() {
+    if (pruneBusy) return;
+    setPruneBusy(true);
+    try {
+      const report = await api.pruneSessionReplicas(region);
+      await load(region);
+      if (report.error) {
+        toast.error(t("sessions.prune.failed"), { description: report.error });
+      } else if (report.removed > 0) {
+        toast.success(t("sessions.prune.done", { n: report.removed }), {
+          description: t("sessions.prune.kept", { n: report.kept }),
+        });
+      } else {
+        toast.info(t("sessions.prune.none"), {
+          description: t("sessions.prune.kept", { n: report.kept }),
+        });
+      }
+      setPruneOpen(false);
+    } catch (error) {
+      toast.error(t("sessions.prune.failed"), { description: api.asError(error) });
+    } finally {
+      setPruneBusy(false);
+    }
+  }
+
   const [importPath, setImportPath] = useState<string | null>(null);
   const [importPreview, setImportPreview] = useState<SessionBundlePreview | null>(null);
 
@@ -477,6 +516,19 @@ export default function SessionsPage() {
           <Upload className="size-3.5" aria-hidden="true" />
           {t("sessions.bundle.import")}
         </Button>
+        {groups.length > 0 ? (
+          <Button
+            size="default"
+            variant="ghost"
+            disabled={pruneBusy}
+            data-prune-replicas="true"
+            title={t("sessions.prune.hint")}
+            onClick={() => setPruneOpen(true)}
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            {t("sessions.prune.action")}
+          </Button>
+        ) : null}
         <ScopeChip scope={scope} />
       </header>
 
@@ -623,6 +675,27 @@ export default function SessionsPage() {
         }}
         onConfirm={() => void confirmImport()}
       />
+
+      <Dialog open={pruneOpen} onOpenChange={(open) => { if (!pruneBusy) setPruneOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("sessions.prune.title")}</DialogTitle>
+            <DialogDescription>{t("sessions.prune.description")}</DialogDescription>
+          </DialogHeader>
+          <p className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+            {t("sessions.prune.note")}
+          </p>
+          <DialogFooter>
+            <Button variant="ghost" disabled={pruneBusy} onClick={() => setPruneOpen(false)}>
+              {t("sessions.prune.cancel")}
+            </Button>
+            <Button disabled={pruneBusy} onClick={() => void runPruneReplicas()} data-prune-confirm="true">
+              {pruneBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : <Trash2 className="size-3.5" aria-hidden="true" />}
+              {t("sessions.prune.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

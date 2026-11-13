@@ -397,3 +397,73 @@ fn cross_region_memory_and_connectors_merge_into_target_region() {
     .expect("二次迁移");
     assert_eq!(second["changed"], false, "二次迁移必须幂等：{second}");
 }
+
+// ---- #198 personal agent memory (red first) ----
+#[test]
+fn personal_memory_merges_source_lines_dedupes_and_is_idempotent() {
+    let home = IsolatedHome::new("personal-memory-merge");
+    let _h = home.path();
+    let src = memory::personal_memory_file_for(Region::Cn, CN_UID);
+    let dst = memory::personal_memory_file_for(Region::Global, GLOBAL_UID);
+    fs::create_dir_all(src.parent().unwrap()).unwrap();
+    fs::create_dir_all(dst.parent().unwrap()).unwrap();
+    fs::write(&src, "- SSH 板端：root@192.0.2.10\n- 偏好：直接执行\n").unwrap();
+    fs::write(&dst, "- 偏好：中文\n- SSH 板端：root@192.0.2.10\n").unwrap();
+
+    let first = migrate::migrate_account_data_cross(
+        Region::Cn,
+        CN_UID,
+        Region::Global,
+        GLOBAL_UID,
+        migrate::MigrateScope::default(),
+    )
+    .unwrap();
+    assert_eq!(first["memory"]["personal"]["appended"], 1, "{first}");
+    let text = fs::read_to_string(&dst).unwrap();
+    assert_eq!(text.matches("SSH 板端").count(), 1, "{text}");
+    assert!(text.contains("直接执行"), "{text}");
+    assert!(
+        first["memory"]["personal"]["backup"].as_str().is_some(),
+        "{first}"
+    );
+    let second = migrate::migrate_account_data_cross(
+        Region::Cn,
+        CN_UID,
+        Region::Global,
+        GLOBAL_UID,
+        migrate::MigrateScope::default(),
+    )
+    .unwrap();
+    assert_eq!(second["memory"]["personal"]["appended"], 0, "{second}");
+}
+
+#[test]
+fn empty_shell_personal_memory_is_reported_skipped_not_success() {
+    let _home = IsolatedHome::new("personal-memory-empty");
+    let src = memory::personal_memory_file_for(Region::Cn, CN_UID);
+    fs::create_dir_all(src.parent().unwrap()).unwrap();
+    fs::write(&src, "# User Memory Profile\n> Version: 0\n").unwrap();
+    let report = migrate::migrate_account_data_cross(
+        Region::Cn,
+        CN_UID,
+        Region::Global,
+        GLOBAL_UID,
+        migrate::MigrateScope::default(),
+    )
+    .unwrap();
+    assert_eq!(report["memory"]["personal"]["skipped"], true, "{report}");
+    assert!(
+        report["memory"]["personal"]["skippedReason"]
+            .as_str()
+            .is_some(),
+        "{report}"
+    );
+    assert_eq!(report["memory"]["personal"]["changed"], false);
+}
+
+#[test]
+fn personal_memory_same_account_is_rejected_even_if_profile_is_missing() {
+    let home = IsolatedHome::new("personal-memory-same");
+    assert!(memory::merge_personal_memory_files(Region::Cn, CN_UID, CN_UID).is_err());
+    let _ = home;
+}

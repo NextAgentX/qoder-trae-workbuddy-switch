@@ -23,7 +23,6 @@ use buddy_switch_core::modules::account;
 use buddy_switch_core::modules::catalog::CatalogStore;
 use buddy_switch_core::modules::config as core_config;
 use buddy_switch_core::modules::region::{self, Region};
-use buddy_switch_core::modules::risk_control::RiskControlSettings;
 use buddy_switch_core::modules::risk_control::RiskStore;
 use buddy_switch_core::modules::upstream::UpstreamClient;
 
@@ -135,12 +134,6 @@ pub struct GatewayConfig {
     /// ⚠️ 客户端在网关状态初始化时构建一次 ⇒ **改本项需重启应用生效**。
     #[serde(default, alias = "upstreamViaProxy")]
     pub upstream_via_proxy: bool,
-    /// 每个 WorkBuddy 区域独立生效的请求风控参数。
-    #[serde(
-        default = "default_risk_controls_by_region",
-        alias = "riskControlsByRegion"
-    )]
-    pub risk_controls_by_region: BTreeMap<String, RiskControlSettings>,
 }
 
 impl Default for GatewayConfig {
@@ -165,23 +158,11 @@ impl Default for GatewayConfig {
             max_context: true,
             model_efforts: std::collections::HashMap::new(),
             upstream_via_proxy: false,
-            risk_controls_by_region: default_risk_controls_by_region(),
         }
     }
 }
 
 impl GatewayConfig {
-    pub fn validate_risk_controls(&self) -> Result<(), String> {
-        for (region, settings) in &self.risk_controls_by_region {
-            if !matches!(region.as_str(), "cn" | "global") {
-                return Err(format!("unknown WorkBuddy risk-control region: {region}"));
-            }
-            settings
-                .validate()
-                .map_err(|error| format!("{region}: {error}"))?;
-        }
-        Ok(())
-    }
     /// 从 `~/.buddy-switch/gateway_config.json` 读取；缺失/损坏回落默认值。
     pub fn load() -> Self {
         let file = region::gateway_config_file();
@@ -215,13 +196,6 @@ impl GatewayConfig {
         };
         format!("http://{host}:{}", self.port)
     }
-}
-
-fn default_risk_controls_by_region() -> BTreeMap<String, RiskControlSettings> {
-    ["cn", "global"]
-        .into_iter()
-        .map(|region| (region.to_string(), RiskControlSettings::default()))
-        .collect()
 }
 
 /// 网关运行状态的**对外响应契约**（`GET /api/gateway/status`，见 A-3.7）。
@@ -754,7 +728,6 @@ mod tests {
             "model_efforts",
             // 上游是否走系统代理（默认 false = 直连，见字段文档）
             "upstream_via_proxy",
-            "risk_controls_by_region",
         ]
         .into_iter()
         .collect();

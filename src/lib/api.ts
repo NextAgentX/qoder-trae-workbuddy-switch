@@ -1,3 +1,4 @@
+import { normalizeRiskControlSettings } from "@/lib/risk-controls";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AccountMeta,
@@ -40,6 +41,7 @@ import type {
   ModelProbeJob,
   ModelProbeLedger,
   GatewayConfig,
+  RiskControlSettings,
   GatewayLogEntry,
   GatewayStatus,
   GatewayTokenTrend,
@@ -55,6 +57,7 @@ import type {
   OAuthPollResult,
   OAuthStartResult,
   ProxyStatus,
+  PruneSessionReplicaResponse,
   Region,
   RegionFilter,
   RotateLog,
@@ -195,7 +198,7 @@ const DEMO_READ_COMMANDS = new Set([
   // `list_sessions` 是**既有**命令，这里补进演示面 —— 会话页要用它 join 标题 / updatedAt。
   "list_sessions", "list_session_replicas",
   // API 网关只读命令（演示站需返回虚构数据，否则 build:demo 报错）
-  "get_gateway_config", "gateway_status", "list_api_keys", "get_gateway_models",
+  "get_gateway_config", "get_risk_control_settings", "gateway_status", "list_api_keys", "get_gateway_models",
   // ⚠️ 图片能力**读取**只读，进演示面；`set_model_image_cap` 是写操作，**不进**（与禁用同款）。
   "get_account_strategy", "get_disabled_models", "get_model_image_caps",
   "get_gateway_logs",
@@ -394,6 +397,7 @@ const ROUTES: Record<string, Route> = {
   list_sessions: { method: "GET", path: "/api/sessions" },
   // P8 T02 · 只读：copy ledger 连通成「会话副本组」（两宿主同步）。
   list_session_replicas: { method: "GET", path: "/api/sessions/replicas" },
+  prune_session_replicas: { method: "POST", path: "/api/sessions/replicas/prune" },
   // P14 S4a · VS Code 插件 / CodeBuddy IDE 的会话仓（**与桌面版不是同一套存储**，
   // 所以单开路由而不是往 `/api/sessions` 塞 `client` 参数）。
   list_vscode_sessions: { method: "GET", path: "/api/vscode-sessions" },
@@ -465,6 +469,8 @@ const ROUTES: Record<string, Route> = {
   // API 网关（对照架构设计 A-3.7）
   get_gateway_config: { method: "GET", path: "/api/gateway/config" },
   save_gateway_config: { method: "POST", path: "/api/gateway/config" },
+  get_risk_control_settings: { method: "GET", path: "/api/settings/risk-controls" },
+  save_risk_control_settings: { method: "POST", path: "/api/settings/risk-controls" },
   gateway_status: { method: "GET", path: "/api/gateway/status" },
   // P12 · C 路（base URL 重定向）—— **默认关**，应用只记"用户已按引导设置"的本地标记。
   proxy_status: { method: "GET", path: "/api/proxy/status" },
@@ -1509,6 +1515,16 @@ export function listSessionReplicas(region?: Region): Promise<SessionReplicaResp
 }
 
 /**
+ * issue #203: remove replica-ledger edges whose target session was deleted.
+ *
+ * Explicit cleanup only. Core refuses to infer deletion when the DB is
+ * unreadable, the key is malformed, or the edge is cross-region.
+ */
+export function pruneSessionReplicas(region?: Region): Promise<PruneSessionReplicaResponse> {
+  return call("prune_session_replicas", region ? { region } : undefined);
+}
+
+/**
  * P8 · **安全同步（增量追加）** —— 把源副本里**目标还没有的尾部行**追加过去。
  *
  * ## 语义（`PLAN.md` §3.15.4）
@@ -2173,6 +2189,15 @@ export function refreshAccountToken(accountId: string, region?: Region): Promise
 
 export function getGatewayConfig(): Promise<GatewayConfig> {
   return call("get_gateway_config");
+}
+
+export async function getRiskControlSettings(): Promise<RiskControlSettings> {
+  const raw = await call<Record<string, unknown>>("get_risk_control_settings");
+  return normalizeRiskControlSettings(raw.settings ?? raw);
+}
+
+export function saveRiskControlSettings(settings: RiskControlSettings): Promise<RiskControlSettings> {
+  return call("save_risk_control_settings", { settings });
 }
 
 export async function saveGatewayConfig(config: GatewayConfig): Promise<GatewayConfig> {

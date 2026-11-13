@@ -3,9 +3,12 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import type { RiskControlSettings } from "@/lib/types";
 
-const FIELDS: { key: keyof RiskControlSettings; label: string; min: number; max: number; unit: string }[] = [
+type NumericKey = Exclude<keyof RiskControlSettings, "enabled">;
+
+const FIELDS: { key: NumericKey; label: string; min: number; max: number; unit: string }[] = [
   { key: "requests_per_minute", label: "请求速率上限", min: 0, max: 600, unit: "次/分钟，0 关闭" },
   { key: "max_in_flight_per_account", label: "单账号并发", min: 1, max: 256, unit: "个请求" },
   { key: "max_in_flight_global", label: "平台总并发", min: 1, max: 256, unit: "个请求" },
@@ -15,12 +18,10 @@ const FIELDS: { key: keyof RiskControlSettings; label: string; min: number; max:
 ];
 
 export function RiskControlsForm({
-  region,
   value,
   saving,
   onSave,
 }: {
-  region: "cn" | "global";
   value: RiskControlSettings;
   saving: boolean;
   onSave: (value: RiskControlSettings) => Promise<void>;
@@ -31,7 +32,10 @@ export function RiskControlsForm({
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
-    const invalid = FIELDS.find(({ key, min, max }) => !Number.isInteger(draft[key]) || draft[key] < min || draft[key] > max);
+    const invalid = FIELDS.find(({ key, min, max }) => {
+      const value = draft[key];
+      return !Number.isInteger(value) || value < min || value > max;
+    });
     if (invalid) {
       setError(`${invalid.label}范围为 ${invalid.min}–${invalid.max} ${invalid.unit}`);
       return;
@@ -44,9 +48,21 @@ export function RiskControlsForm({
     <Card className="mt-4 p-4">
       <form onSubmit={(event) => void submit(event)}>
         <div className="mb-3">
-          <h3 className="text-sm font-semibold">请求风控 · {region === "cn" ? "中国区" : "国际区"}</h3>
-          <p className="mt-1 text-xs text-muted-foreground">仅约束本平台、本区域的请求。认证拒绝、封禁和限流不会触发自动换号。</p>
+          <h3 className="text-sm font-semibold">请求风控</h3>
+          <p className="mt-1 text-xs text-muted-foreground">默认关闭。开启后，统一应用于 WorkBuddy、Trae、Qoder 的所有区域；平台认证或限流结果仍按账号记录。</p>
         </div>
+        <label className="mb-4 flex items-center justify-between gap-4 rounded-md border p-3">
+          <span className="space-y-1">
+            <span className="block text-xs font-medium">启用请求风控</span>
+            <span className="block text-xs text-muted-foreground">关闭时不执行本软件的速率、并发、间隔和暂停拦截，恢复旧版请求行为。</span>
+          </span>
+          <Switch
+            checked={draft.enabled}
+            disabled={saving}
+            onCheckedChange={(enabled) => setDraft((current) => ({ ...current, enabled }))}
+            aria-label="启用请求风控"
+          />
+        </label>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {FIELDS.map(({ key, label, min, max, unit }) => (
             <label key={key} className="space-y-1 text-xs">
@@ -58,6 +74,7 @@ export function RiskControlsForm({
                 max={max}
                 step={1}
                 value={draft[key]}
+                disabled={!draft.enabled || saving}
                 onChange={(event) => setDraft((current) => ({ ...current, [key]: Number(event.target.value) }))}
               />
               <span className="text-muted-foreground">{unit} · 范围 {min}–{max}</span>

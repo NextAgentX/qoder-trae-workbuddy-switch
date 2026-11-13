@@ -1624,6 +1624,21 @@ pub async fn list_session_replicas(region: Option<String>) -> Result<Value, Stri
         .map_err(|error| format!("读取会话副本失败: {error}"))
 }
 
+/// POST /api/sessions/replicas/prune —— remove replica-ledger edges whose target
+/// session no longer exists (issue #203).
+///
+/// This is an explicit cleanup action, not a background prune. The core keeps
+/// edges when the DB is unreadable, the key is malformed, or the edge crosses
+/// regions; deleting a ledger edge is never inferred.
+#[tauri::command]
+pub async fn prune_session_replicas(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || session::prune_deleted_replica_edges_for(region))
+        .await
+        .map_err(|error| format!("清理会话关联失败: {error}"))
+}
+
 /// POST /api/sessions/sync —— P8 **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
 ///
 /// 与 server 侧 `api_session_sync` **同契约**（两宿主同步）。批量 + 逐条结果
@@ -2753,9 +2768,6 @@ pub async fn save_gateway_config(app: tauri::AppHandle, config: Value) -> Result
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: GatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
-    parsed
-        .validate_risk_controls()
-        .map_err(|error| format!("风控设置无效: {error}"))?;
     parsed.save()?;
 
     let state = gateway::shared_state();
@@ -2783,6 +2795,22 @@ pub async fn save_gateway_config(app: tauri::AppHandle, config: Value) -> Result
         "running": addr.is_some(),
         "addr": addr,
     }))
+}
+
+/// Read the application-wide request-risk settings shared by every platform and region.
+#[tauri::command]
+pub fn get_risk_control_settings(
+) -> Result<buddy_switch_core::modules::risk_control::RiskControlSettings, String> {
+    buddy_switch_core::modules::risk_control::load_settings()
+}
+
+/// Save the application-wide request-risk settings shared by every platform and region.
+#[tauri::command]
+pub fn save_risk_control_settings(settings: Value) -> Result<Value, String> {
+    let settings: buddy_switch_core::modules::risk_control::RiskControlSettings =
+        serde_json::from_value(settings).map_err(|error| format!("风控设置格式错误：{error}"))?;
+    buddy_switch_core::modules::risk_control::save_settings(&settings)?;
+    Ok(serde_json::json!({ "settings": settings }))
 }
 
 /// GET /api/proxy/status —— P12 C 路（base URL 重定向）的**只读状态**。
@@ -4298,9 +4326,6 @@ pub async fn save_trae_gateway_config(
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: buddy_switch_gateway::trae::TraeGatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
-    parsed
-        .validate_risk_controls()
-        .map_err(|error| format!("风控设置无效: {error}"))?;
     parsed.save()?;
 
     let state = trae_gateway::shared_state();
@@ -5897,9 +5922,6 @@ pub async fn save_qoder_gateway_config(
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: buddy_switch_gateway::qoder::QoderGatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
-    parsed
-        .validate_risk_controls()
-        .map_err(|error| format!("风控设置无效: {error}"))?;
     parsed.save()?;
 
     let state = qoder_gateway::shared_state();

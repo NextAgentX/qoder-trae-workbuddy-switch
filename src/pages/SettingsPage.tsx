@@ -39,6 +39,7 @@ import { CodebuddyCliCard } from "@/components/settings/codebuddy-cli-card";
 import { CacheSection } from "@/components/settings/cache-section";
 import { RuntimeLogCard } from "@/components/settings/runtime-log-card";
 import { AppSettingsGroups } from "@/components/app-settings";
+import { RiskControlsForm } from "@/components/gateway/risk-controls-form";
 // 时点表编辑器与 Trae 设置页**共用同一份实现**（校验规则属于规则，不属于版式）。
 import { TimesEditor } from "@/components/schedule-times-editor";
 import { Input } from "@/components/ui/input";
@@ -49,6 +50,7 @@ import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { regionDescriptor } from "@/lib/region";
+import { DEFAULT_RISK_CONTROL_SETTINGS } from "@/lib/risk-controls";
 import { scopeOf } from "@/lib/scope";
 import { useScope } from "@/lib/use-scope";
 import type { TranslationKey } from "@/locales/zh";
@@ -62,6 +64,7 @@ import type {
   Region,
   RotateLog,
   RotateStatus,
+  RiskControlSettings,
   ScheduleConfig,
   ScheduleRunResult,
   SwitchConfig,
@@ -1344,6 +1347,35 @@ function GatewaySettingsCard() {
   );
 }
 
+function GlobalRiskControlsCard() {
+  const [settings, setSettings] = useState<RiskControlSettings>(DEFAULT_RISK_CONTROL_SETTINGS);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void api.getRiskControlSettings()
+      .then((value) => { if (active) setSettings(value); })
+      .catch((error) => toast.error("读取风控设置失败", { description: api.asError(error) }))
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function persist(value: RiskControlSettings) {
+    setSaving(true);
+    try {
+      setSettings(await api.saveRiskControlSettings(value));
+      toast.success("公共风控设置已保存");
+    } catch (error) {
+      toast.error("公共风控设置保存失败", { description: api.asError(error) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <RiskControlsForm value={settings} saving={loading || saving} onSave={persist} />;
+}
+
 // ---------------------------------------------------------------------------
 // 定时任务排程（六类任务：各自独立开关 + 独立时点表）
 // ---------------------------------------------------------------------------
@@ -1714,7 +1746,12 @@ export default function SettingsPage() {
             </span>
           </div>
 
-          {section === "general" && <AppSettingsGroups />}
+          {section === "general" && (
+            <>
+              <AppSettingsGroups />
+              <GlobalRiskControlsCard />
+            </>
+          )}
 
           {section === "account" && (
             <>

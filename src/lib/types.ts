@@ -675,6 +675,16 @@ export interface SessionReplicaResponse {
   source: "ledger" | "empty";
 }
 
+/** Result of an explicit stale replica-edge cleanup (issue #203). */
+export interface PruneSessionReplicaResponse {
+  region: string;
+  scanned: number;
+  removed: number;
+  kept: number;
+  removedKeys: string[];
+  error?: string;
+}
+
 /**
  * P8 · 安全同步（增量追加）的**一条**任务：把 `sourceCid` 的新增行追加到 `targetCid`。
  *
@@ -1075,6 +1085,14 @@ export interface MemoryMergeSection {
   changed: boolean;
   /** 改前原文的备份文件路径；未改写或目标原本不存在时为 null。 */
   backup?: string | null;
+  /** 个人工作区 MEMORY.md 的独立合并结果（issue #198）。 */
+  personal?: PersonalMemoryMergeSection | { error: string };
+}
+
+/** 个人工作区 MEMORY.md 合并结果；源缺失/空壳时 skipped 为 true。 */
+export interface PersonalMemoryMergeSection extends MemoryMergeSection {
+  skipped: boolean;
+  skippedReason?: string | null;
 }
 
 /** Connector 逐文件合并计数。 */
@@ -1769,6 +1787,7 @@ export interface CodebuddyPluginDetectResult {
 
 /** 网关运行配置（持久化到 ~/.buddy-switch/gateway_config.json）。字段名与后端 serde 序列化一致。 */
 export interface RiskControlSettings {
+  enabled: boolean;
   requests_per_minute: number;
   max_in_flight_per_account: number;
   max_in_flight_global: number;
@@ -1812,7 +1831,6 @@ export interface GatewayConfig {
    * ⚠️ 后端在网关状态初始化时构建一次 HTTP 客户端 ⇒ **切换后需重启应用生效**。
    */
   upstream_via_proxy: boolean;
-  risk_controls_by_region: Record<"cn" | "global", RiskControlSettings>;
 }
 
 /* ─────────── 模型降级链（P13）───────────

@@ -128,6 +128,17 @@ export const zh = {
   "sessions.bundle.importPartial": "已导入 {n} 个会话，{failed} 个失败",
   "sessions.bundle.importFailed": "导入失败",
   "sessions.bundle.desktopOnly": "文件选择只在桌面端可用",
+  "sessions.prune.action": "清理已删除会话",
+  "sessions.prune.hint": "只清理已确认不存在的关联账本条目，不删除任何现存会话",
+  "sessions.prune.title": "清理已删除会话的关联记录",
+  "sessions.prune.description": "客户端删除会话后，本软件用来记录副本关系的关联账本可能仍保留旧条目。这里只清理已经确认不存在的目标会话条目。",
+  "sessions.prune.note": "不会删除任何会话文件或数据库记录。数据库不可读、条目格式不明或跨区域时一律保留。",
+  "sessions.prune.cancel": "取消",
+  "sessions.prune.confirm": "开始清理",
+  "sessions.prune.done": "已清理 {n} 条失效关联",
+  "sessions.prune.none": "没有发现可清理的失效关联",
+  "sessions.prune.kept": "保留了 {n} 条仍需保留的关联",
+  "sessions.prune.failed": "清理关联记录失败",
   "sessions.sync.hint": "只把来源的新增内容追加到目标，不删除目标已有内容",
   // ★ D2：常驻说明（不只靠 hover 的 title）。文案**必须含「加法」二字** ——
   //   用户对「同步」最大的恐惧是「我的内容被覆盖」，而这句是唯一的常驻承诺。

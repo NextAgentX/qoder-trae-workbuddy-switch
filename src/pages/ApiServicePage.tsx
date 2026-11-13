@@ -21,7 +21,6 @@ import { ModelProbeCard } from "@/components/gateway/model-probe-card";
 // ⚠️ 只接 WB 侧：C 路本期不做 Trae（`proxy.rs` 的 `PROXY_GATEWAY_BASE` 只覆盖 WB 网关端口）。
 import { ProxyPanel } from "@/components/gateway/proxy-panel";
 import { RequestLog } from "@/components/gateway/request-log";
-import { RiskControlsForm } from "@/components/gateway/risk-controls-form";
 import { GatewayClientlessNotice } from "@/components/clientless-notice";
 import { GatewayShell } from "@/components/gateway/gateway-shell";
 import {
@@ -761,21 +760,6 @@ function RegionPoolCard({ region }: { region: Region }) {
       // 不传 `title`：与 Trae 侧一致用默认的「账号池」——版本由**页头切换器**承担，
       // 卡内再挂一次版本后缀只是噪音（Trae 的池卡同样不标区域）。
       className="mb-6"
-    />
-    <RiskControlsForm
-      region={region}
-      value={config.risk_controls_by_region[region]}
-      saving={failoverSaving}
-      onSave={async (value) => {
-        setFailoverSaving(true);
-        try {
-          await saveConfig({ ...config, risk_controls_by_region: { ...config.risk_controls_by_region, [region]: value } });
-          toast.success("风控设置已保存");
-        } catch (error) {
-          toast.error("风控设置保存失败", { description: api.asError(error) });
-          throw error;
-        } finally { setFailoverSaving(false); }
-      }}
     />
     </>
   );

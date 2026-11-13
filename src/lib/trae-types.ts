@@ -1,5 +1,5 @@
 import { t } from "@/lib/i18n";
-import type { GatewayPoolAccount, GatewayPoolSummary, RiskControlSettings } from "@/lib/types";
+import type { GatewayPoolAccount, GatewayPoolSummary } from "@/lib/types";
 
 /**
  * Trae 模块前端类型。
@@ -843,7 +843,6 @@ export interface TraeGatewayConfigRaw {
   max_mode: boolean;
   /** ★ issue #129：账号故障时自动切换（默认 `false`）。 */
   auto_failover: boolean;
-  risk_controls_by_region: Record<"cn" | "global", RiskControlSettings>;
 }
 
 /** 归一化后的网关配置（前端统一用 camelCase）。 */
@@ -873,7 +872,6 @@ export interface TraeGatewayConfig {
    * ⇒ 客户端整步重跑时必然落到另一个号。
    */
   autoFailover: boolean;
-  riskControlsByRegion: Record<"cn" | "global", RiskControlSettings>;
 }
 
 /** 账号池摘要（`pool` 字段）。 */

@@ -111,6 +111,17 @@ export const en = {
   "sessions.bundle.importPartial": "Imported {n} sessions, {failed} failed",
   "sessions.bundle.importFailed": "Import failed",
   "sessions.bundle.desktopOnly": "File picker is only available in the desktop app",
+  "sessions.prune.action": "Clean deleted-session links",
+  "sessions.prune.hint": "Removes only confirmed stale replica-ledger entries; never deletes a live session",
+  "sessions.prune.title": "Clean links left by deleted sessions",
+  "sessions.prune.description": "Deleting a session in the client does not remove the replica-link record kept by this app. This only removes target entries that are confirmed missing.",
+  "sessions.prune.note": "No session file or database row is deleted. Entries are kept when the database is unreadable, the format is unknown, or the entry crosses regions.",
+  "sessions.prune.cancel": "Cancel",
+  "sessions.prune.confirm": "Clean now",
+  "sessions.prune.done": "Removed {n} stale link(s)",
+  "sessions.prune.none": "No stale links found",
+  "sessions.prune.kept": "{n} link(s) were left untouched",
+  "sessions.prune.failed": "Could not clean replica links",
   "sessions.sync.hint": "Appends only what the source added; never deletes existing content",
   // ★ D2: persistent note (not hover-only). Must keep the word "additive" — users'
   // biggest fear about "sync" is losing/overwriting their own content.

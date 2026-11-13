@@ -2927,6 +2927,121 @@ fn copy_ledger_path_for(region: Region) -> PathBuf {
     session_data_dir(region).join(COPY_LEDGER_FILE)
 }
 
+/// Whether a replica endpoint is still materialized for this region.
+///
+/// A row counts as present when either:
+/// - the project index contains its `.jsonl` body, or
+/// - the sessions table has a live (`deleted_at IS NULL`) row owned by that uid.
+///
+/// Missing `workbuddy.db` or an unreadable table returns `None`: "cannot prove
+/// absent" must never prune a ledger edge.
+fn replica_endpoint_is_live(
+    conn: Option<&Connection>,
+    projects: &HashMap<String, PathBuf>,
+    uid: &str,
+    cid: &str,
+) -> Option<bool> {
+    if projects.contains_key(cid) {
+        return Some(true);
+    }
+    let conn = conn?;
+    if !table_exists(conn, "sessions") {
+        return None;
+    }
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions \
+         WHERE id = ?1 AND (user_id = ?2 OR user_id IS NULL OR user_id = '') \
+         AND deleted_at IS NULL)",
+        rusqlite::params![cid, uid],
+        |row| row.get::<_, i64>(0),
+    )
+    .ok()
+    .map(|count| count != 0)
+}
+
+/// Prune ledger edges whose **target endpoint** no longer exists (issue #203).
+///
+/// The copy ledger is a dedupe mechanism, so deleting a client-side session does
+/// not remove its edge. The replica page then renders ghost nodes forever.
+///
+/// Safety boundary:
+/// - only same-region three-part keys are considered;
+/// - malformed keys, cross-region keys, missing ledger and unreadable DB are kept;
+/// - source endpoints are not pruned: source sessions may belong to another
+///   account whose local DB row is not enough to prove absence;
+/// - a target is removed only when `replica_endpoint_is_live` returns `Some(false)`.
+fn prune_deleted_replica_edges_at(
+    region: Region,
+    db_path: &Path,
+    projects_root: &Path,
+    ledger_path: &Path,
+) -> Value {
+    let mut ledger = load_copy_ledger_at(ledger_path);
+    if ledger.is_empty() {
+        return json!({
+            "region": region.as_str(),
+            "scanned": 0,
+            "removed": 0,
+            "kept": 0,
+            "removedKeys": [],
+        });
+    }
+    let projects = build_projects_index_in(projects_root);
+    let conn = open_db(db_path, true);
+    let conn = conn.as_ref();
+    let mut removed = Vec::new();
+    let mut kept = 0usize;
+
+    let keys: Vec<String> = ledger.keys().cloned().collect();
+    for key in keys {
+        let Some((_source_uid, target_uid, _source_cid)) = parse_copy_ledger_key_same_region(&key)
+        else {
+            kept += 1;
+            continue;
+        };
+        let Some(target_cid) = ledger.get(&key).and_then(ledger_new_of) else {
+            kept += 1;
+            continue;
+        };
+        match replica_endpoint_is_live(conn, &projects, &target_uid, &target_cid) {
+            Some(false) => {
+                ledger.remove(&key);
+                removed.push(key);
+            }
+            _ => kept += 1,
+        }
+    }
+
+    let removed_count = removed.len();
+    if removed_count > 0 && !save_copy_ledger_at(ledger_path, &ledger) {
+        return json!({
+            "region": region.as_str(),
+            "scanned": kept + removed_count,
+            "removed": 0,
+            "kept": kept + removed_count,
+            "error": "failed to write ledger",
+            "removedKeys": [],
+        });
+    }
+    json!({
+        "region": region.as_str(),
+        "scanned": kept + removed_count,
+        "removed": removed_count,
+        "kept": kept,
+        "removedKeys": removed,
+    })
+}
+
+/// Prune stale replica edges for the active store and return a structured report.
+pub fn prune_deleted_replica_edges_for(region: Region) -> Value {
+    prune_deleted_replica_edges_at(
+        region,
+        &workbuddy_db_path_for(region),
+        &session_data_dir(region).join("projects"),
+        &copy_ledger_path_for(region),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // P14 S2 · 基线对（「上次一致点」）
 // ---------------------------------------------------------------------------
@@ -5687,6 +5802,92 @@ mod tests {
             .is_empty());
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// issue #203: the replica page reads the copy ledger, but client-side session
+    /// deletion does not remove ledger edges. Cleanup may remove only members that
+    /// are proven absent; cross-region and malformed keys are never inferred.
+    ///
+    /// Falsifiable: removing the existence check deletes live rows (first assert
+    /// turns red); accepting four-part cross-region keys turns the last asserts red.
+    #[test]
+    fn prune_deleted_replica_edges_removes_only_confirmed_missing_members() {
+        let root = std::env::temp_dir().join(format!(
+            "buddy_switch_prune_replicas_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let projects = root.join("projects").join("workspace");
+        std::fs::create_dir_all(&projects).unwrap();
+        for cid in ["src-live", "dst-live"] {
+            std::fs::write(
+                projects.join(format!("{cid}.jsonl")),
+                "{\"type\":\"message\"}\n",
+            )
+            .unwrap();
+        }
+        let db_path = root.join("workbuddy.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, user_id TEXT, deleted_at INTEGER);\
+                 INSERT INTO sessions VALUES ('src-live','uid-a',NULL);\
+                 INSERT INTO sessions VALUES ('dst-live','uid-b',NULL);\
+                 INSERT INTO sessions VALUES ('dst-deleted','uid-b',12345);",
+            )
+            .unwrap();
+        }
+        let ledger_path = root.join(COPY_LEDGER_FILE);
+        let keep_live = copy_ledger_key("uid-a", "uid-b", "src-live");
+        let drop_source_only = copy_ledger_key("uid-a", "uid-b", "src-only");
+        let drop_target = copy_ledger_key("uid-a", "uid-b", "dst-deleted");
+        let drop_orphan = copy_ledger_key("uid-a", "uid-c", "dst-orphan");
+        let cross_region = copy_ledger_key_for(Region::Global, Region::Cn, "uid-a", "uid-b", "x");
+        let malformed = "not-a-ledger-key".to_string();
+        let ledger = json!({
+            keep_live.clone(): "dst-live",
+            drop_source_only.clone(): "dst-missing-1",
+            drop_target.clone(): "dst-deleted",
+            drop_orphan.clone(): "dst-orphan",
+            cross_region.clone(): "dst-cross",
+            malformed.clone(): "dst-bad",
+        });
+        std::fs::write(&ledger_path, serde_json::to_string(&ledger).unwrap()).unwrap();
+
+        let report = prune_deleted_replica_edges_at(
+            Region::Cn,
+            &db_path,
+            &root.join("projects"),
+            &ledger_path,
+        );
+        assert_eq!(report["removed"], 3, "{report}");
+        assert_eq!(report["kept"], 3, "{report}");
+        let remaining = load_copy_ledger_at(&ledger_path);
+        assert!(
+            remaining.contains_key(&keep_live),
+            "both endpoints still exist"
+        );
+        assert!(
+            !remaining.contains_key(&drop_source_only),
+            "missing target is a stale endpoint"
+        );
+        assert!(
+            !remaining.contains_key(&drop_target),
+            "target is soft-deleted and has no body"
+        );
+        assert!(
+            !remaining.contains_key(&drop_orphan),
+            "missing target body and DB row"
+        );
+        assert!(
+            remaining.contains_key(&cross_region),
+            "cross-region edge is out of scope"
+        );
+        assert!(
+            remaining.contains_key(&malformed),
+            "malformed key cannot be judged"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// ★ issue #147：账本值必须同时读得懂旧格式（裸字符串）与新格式（带血缘对象）。

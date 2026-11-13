@@ -8,7 +8,6 @@
 
 import { t } from "@/lib/i18n";
 import { gatewayOpenAiBaseUrlFrom } from "@/lib/gateway-url";
-import { DEFAULT_RISK_CONTROLS_BY_REGION, normalizeRiskControlsByRegion } from "@/lib/risk-controls";
 import type {
   GatewayConfig,
   GatewayPoolAccount,
@@ -33,7 +32,6 @@ export const DEFAULT_GATEWAY_CONFIG: GatewayConfig = {
   model_efforts: {},
   // 默认直连：`reqwest` 会读 HTTPS_PROXY，变量残留时会把上游请求全推给本地代理。
   upstream_via_proxy: false,
-  risk_controls_by_region: DEFAULT_RISK_CONTROLS_BY_REGION,
 };
 
 function asString(value: unknown): string | undefined {
@@ -285,7 +283,6 @@ export function normalizeGatewayConfig(raw: unknown): GatewayConfig {
       asBoolean(record.upstream_via_proxy) ??
       asBoolean(record.upstreamViaProxy) ??
       DEFAULT_GATEWAY_CONFIG.upstream_via_proxy,
-    risk_controls_by_region: normalizeRiskControlsByRegion(record.risk_controls_by_region ?? record.riskControlsByRegion),
   };
 }
 

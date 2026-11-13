@@ -742,17 +742,11 @@ pub async fn chat_for_region_once(
         };
         tried.insert(uid.clone());
 
-        let risk_settings = config
-            .risk_controls_by_region
-            .get(region.as_str())
-            .cloned()
-            .unwrap_or_default();
         let _risk_permit = match crate::risk_controls::admit_request(
             &state.risk_store,
             "qoder",
             region.as_str(),
             &uid,
-            &risk_settings,
             buddy_switch_core::modules::config::now_ms().max(0) as u64,
         ) {
             Ok(permit) => permit,
@@ -960,7 +954,6 @@ pub async fn chat_for_region_once(
                         detail.clone(),
                         None,
                         now_ms,
-                        risk_settings.fallback_cooldown_secs,
                     );
                 }
                 _ => {}

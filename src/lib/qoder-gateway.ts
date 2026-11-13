@@ -20,8 +20,6 @@
  */
 
 import type { GatewayPoolSummary } from "@/lib/types";
-import type { RiskControlSettings } from "@/lib/types";
-import { DEFAULT_RISK_CONTROLS_BY_REGION, normalizeRiskControlsByRegion } from "@/lib/risk-controls";
 import type { TraeGatewayLogEntry } from "@/lib/trae-types";
 import { normalizeTraeGatewayLogs } from "@/lib/trae-gateway";
 
@@ -50,7 +48,6 @@ export const DEFAULT_QODER_GATEWAY_CONFIG: QoderGatewayConfig = {
   autoFailover: false,
   // 空 map = 不补档（默认行为与加该字段之前逐字节一致）。
   modelEfforts: {},
-  riskControlsByRegion: DEFAULT_RISK_CONTROLS_BY_REGION,
 };
 
 /** 网关配置（前端形状）。 */
@@ -86,7 +83,6 @@ export interface QoderGatewayConfig {
   autoFailover: boolean;
   /** 按模型的默认思考档（模型名 → 档位，如 `{"qmodel_38max": "high"}`）。客户端不传时网关补上。 */
   modelEfforts?: Record<string, string>;
-  riskControlsByRegion: Record<"cn" | "global", RiskControlSettings>;
 }
 
 /** 配置的线上形状（snake_case；写回时用）。 */
@@ -116,7 +112,6 @@ export interface QoderGatewayConfigRaw {
   auto_failover: boolean;
   /** 按模型的默认思考档（snake_case）。客户端不传时网关补上。 */
   model_efforts?: Record<string, string>;
-  risk_controls_by_region: Record<"cn" | "global", RiskControlSettings>;
 }
 
 /**
@@ -372,7 +367,6 @@ export function normalizeQoderGatewayConfig(raw: unknown): QoderGatewayConfig {
       if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, string>;
       return {};
     })(),
-    riskControlsByRegion: normalizeRiskControlsByRegion(read("riskControlsByRegion", "risk_controls_by_region")),
   };
 }
 
@@ -404,7 +398,6 @@ export function toQoderGatewayConfigRaw(config: QoderGatewayConfig): QoderGatewa
     // ★ 必须显式带上：Rust 侧是 `#[serde(default)]`，漏传不会报错，只会**静默**变成
     // 空 map —— 界面上选好的档位保存后消失，看起来像「保存没反应」。
     model_efforts: config.modelEfforts ?? {},
-    risk_controls_by_region: config.riskControlsByRegion,
   };
 }
 

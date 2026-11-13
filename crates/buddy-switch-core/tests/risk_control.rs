@@ -8,6 +8,7 @@ fn scope(product: &str, region: &str) -> RiskScope {
 
 fn settings() -> RiskControlSettings {
     RiskControlSettings {
+        enabled: true,
         requests_per_minute: 1,
         max_in_flight_per_account: 2,
         max_in_flight_global: 2,

@@ -1146,17 +1146,11 @@ async fn relay_once(
 
         let uid = account::get_str(&account_value, "uid").unwrap_or_default();
         let account_name = account::account_display_name(&account_value);
-        let risk_settings = config
-            .risk_controls_by_region
-            .get(request.region.as_str())
-            .cloned()
-            .unwrap_or_default();
         let _risk_permit = match crate::risk_controls::admit_request(
             &state.risk_store,
             "workbuddy",
             request.region.as_str(),
             &uid,
-            &risk_settings,
             now_ms.max(0) as u64,
         ) {
             Ok(permit) => permit,
@@ -1425,7 +1419,6 @@ async fn relay_once(
                                 message.clone(),
                                 reset_at_ms.and_then(|value| u64::try_from(value).ok()),
                                 now_ms.max(0) as u64,
-                                risk_settings.fallback_cooldown_secs,
                             );
                         }
                         _ => {}
@@ -1697,12 +1690,6 @@ pub async fn note_envelope_failure(
             reset_at_ms,
             model_scoped: false,
         } => {
-            let settings = state.config_snapshot().await;
-            let risk_settings = settings
-                .risk_controls_by_region
-                .get(region.as_str())
-                .cloned()
-                .unwrap_or_default();
             let _ = crate::risk_controls::record_rate_limit(
                 &state.risk_store,
                 "workbuddy",
@@ -1711,7 +1698,6 @@ pub async fn note_envelope_failure(
                 describe_event(event),
                 reset_at_ms.and_then(|value| u64::try_from(value).ok()),
                 now_ms.max(0) as u64,
-                risk_settings.fallback_cooldown_secs,
             );
         }
         _ => {}

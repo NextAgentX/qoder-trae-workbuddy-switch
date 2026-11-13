@@ -749,10 +749,6 @@ function demoGatewayConfig(): GatewayConfig {
     auto_failover: false,
     // 演示态与真实默认一致：上游直连。
     upstream_via_proxy: false,
-    risk_controls_by_region: {
-      cn: { requests_per_minute: 30, max_in_flight_per_account: 1, max_in_flight_global: 1, min_account_gap_ms: 5000, max_transient_attempts: 1, fallback_cooldown_secs: 60 },
-      global: { requests_per_minute: 30, max_in_flight_per_account: 1, max_in_flight_global: 1, min_account_gap_ms: 5000, max_transient_attempts: 1, fallback_cooldown_secs: 60 },
-    },
   };
 }
 
@@ -2247,10 +2243,6 @@ function demoQoderGatewayConfig(): QoderGatewayConfigRaw {
     model_daily_token_limit: 0,
     // ★ issue #129：与真实默认一致（关）。
     auto_failover: false,
-    risk_controls_by_region: {
-      cn: { requests_per_minute: 30, max_in_flight_per_account: 1, max_in_flight_global: 1, min_account_gap_ms: 5000, max_transient_attempts: 1, fallback_cooldown_secs: 60 },
-      global: { requests_per_minute: 30, max_in_flight_per_account: 1, max_in_flight_global: 1, min_account_gap_ms: 5000, max_transient_attempts: 1, fallback_cooldown_secs: 60 },
-    },
   };
 }
 
@@ -2829,10 +2821,6 @@ function demoTraeGatewayConfig(): TraeGatewayConfigRaw {
     max_mode: true,
     // ★ issue #129：与真实默认一致（关）。
     auto_failover: false,
-    risk_controls_by_region: {
-      cn: { requests_per_minute: 30, max_in_flight_per_account: 1, max_in_flight_global: 1, min_account_gap_ms: 5000, max_transient_attempts: 1, fallback_cooldown_secs: 60 },
-      global: { requests_per_minute: 30, max_in_flight_per_account: 1, max_in_flight_global: 1, min_account_gap_ms: 5000, max_transient_attempts: 1, fallback_cooldown_secs: 60 },
-    },
   };
 }
 
@@ -3557,6 +3545,15 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
         String(args?.slotB ?? "trae-code-cn"),
       );
     case "get_gateway_config": return demoGatewayConfig();
+    case "get_risk_control_settings": return {
+      enabled: false,
+      requests_per_minute: 30,
+      max_in_flight_per_account: 1,
+      max_in_flight_global: 1,
+      min_account_gap_ms: 5000,
+      max_transient_attempts: 1,
+      fallback_cooldown_secs: 60,
+    };
     case "gateway_status": return demoGatewayStatus();
     case "list_api_keys": return { keys: demoApiKeys() };
     case "get_gateway_models": return demoCatalog(args?.region === "global" ? "global" : "cn");

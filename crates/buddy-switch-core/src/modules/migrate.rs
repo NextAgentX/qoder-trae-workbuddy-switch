@@ -127,6 +127,32 @@ pub fn migrate_account_data_cross(
             }
             Err(e) => report["memory"] = json!({ "error": e }),
         }
+
+        // issue #198：当前客户端的智能体长期记忆在个人工作区里，旧档案常是空壳。
+        // 两项分开报告，旧的失败不得遮住新的；新项缺失/空壳必须明确 skipped。
+        match memory::merge_personal_memory_files_cross(
+            source_region,
+            source_uid,
+            target_region,
+            target_uid,
+        ) {
+            Ok(r) => {
+                changed |= r.changed();
+                report["memory"]["personal"] = json!({
+                    "targetLines": r.merge.target_lines,
+                    "sourceLines": r.merge.source_lines,
+                    "appended": r.merge.appended,
+                    "skippedDuplicate": r.merge.skipped_duplicate,
+                    "skipped": r.skipped,
+                    "skippedReason": r.skipped_reason,
+                    "changed": r.changed(),
+                    "backup": r.merge.backup
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                });
+            }
+            Err(e) => report["memory"]["personal"] = json!({ "error": e }),
+        }
     }
 
     if scope.connectors {

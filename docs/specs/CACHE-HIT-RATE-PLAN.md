@@ -11,6 +11,9 @@
 > 2026-11-10 Codex Responses 缓存连续性修复：共用转换器保留 `prompt_cache_key` / 会话字段；
 > WorkBuddy 在选号后按实际账号重绑网关生成的空 UID 缓存键；Trae / Qoder 将 Codex 顶层
 > `session_id` 纳入粘性路由，Qoder 上游会话 ID 改为按账号与会话稳定派生；WorkBuddy 非流式
+> 2026-11-12 会话路由诊断（默认关闭）：`BUDDY_SWITCH_DIAG_SESSION_ROUTING=1` 时，LLM 中继在每次选号后写
+> `[SESSION-ROUTING]` INFO 日志，记录实际生效会话、策略、粘性绑定与选号原因；会话与账号标识均以进程随机盐
+> 哈希成 128-bit 指纹。该开关不改变路由行为，也不绕过 `BUDDY_SWITCH_LOG_LEVEL`。
 > Responses 日志记录真实缓存用量。P1/P3 与缓存覆盖度 UI 仍未完成。
 > 2026-11-11 运行日志定位到 WorkBuddy Responses 粘性键仍未覆盖 Codex 仅提供的 `prompt_cache_key`：
 > 同一 API Key / 模型的请求频繁换上游账号，导致缓存前缀冷启动。现已在 Responses 路由以会话 ID / 请求头

@@ -18,6 +18,7 @@ const MAX_COOLDOWN_SECS: u64 = 30 * 24 * 60 * 60;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RiskControlSettings {
+    pub enabled: bool,
     pub requests_per_minute: u32,
     pub max_in_flight_per_account: u32,
     pub max_in_flight_global: u32,
@@ -29,6 +30,7 @@ pub struct RiskControlSettings {
 impl Default for RiskControlSettings {
     fn default() -> Self {
         Self {
+            enabled: false,
             requests_per_minute: 30,
             max_in_flight_per_account: 1,
             max_in_flight_global: 1,
@@ -312,8 +314,8 @@ impl RiskStore {
         *runtime.global_in_flight.entry(scope.clone()).or_default() += 1;
         Ok(RiskPermit {
             inner: Arc::downgrade(&self.inner),
-            key,
-            scope: scope.clone(),
+            key: Some(key),
+            scope: Some(scope.clone()),
         })
     }
 
@@ -383,27 +385,40 @@ fn platform_config_path(product: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Read the same per-region settings saved by each platform gateway.
-pub fn platform_risk_settings(product: &str, region: &str) -> Result<RiskControlSettings, String> {
-    let config_path = platform_config_path(product)?;
-    let settings = if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path)
-            .map_err(|error| format!("read risk settings: {error}"))?;
-        let config: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|error| format!("parse gateway risk settings: {error}"))?;
-        config
-            .get("risk_controls_by_region")
-            .and_then(|regions| regions.get(region))
-            .cloned()
-            .map(serde_json::from_value::<RiskControlSettings>)
-            .transpose()
-            .map_err(|error| format!("parse {product}/{region} risk settings: {error}"))?
-            .unwrap_or_default()
-    } else {
-        RiskControlSettings::default()
-    };
+fn shared_settings_path() -> PathBuf {
+    crate::modules::config::store_dir().join("request_risk_settings.json")
+}
+
+/// Read the one application-wide request-risk configuration shared by all platforms and regions.
+pub fn load_settings() -> Result<RiskControlSettings, String> {
+    let path = shared_settings_path();
+    if !path.exists() {
+        return Ok(RiskControlSettings::default());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| format!("read request risk settings: {error}"))?;
+    let settings: RiskControlSettings = serde_json::from_str(&raw)
+        .map_err(|error| format!("parse request risk settings: {error}"))?;
     settings.validate()?;
     Ok(settings)
+}
+
+/// Save and validate the one application-wide request-risk configuration.
+pub fn save_settings(settings: &RiskControlSettings) -> Result<(), String> {
+    settings.validate()?;
+    let raw = serde_json::to_string_pretty(settings)
+        .map_err(|error| format!("serialize request risk settings: {error}"))?;
+    crate::modules::config::atomic_write(&shared_settings_path(), &raw)
+        .map_err(|error| format!("write request risk settings: {error}"))
+}
+
+/// Read the shared settings after validating the requested product/region scope.
+pub fn platform_risk_settings(product: &str, region: &str) -> Result<RiskControlSettings, String> {
+    platform_config_path(product)?;
+    if !matches!(region, "cn" | "global") {
+        return Err("unknown risk-control region".into());
+    }
+    load_settings()
 }
 
 /// Core authenticated request entry point used outside the gateway relay.
@@ -415,6 +430,9 @@ fn try_admit_platform_request(
 ) -> Result<RiskPermit, String> {
     let config_path = platform_config_path(product)?;
     let settings = platform_risk_settings(product, region)?;
+    if !settings.enabled {
+        return Ok(RiskPermit::untracked());
+    }
     let scope = RiskScope::new(product, region)?;
     RiskStore::open_shared(config_path.with_file_name("risk_control.json"))?.begin_request_at(
         &scope,
@@ -433,6 +451,9 @@ pub async fn admit_platform_request(
     account_id: &str,
 ) -> Result<RiskPermit, String> {
     let settings = platform_risk_settings(product, region)?;
+    if !settings.enabled {
+        return Ok(RiskPermit::untracked());
+    }
     let config_path = platform_config_path(product)?;
     let scope = RiskScope::new(product, region)?;
     let store = RiskStore::open_shared(config_path.with_file_name("risk_control.json"))?;
@@ -458,6 +479,9 @@ pub fn record_platform_response(
     code: i64,
     reason: String,
 ) -> Result<(), String> {
+    if !platform_risk_settings(product, region)?.enabled {
+        return Ok(());
+    }
     let state_path = match product {
         "workbuddy" => {
             crate::modules::region::gateway_config_file().with_file_name("risk_control.json")
@@ -483,23 +507,7 @@ pub fn record_platform_response(
             60,
         ),
         429 => {
-            let config_path = match product {
-                "workbuddy" => crate::modules::region::gateway_config_file(),
-                "trae" => crate::modules::trae::paths::api_gateway_file(),
-                "qoder" => crate::modules::qoder::paths::gateway_config_file(),
-                _ => unreachable!(),
-            };
-            let cooldown = std::fs::read_to_string(config_path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-                .and_then(|value| {
-                    value
-                        .get("risk_controls_by_region")?
-                        .get(region)?
-                        .get("fallback_cooldown_secs")?
-                        .as_u64()
-                })
-                .unwrap_or_else(|| RiskControlSettings::default().fallback_cooldown_secs);
+            let cooldown = load_settings()?.fallback_cooldown_secs;
             store.record_outcome_at(
                 &scope,
                 account_id,
@@ -515,16 +523,29 @@ pub fn record_platform_response(
 
 pub struct RiskPermit {
     inner: Weak<Inner>,
-    key: AccountKey,
-    scope: RiskScope,
+    key: Option<AccountKey>,
+    scope: Option<RiskScope>,
+}
+
+impl RiskPermit {
+    /// Represents a request made while the optional risk controls are disabled.
+    pub fn untracked() -> Self {
+        Self {
+            inner: Weak::new(),
+            key: None,
+            scope: None,
+        }
+    }
 }
 
 impl Drop for RiskPermit {
     fn drop(&mut self) {
-        if let Some(inner) = self.inner.upgrade() {
-            if let Ok(mut runtime) = inner.runtime.lock() {
-                decrement(&mut runtime.in_flight, &self.key);
-                decrement(&mut runtime.global_in_flight, &self.scope);
+        if let (Some(key), Some(scope)) = (&self.key, &self.scope) {
+            if let Some(inner) = self.inner.upgrade() {
+                if let Ok(mut runtime) = inner.runtime.lock() {
+                    decrement(&mut runtime.in_flight, key);
+                    decrement(&mut runtime.global_in_flight, scope);
+                }
             }
         }
     }
