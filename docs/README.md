@@ -9,6 +9,7 @@
 | [`guides/`](guides/) | 怎么装、怎么开发、客户端怎么接网关 | 跟着版本更新 |
 | [`policies/`](policies/) | 许可与免责声明（README 引用它们） | 极少 |
 | [`specs/`](specs/) | 现行架构与决策：改代码前该读的依据 | **随代码一起改** |
+| [`superpowers/plans/`](superpowers/plans/) | 经确认设计对应的分步实施计划 | 实施期间更新，完成后归档 |
 | [`history/`](history/) | 已完结的一次性报告：审计、探针、外部调研、旧方案 | **只读，不再改** |
 | [`prototype/`](prototype/) | 可点原型 + JSDOM 校验套件（门禁读这里的文件） | 新增交互先进这里 |
 | [`releases/`](releases/) | 每版人工措辞的发布说明（`gen-release-notes.mjs` 约定路径） | 每版一篇 |
@@ -40,7 +41,7 @@
 | 想知道某功能当初为什么这么做 | [`specs/DECISIONS.md`](specs/DECISIONS.md)（D1–D46） |
 | 加新交互（先原型、后代码） | [`prototype/`](prototype/) → `index.html` 可直接打开 |
 | 账号页「客户端限流」怎么和网关「限流探测」联动（同一份数据 + 两处入口） | [`prototype/limit-link-proto.html`](prototype/limit-link-proto.html)（可点设计稿，**已落地**）+ [`prototype/verify-limit-link.mjs`](prototype/verify-limit-link.mjs)（34 条行为校验）+ [`specs/MODEL-LIMIT-PROBE-PLAN.md`](specs/MODEL-LIMIT-PROBE-PLAN.md) §5.9（口径） |
-| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.110949`](releases/v2026.11.110949.md)） |
+| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.131448`](releases/v2026.11.131448.md)） |
 
 ---
 
@@ -59,6 +60,9 @@
 | [`P5-P12-TASKS.md`](specs/P5-P12-TASKS.md) | P5–P12 的执行级任务清单 | 现行 |
 | [`UPDATE-NOTES-ARCH.md`](specs/UPDATE-NOTES-ARCH.md) | 升级前说明弹窗（版本内容）：四阶段交互、数据契约、发布侧产出与切片口径 | 现行 · 2026-10-17 落地 |
 | [`GATEWAY-UPSTREAM-NETWORK.md`](specs/GATEWAY-UPSTREAM-NETWORK.md) | 网关**出站**网络：默认直连 vs 系统代理（`no_proxy` 纪律 + 兜底回落 + 排查手法） | 现行 · 2026-11-08 落地 |
+| [`RISK-ACCOUNT-ISOLATION.md`](specs/RISK-ACCOUNT-ISOLATION.md) | 本地认证快照、共享出站客户端与风控状态的适用边界 | 现行 · 2026-11-13 |
+| [`RISK-CONTROLS-DESIGN.md`](specs/RISK-CONTROLS-DESIGN.md) | WorkBuddy / Trae / Qoder 网关合规风控设置设计（方案 A） | 实施中 · relay、认证后台请求及设置已接入，完整 Rust 测试受本机 OpenSSL 构建依赖阻塞 |
+| [`2026-11-13-three-platform-risk-controls.md`](superpowers/plans/2026-11-13-three-platform-risk-controls.md) | 三平台合规风控设置实施计划 | 实施中 · 后台入口已接线；剩余需完整 Core/server/Tauri 验收 |
 | [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |
 
 ### 分期架构（P3–P15）
