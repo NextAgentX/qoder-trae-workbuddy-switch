@@ -353,6 +353,7 @@ fn is_unauthorized(response: &Value) -> bool {
         .any(|keyword| message.contains(keyword))
 }
 
+#[cfg(test)]
 fn is_transport_error(response: &Value) -> bool {
     response_code(response) == Some(-1)
         && response
@@ -393,31 +394,40 @@ pub async fn authenticated_post_for(
         return json!({"code": -2, "message": err});
     }
     let config = load_checkin_config();
-    let mut working_account = ensure_fresh_token_for(region, account.clone(), &config).await;
-    let mut response = post_with_account(&working_account, url, body.clone()).await;
-
-    if is_unauthorized(&response)
-        && !working_account
-            .get("refresh_token")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .is_empty()
-    {
-        working_account = refresh_account_token_for(region, working_account).await;
-        response = post_with_account(&working_account, url, body).await;
-    }
-
-    response
+    let working_account = ensure_fresh_token_for(region, account.clone(), &config).await;
+    post_with_account(region, &working_account, url, body).await
 }
 
-async fn post_with_account(account: &Value, url: &str, body: Value) -> Value {
+async fn post_with_account(region: Region, account: &Value, url: &str, body: Value) -> Value {
+    let uid = account.get("uid").and_then(Value::as_str).unwrap_or("");
+    let _risk_permit = match crate::modules::risk_control::admit_platform_request(
+        "workbuddy",
+        region.as_str(),
+        uid,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(error) => return json!({"code": -3, "message": format!("风控准入拦截：{error}")}),
+    };
     let headers = resource_auth_headers(account, request_origin(url));
-    let response = http_request(url, "POST", Some(body.clone()), Some(&headers)).await;
-    if is_transport_error(&response) {
-        http_request(url, "POST", Some(body), Some(&headers)).await
-    } else {
-        response
-    }
+    // POST 结果不确定时不自动重放；账号共用网关出口，不读取旧账号代理映射。
+    let response = http_request(url, "POST", Some(body), Some(&headers)).await;
+    let code = response.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    let reason = response
+        .get("message")
+        .or_else(|| response.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "workbuddy",
+        region.as_str(),
+        uid,
+        code,
+        reason,
+    );
+    response
 }
 
 fn request_origin(url: &str) -> &'static str {
@@ -525,13 +535,14 @@ struct NewResourceResponses {
 }
 
 async fn retry_new_response_if_unauthorized(
+    region: Region,
     account: &Value,
     response: Value,
     url: &str,
     body: Value,
 ) -> Value {
     if is_unauthorized(&response) {
-        post_with_account(account, url, body).await
+        post_with_account(region, account, url, body).await
     } else {
         response
     }
@@ -548,11 +559,10 @@ async fn fetch_new_resource_responses(region: Region, account: &Value) -> NewRes
     let summary_body = json!({});
     let paid_body = paid_packages_body();
     let free_body = free_packages_body();
-    let (summary, paid, free) = tokio::join!(
-        post_with_account(&working_account, &summary_url, summary_body.clone()),
-        post_with_account(&working_account, &paid_url, paid_body.clone()),
-        post_with_account(&working_account, &free_url, free_body.clone()),
-    );
+    let summary =
+        post_with_account(region, &working_account, &summary_url, summary_body.clone()).await;
+    let paid = post_with_account(region, &working_account, &paid_url, paid_body.clone()).await;
+    let free = post_with_account(region, &working_account, &free_url, free_body.clone()).await;
 
     if !(is_unauthorized(&summary) || is_unauthorized(&paid) || is_unauthorized(&free)) {
         return NewResourceResponses {
@@ -579,9 +589,9 @@ async fn fetch_new_resource_responses(region: Region, account: &Value) -> NewRes
     }
     let refreshed = refresh_account_token_for(region, working_account).await;
     let (summary, paid, free) = tokio::join!(
-        retry_new_response_if_unauthorized(&refreshed, summary, &summary_url, summary_body),
-        retry_new_response_if_unauthorized(&refreshed, paid, &paid_url, paid_body),
-        retry_new_response_if_unauthorized(&refreshed, free, &free_url, free_body),
+        retry_new_response_if_unauthorized(region, &refreshed, summary, &summary_url, summary_body),
+        retry_new_response_if_unauthorized(region, &refreshed, paid, &paid_url, paid_body),
+        retry_new_response_if_unauthorized(region, &refreshed, free, &free_url, free_body),
     );
     NewResourceResponses {
         account: refreshed,
@@ -610,7 +620,7 @@ async fn fetch_legacy_user_resource_for(region: Region, account: &Value) -> Valu
     // 新接口编排已经统一执行过惰性刷新，并在任一路未授权时只刷新一次。
     // 旧接口回退必须直接复用该账号，不能重新进入 authenticated_post，
     // 否则可能重复刷新并用旧 refresh token 覆盖刚落盘的新 token。
-    post_with_account(account, &url, body).await
+    post_with_account(region, account, &url, body).await
 }
 
 fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {

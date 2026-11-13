@@ -51,6 +51,8 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 use buddy_switch_core::modules::config as core_config;
 use buddy_switch_core::modules::qoder::region::{self as qoder_region, QoderRegion};
 use buddy_switch_core::modules::qoder::{account, api, cosy, paths};
+use buddy_switch_core::modules::risk_control::RiskControlSettings;
+use buddy_switch_core::modules::risk_control::RiskStore;
 
 use crate::logging::RequestLog;
 use crate::{body_limit_bytes, GatewayProduct};
@@ -94,6 +96,13 @@ fn build_http_client() -> reqwest::Client {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_risk_controls_by_region() -> std::collections::BTreeMap<String, RiskControlSettings> {
+    ["cn", "global"]
+        .into_iter()
+        .map(|region| (region.to_string(), RiskControlSettings::default()))
+        .collect()
 }
 
 /// Qoder 网关配置（磁盘：`qoder/gateway_config.json`）。
@@ -171,6 +180,12 @@ pub struct QoderGatewayConfig {
     /// （宁可退回上游默认，也不要把非法值发给上游换一个 400）。
     #[serde(default, alias = "modelEfforts")]
     pub model_efforts: std::collections::BTreeMap<String, String>,
+    /// CN 与 Global 区域分别保存的请求风控设置。
+    #[serde(
+        default = "default_risk_controls_by_region",
+        alias = "riskControlsByRegion"
+    )]
+    pub risk_controls_by_region: std::collections::BTreeMap<String, RiskControlSettings>,
 }
 
 impl Default for QoderGatewayConfig {
@@ -200,11 +215,23 @@ impl Default for QoderGatewayConfig {
             auto_failover: false,
             // 空 map = 不补档（默认行为与加该字段之前逐字节一致）。
             model_efforts: std::collections::BTreeMap::new(),
+            risk_controls_by_region: default_risk_controls_by_region(),
         }
     }
 }
 
 impl QoderGatewayConfig {
+    pub fn validate_risk_controls(&self) -> Result<(), String> {
+        for (region, settings) in &self.risk_controls_by_region {
+            if !matches!(region.as_str(), "cn" | "global") {
+                return Err(format!("unknown Qoder risk-control region: {region}"));
+            }
+            settings
+                .validate()
+                .map_err(|error| format!("{region}: {error}"))?;
+        }
+        Ok(())
+    }
     /// 从 `qoder/gateway_config.json` 读取；缺失 / 损坏回落默认。
     pub fn load() -> Self {
         std::fs::read_to_string(paths::gateway_config_file())
@@ -270,6 +297,8 @@ impl CachedCatalog {
 #[derive(Clone)]
 pub struct QoderGatewayState {
     pub config: Arc<RwLock<QoderGatewayConfig>>,
+    /// 按平台区域保存的请求准入状态；损坏时由路由 fail-closed。
+    pub risk_store: Result<RiskStore, String>,
     /// 区域 → 账号池。
     pub pools: Arc<Mutex<HashMap<QoderRegion, pool::QoderPool>>>,
     /// 用户禁用的模型（P11；键 = 作用域）。
@@ -304,6 +333,9 @@ impl QoderGatewayState {
         ));
         Self {
             config: Arc::new(RwLock::new(config.clone())),
+            risk_store: RiskStore::open_shared(
+                paths::gateway_config_file().with_file_name("risk_control.json"),
+            ),
             pools: Arc::new(Mutex::new(HashMap::new())),
             disabled: crate::disabled_models::shared(),
             sticky: Arc::new(Mutex::new(crate::StickyTable::new(config.sticky_ttl_ms))),
@@ -446,7 +478,7 @@ impl QoderGatewayState {
             Some(host) => vec![host.as_str()],
             None => qoder_region_candidates(region),
         };
-        match api::fetch_model_list_at(&hosts, &input).await {
+        match api::fetch_model_list_for(region, &hosts, &input).await {
             Ok(models) => {
                 let fetched_at = now_ms();
                 let mut cache = self.catalogs.write().await;

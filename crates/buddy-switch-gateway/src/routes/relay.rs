@@ -14,9 +14,10 @@
 //! 非流式场景无差别（响应体在 handler 内被消费完毕）。
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use buddy_switch_core::modules::account;
 use buddy_switch_core::modules::region::Region;
@@ -26,7 +27,8 @@ use crate::account_strategy::{AccountSelector, AccountStrategy};
 use crate::error::{GatewayError, NoCredentialCause, UpstreamAttempt};
 use crate::outbound::{self, DegradeGate, OutboundMeta};
 use crate::pool::{
-    classify_event, exclusions, InFlightLease, PickMode, PoolSummary, RealmTag, UpstreamEvent,
+    classify_event, exclusions, InFlightLease, PickMode, Pool, PoolEntryLike, PoolSummary,
+    RealmTag, UpstreamEvent,
 };
 use crate::session_headers::{self, ConversationContext};
 
@@ -942,6 +944,14 @@ async fn relay_once(
     // 会话粘性键；客户端没给会话 id 时为 `None`（整段跳过粘性，保持原行为）。
     let sticky_key = sticky_key_of(&request);
 
+    // 诊断只覆盖 LLM 路由：Biz（签到 / 积分）没有模型与会话缓存语义。
+    // 指纹必须基于**实际生效**的会话 id，而不是只基于入站原始值。
+    let has_session_identity = request
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        || sticky_key.is_some();
     // 会话上下文：轮内所有重试复用同一实例。
     let context = ConversationContext {
         conversation_id: session_headers::resolve_conversation_id(
@@ -952,6 +962,15 @@ async fn relay_once(
         trace_id: request.trace_id.clone(),
     };
     let message_id = session_headers::new_hex_id();
+    let route_diag = SessionRouteDiag::new(
+        matches!(&request.kind, RelayKind::Llm),
+        has_session_identity.then_some(context.conversation_id.as_str()),
+    );
+    let diag_strategy = if route_diag.enabled {
+        Some(state.strategy_for(request.region).await)
+    } else {
+        None
+    };
 
     let mut tried: HashSet<String> = HashSet::new();
     let mut last: Option<RelayFailure> = None;
@@ -1046,6 +1065,39 @@ async fn relay_once(
                 .map(str::to_string),
             None => None,
         };
+        let selection_diag = if route_diag.enabled {
+            let pool = state.pool.read().await;
+            let previous_uid = pool
+                .entries()
+                .filter(|entry| entry.realm() == Some(realm))
+                .max_by_key(|entry| entry.used_seq())
+                .map(|entry| entry.uid().to_string());
+            let sticky_reason = preferred_uid.as_deref().map(|uid| {
+                unavailable_reason(
+                    &pool,
+                    uid,
+                    &request.model,
+                    now_ms,
+                    allowed.as_ref(),
+                    &config,
+                    &tried,
+                )
+            });
+            let previous_reason = previous_uid.as_deref().map(|uid| {
+                unavailable_reason(
+                    &pool,
+                    uid,
+                    &request.model,
+                    now_ms,
+                    allowed.as_ref(),
+                    &config,
+                    &tried,
+                )
+            });
+            Some((previous_uid, previous_reason, sticky_reason))
+        } else {
+            None
+        };
         // ★ issue #76：本密钥的允许名单（循环外已算好，见函数上方注释）。
         let selected = select_account(
             state,
@@ -1063,6 +1115,20 @@ async fn relay_once(
         .await;
 
         let Some(account_value) = selected else {
+            if let Some((previous_uid, previous_reason, sticky_reason)) = selection_diag {
+                route_diag.record_selection(
+                    request.region,
+                    &request.model,
+                    diag_strategy.as_ref(),
+                    attempt,
+                    preferred_uid.as_deref(),
+                    sticky_reason.as_deref(),
+                    previous_uid.as_deref(),
+                    previous_reason.as_deref(),
+                    None,
+                    "no_eligible_account",
+                );
+            }
             // 池与策略都给不出账号：若已有失败记录，返回它（更有诊断价值）。
             //
             // ★ 只有当**本轮一次都没打到上游**时才补这条 —— 否则它会污染换号轨迹
@@ -1080,6 +1146,88 @@ async fn relay_once(
 
         let uid = account::get_str(&account_value, "uid").unwrap_or_default();
         let account_name = account::account_display_name(&account_value);
+        let risk_settings = config
+            .risk_controls_by_region
+            .get(request.region.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let _risk_permit = match crate::risk_controls::admit_request(
+            &state.risk_store,
+            "workbuddy",
+            request.region.as_str(),
+            &uid,
+            &risk_settings,
+            now_ms.max(0) as u64,
+        ) {
+            Ok(permit) => permit,
+            Err(error) => {
+                attempts.push(UpstreamAttempt {
+                    account: account_name.clone(),
+                    uid: uid.clone(),
+                    status: 429,
+                    reason: error.clone(),
+                });
+                last = Some(RelayFailure {
+                    error: GatewayError::Upstream {
+                        kind: buddy_switch_core::modules::upstream::UpstreamErrorKind::SoftRate,
+                        status: 429,
+                        message: format!("请求被风控准入拦截：{error}"),
+                        attempts: attempts.clone(),
+                    },
+                    account: account_name,
+                    uid,
+                    upstream_message: error,
+                    sanitized: request.sanitized,
+                    event: None,
+                    fallback: None,
+                });
+                break;
+            }
+        };
+        if let Some((previous_uid, previous_reason, sticky_reason)) = selection_diag {
+            let selection_reason =
+                if matches!(diag_strategy.as_ref(), Some(AccountStrategy::Sequential)) {
+                    if preferred_uid
+                        .as_deref()
+                        .is_some_and(|preferred| preferred != uid)
+                        && sticky_reason.as_deref() == Some("usable")
+                    {
+                        "session_sticky_ignored_by_sequential"
+                    } else if previous_uid.as_deref() == Some(uid.as_str()) {
+                        "kept_sequential_account"
+                    } else if previous_reason
+                        .as_deref()
+                        .is_some_and(|reason| reason != "usable")
+                    {
+                        previous_reason.as_deref().unwrap_or("previous_unavailable")
+                    } else if previous_uid.is_some() {
+                        "selection_changed_while_previous_usable"
+                    } else {
+                        "initial_selection"
+                    }
+                } else if preferred_uid.as_deref() == Some(uid.as_str()) {
+                    "kept_session_account"
+                } else if preferred_uid.is_some() {
+                    sticky_reason
+                        .as_deref()
+                        .filter(|reason| *reason != "usable")
+                        .unwrap_or("session_sticky_not_selected")
+                } else {
+                    "no_session_binding"
+                };
+            route_diag.record_selection(
+                request.region,
+                &request.model,
+                diag_strategy.as_ref(),
+                attempt,
+                preferred_uid.as_deref(),
+                sticky_reason.as_deref(),
+                previous_uid.as_deref(),
+                previous_reason.as_deref(),
+                Some(&uid),
+                selection_reason,
+            );
+        }
 
         // ★ E1：走到第 2 轮及以后说明**上一轮没能用这个账号** ⇒ 记一次「换号」。
         //   判据放在**选号成功之后**：只有真的换到另一个账号才算，「同一账号重试」不计。
@@ -1124,11 +1272,8 @@ async fn relay_once(
                         request.conversation_id.as_deref(),
                     )
                 };
-                // 会话头族 + 派生设备标识（**LLM 专用**：业务请求不适用，故放在本分支内）。
-                let mut extra = session_headers::conversation_headers(&context, &message_id);
-                if !uid.is_empty() {
-                    extra.extend(session_headers::device_headers(&uid));
-                }
+                // 只补会话关联头；沿用官方客户端设备身份。
+                let extra = session_headers::conversation_headers(&context, &message_id);
                 state
                     .upstream
                     .chat_stream_with(
@@ -1256,6 +1401,36 @@ async fn relay_once(
                 } else {
                     classify_event(status, &message)
                 };
+                if !uid.is_empty() {
+                    match &event {
+                        UpstreamEvent::AuthRejected | UpstreamEvent::SessionDead => {
+                            let _ = crate::risk_controls::pause_account(
+                                &state.risk_store,
+                                "workbuddy",
+                                request.region.as_str(),
+                                &uid,
+                                message.clone(),
+                                now_ms.max(0) as u64,
+                            );
+                        }
+                        UpstreamEvent::SoftRate {
+                            reset_at_ms,
+                            model_scoped: false,
+                        } => {
+                            let _ = crate::risk_controls::record_rate_limit(
+                                &state.risk_store,
+                                "workbuddy",
+                                request.region.as_str(),
+                                &uid,
+                                message.clone(),
+                                reset_at_ms.and_then(|value| u64::try_from(value).ok()),
+                                now_ms.max(0) as u64,
+                                risk_settings.fallback_cooldown_secs,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 let (disabled, gate_opened) = if uid.is_empty() {
                     (false, false)
                 } else {
@@ -1420,23 +1595,10 @@ pub fn scope_key(region: Region) -> &'static str {
 /// - **400 / 422 参数错**：同一份坏参数喂给下一个号 = 白烧 N 个账号的配额；
 /// - **404**：可能是「该账号的模型清单里没有它」，换 **1 次**足够，第 3 次纯浪费。
 fn should_rotate(event: &UpstreamEvent, attempt: usize) -> bool {
-    match event {
-        // 换号能救的：额度不足、限流、模型被封、上游抖动、会话失效。
-        UpstreamEvent::HardCredit
-        | UpstreamEvent::SoftRate { .. }
-        | UpstreamEvent::ModelBlocked
-        | UpstreamEvent::Server
-        // 超时也换号：不同账号走不同上游节点，换一条链路可能就不超时了。
-        | UpstreamEvent::Timeout
-        | UpstreamEvent::SessionDead => true,
-        // 401/403 换号能救：池里其它号的凭据可能好好的（issue #100）。
-        // 旧实现把它归到 `Client`（不换号）⇒ 池里明明有健康账号，客户端却直接吃到 401。
-        UpstreamEvent::AuthRejected => true,
-        // 只换一次（`attempt == 0` 时还允许再试一个号）。
-        UpstreamEvent::NotFound => attempt == 0,
-        // 调用方自己的问题，换谁都一样。
-        UpstreamEvent::Client => false,
-    }
+    let _ = (event, attempt);
+    // Relay 调用是非幂等 POST。对任何上游失败自动换账号重发，都可能重复执行
+    // 已被上游接收的操作；认证拒绝、封禁、限流与额度不足也必须由当前账号处理。
+    false
 }
 
 /// 流内信封错误的接收方：把治理副作用丢到**后台任务**（`poll_next` 里不能 `.await`）。
@@ -1447,6 +1609,7 @@ pub struct EnvelopeErrorSink {
     state: GatewayState,
     uid: String,
     model: String,
+    region: Region,
     /// 会话粘性键（`None` = 客户端没给会话 id ⇒ 本来就没绑定）。
     ///
     /// ★ issue #129 §5.2 改动 3：首帧前的两条失败路径早已解绑粘性，首帧后的
@@ -1460,10 +1623,11 @@ impl crate::protocol::usage_tap::StreamErrorSink for EnvelopeErrorSink {
         let state = self.state.clone();
         let uid = self.uid.clone();
         let model = self.model.clone();
+        let region = self.region;
         let sticky_key = self.sticky_key.clone();
         tokio::spawn(async move {
             // ① 冷却 / 熔断 / 模型闸门（既有唯一路径）。
-            note_envelope_failure(&state, &uid, &model, &error.event).await;
+            note_envelope_failure(&state, region, &uid, &model, &error.event).await;
             // ② 粘性解绑：这个号已经失败过，下一轮必须换。
             if let Some(key) = sticky_key.as_deref() {
                 state.sticky.write().await.unbind(key);
@@ -1480,6 +1644,7 @@ impl crate::protocol::usage_tap::StreamErrorSink for EnvelopeErrorSink {
 /// 构造流内错误接收方；`uid` 为空（没选到账号）时返回 `None` —— 没有账号就没有可冷却的对象。
 pub fn envelope_error_sink(
     state: &GatewayState,
+    region: Region,
     uid: &str,
     model: &str,
     // ★ issue #129：首帧后失败同样要解绑粘性（见 `EnvelopeErrorSink::sticky_key`）。
@@ -1492,6 +1657,7 @@ pub fn envelope_error_sink(
         state: state.clone(),
         uid: uid.to_string(),
         model: model.to_string(),
+        region,
         sticky_key: sticky_key.map(str::to_string),
     }))
 }
@@ -1507,6 +1673,7 @@ pub fn envelope_error_sink(
 /// `uid` 为空（未选到账号）时什么也不做 —— 与 HTTP 非 2xx 的治理路径一致。
 pub async fn note_envelope_failure(
     state: &GatewayState,
+    region: Region,
     uid: &str,
     model: &str,
     event: &UpstreamEvent,
@@ -1515,6 +1682,40 @@ pub async fn note_envelope_failure(
         return;
     }
     let now_ms = timeutil::now_ms();
+    match event {
+        UpstreamEvent::AuthRejected | UpstreamEvent::SessionDead => {
+            let _ = crate::risk_controls::pause_account(
+                &state.risk_store,
+                "workbuddy",
+                region.as_str(),
+                uid,
+                describe_event(event),
+                now_ms.max(0) as u64,
+            );
+        }
+        UpstreamEvent::SoftRate {
+            reset_at_ms,
+            model_scoped: false,
+        } => {
+            let settings = state.config_snapshot().await;
+            let risk_settings = settings
+                .risk_controls_by_region
+                .get(region.as_str())
+                .cloned()
+                .unwrap_or_default();
+            let _ = crate::risk_controls::record_rate_limit(
+                &state.risk_store,
+                "workbuddy",
+                region.as_str(),
+                uid,
+                describe_event(event),
+                reset_at_ms.and_then(|value| u64::try_from(value).ok()),
+                now_ms.max(0) as u64,
+                risk_settings.fallback_cooldown_secs,
+            );
+        }
+        _ => {}
+    }
     let mut pool = state.pool.write().await;
     pool.apply_upstream_error(uid, model, event, now_ms);
     if is_model_level(event) {
@@ -1642,7 +1843,6 @@ fn allowed_uids_for(policy: &crate::apikey::KeyPolicy, region: Region) -> Option
     crate::apikey::allowed_uids_for_policy(policy, accounts)
 }
 
-/// 选号：优先账号池（有治理状态），池给不出时回落既有策略。
 /// 由请求推导**会话粘性键**；客户端未给会话 id ⇒ `None`（整段跳过粘性）。
 ///
 /// ★ 缺失时必须返回 `None`，**不得**退化成轮主键（`conversation_request_id` 每轮都换
@@ -1650,6 +1850,153 @@ fn allowed_uids_for(policy: &crate::apikey::KeyPolicy, region: Region) -> Option
 ///
 /// 区域与模型都进键：跨区域的账号库本就分家；同一会话切模型时应允许落到各自最合适的账号
 /// （否则「模型级限流只封锁该模型」的优势会被粘性抵消）。
+
+///
+/// 仅在显式设置 `BUDDY_SWITCH_DIAG_SESSION_ROUTING=1` 时写入运行日志。指纹使用进程随机盐，
+/// 只能在本次运行中关联；原始会话键与账号 uid 永不落盘。
+///
+/// 日志级别为 INFO；开关本身不绕过 `BUDDY_SWITCH_LOG_LEVEL`（缺省 Info）。
+/// 诊断契约见 `docs/specs/CACHE-HIT-RATE-PLAN.md`。
+struct SessionRouteDiag {
+    enabled: bool,
+    request_id: String,
+    session_fp: Option<String>,
+}
+
+impl SessionRouteDiag {
+    fn new(is_llm: bool, session_id: Option<&str>) -> Self {
+        let enabled = diagnostic_gate(
+            is_llm,
+            std::env::var("BUDDY_SWITCH_DIAG_SESSION_ROUTING")
+                .ok()
+                .as_deref(),
+        );
+        Self {
+            enabled,
+            request_id: if enabled {
+                uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+            } else {
+                String::new()
+            },
+            session_fp: if enabled {
+                session_id.map(|value| diagnostic_fingerprint("session", value))
+            } else {
+                None
+            },
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_selection(
+        &self,
+        region: Region,
+        model: &str,
+        strategy: Option<&AccountStrategy>,
+        attempt: usize,
+        sticky_uid: Option<&str>,
+        sticky_reason: Option<&str>,
+        previous_uid: Option<&str>,
+        previous_reason: Option<&str>,
+        selected_uid: Option<&str>,
+        selection_reason: &str,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let fp = |namespace, value: Option<&str>| {
+            value.map(|value| diagnostic_fingerprint(namespace, value))
+        };
+        buddy_switch_core::modules::runtime_log::log(
+            buddy_switch_core::modules::runtime_log::Level::Info,
+            "session-routing",
+            &format!(
+                "[SESSION-ROUTING] req={} region={region:?} model={model} session_fp={} strategy={} attempt={} sticky_uid_fp={} sticky_reason={} previous_uid_fp={} previous_reason={} selected_uid_fp={} selection_reason={selection_reason}",
+                self.request_id,
+                self.session_fp.as_deref().unwrap_or("none"),
+                strategy_label(strategy),
+                attempt + 1,
+                fp("account", sticky_uid).as_deref().unwrap_or("none"),
+                sticky_reason.unwrap_or("no_session_binding"),
+                fp("account", previous_uid).as_deref().unwrap_or("none"),
+                previous_reason.unwrap_or("none"),
+                fp("account", selected_uid).as_deref().unwrap_or("none"),
+            ),
+        );
+    }
+}
+
+fn diagnostic_gate(is_llm: bool, raw: Option<&str>) -> bool {
+    is_llm && raw.map(|value| value.trim() == "1").unwrap_or(false)
+}
+
+fn diagnostic_fingerprint(namespace: &str, value: &str) -> String {
+    static PROCESS_SALT: OnceLock<String> = OnceLock::new();
+    let salt = PROCESS_SALT.get_or_init(|| uuid::Uuid::new_v4().to_string());
+    let digest = Sha256::digest(format!("{salt}:{namespace}:{value}").as_bytes());
+    // 128-bit：足够在本次进程内关联，同时避免短 uid 被字典反推。
+    digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn strategy_label(strategy: Option<&AccountStrategy>) -> &'static str {
+    match strategy {
+        Some(AccountStrategy::Current) => "current",
+        Some(AccountStrategy::Pinned { .. }) => "pinned",
+        Some(AccountStrategy::MaxCredits) => "max_credits",
+        Some(AccountStrategy::Random) => "random",
+        Some(AccountStrategy::Sequential) => "sequential",
+        None => "unknown",
+    }
+}
+
+/// 与选号过滤顺序一致，给绑定账号标出当前不可用的首个原因。
+///
+/// 前四个过滤条件必须与 `pick_with_preference` 的 `preferred_usable` 完全一致：
+/// `tried` → 排除 → 白名单 → 账号条目可用性。验证票会先并入 `tried`，所以这里
+/// 传入 `tried` 即可覆盖「别的请求正在验证」这一格。
+fn unavailable_reason(
+    pool: &Pool,
+    uid: &str,
+    model: &str,
+    now_ms: i64,
+    allowed: Option<&HashSet<String>>,
+    config: &crate::state::GatewayConfig,
+    tried: &HashSet<String>,
+) -> &'static str {
+    if tried.contains(uid) {
+        return "already_tried_or_verify_pending";
+    }
+    if pool.is_excluded(uid) {
+        return "excluded";
+    }
+    if !allowed.map(|set| set.contains(uid)).unwrap_or(true) {
+        return "key_scope";
+    }
+    let Some(entry) = pool.get(uid) else {
+        return "missing_from_pool";
+    };
+    if !entry.present_in_store() {
+        return "credential_missing";
+    }
+    if !entry.healthy(now_ms) {
+        return "account_cooldown_or_disabled";
+    }
+    if !entry.healthy_for_request(now_ms, model) {
+        return "model_cooldown";
+    }
+    let limit = match entry.realm() {
+        Some(RealmTag::Global) if config.pool.max_in_flight_global > 0 => {
+            config.pool.max_in_flight_global
+        }
+        _ => config.pool.max_in_flight,
+    };
+    if limit > 0 && entry.in_flight_now(now_ms) >= limit {
+        return "in_flight_full";
+    }
+    "usable"
+}
 fn sticky_key_of(request: &RelayRequest) -> Option<String> {
     sticky_key_for(
         request.region,
@@ -1714,6 +2061,20 @@ async fn select_account(
     // 这里的逐个验证是**兜底**：同步与取凭据之间仍可能有一条被删掉的号，
     // 无凭据的记入 `skipped` 后重选，绝不让一条脏数据拖死整轮。
     let mut skipped: HashSet<String> = tried.clone();
+    {
+        let pool = state.pool.read().await;
+        for entry in pool.entries() {
+            if crate::risk_controls::account_blocked(
+                &state.risk_store,
+                "workbuddy",
+                region.as_str(),
+                &entry.uid,
+                now_ms.max(0) as u64,
+            ) {
+                skipped.insert(entry.uid.clone());
+            }
+        }
+    }
     let pool_empty = state.pool.read().await.is_empty();
     if !pool_empty {
         loop {
@@ -1769,6 +2130,15 @@ async fn select_account(
             let uid = account::get_str(&account_value, "uid").unwrap_or_default();
             // 已排除的账号**绝不能**从这里漏回来（否则「排除」只是个好看的开关）。
             if !uid.is_empty() && state.pool.read().await.is_excluded(&uid) {
+                return None;
+            }
+            if crate::risk_controls::account_blocked(
+                &state.risk_store,
+                "workbuddy",
+                region.as_str(),
+                &uid,
+                now_ms.max(0) as u64,
+            ) {
                 return None;
             }
             // 池已试过的账号不再重复选择（否则会立刻二次失败）。
@@ -2159,6 +2529,55 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn session_route_diag_is_opt_in_and_llm_only() {
+        let disabled = SessionRouteDiag::new(false, Some("conv-1"));
+        assert!(!disabled.enabled, "Biz 请求不得启用会话路由诊断");
+        assert_eq!(disabled.session_fp, None);
+        assert_eq!(disabled.request_id, "");
+
+        // 环境开关只在显式设为 "1" 时生效；这里只测纯门控函数，避免修改进程环境。
+        assert!(!diagnostic_gate(false, Some("1")));
+        assert!(!diagnostic_gate(true, Some("0")));
+        assert!(diagnostic_gate(true, Some("1")));
+    }
+
+    #[test]
+    fn diagnostic_fingerprint_is_stable_salted_and_does_not_emit_raw_value() {
+        let raw = "short-uid";
+        let first = diagnostic_fingerprint("account", raw);
+        let second = diagnostic_fingerprint("account", raw);
+        assert_eq!(first, second, "同一进程内必须可关联");
+        assert_eq!(first.len(), 32, "128-bit 指纹应为 32 个十六进制字符");
+        assert!(!first.contains(raw), "指纹不得包含原始 uid");
+        assert_ne!(
+            first,
+            diagnostic_fingerprint("session", raw),
+            "命名空间必须隔离"
+        );
+    }
+
+    #[test]
+    fn unavailable_reason_checks_tried_before_other_filters() {
+        let config = crate::state::GatewayConfig::default();
+        let mut pool = Pool::new(crate::pool::PoolConfig::default());
+        pool.upsert("u1", Some(RealmTag::Cn), "");
+        let mut tried = HashSet::new();
+        tried.insert("u1".to_string());
+        assert_eq!(
+            unavailable_reason(
+                &pool,
+                "u1",
+                "model",
+                1_700_000_000_000,
+                None,
+                &config,
+                &tried,
+            ),
+            "already_tried_or_verify_pending",
+            "已试过（含验证票并入 tried）必须优先于健康检查"
+        );
+    }
+    #[test]
     fn realm_mapping_covers_both_regions() {
         assert_eq!(realm_of(Region::Cn), RealmTag::Cn);
         assert_eq!(realm_of(Region::Global), RealmTag::Global);
@@ -2506,20 +2925,20 @@ mod tests {
     // `pick_with_preference` 系列用例与 `pool::tests::pick_account_honours_preferred_uid_and_falls_back`
     // 守住；Trae 侧另有 `trae::pool::preferred_uid_falls_back_when_unusable` 做行为级印证。
 
-    /// ★ issue #100：上游 401/403 必须**换号**。
-    ///
-    /// 旧实现把它归到 `UpstreamEvent::Client`（「调用方错误，不换号」）⇒ 池里明明有
-    /// 健康账号，客户端却直接吃到 401。用户原话：「之前旧的登录状态直接报 401」。
-    ///
-    /// 变异：把 `should_rotate` 里的 `AuthRejected` 挪回「不换号」⇒ 第一条断言红。
+    /// 认证拒绝、封禁、限流和额度不足都必须停止当前请求，不能转交给另一个账号。
     #[test]
-    fn auth_rejected_rotates_to_another_account() {
+    fn terminal_account_outcomes_do_not_rotate_accounts() {
         use crate::pool::UpstreamEvent;
-        assert!(should_rotate(&UpstreamEvent::AuthRejected, 0));
-        assert!(
-            should_rotate(&UpstreamEvent::AuthRejected, 5),
-            "401/403 不受 attempt 预算影响（它换号就能救）"
-        );
+        assert!(!should_rotate(&UpstreamEvent::AuthRejected, 0));
+        assert!(!should_rotate(&UpstreamEvent::AuthRejected, 5));
+        assert!(!should_rotate(&UpstreamEvent::HardCredit, 0));
+        assert!(!should_rotate(
+            &UpstreamEvent::SoftRate {
+                reset_at_ms: None,
+                model_scoped: false
+            },
+            0
+        ));
         // 对照：参数错（400/422）仍然不换号 —— 换号只是把同一份坏参数喂给下一个号。
         assert!(!should_rotate(&UpstreamEvent::Client, 0));
     }

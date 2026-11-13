@@ -714,6 +714,7 @@ pub fn run() {
             commands::set_key_policy,
             commands::key_usage,
             commands::revive_gateway_account,
+            commands::recover_gateway_risk_account,
             commands::get_unified_gateway_config,
             commands::save_unified_gateway_config,
             commands::get_unified_gateway_models,

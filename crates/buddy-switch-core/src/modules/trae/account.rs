@@ -1881,6 +1881,11 @@ pub async fn refresh_jwt(user_id: &str) -> Result<String, String> {
 /// 续期必须用「这个账号当初登录 / 导入时那台设备」的私钥签名。旧账号没有绑定 ⇒
 /// 透传 `None`，由 [`exchange_token_for`] 回落当前目录并**留痕**。
 pub async fn refresh_jwt_for(variant: TraeVariant, user_id: &str) -> Result<String, String> {
+    let region_key = variant.region().as_str();
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("trae", region_key, user_id)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let account = find_for(variant, user_id).ok_or("账号不存在")?;
     let refresh_token = account
         .refresh_token
@@ -1891,9 +1896,30 @@ pub async fn refresh_jwt_for(variant: TraeVariant, user_id: &str) -> Result<Stri
     // 绑定可能不存在（旧账号 / 刚换过 uid）—— 那正是回落分支存在的意义，不是错误。
     let device_binding = bound_device_id(variant, user_id);
 
-    let exchanged = exchange_token_for(variant, &refresh_token, device_binding.as_deref())
-        .await
-        .map_err(|error| refresh_error_message(&error))?;
+    let exchanged =
+        match exchange_token_for(variant, &refresh_token, device_binding.as_deref()).await {
+            Ok(value) => value,
+            Err(error) => {
+                let lower = error.message.to_ascii_lowercase();
+                let code = if lower.contains("401") {
+                    401
+                } else if lower.contains("403") {
+                    403
+                } else if lower.contains("429") {
+                    429
+                } else {
+                    0
+                };
+                let _ = crate::modules::risk_control::record_platform_response(
+                    "trae",
+                    region_key,
+                    user_id,
+                    code,
+                    error.message.clone(),
+                );
+                return Err(refresh_error_message(&error));
+            }
+        };
     let new_jwt = exchanged.jwt;
     let info = jwt::parse(&new_jwt);
     ensure_refreshed_uid_matches(user_id, info.user_id.as_deref())?;

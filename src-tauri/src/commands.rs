@@ -2753,6 +2753,9 @@ pub async fn save_gateway_config(app: tauri::AppHandle, config: Value) -> Result
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: GatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
+    parsed
+        .validate_risk_controls()
+        .map_err(|error| format!("风控设置无效: {error}"))?;
     parsed.save()?;
 
     let state = gateway::shared_state();
@@ -3176,7 +3179,44 @@ pub async fn revive_gateway_account(uid: String) -> Result<Value, String> {
         return Err(format!("账号 {uid} 不在账号池中（可能已被删除）"));
     }
     let revived = pool.revive(&uid);
-    Ok(json!({ "ok": true, "revived": revived }))
+    drop(pool);
+    let risk_recovered_cn = buddy_switch_gateway::risk_controls::recover_account(
+        &state.risk_store,
+        "workbuddy",
+        "cn",
+        &uid,
+    )?;
+    let risk_recovered_global = buddy_switch_gateway::risk_controls::recover_account(
+        &state.risk_store,
+        "workbuddy",
+        "global",
+        &uid,
+    )?;
+    let risk_recovered = risk_recovered_cn || risk_recovered_global;
+    Ok(json!({ "ok": true, "revived": revived, "risk_recovered": risk_recovered }))
+}
+
+/// 清除某产品、区域下人工确认后的持久化风险暂停/冷却。
+#[tauri::command]
+pub async fn recover_gateway_risk_account(
+    platform: String,
+    region: String,
+    uid: String,
+) -> Result<Value, String> {
+    let platform = platform.trim().to_ascii_lowercase();
+    let region = region.trim().to_ascii_lowercase();
+    let uid = uid.trim();
+    if uid.is_empty() || !matches!(region.as_str(), "cn" | "global") {
+        return Err("platform/region/uid 参数无效".into());
+    }
+    let store = match platform.as_str() {
+        "workbuddy" => gateway::shared_state().risk_store,
+        "trae" => trae_gateway::shared_state().risk_store,
+        "qoder" => qoder_gateway::shared_state().risk_store,
+        _ => return Err("platform 只支持 workbuddy、trae、qoder".into()),
+    };
+    buddy_switch_gateway::risk_controls::recover_account(&store, &platform, &region, uid)?;
+    Ok(json!({ "ok": true, "platform": platform, "region": region, "uid": uid }))
 }
 
 /// GET /api/gateway/models —— 模型列表 + 来源（按 region）。
@@ -4259,6 +4299,9 @@ pub async fn save_trae_gateway_config(
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: buddy_switch_gateway::trae::TraeGatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
+    parsed
+        .validate_risk_controls()
+        .map_err(|error| format!("风控设置无效: {error}"))?;
     parsed.save()?;
 
     let state = trae_gateway::shared_state();
@@ -5855,6 +5898,9 @@ pub async fn save_qoder_gateway_config(
     let submitted = config.get("config").cloned().unwrap_or(config);
     let parsed: buddy_switch_gateway::qoder::QoderGatewayConfig =
         serde_json::from_value(submitted).map_err(|error| format!("配置格式错误: {error}"))?;
+    parsed
+        .validate_risk_controls()
+        .map_err(|error| format!("风控设置无效: {error}"))?;
     parsed.save()?;
 
     let state = qoder_gateway::shared_state();

@@ -27,6 +27,7 @@ import {
 import { QoderApiKeyTable } from "@/components/gateway/qoder-api-key-table";
 import { QoderModelList } from "@/components/gateway/qoder-model-list";
 import { QoderQuotaGuard } from "@/components/gateway/qoder-quota-guard";
+import { RiskControlsForm } from "@/components/gateway/risk-controls-form";
 import { ModelFallbackCard } from "@/components/gateway/model-fallback-card";
 import { ModelProbeCard } from "@/components/gateway/model-probe-card";
 import { TraeIntegrationGuide } from "@/components/gateway/trae-integration-guide";
@@ -771,6 +772,12 @@ export default function QoderApiServicePage() {
                   label: t("shared.gateway.pool.strategySequential"),
                 },
               ]}
+            />
+            <RiskControlsForm
+              region={region}
+              value={config.riskControlsByRegion[region]}
+              saving={saving}
+              onSave={async (value) => persist({ riskControlsByRegion: { ...config.riskControlsByRegion, [region]: value } })}
             />
             </>
           )}

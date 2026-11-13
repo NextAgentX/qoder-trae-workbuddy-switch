@@ -1768,6 +1768,15 @@ export interface CodebuddyPluginDetectResult {
 // ---------------------------------------------------------------------------
 
 /** 网关运行配置（持久化到 ~/.buddy-switch/gateway_config.json）。字段名与后端 serde 序列化一致。 */
+export interface RiskControlSettings {
+  requests_per_minute: number;
+  max_in_flight_per_account: number;
+  max_in_flight_global: number;
+  min_account_gap_ms: number;
+  max_transient_attempts: number;
+  fallback_cooldown_secs: number;
+}
+
 export interface GatewayConfig {
   enabled: boolean;
   bind_addr: string;
@@ -1803,6 +1812,7 @@ export interface GatewayConfig {
    * ⚠️ 后端在网关状态初始化时构建一次 HTTP 客户端 ⇒ **切换后需重启应用生效**。
    */
   upstream_via_proxy: boolean;
+  risk_controls_by_region: Record<"cn" | "global", RiskControlSettings>;
 }
 
 /* ─────────── 模型降级链（P13）───────────

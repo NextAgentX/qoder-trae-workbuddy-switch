@@ -345,6 +345,12 @@ impl UpstreamClient {
         Self { http }
     }
 
+    /// 所有账号复用网关共享出口；账号配置中的旧代理映射不会参与路由。
+    fn client_for_account(&self, acc: &Value) -> Result<reqwest::Client, String> {
+        let _ = acc;
+        Ok(self.http.clone())
+    }
+
     /// POST chat 端点；成功返回原始 SSE 响应。
     ///
     /// CN 直传已规范化的 body；Global 走 [`prepare_international_chat_body`]
@@ -401,6 +407,21 @@ impl UpstreamClient {
     pub async fn forward_with_method(
         &self,
         url: &str,
+        headers: HashMap<String, String>,
+        body: String,
+        signal: Option<watch::Receiver<bool>>,
+        user_agent: &str,
+        method: reqwest::Method,
+    ) -> UpstreamChatResult {
+        self.forward_with_method_on(&self.http, url, headers, body, signal, user_agent, method)
+            .await
+    }
+
+    /// 在指定客户端上执行通用出站（账号独立出口复用同一套结果分类）。
+    async fn forward_with_method_on(
+        &self,
+        http: &reqwest::Client,
+        url: &str,
         mut headers: HashMap<String, String>,
         body: String,
         signal: Option<watch::Receiver<bool>>,
@@ -409,8 +430,7 @@ impl UpstreamClient {
     ) -> UpstreamChatResult {
         headers.insert("User-Agent".to_string(), user_agent.to_string());
 
-        let request = self
-            .http
+        let request = http
             .request(method, url)
             .headers(header_map(&headers))
             .body(body);
@@ -493,7 +513,18 @@ impl UpstreamClient {
         };
         let url = format!("{}{path}", region_spec(region).billing_base);
         let headers = account::build_auth_headers(acc);
-        self.forward_with_method(
+        let http = match self.client_for_account(acc) {
+            Ok(client) => client,
+            Err(message) => {
+                return UpstreamChatResult::Err {
+                    status: 0,
+                    kind: UpstreamErrorKind::Server,
+                    message,
+                }
+            }
+        };
+        self.forward_with_method_on(
+            &http,
             &url,
             headers,
             body_json.to_string(),
@@ -537,13 +568,25 @@ impl UpstreamClient {
                 }
             }
         }
-        // ★ 出站交给通用实现 —— 行为与抽取前**逐字一致**（仅把「URL/头/body 的构造」留在本函数）。
-        self.forward_with(
+        // ★ 出站交给通用实现，但客户端必须按账号选择；缺独立出口时 fail-closed。
+        let http = match self.client_for_account(acc) {
+            Ok(client) => client,
+            Err(message) => {
+                return UpstreamChatResult::Err {
+                    status: 0,
+                    kind: UpstreamErrorKind::Server,
+                    message,
+                }
+            }
+        };
+        self.forward_with_method_on(
+            &http,
             &url,
             headers,
             chat_body_for(region, body_json),
             signal,
             &user_agent,
+            reqwest::Method::POST,
         )
         .await
     }
@@ -589,8 +632,11 @@ impl UpstreamClient {
             headers.insert("X-Enterprise-Id".to_string(), eid);
         }
 
-        let response = self
-            .http
+        let http = match self.client_for_account(acc) {
+            Ok(client) => client,
+            Err(message) => return Err(message),
+        };
+        let response = http
             .post(&url)
             .headers(header_map(&headers))
             .json(&json!({}))
@@ -650,6 +696,18 @@ impl UpstreamClient {
         region: Region,
         acc: &Value,
     ) -> Result<Vec<CatalogModel>, UpstreamFailure> {
+        let uid = account::get_str(acc, "uid").unwrap_or_default();
+        let _risk_permit = crate::modules::risk_control::admit_platform_request(
+            "workbuddy",
+            region.as_str(),
+            &uid,
+        )
+        .await
+        .map_err(|error| UpstreamFailure {
+            status: 0,
+            kind: UpstreamErrorKind::Server,
+            message: format!("风控准入拦截：{error}"),
+        })?;
         let spec = region_spec(region);
         let international = matches!(spec.catalog_ua, CatalogUa::App);
         let url = format!("{}{}", spec.chat_base, spec.models_path);
@@ -677,8 +735,17 @@ impl UpstreamClient {
         }
         headers.insert("User-Agent".to_string(), user_agent);
 
-        let response = self
-            .http
+        let http = match self.client_for_account(acc) {
+            Ok(client) => client,
+            Err(message) => {
+                return Err(UpstreamFailure {
+                    status: 0,
+                    kind: UpstreamErrorKind::Server,
+                    message,
+                })
+            }
+        };
+        let response = http
             .get(&url)
             .headers(header_map(&headers))
             .send()
@@ -690,6 +757,13 @@ impl UpstreamClient {
             })?;
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
+        let _ = crate::modules::risk_control::record_platform_response(
+            "workbuddy",
+            region.as_str(),
+            &uid,
+            i64::from(status),
+            format!("模型目录 HTTP {status}"),
+        );
         let Some(document) = parse_envelope(&text) else {
             let message = text.chars().take(ERROR_BODY_LIMIT).collect::<String>();
             return Err(UpstreamFailure {
@@ -733,6 +807,18 @@ impl UpstreamClient {
         region: Region,
         acc: &Value,
     ) -> Result<Credits, UpstreamFailure> {
+        let uid = account::get_str(acc, "uid").unwrap_or_default();
+        let _risk_permit = crate::modules::risk_control::admit_platform_request(
+            "workbuddy",
+            region.as_str(),
+            &uid,
+        )
+        .await
+        .map_err(|error| UpstreamFailure {
+            status: 0,
+            kind: UpstreamErrorKind::Server,
+            message: format!("风控准入拦截：{error}"),
+        })?;
         let spec = region_spec(region);
         let url = format!("{}/v2/billing/meter/get-user-resource", spec.billing_base);
         let now = chrono::Local::now();
@@ -772,8 +858,17 @@ impl UpstreamClient {
             headers.insert("X-Domain".to_string(), domain);
         }
 
-        let response = self
-            .http
+        let http = match self.client_for_account(acc) {
+            Ok(client) => client,
+            Err(message) => {
+                return Err(UpstreamFailure {
+                    status: 0,
+                    kind: UpstreamErrorKind::Server,
+                    message,
+                })
+            }
+        };
+        let response = http
             .post(&url)
             .headers(header_map(&headers))
             .json(&body)
@@ -786,6 +881,13 @@ impl UpstreamClient {
             })?;
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
+        let _ = crate::modules::risk_control::record_platform_response(
+            "workbuddy",
+            region.as_str(),
+            &uid,
+            i64::from(status),
+            format!("积分查询 HTTP {status}"),
+        );
         let Some(document) = parse_envelope(&text) else {
             let message = text.chars().take(ERROR_BODY_LIMIT).collect::<String>();
             return Err(UpstreamFailure {
@@ -1413,5 +1515,24 @@ mod tests {
         let source = r#"{"messages":[{"role":"user","content":"hi"}]}"#;
         let once = chat_body_for(Region::Global, source);
         assert_eq!(chat_body_for(Region::Global, &once), once);
+    }
+
+    #[test]
+    fn account_egress_config_does_not_change_shared_client() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-upstream-egress-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let previous = std::env::var_os(crate::modules::config::BUDDY_SWITCH_HOME_ENV);
+        std::env::set_var(crate::modules::config::BUDDY_SWITCH_HOME_ENV, &dir);
+        let client = UpstreamClient::new(reqwest::Client::new());
+        let selected = client.client_for_account(&json!({"uid": "u1"})).unwrap();
+        assert!(selected.get("https://example.com").build().is_ok());
+        match previous {
+            Some(value) => std::env::set_var(crate::modules::config::BUDDY_SWITCH_HOME_ENV, value),
+            None => std::env::remove_var(crate::modules::config::BUDDY_SWITCH_HOME_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

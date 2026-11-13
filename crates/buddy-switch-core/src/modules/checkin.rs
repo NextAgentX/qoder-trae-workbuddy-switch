@@ -22,7 +22,7 @@ use crate::modules::config::{
     add_checkin_log, http_request, load_checkin_config, load_checkin_logs, now_ms, RunFlagGuard,
     CHECKIN_API_PREFIX,
 };
-use crate::modules::refresh::{ensure_fresh_token_for, refresh_account_token_for};
+use crate::modules::refresh::ensure_fresh_token_for;
 use crate::modules::region::{region_spec, Region};
 
 static CHECKIN_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -81,6 +81,7 @@ impl Drop for AccountRunGuard {
 }
 
 /// 判断是否因 token 失效被拒（用于触发刷新重试）。
+#[cfg(test)]
 fn is_unauthorized(resp: &Value) -> bool {
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code == 401 || code == 403 {
@@ -105,18 +106,32 @@ async fn checkin_request_for(region: Region, path: &str, account: &Value) -> Val
     }
     let url = format!("{}{path}", region_spec(region).billing_base);
     let headers = build_auth_headers(account);
-    let mut resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
-    if is_unauthorized(&resp)
-        && !account
-            .get("refresh_token")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .is_empty()
+    let uid = account.get("uid").and_then(Value::as_str).unwrap_or("");
+    let _risk_permit = match crate::modules::risk_control::admit_platform_request(
+        "workbuddy",
+        region.as_str(),
+        uid,
+    )
+    .await
     {
-        let refreshed = refresh_account_token_for(region, account.clone()).await;
-        let headers = build_auth_headers(&refreshed);
-        resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
-    }
+        Ok(permit) => permit,
+        Err(error) => return json!({"code": -3, "message": format!("风控准入拦截：{error}")}),
+    };
+    let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
+    let code = resp.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    let reason = resp
+        .get("message")
+        .or_else(|| resp.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "workbuddy",
+        region.as_str(),
+        uid,
+        code,
+        reason,
+    );
     resp
 }
 

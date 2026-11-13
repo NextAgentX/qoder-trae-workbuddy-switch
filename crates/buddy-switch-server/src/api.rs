@@ -348,6 +348,7 @@ fn api_routes() -> Router {
         .route("/api/gateway/status", get(api_gateway_status))
         // 账号池：人工解除某账号的禁用（禁用是终态且落盘，此前**没有任何出口**）。
         .route("/api/gateway/pool/revive", post(api_gateway_revive_account))
+        .route("/api/gateway/risk/recover", post(api_gateway_risk_recover))
         .route(
             "/api/gateway/pool/exclusions",
             get(api_gateway_pool_exclusions).post(api_gateway_set_pool_exclusion),
@@ -3484,6 +3485,9 @@ async fn api_save_gateway_config(Json(body): Json<Value>) -> Response {
         Ok(config) => config,
         Err(error) => return json_err(format!("配置格式错误: {error}"), StatusCode::BAD_REQUEST),
     };
+    if let Err(error) = config.validate_risk_controls() {
+        return json_err(format!("风控设置无效: {error}"), StatusCode::BAD_REQUEST);
+    }
     if let Err(error) = config.save() {
         return json_err(error, StatusCode::BAD_REQUEST);
     }
@@ -3641,7 +3645,76 @@ async fn api_gateway_revive_account(Json(body): Json<Value>) -> Response {
         );
     }
     let revived = pool.revive(uid);
-    json_ok(json!({ "ok": true, "revived": revived }))
+    drop(pool);
+    let risk_recovered_cn = match buddy_switch_gateway::risk_controls::recover_account(
+        &state.risk_store,
+        "workbuddy",
+        "cn",
+        uid,
+    ) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let risk_recovered_global = match buddy_switch_gateway::risk_controls::recover_account(
+        &state.risk_store,
+        "workbuddy",
+        "global",
+        uid,
+    ) {
+        Ok(value) => value,
+        Err(error) => return json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    json_ok(
+        json!({ "ok": true, "revived": revived, "risk_recovered": risk_recovered_cn || risk_recovered_global }),
+    )
+}
+
+async fn api_gateway_risk_recover(Json(body): Json<Value>) -> Response {
+    let platform = body
+        .get("platform")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let region = body
+        .get("region")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let uid = body.get("uid").and_then(Value::as_str).unwrap_or("").trim();
+    let product = match platform.as_str() {
+        "workbuddy" => Product::Workbuddy,
+        "trae" => Product::Trae,
+        "qoder" => Product::Qoder,
+        _ => {
+            return json_err(
+                "platform 只支持 workbuddy、trae、qoder".into(),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    if let Err(error) = require_capability(product, capability::Capability::Gateway) {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    if uid.is_empty() || !matches!(region.as_str(), "cn" | "global") {
+        return json_err(
+            "platform/region/uid 参数无效".into(),
+            StatusCode::BAD_REQUEST,
+        );
+    }
+    let store = match platform.as_str() {
+        "workbuddy" => crate::gateway_host::shared_state().risk_store,
+        "trae" => crate::trae_gateway::shared_state().risk_store,
+        "qoder" => crate::qoder_gateway::shared_state().risk_store,
+        _ => unreachable!(),
+    };
+    match buddy_switch_gateway::risk_controls::recover_account(&store, &platform, &region, uid) {
+        Ok(recovered) => json_ok(
+            json!({ "ok": true, "recovered": recovered, "platform": platform, "region": region, "uid": uid }),
+        ),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 /// POST /api/gateway/open-data-dir —— 打开 **WorkBuddy 客户端**的数据目录（`{region?}`）。
@@ -5003,6 +5076,9 @@ async fn api_save_trae_gateway_config(Json(body): Json<Value>) -> Response {
                 return json_err(format!("配置格式错误: {error}"), StatusCode::BAD_REQUEST)
             }
         };
+    if let Err(error) = config.validate_risk_controls() {
+        return json_err(format!("风控设置无效: {error}"), StatusCode::BAD_REQUEST);
+    }
     if let Err(error) = config.save() {
         return json_err(error, StatusCode::BAD_REQUEST);
     }
@@ -8613,6 +8689,9 @@ async fn api_save_qoder_gateway_config(Json(body): Json<Value>) -> Response {
                 return json_err(format!("配置格式错误: {error}"), StatusCode::BAD_REQUEST)
             }
         };
+    if let Err(error) = config.validate_risk_controls() {
+        return json_err(format!("风控设置无效: {error}"), StatusCode::BAD_REQUEST);
+    }
     if let Err(error) = config.save() {
         return json_err(error, StatusCode::BAD_REQUEST);
     }

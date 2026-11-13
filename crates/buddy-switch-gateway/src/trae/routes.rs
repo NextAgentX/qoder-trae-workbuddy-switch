@@ -1059,11 +1059,19 @@ async fn stream_chat(
         .await
         {
             None => break,
-            Some(AttemptResult::Failed { failure, .. }) => last = Some(failure),
+            Some(AttemptResult::Failed { failure, .. }) => {
+                let terminal = matches!(failure.status, 401 | 402 | 403 | 429)
+                    || failure.code == "upstream_unreachable";
+                last = Some(failure);
+                if terminal {
+                    break;
+                }
+            }
             Some(AttemptResult::Ok {
                 account,
                 response,
                 capture,
+                risk_permit,
             }) => {
                 let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(64);
                 let task_state = state.clone();
@@ -1072,6 +1080,7 @@ async fn stream_chat(
                 // ★ issue #76：Key 要进 `tokio::spawn`（'static）⇒ 先 clone 一份。
                 let task_key = key.cloned();
                 tokio::spawn(async move {
+                    let _risk_permit = risk_permit;
                     let outcome = sse::stream_convert(
                         response,
                         tx,
@@ -1181,7 +1190,7 @@ async fn aggregate_payload(
     let mut last: Option<UpstreamFailure> = None;
 
     for _ in 0..max_rotate {
-        let (account, response, capture) = match attempt_once(
+        let (account, response, capture, _risk_permit) = match attempt_once(
             state,
             body,
             default_model,
@@ -1195,14 +1204,20 @@ async fn aggregate_payload(
         {
             None => break,
             Some(AttemptResult::Failed { failure, .. }) => {
+                let terminal = matches!(failure.status, 401 | 402 | 403 | 429)
+                    || failure.code == "upstream_unreachable";
                 last = Some(failure);
+                if terminal {
+                    break;
+                }
                 continue;
             }
             Some(AttemptResult::Ok {
                 account,
                 response,
                 capture,
-            }) => (account, response, capture),
+                risk_permit,
+            }) => (account, response, capture, risk_permit),
         };
 
         let (payload, error, usage) =
@@ -1355,6 +1370,8 @@ enum AttemptResult {
         /// 抓取旁路句柄（诊断用）：`Some` 表示本次尝试开着抓取，编号已生成、
         /// 请求对已落盘；响应消费方接着用同一编号追加原始流。
         capture: Option<Capture>,
+        /// 在整个响应体被消费完之前保留并发额度。
+        risk_permit: buddy_switch_core::modules::risk_control::RiskPermit,
     },
     /// 出站失败：已分类、已写回冷却文件。
     Failed {
@@ -1443,6 +1460,18 @@ async fn attempt_once(
             .or_insert_with(|| TraePool::for_variant(variant));
         // 每次选号前重新同步：另一个入口（签到页 / 桌面端）可能刚写了冷却或刷新了积分。
         pool.sync_for(variant);
+        let region_key = super::region_of_variant(variant).as_str();
+        for entry in pool.entries() {
+            if crate::risk_controls::account_blocked(
+                &state.risk_store,
+                "trae",
+                region_key,
+                &entry.uid,
+                buddy_switch_core::modules::config::now_ms().max(0) as u64,
+            ) {
+                tried.insert(entry.uid.clone());
+            }
+        }
         // 偏好优先级：**显式指定 > 会话粘性 > 自动择优**（见 [`resolve_preference`]）。
         // 两者都不可用时 `pick_with_preference` 会自行回落到自动择优，绝不拒绝服务。
         let preferred = resolve_preference(preferred_uid, sticky_uid.as_deref());
@@ -1450,6 +1479,34 @@ async fn attempt_once(
         pool.pick(now_secs(), tried, preferred, allowed)
     }?;
     tried.insert(picked.uid.clone());
+
+    let config = state.config_snapshot().await;
+    let region_key = super::region_of_variant(variant).as_str();
+    let risk_settings = config
+        .risk_controls_by_region
+        .get(region_key)
+        .cloned()
+        .unwrap_or_default();
+    let risk_permit = match crate::risk_controls::admit_request(
+        &state.risk_store,
+        "trae",
+        region_key,
+        &picked.uid,
+        &risk_settings,
+        buddy_switch_core::modules::config::now_ms().max(0) as u64,
+    ) {
+        Ok(permit) => permit,
+        Err(error) => {
+            return Some(AttemptResult::Failed {
+                account: picked.clone(),
+                failure: UpstreamFailure {
+                    status: 429,
+                    code: "risk_control_blocked".into(),
+                    message: format!("请求被风控准入拦截：{error}"),
+                },
+            });
+        }
+    };
 
     // 抓取（诊断旁路）：开关打开时为**本次尝试**建句柄（目录解析 + 编号各一次）。
     // 关闭时连目录都不碰 —— 热路径上零 IO 开销。编号随 `AttemptResult::Ok`
@@ -1477,10 +1534,37 @@ async fn attempt_once(
                 account: picked,
                 response,
                 capture,
+                risk_permit,
             })
         }
         Err((status, detail)) => {
             let kind = classify_http(status, &detail);
+            let now_ms = buddy_switch_core::modules::config::now_ms().max(0) as u64;
+            match kind {
+                TraeErrKind::AuthRejected | TraeErrKind::SessionDead => {
+                    let _ = crate::risk_controls::pause_account(
+                        &state.risk_store,
+                        "trae",
+                        region_key,
+                        &picked.uid,
+                        detail.clone(),
+                        now_ms,
+                    );
+                }
+                TraeErrKind::SoftRate => {
+                    let _ = crate::risk_controls::record_rate_limit(
+                        &state.risk_store,
+                        "trae",
+                        region_key,
+                        &picked.uid,
+                        detail.clone(),
+                        None,
+                        now_ms,
+                        risk_settings.fallback_cooldown_secs,
+                    );
+                }
+                _ => {}
+            }
             let failure = UpstreamFailure {
                 // 传输层错误没有 HTTP 状态码，对客户端统一报 502（网关上游不可达）。
                 status: if status == 0 { 502 } else { status },

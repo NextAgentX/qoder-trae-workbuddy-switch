@@ -316,6 +316,9 @@ pub async fn refresh(variant: TraeVariant) -> Result<Vec<ClientModel>, String> {
         .find(|record| !jwt::normalize(&record.jwt).is_empty())
         .ok_or_else(|| "账号池里没有可用凭据（先登录一个 Trae 账号）".to_string())?;
     let uid = jwt::user_id_of(&account.jwt).unwrap_or_default();
+    let _risk_permit = crate::modules::risk_control::admit_platform_request("trae", "cn", &uid)
+        .await
+        .map_err(|error| format!("风控准入拦截：{error}"))?;
     let device_entry = device::ensure_for_variant(variant, &uid)
         .map_err(|error| format!("读不到本机设备标识: {error}"))?;
     let machine_id = device::oauth_login_machine_for(variant).machine_id;
@@ -338,6 +341,13 @@ pub async fn refresh(variant: TraeVariant) -> Result<Vec<ClientModel>, String> {
     })?;
     let status = response.status().as_u16();
     let text = response.text().await.unwrap_or_default();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "trae",
+        "cn",
+        &uid,
+        i64::from(status),
+        format!("模型目录请求 HTTP {status}"),
+    );
     if status != 200 {
         return Err(format!("上游返回 HTTP {status}: {}", truncate(&text, 200)));
     }

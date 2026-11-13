@@ -49,6 +49,8 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 
 use buddy_switch_core::modules::config as core_config;
 use buddy_switch_core::modules::region::Region;
+use buddy_switch_core::modules::risk_control::RiskControlSettings;
+use buddy_switch_core::modules::risk_control::RiskStore;
 use buddy_switch_core::modules::trae::region::TraeRegion;
 use buddy_switch_core::modules::trae::variant::TraeVariant;
 
@@ -77,6 +79,13 @@ use pool::TraePool;
 /// 想按变体/地区切换出站时，请改 [`TraeGatewayConfig::upstream`] 的取值来源，
 /// 不要在调用点写分支 —— 该字段本来就是为"可重定向出站"设计的（e2e 测试也靠它）。
 pub const TRAE_AGENT_HOST: &str = "https://trae-api-cn.mchost.guru";
+
+fn default_risk_controls_by_region() -> std::collections::BTreeMap<String, RiskControlSettings> {
+    ["cn", "global"]
+        .into_iter()
+        .map(|region| (region.to_string(), RiskControlSettings::default()))
+        .collect()
+}
 
 /// SOLO 对话接口路径（消耗 IDE 积分，product_id 208）。
 pub const TRAE_LLM_CHAT_PATH: &str = "/api/agent/v3/llm_utils_chat";
@@ -258,6 +267,12 @@ pub struct TraeGatewayConfig {
     /// 与 WorkBuddy 网关的 `GatewayConfig::auto_failover` 同名同义，便于三处对齐。
     #[serde(alias = "autoFailover")]
     pub auto_failover: bool,
+    /// CN 与 Global 区域分别保存的请求风控设置。
+    #[serde(
+        default = "default_risk_controls_by_region",
+        alias = "riskControlsByRegion"
+    )]
+    pub risk_controls_by_region: std::collections::BTreeMap<String, RiskControlSettings>,
 }
 
 /// 进程内 Trae 网关当前的 Max Mode 开关（给**命令面**等拿不到 `TraeGatewayState` 的地方用）。
@@ -282,11 +297,23 @@ impl Default for TraeGatewayConfig {
             capture_enabled: false,
             max_mode: true,
             auto_failover: false,
+            risk_controls_by_region: default_risk_controls_by_region(),
         }
     }
 }
 
 impl TraeGatewayConfig {
+    pub fn validate_risk_controls(&self) -> Result<(), String> {
+        for (region, settings) in &self.risk_controls_by_region {
+            if !matches!(region.as_str(), "cn" | "global") {
+                return Err(format!("unknown Trae risk-control region: {region}"));
+            }
+            settings
+                .validate()
+                .map_err(|error| format!("{region}: {error}"))?;
+        }
+        Ok(())
+    }
     /// 从 `~/.buddy-switch/trae/api_gateway.json` 读取；缺失/损坏回落默认值。
     pub fn load() -> Self {
         let file = paths::api_gateway_file();
@@ -358,6 +385,8 @@ pub fn body_limit_bytes(max_body_mb: usize) -> usize {
 pub struct TraeGatewayState {
     /// 运行配置。
     pub config: Arc<RwLock<TraeGatewayConfig>>,
+    /// 按平台区域保存的请求准入状态；损坏时由路由 fail-closed。
+    pub risk_store: Result<RiskStore, String>,
     /// **按产品线分家的账号池**：Key 的归属（`variant`）决定用哪个池。
     ///
     /// 用 `HashMap<TraeVariant, TraePool>` 而非「一个池 + 每条目带 variant」：
@@ -419,6 +448,9 @@ impl TraeGatewayState {
         ));
         Self {
             config: Arc::new(RwLock::new(config.clone())),
+            risk_store: RiskStore::open_shared(
+                paths::api_gateway_file().with_file_name("risk_control.json"),
+            ),
             pools: Arc::new(Mutex::new(HashMap::new())),
             disabled: crate::disabled_models::shared(),
             sticky: Arc::new(Mutex::new(StickyTable::new(config.sticky_ttl_ms))),
@@ -932,6 +964,7 @@ mod tests {
             "capture_enabled",
             "max_mode",
             "auto_failover",
+            "risk_controls_by_region",
         ]
         .into_iter()
         .collect();

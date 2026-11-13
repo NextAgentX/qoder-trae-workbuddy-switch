@@ -28,6 +28,7 @@ import { ModelProbeCard } from "@/components/gateway/model-probe-card";
 import { TraeIntegrationGuide } from "@/components/gateway/trae-integration-guide";
 import { TraeModelList } from "@/components/gateway/trae-model-list";
 import { TraeRequestLog } from "@/components/gateway/trae-request-log";
+import { RiskControlsForm } from "@/components/gateway/risk-controls-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -842,6 +843,7 @@ export default function TraeApiServicePage() {
 
           {/* ---- 账号池（与 WorkBuddy 侧共用同一张卡） ---- */}
           {section === "pool" && (
+            <>
             <AccountPoolCard
               pool={status?.pool ?? null}
               accounts={status?.accounts ?? []}
@@ -876,6 +878,13 @@ export default function TraeApiServicePage() {
                 },
               ]}
             />
+            <RiskControlsForm
+              region={traeRegionOf(variant)}
+              value={config.riskControlsByRegion[traeRegionOf(variant)]}
+              saving={saving}
+              onSave={async (value) => persist({ riskControlsByRegion: { ...config.riskControlsByRegion, [traeRegionOf(variant)]: value } })}
+            />
+            </>
           )}
 
           {/* ---- 请求日志 ---- */}

@@ -69,22 +69,50 @@ pub fn plan_refresh(account: &RawAccount) -> Result<RefreshPlan, String> {
 
 /// 刷新一条账号的令牌并回写账号库。返回面向命令面的视图（**不含令牌明文**）。
 pub async fn refresh_for(region: QoderRegion, uid: &str) -> Result<Value, String> {
+    let region_key = region.as_str();
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region_key, uid)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let account =
         account::find_account_for(region, uid).ok_or_else(|| format!("账号不存在: {uid}"))?;
     let plan = plan_refresh(&account)?;
 
-    let refreshed = match plan {
+    let refreshed_result = match plan {
         RefreshPlan::Device => {
             let refresh = account.refresh_token.as_deref().unwrap_or("");
-            api::refresh_token(region, RefreshKind::Device, refresh).await?
+            api::refresh_token(region, RefreshKind::Device, refresh).await
         }
         RefreshPlan::Job => {
             let refresh = account.refresh_token.as_deref().unwrap_or("");
-            api::refresh_token(region, RefreshKind::Job, refresh).await?
+            api::refresh_token(region, RefreshKind::Job, refresh).await
         }
         RefreshPlan::PatExchange => {
             let pat = account.personal_token.as_deref().unwrap_or("");
-            api::exchange_pat(region, pat).await?
+            api::exchange_pat(region, pat).await
+        }
+    };
+    let refreshed = match refreshed_result {
+        Ok(value) => value,
+        Err(error) => {
+            let lower = error.to_ascii_lowercase();
+            let code = if lower.contains("http 401") {
+                401
+            } else if lower.contains("http 403") {
+                403
+            } else if lower.contains("http 429") {
+                429
+            } else {
+                0
+            };
+            let _ = crate::modules::risk_control::record_platform_response(
+                "qoder",
+                region_key,
+                uid,
+                code,
+                error.clone(),
+            );
+            return Err(error);
         }
     };
 

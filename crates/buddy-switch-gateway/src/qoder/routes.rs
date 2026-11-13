@@ -708,7 +708,7 @@ pub async fn chat_for_region_once(
         .as_deref()
         .and_then(|actor| allowed_uids_for(&actor.policy, region));
 
-    for _ in 0..max_rotate {
+    'accounts: for _ in 0..max_rotate {
         // 池随账号库同步（导入 / 刷新后即时生效），然后选号。
         // 选号连同**展示名**一起取：失败原因要给用户看名字，不是一串 uid
         //（护栏 / 在途 / 上游错误的文案统一用名字，混用会让同一条报错里出现两种身份）。
@@ -716,6 +716,17 @@ pub async fn chat_for_region_once(
             let mut pools = state.pools.lock().await;
             let pool = pools.entry(region).or_default();
             pool.sync_for(region);
+            for entry in pool.entries() {
+                if crate::risk_controls::account_blocked(
+                    &state.risk_store,
+                    "qoder",
+                    region.as_str(),
+                    &entry.uid,
+                    buddy_switch_core::modules::config::now_ms().max(0) as u64,
+                ) {
+                    tried.insert(entry.uid.clone());
+                }
+            }
             pool.pick(&model, &tried, preferred.as_deref(), allowed.as_ref())
                 .map(|uid| {
                     let name = pool
@@ -730,6 +741,31 @@ pub async fn chat_for_region_once(
             break;
         };
         tried.insert(uid.clone());
+
+        let risk_settings = config
+            .risk_controls_by_region
+            .get(region.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let _risk_permit = match crate::risk_controls::admit_request(
+            &state.risk_store,
+            "qoder",
+            region.as_str(),
+            &uid,
+            &risk_settings,
+            buddy_switch_core::modules::config::now_ms().max(0) as u64,
+        ) {
+            Ok(permit) => permit,
+            Err(error) => {
+                failures.push(format!("{display_name}：风控准入拦截：{error}"));
+                return protocol_error(
+                    protocol,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limit_error",
+                    &error,
+                );
+            }
+        };
 
         /* ★ 限额护栏（G1 余额地板 / G2 当日 token / G4 单模型 token / 402 停放）：
         拦下的号直接跳过并留下**可读原因**（不是静默少一个账号）。必须在取在途
@@ -795,7 +831,7 @@ pub async fn chat_for_region_once(
                 Ok(session) => session,
                 Err(error) => {
                     failures.push(format!("{}：{error}", entry.name));
-                    break 'attempt;
+                    break 'accounts;
                 }
             };
 
@@ -903,6 +939,32 @@ pub async fn chat_for_region_once(
             }
 
             let kind = classify_http_with_detail(status_code, &detail);
+            let now_ms = buddy_switch_core::modules::config::now_ms().max(0) as u64;
+            match kind {
+                QoderErrKind::AuthDead => {
+                    let _ = crate::risk_controls::pause_account(
+                        &state.risk_store,
+                        "qoder",
+                        region.as_str(),
+                        &uid,
+                        detail.clone(),
+                        now_ms,
+                    );
+                }
+                QoderErrKind::RateLimited => {
+                    let _ = crate::risk_controls::record_rate_limit(
+                        &state.risk_store,
+                        "qoder",
+                        region.as_str(),
+                        &uid,
+                        detail.clone(),
+                        None,
+                        now_ms,
+                        risk_settings.fallback_cooldown_secs,
+                    );
+                }
+                _ => {}
+            }
             // 遥测：与分类**同一处**记一次（别在别处重复计数，见 `qoder::risk`）。
             match kind {
                 QoderErrKind::Queued => super::risk::note_queued(),
@@ -1083,10 +1145,23 @@ pub(crate) async fn chat_once_for_account(
         }
         match request.send().await {
             Ok(response) => return Ok(response),
-            Err(error) => transport_error = error.to_string(),
+            Err(error) if error.is_connect() => {
+                // A connection failure happens before this POST is delivered;
+                // it is safe to try the next configured host.
+                transport_error = error.to_string();
+            }
+            Err(error) => {
+                // The POST may have reached the upstream before the connection
+                // failed; never replay it against another host.
+                return Err(error.to_string());
+            }
         }
     }
-    Err(transport_error)
+    Err(if transport_error.is_empty() {
+        "no upstream host candidates".into()
+    } else {
+        transport_error
+    })
 }
 
 fn usage_counts(usage: &Value) -> (u64, u64) {

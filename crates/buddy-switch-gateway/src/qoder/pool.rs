@@ -50,9 +50,9 @@ fn now_ms() -> i64 {
 /// 上游错误分类（决定冷却时长与是否换号）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QoderErrKind {
-    /// 429：按**模型**冷却 − 换号。
+    /// 429：按模型记录冷却，当前自动化停止，不转交给另一账号。
     RateLimited,
-    /// 401/403：凭据死 ⇒ 长冷却 + 标记，换号。
+    /// 401/403：凭据死 ⇒ 长冷却 + 标记，当前自动化停止。
     AuthDead,
     /// 5xx / 传输层：短冷却 + 换号。
     Transient,
@@ -61,8 +61,7 @@ pub enum QoderErrKind {
     /// ★ 上游**排队**（`10605` / `isQueued`，通常裹在 401/403 信封里）：
     /// 账号没问题、也不是凭据死 ⇒ **不冷却、不标 dead**，只轮换。
     Queued,
-    /// ★ 402：**余额耗尽**。额度按每日 10:00（UTC+8）重置 ⇒ 短冷却毫无意义
-    /// （几分钟后放出去只会再撞一次），要停到下一个重置窗口，见 `quota::park_exhausted`。
+    /// ★ 402：余额耗尽并暂停该账号，当前自动化停止，不由其他账号接力消耗。
     BalanceExhausted,
 }
 
@@ -80,7 +79,7 @@ impl QoderErrKind {
 
     /// 是否值得换号重试。
     pub fn should_rotate(self) -> bool {
-        !matches!(self, QoderErrKind::ClientError)
+        false
     }
 }
 
@@ -1120,8 +1119,8 @@ mod tests {
             classify_http_with_detail(500, "10605"),
             QoderErrKind::Transient
         );
-        // 排队要换号（另一个号可能没排队），但**不是**客户端错。
-        assert!(QoderErrKind::Queued.should_rotate());
+        // 排队不是客户端错，但当前自动化不转交给另一个账号。
+        assert!(!QoderErrKind::Queued.should_rotate());
         assert_eq!(QoderErrKind::Queued.as_str(), "queued");
     }
 
@@ -1140,15 +1139,15 @@ mod tests {
         assert_eq!(parse_min_pick_gap(Some("abc")), 0, "乱码 = 关，不是崩");
     }
 
-    /// ★ 402 = **余额耗尽**：不是「客户端参数错」，必须换号 + 停放（不是短冷却）。
+    /// ★ 402 = **余额耗尽**：识别为独立状态并停放账号，不由其他账号接力。
     ///
     /// 可证伪：把 `classify_http` 的 `402 => BalanceExhausted` 删掉 ⇒ 402 落进
-    /// `ClientError`（`should_rotate() == false`）⇒ 每条请求都去撞同一个没钱的账号。
+    /// `ClientError` ⇒ 无法把余额耗尽与参数错误区分，治理状态也会丢失。
     #[test]
     fn classify_http_402_is_balance_exhausted() {
         let kind = classify_http(402);
         assert_eq!(kind, QoderErrKind::BalanceExhausted);
-        assert!(kind.should_rotate(), "余额耗尽要换号（别的号可能还有额度）");
+        assert!(!kind.should_rotate(), "余额耗尽不得由其他账号接力");
         assert_eq!(kind.as_str(), "balance_exhausted");
         // 其余状态码不受影响。
         assert_eq!(classify_http(400), QoderErrKind::ClientError);

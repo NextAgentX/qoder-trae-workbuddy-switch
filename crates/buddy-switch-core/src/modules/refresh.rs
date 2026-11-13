@@ -154,6 +154,20 @@ pub async fn refresh_account_token_for(region: Region, mut account: Value) -> Va
         let _ = upsert_account_for(region, &account);
         return account;
     }
+    let uid = account.get("uid").and_then(Value::as_str).unwrap_or("");
+    let _risk_permit = match crate::modules::risk_control::admit_platform_request(
+        "workbuddy",
+        region.as_str(),
+        uid,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(error) => {
+            account["refresh_transient_error"] = json!(format!("风控准入拦截：{error}"));
+            return account;
+        }
+    };
 
     let mut headers = build_auth_headers(&account);
     headers.insert("X-Refresh-Token".to_string(), rt.clone());
@@ -170,6 +184,19 @@ pub async fn refresh_account_token_for(region: Region, mut account: Value) -> Va
     );
     let resp = http_request(&url, "POST", Some(json!({})), Some(&headers)).await;
     let code = resp.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let reason = resp
+        .get("message")
+        .or_else(|| resp.get("msg"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "workbuddy",
+        region.as_str(),
+        uid,
+        code,
+        reason,
+    );
     if code != 0 && code != 200 {
         let message = resp
             .get("message")

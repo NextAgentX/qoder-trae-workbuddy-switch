@@ -1,5 +1,4 @@
-//! 会话头族与派生标识（对照参考实现 `internal/upstream/headers.go` 的
-//! `injectConversationHeaders` 与 `internal/session/ids.go`）。
+//! 会话头族（对照参考实现 `internal/upstream/headers.go` 的 `injectConversationHeaders`）。
 //!
 //! 为什么需要这一族头：上游按 `X-Conversation-Request-ID` 作为**对话轮聚合主键**。
 //! 若每跳都新生成，同一轮对话在后台会被拆成一串碎片（issue #35 的症状）。因此
@@ -25,9 +24,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// 派生标识的命名空间前缀（与参考实现一致，保证两端在相同 uid 下得到相同 id）。
-const ID_NAMESPACE: &str = "wb2a";
-
 /// 单次请求 id：32 位十六进制（16 字节随机）。
 pub fn new_hex_id() -> String {
     Uuid::new_v4().simple().to_string()
@@ -37,25 +33,6 @@ pub fn new_hex_id() -> String {
 pub fn valid_trace_id(candidate: &str) -> bool {
     let length = candidate.len();
     (length == 16 || length == 32) && candidate.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// 派生稳定设备/会话标识：`sha256("wb2a:<purpose>:<uid>")` 前 18 字节的十六进制（36 字符）。
-///
-/// 同 uid + 同 purpose 恒定，因此上游看到的是一个稳定的设备指纹，
-/// 而不是每个进程随机的新设备（后者会触发风控）。
-/// uid 为空时返回空串，调用方据此**不发送**该头。
-pub fn derived_device_id(purpose: &str, uid: &str) -> String {
-    if uid.is_empty() {
-        return String::new();
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{ID_NAMESPACE}:{purpose}:{uid}").as_bytes());
-    let digest = hasher.finalize();
-    digest
-        .iter()
-        .take(18)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 /// 由会话键派生**进程内稳定**的轮主键：`sha256("<salt>|<key>")` 前 16 字节。
@@ -318,23 +295,6 @@ pub fn conversation_headers(
     headers
 }
 
-/// 构造派生标识头（`X-Machine-ID` / `X-Session-ID`）。uid 为空时返回空表。
-pub fn device_headers(uid: &str) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    if uid.is_empty() {
-        return headers;
-    }
-    headers.insert(
-        "X-Machine-ID".to_string(),
-        derived_device_id("machine", uid),
-    );
-    headers.insert(
-        "X-Session-ID".to_string(),
-        derived_device_id("session", uid),
-    );
-    headers
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,30 +413,6 @@ mod tests {
         assert!(!valid_trace_id("0123456789abcdef0"), "17 位非法");
         assert!(!valid_trace_id("0123456789abcdeg"), "非十六进制字符非法");
         assert!(!valid_trace_id(""));
-    }
-
-    #[test]
-    fn derived_device_id_is_stable_per_uid_and_purpose() {
-        let first = derived_device_id("machine", "u1");
-        let second = derived_device_id("machine", "u1");
-        assert_eq!(first, second, "同 uid 同 purpose 必须稳定");
-        assert_eq!(first.len(), 36, "18 字节 → 36 位十六进制");
-        assert_ne!(
-            first,
-            derived_device_id("session", "u1"),
-            "purpose 必须区分"
-        );
-        assert_ne!(first, derived_device_id("machine", "u2"), "uid 必须区分");
-        assert_eq!(derived_device_id("machine", ""), "", "空 uid 不派生");
-    }
-
-    #[test]
-    fn device_headers_skipped_for_empty_uid() {
-        assert!(device_headers("").is_empty());
-        let headers = device_headers("u1");
-        assert_eq!(headers.len(), 2);
-        assert!(headers.contains_key("X-Machine-ID"));
-        assert!(headers.contains_key("X-Session-ID"));
     }
 
     #[test]

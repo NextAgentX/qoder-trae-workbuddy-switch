@@ -2527,6 +2527,10 @@ pub async fn checkin_status(
     uid: &str,
     access_token: &str,
 ) -> Result<CheckinStatus, String> {
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let spec = region::realm_spec(region);
     let client = shared_client()?;
     let response = apply_headers(
@@ -2544,6 +2548,13 @@ pub async fn checkin_status(
     .map_err(|error| format!("签到状态请求失败: {error}"))?;
     let status_code = response.status();
     let body = response.text().await.unwrap_or_default();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "qoder",
+        region.as_str(),
+        uid,
+        i64::from(status_code.as_u16()),
+        body.chars().take(200).collect(),
+    );
     if matches!(status_code.as_u16(), 404 | 405 | 410) {
         return Err(format!(
             "{CHECKIN_REASON_NOT_FOUND} (HTTP {})",
@@ -2572,6 +2583,10 @@ pub async fn checkin_claim(
     uid: &str,
     access_token: &str,
 ) -> Result<Value, String> {
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let spec = region::realm_spec(region);
     let client = shared_client()?;
     let response = apply_headers(
@@ -2590,6 +2605,13 @@ pub async fn checkin_claim(
     .map_err(|error| format!("签到领取请求失败: {error}"))?;
     let status_code = response.status();
     let body = response.text().await.unwrap_or_default();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "qoder",
+        region.as_str(),
+        uid,
+        i64::from(status_code.as_u16()),
+        body.chars().take(200).collect(),
+    );
     if !status_code.is_success() {
         return Err(format!(
             "签到领取失败: HTTP {} {}",
@@ -2606,6 +2628,10 @@ pub async fn quota_usage(
     uid: &str,
     access_token: &str,
 ) -> Result<QuotaView, String> {
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let spec = region::realm_spec(region);
     let client = shared_client()?;
     let response = apply_headers(
@@ -2619,6 +2645,13 @@ pub async fn quota_usage(
     .map_err(|error| format!("额度查询失败: {error}"))?;
     let status_code = response.status();
     let body = response.text().await.unwrap_or_default();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "qoder",
+        region.as_str(),
+        uid,
+        i64::from(status_code.as_u16()),
+        body.chars().take(200).collect(),
+    );
     if !status_code.is_success() {
         return Err(format!(
             "额度查询失败: HTTP {} {}",
@@ -2637,6 +2670,10 @@ pub async fn user_plan(
     uid: &str,
     access_token: &str,
 ) -> Result<Value, String> {
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let spec = region::realm_spec(region);
     let client = shared_client()?;
     let response = apply_headers(
@@ -2650,6 +2687,13 @@ pub async fn user_plan(
     .map_err(|error| format!("套餐查询失败: {error}"))?;
     let status_code = response.status();
     let body = response.text().await.unwrap_or_default();
+    let _ = crate::modules::risk_control::record_platform_response(
+        "qoder",
+        region.as_str(),
+        uid,
+        i64::from(status_code.as_u16()),
+        body.chars().take(200).collect(),
+    );
     if !status_code.is_success() {
         return Err(format!(
             "套餐查询失败: HTTP {} {}",
@@ -2667,7 +2711,7 @@ pub async fn fetch_model_list(
     region: QoderRegion,
     input: &CosyAccountInput<'_>,
 ) -> Result<Vec<Value>, String> {
-    fetch_model_list_at(&region::gateway_candidates(region), input).await
+    fetch_model_list_for(region, &region::gateway_candidates(region), input).await
 }
 
 /// 同 [`fetch_model_list`]，但由调用方指定候选主机（**测试挂载点**：指向 mock 上游；
@@ -2676,11 +2720,28 @@ pub async fn fetch_model_list_at(
     hosts: &[&str],
     input: &CosyAccountInput<'_>,
 ) -> Result<Vec<Value>, String> {
+    fetch_model_list_for(QoderRegion::Cn, hosts, input).await
+}
+
+pub async fn fetch_model_list_for(
+    region: QoderRegion,
+    hosts: &[&str],
+    input: &CosyAccountInput<'_>,
+) -> Result<Vec<Value>, String> {
+    let region_key = region.as_str();
+    let risk_settings = crate::modules::risk_control::platform_risk_settings("qoder", region_key)?;
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region_key, input.uid)
+            .await
+            .map_err(|error| format!("风控准入拦截：{error}"))?;
     let sign_body = cosy::qoder_encode(b"{}");
     let session = cosy::shared_cache().get(input)?;
     let client = shared_client()?;
     let mut last_error = String::new();
-    for host in hosts {
+    // `max_transient_attempts` 是额外重试次数；此处只会在
+    // 连接错误或 408/425/5xx 上转到下一个候选主机。明确拒绝、限流、额度不足立即停止。
+    let max_attempts = 1usize.saturating_add(risk_settings.max_transient_attempts as usize);
+    for host in hosts.iter().take(max_attempts) {
         let raw_url = format!("{host}{PATH_MODELS_ENCODED}");
         // ★ 签名用**无 query** 的 path（见 [`PATH_MODELS_SIGN`]）。
         let headers = session.headers(&sign_body, PATH_MODELS_SIGN, None, false);
@@ -2695,12 +2756,34 @@ pub async fn fetch_model_list_at(
             Ok(response) => {
                 let status_code = response.status();
                 let body = response.text().await.unwrap_or_default();
+                // Model entitlement 403 is not necessarily an account ban; stop
+                // host fallback, but reserve persistent pause for explicit 401.
+                if status_code.as_u16() != 403 {
+                    let _ = crate::modules::risk_control::record_platform_response(
+                        "qoder",
+                        region_key,
+                        input.uid,
+                        i64::from(status_code.as_u16()),
+                        body.chars().take(200).collect(),
+                    );
+                }
                 if !status_code.is_success() {
                     last_error = format!(
                         "HTTP {} {}",
                         status_code.as_u16(),
                         body.chars().take(160).collect::<String>()
                     );
+                    if matches!(status_code.as_u16(), 401 | 402 | 403 | 429) {
+                        return Err(format!(
+                            "模型清单请求遇到受保护状态，停止尝试其它上游主机：{last_error}"
+                        ));
+                    }
+                    if !(status_code.is_server_error() || matches!(status_code.as_u16(), 408 | 425))
+                    {
+                        return Err(format!(
+                            "模型清单请求遇到不可重试状态，停止尝试其它上游主机：{last_error}"
+                        ));
+                    }
                     continue;
                 }
                 let data: Value = serde_json::from_str(&body)

@@ -313,6 +313,7 @@ pub async fn messages_for_region(
                         // ★ 流内信封错误：与 chat 路由同一判据，只是错误体形状不同。
                         .with_error_sink(relay::envelope_error_sink(
                             &state,
+                            region,
                             &uid,
                             &model,
                             sticky_key.as_deref(),
@@ -335,7 +336,8 @@ pub async fn messages_for_region(
                 // ★ 200 信封错误（P0-3）：与 chat 路由同一判据、同一治理副作用，
                 //   只是对外错误体走 Anthropic 形状。
                 if let Some(envelope) = crate::protocol::error_sniffer::sniff_http_body(&text) {
-                    relay::note_envelope_failure(&state, &uid, &model, &envelope.event).await;
+                    relay::note_envelope_failure(&state, region, &uid, &model, &envelope.event)
+                        .await;
                     let elapsed_ms = started.elapsed().as_millis() as i64;
                     state.log.record(
                         RequestMeta {

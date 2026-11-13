@@ -23,6 +23,8 @@ use buddy_switch_core::modules::account;
 use buddy_switch_core::modules::catalog::CatalogStore;
 use buddy_switch_core::modules::config as core_config;
 use buddy_switch_core::modules::region::{self, Region};
+use buddy_switch_core::modules::risk_control::RiskControlSettings;
+use buddy_switch_core::modules::risk_control::RiskStore;
 use buddy_switch_core::modules::upstream::UpstreamClient;
 
 use crate::account_strategy::{load_strategies, AccountStrategy};
@@ -133,6 +135,12 @@ pub struct GatewayConfig {
     /// ⚠️ 客户端在网关状态初始化时构建一次 ⇒ **改本项需重启应用生效**。
     #[serde(default, alias = "upstreamViaProxy")]
     pub upstream_via_proxy: bool,
+    /// 每个 WorkBuddy 区域独立生效的请求风控参数。
+    #[serde(
+        default = "default_risk_controls_by_region",
+        alias = "riskControlsByRegion"
+    )]
+    pub risk_controls_by_region: BTreeMap<String, RiskControlSettings>,
 }
 
 impl Default for GatewayConfig {
@@ -157,11 +165,23 @@ impl Default for GatewayConfig {
             max_context: true,
             model_efforts: std::collections::HashMap::new(),
             upstream_via_proxy: false,
+            risk_controls_by_region: default_risk_controls_by_region(),
         }
     }
 }
 
 impl GatewayConfig {
+    pub fn validate_risk_controls(&self) -> Result<(), String> {
+        for (region, settings) in &self.risk_controls_by_region {
+            if !matches!(region.as_str(), "cn" | "global") {
+                return Err(format!("unknown WorkBuddy risk-control region: {region}"));
+            }
+            settings
+                .validate()
+                .map_err(|error| format!("{region}: {error}"))?;
+        }
+        Ok(())
+    }
     /// 从 `~/.buddy-switch/gateway_config.json` 读取；缺失/损坏回落默认值。
     pub fn load() -> Self {
         let file = region::gateway_config_file();
@@ -195,6 +215,13 @@ impl GatewayConfig {
         };
         format!("http://{host}:{}", self.port)
     }
+}
+
+fn default_risk_controls_by_region() -> BTreeMap<String, RiskControlSettings> {
+    ["cn", "global"]
+        .into_iter()
+        .map(|region| (region.to_string(), RiskControlSettings::default()))
+        .collect()
 }
 
 /// 网关运行状态的**对外响应契约**（`GET /api/gateway/status`，见 A-3.7）。
@@ -367,6 +394,8 @@ pub fn body_limit_bytes(max_body_mb: usize) -> usize {
 #[derive(Clone)]
 pub struct GatewayState {
     pub config: Arc<RwLock<GatewayConfig>>,
+    /// 账号请求准入与暂停状态；损坏的状态文件保留为初始化错误，调用时 fail-closed。
+    pub risk_store: Result<RiskStore, String>,
     pub keys: Arc<ApiKeyStore>,
     /// ★ 按密钥的用量账本（issue #76）：与 Key 台账**分文件** ——
     /// 台账低频写（创建/吊销/改策略），用量每请求写；合并在一个文件里
@@ -443,9 +472,6 @@ impl GatewayState {
         let http = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         let upstream = Arc::new(UpstreamClient::new(http));
         let strategies = Arc::new(RwLock::new(load_strategies()));
-
-        // 提示词：配置错误不 panic（桌面端不能因为一个配置项启动失败），
-        // 但必须把原因留在 `prompt_error` 里供 `/status` 透出。
         let (prompt, prompt_error) = match PromptMode_::parse(&config.prompt_mode) {
             Ok(mode) => {
                 let file = config.prompt_file.as_deref().map(std::path::Path::new);
@@ -469,6 +495,9 @@ impl GatewayState {
 
         Self {
             config: Arc::new(RwLock::new(config.clone())),
+            risk_store: RiskStore::open_shared(
+                gateway_state_file().with_file_name("risk_control.json"),
+            ),
             keys,
             key_usage,
             catalogs,
@@ -725,6 +754,7 @@ mod tests {
             "model_efforts",
             // 上游是否走系统代理（默认 false = 直连，见字段文档）
             "upstream_via_proxy",
+            "risk_controls_by_region",
         ]
         .into_iter()
         .collect();

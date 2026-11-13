@@ -570,7 +570,7 @@ pub async fn credit_packs_probe<R: Runtime>(
         }));
     }
 
-    let raw = match web_usage::fetch_credit_packs_raw(region, &header).await {
+    let raw = match web_usage::fetch_credit_packs_raw(region, &uid, &header).await {
         Ok(raw) => raw,
         Err(error) => {
             // ★ 只有「上游明确拒绝」才清缓存；网络抖动不清（否则一次抖动就掉登录态）。
@@ -663,7 +663,7 @@ pub async fn credit_packs(scope: String, uid: String) -> Result<Value, String> {
         }));
     };
 
-    let raw = match web_usage::fetch_credit_packs_raw(region, &header).await {
+    let raw = match web_usage::fetch_credit_packs_raw(region, &uid, &header).await {
         Ok(raw) => raw,
         Err(error) => {
             if error.unauthorized {

@@ -340,6 +340,7 @@ pub async fn chat_for_region(
                         //   计模型闸门。**不改字节**，客户端看到的内容与改造前完全一致。
                         .with_error_sink(relay::envelope_error_sink(
                             &state,
+                            region,
                             &uid,
                             &model,
                             sticky_key.as_deref(),
@@ -447,7 +448,7 @@ async fn envelope_error_response(
 
     // 治理副作用与 HTTP 非 2xx 走**同一条**路径（冷却口径、熔断、模型闸门都一致），
     // 收在 `relay::note_envelope_failure` 里供三条路由共用。
-    relay::note_envelope_failure(state, uid, model, &envelope.event).await;
+    relay::note_envelope_failure(state, region, uid, model, &envelope.event).await;
 
     let elapsed_ms = started.elapsed().as_millis() as i64;
     state.log.record(

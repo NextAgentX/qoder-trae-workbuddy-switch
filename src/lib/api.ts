@@ -487,6 +487,7 @@ const ROUTES: Record<string, Route> = {
   // 账号池：人工解除某账号的禁用。禁用是**终态且落盘**，此前没有任何出口
   // （余额刷新被 `disabled` 挡住、`revive` 在生产代码里零调用点）。
   revive_gateway_account: { method: "POST", path: "/api/gateway/pool/revive" },
+  recover_gateway_risk_account: { method: "POST", path: "/api/gateway/risk/recover" },
   // 账号池：**排除 / 取消排除**某账号（硬约束：选号 / 兜底 / 粘性 / 指定全跳过）。
   // 与 revive 的区别见 `pool_admin` 的模块文档：禁用要修，排除只是不用的选择。
   gateway_pool_exclusions: { method: "GET", path: "/api/gateway/pool/exclusions" },
@@ -2571,6 +2572,15 @@ export function keyUsage(id: string): Promise<KeyUsageSnapshot> {
  */
 export function reviveGatewayAccount(uid: string): Promise<{ ok: boolean; revived: boolean }> {
   return call("revive_gateway_account", { uid });
+}
+
+/** 用户在官方渠道处理后，手动恢复某平台/区域的持久化风险暂停。 */
+export function recoverGatewayRiskAccount(
+  platform: "workbuddy" | "trae" | "qoder",
+  region: "cn" | "global",
+  uid: string,
+): Promise<{ ok: boolean; recovered?: boolean; platform: string; region: string; uid: string }> {
+  return call("recover_gateway_risk_account", { platform, region, uid });
 }
 
 /** 排除项（`inStore=false` = 该账号已不在账号库里，排除项按设计保留）。 */

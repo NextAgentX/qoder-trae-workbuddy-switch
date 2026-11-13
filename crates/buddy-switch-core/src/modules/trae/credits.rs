@@ -233,6 +233,19 @@ pub async fn post_json_for(
     jwt_value: &str,
     device: &DeviceEntry,
 ) -> (u16, String) {
+    let uid = jwt::user_id_of(jwt_value).unwrap_or_default();
+    if uid.is_empty() {
+        return (0, "账号 JWT 中缺少 user id".into());
+    }
+    let region_key = variant.region().as_str();
+    let _risk_permit = match crate::modules::risk_control::admit_platform_request(
+        "trae", region_key, &uid,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(error) => return (429, format!("风控准入拦截：{error}")),
+    };
     let base = super::endpoints_for(variant).account_base;
     let url = format!("{base}{path}");
     let mut request = trae_http_client().post(&url).body("{}");
@@ -243,6 +256,13 @@ pub async fn post_json_for(
         Ok(response) => {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
+            let _ = crate::modules::risk_control::record_platform_response(
+                "trae",
+                region_key,
+                &uid,
+                i64::from(status),
+                text.chars().take(200).collect(),
+            );
             (status, text)
         }
         // 带码版：文本与 `describe_transport_error` 逐字节相同，另带 `net.transport.*` 码，

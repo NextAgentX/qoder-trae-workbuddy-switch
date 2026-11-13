@@ -1166,24 +1166,6 @@ fn direct_client() -> &'static reqwest::Client {
     })
 }
 
-/// 当前环境里是否配置了出口代理（大小写都认，Windows 环境变量名不区分大小写，
-/// 但 `std::env::var` 是区分的）。
-fn env_proxy_configured() -> bool {
-    const KEYS: [&str; 6] = [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ];
-    KEYS.iter().any(|key| {
-        std::env::var(key)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-    })
-}
-
 /// 通用 HTTP 请求，返回解析后的 JSON。
 ///
 /// 行为对齐 Python 版：
@@ -1220,7 +1202,9 @@ pub async fn http_request_with_proxy(
             Ok(client) => client,
             Err(e) => return json!({"code": -1, "message": format!("代理客户端创建失败: {e}")}),
         },
-        None => http_client().clone(),
+        // ★ 未显式指定出口时也必须直连：不能因为环境里残留 HTTPS_PROXY
+        // 就让不同账号在无配置情况下共用系统代理出口。
+        None => direct_client().clone(),
     };
 
     /// 发一次（`RequestBuilder` 被 `send()` 消费，重试必须重建）。
@@ -1244,27 +1228,10 @@ pub async fn http_request_with_proxy(
         req.send().await
     }
 
-    let mut sent = send_once(&client, &method, url, body.as_ref(), headers).await;
-    /* ★ 代理「半死」时的兜底（2026-10-27 首版 / 2026-11-08 放宽）：
-    `reqwest` 默认读 `HTTPS_PROXY` 等环境变量，而代理进程关掉之后这些变量
-    常常**还留在注册表里**（User 作用域）⇒ 每一条出站请求都先去连一个已经
-    没人监听的端口，2 秒后被拒，界面只看到
-    `error sending request for url (...)`（OAuth 扫码、账号识别全挂）。
-
-    ★ 2026-11-08 修正：首版只认 `is_connect()` / `is_timeout()`，漏掉了**最常
-    见的一种坏法** —— 代理端口活着、TCP 也连上了，但代理链路本身坏了
-    （例如把 `www.workbuddy.ai` 的 TLS 握手中断，表现为
-    `UNEXPECTED_EOF_WHILE_READING`）。这种错误既不是 connect 也不是 timeout，
-    于是兜底不触发，用户看到的现象就是「**必须开着代理才能用**」——
-    其实正好相反：关掉代理直连是通的，走代理才不通。
-
-    现在的判据放宽为「**只要这次请求在拿到 HTTP 响应之前就失败了**」就回落：
-    `send()` 返回 `Err` 必然意味着**没有任何响应字节**到达调用方，重发不会造成
-    「签到两次」这类重复副作用（真正的重复风险在拿到响应之后，那条路径不走这里）。
-    直连也失败时，仍然把**原始**错误报上去（不掩盖真实故障）。 */
-    if sent.is_err() && explicit_proxy.is_none() && env_proxy_configured() {
-        sent = send_once(direct_client(), &method, url, body.as_ref(), headers).await;
-    }
+    let sent = send_once(&client, &method, url, body.as_ref(), headers).await;
+    /* ★ 未显式指定出口时使用 `direct_client()`：不读环境代理、不做“代理失败后直连”
+    的隐式重试。显式代理失败也**绝不回落到直连** —— 否则同一账号的请求会在
+    另一个公网出口再出现一次，正好破坏风控隔离。 */
     match sent {
         Ok(resp) => {
             let status = resp.status();

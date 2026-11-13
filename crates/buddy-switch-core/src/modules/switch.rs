@@ -18,6 +18,7 @@ use crate::modules::session;
 pub type ProgressFn = Box<dyn Fn(&str) + Send + Sync>;
 
 /// 切换账号（CN）。copy_session_ids 非空时按路径 B 复制勾选会话（新 id，云端可同步）。
+
 pub fn switch_account(
     progress_fn: Option<&ProgressFn>,
     account_id: &str,

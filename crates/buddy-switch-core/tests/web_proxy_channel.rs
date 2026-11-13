@@ -110,6 +110,7 @@ async fn global_per_pack_request_goes_through_proxy() {
 
     let result = web_usage::fetch_credit_packs_raw(
         QoderRegion::Global,
+        "channel-test-user",
         "qoder_session_cookie=deliberately-invalid-channel-test",
     )
     .await;
@@ -140,6 +141,7 @@ async fn cn_request_without_proxy_bypasses_tunnel() {
 
     let result = web_usage::fetch_credit_packs_raw(
         QoderRegion::Cn,
+        "channel-test-user",
         "qoder_session_cookie=deliberately-invalid-channel-test",
     )
     .await;

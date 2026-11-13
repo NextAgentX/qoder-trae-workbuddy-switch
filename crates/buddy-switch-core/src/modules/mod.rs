@@ -1,4 +1,5 @@
 pub mod account;
+/// 账号级出站隔离（按 uid 绑定代理；缺配置时 fail-closed）。
 pub mod activity;
 // P15 · 外部 Agent 会话监听：`hook 事件 → 会话状态` 的纯状态机 —— 悬浮窗的**第二个数据源**
 // （第一个是 `companion.rs` 消费的自家切换进度）。**零周期任务**：过期靠读取时惰性判定。
@@ -73,6 +74,8 @@ pub mod gateway_namespace;
 // Trae / Qoder 的**网关逐日账本**（用量页「账本」视图的数据源）。
 // 与 `token_daily` 同源同语义，但它只记网关一本（这两个平台没有可解析的客户端落盘）。
 pub mod gateway_ledger;
+/// 可配置的请求速率、并发与账号风险状态（按平台和区域隔离）。
+pub mod risk_control;
 pub mod rotate;
 // 本工具**自身**的运行日志（排查问题用）：按日纯文本 + 有界滚动 + 出站脱敏。
 // ⚠️ 与「网关请求日志」（JSON、面向统计）和「Trae 客户端日志」是三件不同的事，见模块头。

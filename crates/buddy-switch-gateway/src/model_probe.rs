@@ -1310,8 +1310,7 @@ async fn probe_cell_wb(state: &GatewayState, region: Region, uid: &str, model: &
     );
 
     let context = ConversationContext::new(None, None, None, None, None);
-    let mut extra = session_headers::conversation_headers(&context, &session_headers::new_hex_id());
-    extra.extend(session_headers::device_headers(uid));
+    let extra = session_headers::conversation_headers(&context, &session_headers::new_hex_id());
 
     let started = Instant::now();
     // ★ 单格硬超时：宿主客户端的总超时是 600s，对一格太长（一格挂住会拖死整轮）。

@@ -153,6 +153,7 @@ impl std::fmt::Display for WebUsageError {
 /// 混在一起会让「归属不符」与「请求失败」无法区分。
 pub async fn fetch_credit_packs_raw(
     region: QoderRegion,
+    uid: &str,
     cookie_header: &str,
 ) -> Result<Value, WebUsageError> {
     if cookie_header.trim().is_empty() {
@@ -160,6 +161,10 @@ pub async fn fetch_credit_packs_raw(
             "没有可用的网页会话 Cookie（请先登录 Qoder 网页端）".to_string(),
         ));
     }
+    let _risk_permit =
+        crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+            .map_err(|error| WebUsageError::other(format!("风控准入拦截：{error}")))?;
     let spec = region::realm_spec(region);
     // ★ 出站代理（issue #111 收尾）：国际版网页端接口按 IP 判地区，国内直连会被拦；
     //    这里按区域读 `qoder/proxy.json`，留空 = 直连（共享客户端）。
@@ -178,6 +183,15 @@ pub async fn fetch_credit_packs_raw(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     let code = status.as_u16();
+    if code == 429 {
+        let _ = crate::modules::risk_control::record_platform_response(
+            "qoder",
+            region.as_str(),
+            uid,
+            i64::from(code),
+            "网页额度明细请求被限流".to_string(),
+        );
+    }
     // 401 / 403 = 会话被上游明确拒绝 ⇒ 缓存该作废。
     let unauthorized = matches!(code, 401 | 403);
     if !status.is_success() {

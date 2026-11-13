@@ -571,6 +571,18 @@ async fn pro_pack_status_at(
     base: &str,
     identity: Option<&NativeIdentity>,
 ) -> Value {
+    let _risk_permit = match crate::modules::risk_control::admit_platform_request(
+        "qoder",
+        region.as_str(),
+        uid,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(error) => {
+            return json!({"available": false, "eligible": false, "error": format!("风控准入拦截：{error}")})
+        }
+    };
     let (headers, _machine) = desktop_headers(region, uid, access_token, identity);
     let client = match api::shared_client() {
         Ok(client) => client,
@@ -596,6 +608,16 @@ async fn pro_pack_status_at(
     };
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
+    // 此端点把 403 定义为活动不可用；不能把业务态误记成账号认证暂停。
+    if status != 403 {
+        let _ = crate::modules::risk_control::record_platform_response(
+            "qoder",
+            region.as_str(),
+            uid,
+            status.into(),
+            format!("Pro 资格查询 HTTP {status}"),
+        );
+    }
     match status {
         200..=299 => {
             let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
@@ -633,6 +655,18 @@ async fn claim_pro_pack_at(
     base: &str,
     identity: Option<&NativeIdentity>,
 ) -> Value {
+    let _risk_permit = match crate::modules::risk_control::admit_platform_request(
+        "qoder",
+        region.as_str(),
+        uid,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(error) => {
+            return json!({"ok": false, "already": false, "available": false, "message": format!("风控准入拦截：{error}")})
+        }
+    };
     let (headers, _machine) = desktop_headers(region, uid, access_token, identity);
     let client = match api::shared_client() {
         Ok(client) => client,
@@ -662,6 +696,16 @@ async fn claim_pro_pack_at(
     };
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
+    // 此端点把 403 定义为活动不可用；不能把业务态误记成账号认证暂停。
+    if status != 403 {
+        let _ = crate::modules::risk_control::record_platform_response(
+            "qoder",
+            region.as_str(),
+            uid,
+            status.into(),
+            format!("Pro 领取 HTTP {status}"),
+        );
+    }
     let upper = body.to_ascii_uppercase();
     // 409 / 响应体含 ALREADY ⇒ 已领过（幂等成功，不是错误）。
     if status == 409 || upper.contains("ALREADY") {
@@ -770,6 +814,13 @@ async fn fetch_campaigns_at(
     base: &str,
     identity: Option<&NativeIdentity>,
 ) -> CampaignsSnapshot {
+    let _risk_permit =
+        match crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return CampaignsSnapshot::failed(true, format!("风控准入拦截：{error}")),
+        };
     let (headers, machine_state) = desktop_headers(region, uid, access_token, identity);
     let identity_source = if identity.is_some() {
         native::IDENTITY_NATIVE
@@ -793,6 +844,17 @@ async fn fetch_campaigns_at(
     };
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
+    // Campaign 403 may be a business or region-availability response; it is
+    // terminal for this call, but does not prove the account itself is banned.
+    if status != 403 {
+        let _ = crate::modules::risk_control::record_platform_response(
+            "qoder",
+            region.as_str(),
+            uid,
+            status.into(),
+            format!("活动列表 HTTP {status}"),
+        );
+    }
     if matches!(status, 404 | 405 | 410) {
         return CampaignsSnapshot {
             ok: false,
@@ -855,6 +917,13 @@ pub async fn claim_campaign(
     access_token: &str,
     campaign_id: &str,
 ) -> ClaimOutcome {
+    let _risk_permit =
+        match crate::modules::risk_control::admit_platform_request("qoder", region.as_str(), uid)
+            .await
+        {
+            Ok(permit) => permit,
+            Err(error) => return ClaimOutcome::failed(format!("风控准入拦截：{error}")),
+        };
     let spec = realm_spec(region);
     let identity = native::cached_identity(region, uid, false);
     let (headers, _) = desktop_headers(region, uid, access_token, identity.as_ref());
@@ -876,6 +945,15 @@ pub async fn claim_campaign(
     };
     let status_code = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
+    if status_code != 403 {
+        let _ = crate::modules::risk_control::record_platform_response(
+            "qoder",
+            region.as_str(),
+            uid,
+            status_code.into(),
+            format!("活动领取 HTTP {status_code}"),
+        );
+    }
     if status_code == 409 {
         return ClaimOutcome {
             ok: true,

@@ -309,43 +309,16 @@ pub fn write_account_to_auth_file_for(region: Region, acc: &Value) -> Result<(),
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let existing = read_auth_file_for(region).unwrap_or_else(|| json!({}));
-    eprintln!(
-        "[auth] write_account: existing is_object={} allAccounts_len={}",
-        existing.is_object(),
-        existing
-            .get("allAccounts")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0)
-    );
-    let all_accounts = existing
-        .get("allAccounts")
-        .cloned()
-        .or_else(|| existing.get("accounts").cloned())
-        .filter(|v| v.is_array())
-        .unwrap_or_else(|| json!([]));
+    // ★ 风控隔离：官方客户端文件是**当前账号的单账号快照**，不是账号库镜像。
+    //
+    // 旧实现把历史 `allAccounts` 合并后写回，导致官方客户端同时看到多个账号，
+    // 形成直接的账号关联面。全部账号仍由 `~/.buddy-switch/accounts*.json` 保管；
+    // 这里只把目标账号交给客户端。读取 `existing` 仍保留，用于后续兼容性校验/诊断，
+    // 但绝不把其中其它账号透传。
+    let _existing = read_auth_file_for(region).unwrap_or_else(|| json!({}));
     let account_obj = build_account_obj(acc);
     let auth_obj = build_auth_obj(acc);
-
-    // 把目标账号并入 allAccounts（去重：按 uid 或 id）
-    let target_uid = get_str(acc, "uid").unwrap_or_default();
-    let mut all: Vec<Value> = all_accounts.as_array().cloned().unwrap_or_default();
-    all.retain(|a| {
-        let primary = a
-            .get("uid")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                a.get("id")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or("");
-        primary != target_uid
-    });
-    all.push(account_obj.clone());
-    eprintln!("[auth] write_account: merged allAccounts len={}", all.len());
+    let all: Vec<Value> = vec![account_obj.clone()];
 
     let session = json!({
         "account": &account_obj,
@@ -813,6 +786,70 @@ mod tests {
         assert_eq!(written["auth"]["accessToken"], envelope);
         assert_eq!(written["auth"]["refreshToken"], envelope);
         assert_eq!(written["auth"]["accessToken"], acc["access_token"]);
+
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// ★ 风控隔离：切换账号时，官方认证文件里**只能出现当前账号**。
+    ///
+    /// 旧实现会把 `allAccounts` / `accounts` 原样保留并追加目标账号，于是官方客户端
+    /// 同时看到多个账号 —— 这是最直接的账号关联面。账号库仍由本应用保管全部账号，
+    /// 但交给官方客户端的那份文件必须是「单账号快照」。
+    ///
+    /// 可证伪：把写入侧改回合并旧 `allAccounts`，本用例第一条断言立即变红。
+    #[test]
+    fn write_back_exposes_only_the_current_account() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-auth-isolation-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let guard = crate::modules::config::HomeOverrideGuard::set(&dir);
+
+        let old = json!({
+            "uid": "u-old",
+            "nickname": "旧账号",
+            "domain": "www.codebuddy.cn",
+        });
+        let seed = json!({
+            "account": old.clone(),
+            "auth": {
+                "accessToken": "old-at",
+                "refreshToken": "old-rt",
+                "domain": "www.codebuddy.cn",
+            },
+            "accounts": [old.clone()],
+            "allAccounts": [old],
+        });
+        let path = auth_file_path_for(Region::Cn);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create auth dir");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&seed).expect("serialize seed"),
+        )
+        .expect("seed auth file");
+
+        let target = json!({
+            "id": "a-target",
+            "uid": "u-target",
+            "nickname": "目标账号",
+            "domain": "www.codebuddy.cn",
+            "access_token": "target-at",
+            "refresh_token": "target-rt",
+        });
+        write_account_to_auth_file_for(Region::Cn, &target).expect("写入目标账号");
+
+        let written = read_auth_file_for(Region::Cn).expect("写回后必须能读回");
+        for key in ["accounts", "allAccounts"] {
+            let list = written[key].as_array().expect("账号列表必须是数组");
+            assert_eq!(list.len(), 1, "{key} 必须只含当前账号");
+            assert_eq!(list[0]["uid"], "u-target", "{key} 必须指向目标账号");
+            assert!(
+                list.iter().all(|account| account["uid"] != "u-old"),
+                "{key} 不得泄漏旧账号"
+            );
+        }
+        assert_eq!(written["account"]["uid"], "u-target");
 
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
