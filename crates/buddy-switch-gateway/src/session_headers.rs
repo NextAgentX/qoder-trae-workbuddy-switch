@@ -122,6 +122,57 @@ pub fn conversation_id_of(body: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// 为缺少显式会话 ID 的 Chat Completions 请求生成内容指纹。
+///
+/// 取 system 指令和首条 user 消息，与 Trae 上游会话身份的稳定前缀一致；只返回
+/// SHA-256 摘要，避免把提示词正文作为选号表键。固定 user/install ID 不参与，
+/// 否则同一客户端的不同会话会被错误地绑定到同一账号。
+pub fn chat_content_identity(body: &Value) -> Option<String> {
+    let messages = body.get("messages")?.as_array()?;
+    let mut system = None;
+    let mut first_user = None;
+    for message in messages {
+        let (Some(role), Some(content)) = (
+            message.get("role").and_then(Value::as_str),
+            message.get("content"),
+        ) else {
+            continue;
+        };
+        if content.is_null() {
+            continue;
+        }
+        match role {
+            "system" if system.is_none() => system = Some(content),
+            "user" if first_user.is_none() => first_user = Some(content),
+            _ => {}
+        }
+        if system.is_some() && first_user.is_some() {
+            break;
+        }
+    }
+    if system.is_none() && first_user.is_none() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"chat-content-session-v1|");
+    for (role, content) in [("system", system), ("user", first_user)] {
+        if let Some(content) = content {
+            let encoded = serde_json::to_vec(content).ok()?;
+            hasher.update(role.as_bytes());
+            hasher.update((encoded.len() as u64).to_be_bytes());
+            hasher.update(encoded);
+        }
+    }
+    Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    )
+}
+
 /// 入站会话标识头的候选顺序（issue #150）。
 ///
 /// - `x-claude-code-session-id`：Claude Code 自带的每会话 id；
@@ -186,6 +237,39 @@ fn body_session_id_of(body: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+/// 会话标识的来源与值，用于 Responses transcript 的会话级隔离。
+///
+/// 来源也纳入身份，避免两个不同 Agent 恰好使用相同的原始 ID 时共用状态。
+pub fn response_session_identity(body: &Value, headers: &HeaderMap) -> Option<String> {
+    if let Some(id) = conversation_id_of(body)
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+    {
+        return Some(format!("metadata.conversation_id:{id}"));
+    }
+    if let Some(id) = body_session_id_of(body) {
+        return Some(format!("body.session_id:{id}"));
+    }
+    for name in SESSION_ID_HEADERS {
+        if let Some(id) = header_text(headers, name) {
+            return Some(format!("header.{name}:{id}"));
+        }
+    }
+    for (name, value) in [
+        ("body.conversation_id", body.get("conversation_id")),
+        ("body.prompt_cache_key", body.get("prompt_cache_key")),
+    ] {
+        if let Some(id) = value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return Some(format!("{name}:{id}"));
+        }
+    }
+    None
 }
 
 /// 解析本轮 `conversation_id`（恒非空）。
@@ -373,6 +457,40 @@ mod tests {
             )
             .as_deref(),
             Some("meta-1")
+        );
+    }
+
+    #[test]
+    fn response_session_identity_keeps_source_namespaces_and_supported_fallbacks() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-claude-code-session-id", "same-id".parse().unwrap());
+        assert_eq!(
+            response_session_identity(&json!({}), &headers).as_deref(),
+            Some("header.x-claude-code-session-id:same-id")
+        );
+        assert_eq!(
+            response_session_identity(&json!({"session_id": "same-id"}), &headers).as_deref(),
+            Some("body.session_id:same-id"),
+            "body session identity takes precedence over headers"
+        );
+        assert_eq!(
+            response_session_identity(
+                &json!({"prompt_cache_key": "cache-session"}),
+                &HeaderMap::new()
+            )
+            .as_deref(),
+            Some("body.prompt_cache_key:cache-session")
+        );
+        assert_eq!(
+            response_session_identity(&json!({"prompt_cache_key": "  "}), &HeaderMap::new()),
+            None
+        );
+        assert_eq!(
+            response_session_identity(
+                &json!({"metadata": {"conversation_id": "  "}}),
+                &HeaderMap::new()
+            ),
+            None
         );
     }
 

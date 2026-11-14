@@ -53,9 +53,8 @@ pub struct UsageReport {
     /// - OpenAI：`usage.prompt_tokens_details.cached_tokens`
     /// - Anthropic：`usage.cache_read_input_tokens`
     ///
-    /// 读不到就是 `0`（**不是**「没有命中」）—— 与 `credit` 写 0 同一诚实口径：
-    /// 上游没报 ≠ 事实为零。
-    pub cached_tokens: i64,
+    /// `None` 表示上游没返回缓存字段；`Some(0)` 表示明确报告未命中。
+    pub cached_tokens: Option<i64>,
 }
 
 impl UsageReport {
@@ -122,16 +121,15 @@ pub fn extract_usage(frame: &Value) -> Option<UsageReport> {
                     .and_then(|details| details.get("cached_tokens"))
             })
             .or_else(|| usage.get("cache_read_input_tokens"))
+            .or_else(|| usage.get("cached_tokens"))
             .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .max(0)
-            .min(prompt),
+            .map(|cached| cached.max(0).min(prompt)),
     })
 }
 
 /// Read cached input tokens from a raw upstream usage object using the same aliases
 /// as `extract_usage`. This is also used by non-streaming response loggers.
-pub fn cached_tokens_from_usage(usage: &Value) -> i64 {
+pub fn cached_tokens_from_usage(usage: &Value) -> Option<u64> {
     usage
         .get("prompt_cache_hit_tokens")
         .or_else(|| {
@@ -141,9 +139,7 @@ pub fn cached_tokens_from_usage(usage: &Value) -> i64 {
         })
         .or_else(|| usage.get("cache_read_input_tokens"))
         .or_else(|| usage.get("cached_tokens"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
-        .max(0)
+        .and_then(Value::as_u64)
 }
 
 /// **流内错误**回调（P0-3 的流式半边）。
@@ -578,7 +574,7 @@ mod tests {
             credit,
             prompt_tokens: prompt,
             completion_tokens: completion,
-            cached_tokens: 0,
+            cached_tokens: None,
         })
     }
 
@@ -740,7 +736,7 @@ mod tests {
             "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 20
         }}))
         .expect("合法样本");
-        assert_eq!(deepseek.cached_tokens, 80);
+        assert_eq!(deepseek.cached_tokens, Some(80));
 
         // OpenAI：`prompt_tokens_details.cached_tokens`
         let openai = extract_usage(&json!({"usage": {
@@ -748,7 +744,7 @@ mod tests {
             "prompt_tokens_details": {"cached_tokens": 64}
         }}))
         .expect("合法样本");
-        assert_eq!(openai.cached_tokens, 64);
+        assert_eq!(openai.cached_tokens, Some(64));
 
         // Anthropic：`cache_read_input_tokens`
         let anthropic = extract_usage(&json!({"usage": {
@@ -756,14 +752,14 @@ mod tests {
             "cache_read_input_tokens": 96
         }}))
         .expect("合法样本");
-        assert_eq!(anthropic.cached_tokens, 96);
+        assert_eq!(anthropic.cached_tokens, Some(96));
 
-        // 上游没报 ⇒ 0（不是「没命中」，是「不知道」）。
+        // 未返回缓存字段与明确未命中分开记录。
         let absent = extract_usage(&json!({"usage": {
             "credit": 0.1, "prompt_tokens": 100, "completion_tokens": 20
         }}))
         .expect("合法样本");
-        assert_eq!(absent.cached_tokens, 0);
+        assert_eq!(absent.cached_tokens, None);
 
         // 脏数（命中数 > 输入总数）⇒ 钳到输入总数，不把不可能的读数写进日志。
         let dirty = extract_usage(&json!({"usage": {
@@ -771,7 +767,7 @@ mod tests {
             "prompt_cache_hit_tokens": 999
         }}))
         .expect("合法样本");
-        assert_eq!(dirty.cached_tokens, 10, "命中数不可能超过输入总数");
+        assert_eq!(dirty.cached_tokens, Some(10), "命中数不可能超过输入总数");
     }
 
     #[test]
@@ -797,7 +793,7 @@ mod tests {
                 credit: 1.0,
                 prompt_tokens: 0,
                 completion_tokens: 2,
-                cached_tokens: 0
+                cached_tokens: None
             }),
             "负数项应被钳制为 0，而不是让求和变成负数"
         );
@@ -808,7 +804,7 @@ mod tests {
                 credit: 0.0,
                 prompt_tokens: 3,
                 completion_tokens: 0,
-                cached_tokens: 0
+                cached_tokens: None
             }),
             "显式 credit=0 是合法样本（免费模型），不同于「缺 credit」"
         );

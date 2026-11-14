@@ -124,8 +124,8 @@ pub async fn responses_for_region(
         }
     }
 
-    // `previous_response_id` 只能在同一 API Key 与区域的内存状态中解析。
-    let response_scope = format!(
+    // `previous_response_id` 必须匹配产品线 / Key / 区域与（若客户端提供）会话身份。
+    let base_response_scope = format!(
         "{}:{:?}:{}",
         key.as_deref().map(|actor| actor.scope).unwrap_or("local"),
         region,
@@ -133,7 +133,12 @@ pub async fn responses_for_region(
             .map(|actor| actor.key_id.as_str())
             .unwrap_or("anonymous"),
     );
-    let (parsed, response_transcript) =
+    let response_identity = session_headers::response_session_identity(&parsed, &headers);
+    let response_scope = crate::protocol::responses::state_scope_for_session(
+        &base_response_scope,
+        response_identity.as_deref(),
+    );
+    let (parsed, response_transcript, response_scope) =
         match crate::protocol::responses::prepare_request_with_state(&parsed, &response_scope) {
             Ok(prepared) => prepared,
             Err(message) => {
@@ -227,7 +232,7 @@ pub async fn responses_for_region(
                     total_ms: elapsed,
                     prompt_tokens: 0,
                     completion_tokens: 0,
-                    cached_tokens: 0,
+                    cached_tokens: None,
                     credit: 0.0,
                     stream: true,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -258,7 +263,7 @@ pub async fn responses_for_region(
                     total_ms: elapsed_ms,
                     prompt_tokens: 0,
                     completion_tokens: 0,
-                    cached_tokens: 0,
+                    cached_tokens: None,
                     credit: 0.0,
                     stream: wants_stream,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -310,7 +315,7 @@ pub async fn responses_for_region(
                         total_ms: 0,
                         prompt_tokens: 0,
                         completion_tokens: 0,
-                        cached_tokens: 0,
+                        cached_tokens: None,
                         credit: 0.0,
                         stream: true,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -369,7 +374,7 @@ pub async fn responses_for_region(
                             total_ms: elapsed_ms,
                             prompt_tokens: 0,
                             completion_tokens: 0,
-                            cached_tokens: 0,
+                            cached_tokens: None,
                             credit: 0.0,
                             stream: false,
                             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -427,9 +432,7 @@ pub async fn responses_for_region(
                         cached_tokens: accumulator
                             .raw_usage
                             .as_ref()
-                            .map(crate::protocol::usage_tap::cached_tokens_from_usage)
-                            .and_then(|tokens| u64::try_from(tokens).ok())
-                            .unwrap_or(0),
+                            .and_then(crate::protocol::usage_tap::cached_tokens_from_usage),
                         credit: accumulator.credit.unwrap_or(0.0),
                         stream: false,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。

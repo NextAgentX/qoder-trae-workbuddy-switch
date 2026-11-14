@@ -527,8 +527,8 @@ impl QoderGatewayState {
         prompt_tokens: i64,
         completion_tokens: i64,
         // ★ issue #154：命中上游前缀缓存的输入 token（`prompt_tokens` 的子集；
-        //   0 = 上游没报）。进日志后账本按账号 / 模型 / 密钥分桶。
-        cached_tokens: i64,
+        //   `None` = 上游没报，`Some(0)` = 上游明确报 0）。进日志后账本按账号 / 模型 / 密钥分桶。
+        cached_tokens: Option<u64>,
         // 上游 `usage.credits`（浮点；`0` = 未取到）：G3 的计数来源，也进日志。
         credits: f64,
         error: Option<String>,

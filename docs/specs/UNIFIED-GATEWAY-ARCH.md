@@ -372,6 +372,12 @@ Trae 侧已补齐 `/v1/responses`（入站 Responses → chat、出站 chat SSE 
 （历史：曾有「Trae 没有该端点 ⇒ 501、不许 404、不许静默降级到 chat」的约定。补齐后
 这条约定失去对象，但它想防的东西仍然成立 —— **不认识的能力要报错，不要静默降级**。）
 
+### Responses 会话状态隔离
+
+三条产品线共享 Responses transcript 状态链。状态键保留产品线、区域、API Key（Trae 另含客户端变体）隔离，并在请求提供稳定客户端会话身份时追加该身份 SHA-256 的前 128 位指纹。身份由共享会话解析器从 body `session_id` / `conversation_id`、metadata 会话字段、`x-claude-code-session-id` / `x-session-id` / `x-conversation-id` 及 `prompt_cache_key` 中提取；来源标签也参与指纹，避免不同字段命名空间的 ID 撞键。原始会话 ID 不进入状态键。
+
+续接请求临时缺少会话身份时，只有该 `previous_response_id` 在既有 Key / 区域 / 产品线 scope 内唯一，才能继承其原身份继续；首轮和续接都不提供稳定身份时，服务端无法推断项目归属。续接访问刷新空闲 TTL，容量压力下按最近访问时间淘汰。输入历史预算为 256 KiB，超限裁剪只记录字节数和条目数，不记录 prompt 正文。OpenAI Completions 与 Anthropic Messages 不使用此 transcript 状态链，客户端仍须在每次请求中提交所需历史。
+
 **④ 前缀在册但命名空间未启用（400）**
 ```json
 { "error": {

@@ -1768,9 +1768,9 @@ fn describe_event(event: &UpstreamEvent) -> String {
         UpstreamEvent::Server => "5xx 上游异常 → 计入熔断".to_string(),
         UpstreamEvent::Timeout => "请求超时 → 计入熔断并换号（换模型可能更有效）".to_string(),
         UpstreamEvent::SessionDead => "12153 会话失效 → 三振禁用".to_string(),
-        // issue #100：401/403 不再归到「调用方错误」—— 那是**该账号的凭据**被拒。
+        // 401/403 是**该账号的凭据**被拒：冷却该账号，但当前请求不换号。
         UpstreamEvent::AuthRejected => {
-            "401/403 凭据被拒 → 浅冷却 60s 并换号（保活刷新后可自愈）".to_string()
+            "401/403 凭据被拒 → 冷却当前账号（不换号，保活刷新后可自愈）".to_string()
         }
         UpstreamEvent::Client => "4xx 调用方错误（不换号）".to_string(),
     }
@@ -2927,6 +2927,10 @@ mod tests {
         ));
         // 对照：参数错（400/422）仍然不换号 —— 换号只是把同一份坏参数喂给下一个号。
         assert!(!should_rotate(&UpstreamEvent::Client, 0));
+        assert!(
+            describe_event(&UpstreamEvent::AuthRejected).contains("不换号"),
+            "用户可见说明必须与终态策略一致"
+        );
     }
 }
 

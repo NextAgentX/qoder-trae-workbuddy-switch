@@ -200,7 +200,7 @@ Trae 分区：把端口换成 `57894`，且**认证头统一用 `Authorization: 
 | **`401` + `"type":"no_credential"`**，且文案里带「N 个已禁用 / 冷却中 / 余额为 0 / 被你排除 / 在途已满」 | **号在库里，但此刻一个都用不了** —— 不是没登录，重新登录/切换账号救不了 | 按文案里的计数去「网关 → 账号池」看逐账号原因。禁用是终态（需余额刷新成功或人工恢复）；排除点「取消排除」；「在途已满」会自己好 |
 | **`503` + `"type":"pool_busy"`** | 号**都健康**、凭据与余额正常，只是**在途并发占满**（旧版本这里错报成 401，会把人骗去重新登录） | 响应头已带 `Retry-After: 2`，等 2 秒重试即可。长期出现说明并发确实高：调高「每账号在途上限」或增加账号 |
 | **`402`** | 上游余额不足（网关按硬冷却处理，通常冷到次日 04:00） | 换号由网关自动处理；**全都余额不足**时才会把这个 402 透出来 —— 该去充值/换号了 |
-| `404` | 路径拼错，或 Codex 对 Trae 网关用了 `responses` | 见 §2.3；Codex 接 Trae 必须 `wire_api = "chat"` |
+| `404` | 路径拼错，或当前运行的旧版网关尚不支持该端点 | 见 §2.3；升级网关后确认对应 `/v1` 路由可用 |
 | `413` | 请求体超过 `max_body_mb`（默认 8MB） | 调大后**重启网关**（该值在 router 构建期固化，不热生效） |
 | `429` | 上游限流 / Key 限流 | 换号由网关自动处理；持续 429 看「请求日志」与「客户端限流台账」 |
 | `502` | 上游错误 / 账号池无可用户 | 看「API 服务」页的诊断行（逐账号说明为什么不能路由） |
@@ -228,7 +228,7 @@ Trae 分区：把端口换成 `57894`，且**认证头统一用 `Authorization: 
 
 ### 3.1 Codex（OpenAI Codex CLI）
 
-**结论**：改 `~/.codex/config.toml`，加一个自定义 `model_provider`。WB 与 Qoder 网关都能用 `wire_api = "responses"`；Trae 网关只能用 `wire_api = "chat"`。
+**结论**：改 `~/.codex/config.toml`，加一个自定义 `model_provider`。三个网关都支持 `wire_api = "responses"`；Trae 也可继续用 `wire_api = "chat"`。Codex 接 Trae 推荐 Responses，以使用网关的会话隔离和历史输入预算。
 
 **WorkBuddy 网关（推荐 `responses`）**
 
@@ -257,7 +257,7 @@ env_key = "BUDDY_SWITCH_KEY"
 wire_api = "responses"
 ```
 
-**Trae 网关（必须 `chat`）**
+**Trae 网关（推荐 `responses`）**
 
 ```toml
 model = "<从 /v1/models 复制的模型 id>"
@@ -267,7 +267,7 @@ model_provider = "buddy_switch_trae"
 name = "Buddy Switch (Trae)"
 base_url = "http://127.0.0.1:57894/v1"
 env_key = "BUDDY_SWITCH_KEY"
-wire_api = "chat"
+wire_api = "responses"
 ```
 
 Key 放环境变量，**不要写进 TOML**：
@@ -290,8 +290,8 @@ setx BUDDY_SWITCH_KEY "sk-wb-..."
 - **Responses 支持的是一个子集**（网关侧 `protocol/responses.rs` 已写清边界）：
   - 支持：`input`（字符串 / items 数组）、`instructions`、扁平 `tools`、`tool_choice`、`temperature` / `top_p` / `max_output_tokens` / `parallel_tool_calls`。
   - **忽略而非报错**：`store`、`include`、`background`、`stream_options`、文件 / 音频输入。`store` 不会开启持久化存储；Responses 状态只由网关在进程内短期保存。
-  - `previous_response_id` 已由 WorkBuddy、Trae、Qoder 三条 Responses 路由支持：状态按 API Key 与区域隔离（Trae 还区分客户端变体），最多保留 256 条、单条 transcript 上限 512 KiB、1 小时过期；只有成功完成且 transcript 未超限的响应会保存。超限时本轮响应仍会返回，但不会保存续接状态；后续使用该 ID 会返回 400。网关重启、状态过期或被容量淘汰后，该 ID 也会返回 400；跨 Key / 区域 / Trae 变体续接同样会返回 400。状态不是持久会话存储。
-  - Responses 历史输入还会按 64 KiB 预算裁剪：保留 system/developer 指令和最新完整 user turn，再尽量保留较新的完整旧轮次。因此超长对话可能不再包含较早历史；Codex 若发送 `compaction` 项，该项也无法还原为上游可读内容。
+  - `previous_response_id` 已由 WorkBuddy、Trae、Qoder 三条 Responses 路由支持：状态按 API Key、区域、产品线（Trae 还区分客户端变体）隔离；请求提供会话身份时，再按身份指纹隔离。支持的身份来源包括 body `session_id` / `conversation_id`、metadata 会话字段、`x-claude-code-session-id` / `x-session-id` / `x-conversation-id`，以及 Codex 可用的 `prompt_cache_key`。续接请求临时缺少身份时，只在该 response ID 于现有 Key/区域/产品线范围内唯一时继承原会话；如果 ID 不能唯一确定会话，续接失败。首轮和续接都不提供稳定身份时，网关仍无法区分该客户端的不同项目。状态按 24 小时空闲过期；续接访问会刷新过期时间。单条 transcript 序列化大小上限 512 KiB，估算的全局内存预算 128 MiB、每个 API Key/区域/产品线 scope 64 MiB、每个会话 32 MiB；条目上限分别为全局 1024、每 scope 512、每会话 64。容量不足时先在超额会话或 scope 内淘汰最久未访问项，全局压力则优先回收占用最大的 scope。只有成功完成且 transcript 未超限的响应会保存。状态未保存、过期和淘汰会产生不含 ID、Key 或正文的摘要日志。网关重启、状态空闲过期或被容量淘汰后，该 ID 会返回 400；身份 / Key / 区域 / 产品线不匹配时按状态不存在处理。状态不是持久会话存储。
+  - Responses 和 Chat Completions 的历史输入预算为 256 KiB：保留 system/developer 指令和最新完整 user 消息；超长的同一轮会裁掉较早活动，只保留最近完整条目，并将 function call 与对应输出成组保留。剩余预算再纳入较新的旧轮次。指令或最新 user 消息本身超过预算时仍会完整保留，因此 256 KiB 是历史裁剪预算，不是请求绝对上限。网关只记录输入/保留字节数与裁剪条目数，不记录正文。Codex 若发送 `compaction` 项，该项也无法还原为上游可读内容。
 - `reasoning` 项在 **WB 路径**会被丢弃（上游不接受）；**Qoder 路径**会翻成上游的思考档位 ⇒ `model_reasoning_effort` 生效。
 
 ### 3.2 Claude Code

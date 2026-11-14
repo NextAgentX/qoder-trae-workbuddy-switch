@@ -8,6 +8,12 @@
 > 客户端账本的命中率仍是 `token_stats` 原有那一列。§12 的四个待拍板项里，
 > 第 3 项（`to_openai()` 透传）与第 4 项（模型表给率）已按「给」实现，另两项仍待定。
 >
+> 2026-11-14 Agent 会话连续性：Responses 状态按客户端会话身份指纹进一步隔离（字段来源带命名空间）；状态访问刷新 24 小时空闲 TTL（由 1 小时调高）。状态容量按估算内存分配：全局 128 MiB / 1024 条、每 API Key+区域+产品线 scope 64 MiB / 512 条、每会话 32 MiB / 64 条（由 16 MiB / 32 条调高）；超额优先在对应会话或 scope 内淘汰 LRU，全局压力优先回收占用最大的 scope。日志记录不含会话 ID、Key 或正文的状态量 / 淘汰摘要。输入历史预算由 64 KiB 提高到 256 KiB。续接中身份暂缺时，唯一的 response ID 会继承其原身份；从首轮起均无稳定身份时仍沿用旧 scope，服务端无法推断项目归属。
+> 2026-11-14 Trae 连续请求实测：CC Switch 的 proxy 记录与本机 Trae 网关日志在同一时间窗均显示 `/v1/responses`、同一账号、输入约 800K–897K、缓存读数 0；账号轮换不是该批 0 命中的原因。原始上游 `token_usage` 抓取关闭，暂不能区分上游明确报 0 与未返回缓存字段。Trae/Qoder 网关日志现将 `cachedTokens` 记为 `null | number`，保留这一区别。
+> 2026-11-14 Chat 缓存连续性：WorkBuddy、Trae、Qoder 的 Chat Completions 缺少显式会话身份时，均以 system 指令 + 首条 user 内容的 SHA-256 指纹作为账号粘性兜底，固定安装级 `user` 不参与。Responses 与 Chat Completions 均走共享的历史裁剪。
+> 2026-11-14 WorkBuddy 缓存观测：`cachedTokens` 在原始请求日志中写为 `null | number`；`null` 表示上游未返回缓存字段，`0` 表示明确报 0。旧日志和聚合账本仍按 0 处理缺失字段，不反推其缓存状态。
+> 2026-11-14 Responses 长单轮裁剪：旧策略完整保留最新 user turn，工具调用密集的单轮仍可长到 800K 输入。现在保留最新 user 消息，并仅从该轮尾部纳入完整条目；function_call 与对应 function_call_output 成组，避免悬空工具记录。system/developer 指令与最新 user 消息不会截断，单个必保留项超预算时请求仍可能超过 256 KiB。
+>
 > 2026-11-10 Codex Responses 缓存连续性修复：共用转换器保留 `prompt_cache_key` / 会话字段；
 > WorkBuddy 在选号后按实际账号重绑网关生成的空 UID 缓存键；Trae / Qoder 将 Codex 顶层
 > `session_id` 纳入粘性路由，Qoder 上游会话 ID 改为按账号与会话稳定派生；WorkBuddy 非流式
@@ -20,10 +26,10 @@
 > 优先，并在缺失时回退到 Responses 会话身份（含 `prompt_cache_key`），与 Trae / Qoder 对齐。
 >
 > 2026-11-10 Responses 输入裁剪：共享 Responses → chat 转换器对数组形式的 `input` 限制历史
-> 体积为 64 KiB；始终保留 system/developer 指令与最新完整 user turn，再从新到旧纳入完整旧轮次，
-> 不在工具调用链中间截断。未超限的请求保持原样；单个最新轮次超过上限时仍完整保留。该策略
+> 体积为 256 KiB（2026-11-14 调高；此前为 64 KiB）；始终保留 system/developer 指令与最新 user 消息，超长的最新轮只保留最近完整活动条目与完整工具调用批次，再从新到旧纳入完整旧轮次，
+> 不在工具调用 / 结果之间截断。未超限的请求保持原样；单个必保留指令或最新 user 消息超过上限时仍保留原文。超限时只记录字节数与裁剪条目数，不记正文。该策略
 > 适用于 WorkBuddy、Trae、Qoder 的共享转换路径。三条 Responses 路由均已接入 `previous_response_id`
-> 进程内状态链：状态按 API Key + 区域（Trae 再按客户端变体）隔离，最多 256 条、单条 transcript 上限 512 KiB、1 小时过期，只在完成响应后保存；
+> 进程内状态链：状态按 API Key + 区域（Trae 再按客户端变体）隔离，提供会话身份时继续按身份指纹隔离；全局估算内存 128 MiB / 1024 条、scope 64 MiB / 512 条、会话 32 MiB / 64 条，单条 transcript 序列化上限 512 KiB，24 小时空闲过期；只在完成响应后保存；
 > 进程重启后状态清空。
 >
 > ⚠️ 上面「第 3 项已实现」是第一版写错后补上的：当时 `TokenUsage.cached` 已经解析出来

@@ -26,11 +26,11 @@ pub struct TokenUsage {
     pub completion: u64,
     pub total: u64,
     pub reasoning: u64,
-    /// 命中上游前缀缓存的输入 token（`prompt` 的**子集**；0 = 上游没报）。
+    /// 命中上游前缀缓存的输入 token（`prompt` 的**子集**；`None` = 上游没报）。
     ///
     /// ★ issue #154：进请求日志的 `cachedTokens`，账本再按账号 / 模型 / 密钥分桶
     /// ⇒ 「命中率掉了」与「换号了」终于能在同一本账里 join。
-    pub cached: u64,
+    pub cached: Option<u64>,
 }
 
 impl TokenUsage {
@@ -70,8 +70,8 @@ impl TokenUsage {
             "completion_tokens": self.completion,
             "total_tokens": self.total,
         });
-        if self.cached > 0 {
-            usage["prompt_tokens_details"] = json!({ "cached_tokens": self.cached });
+        if let Some(cached) = self.cached.filter(|cached| *cached > 0) {
+            usage["prompt_tokens_details"] = json!({ "cached_tokens": cached });
         }
         usage
     }
@@ -93,7 +93,7 @@ impl TokenUsage {
 ///
 /// **上限钳到 `prompt_tokens`**：命中量在语义上是输入的子集，脏数据（上游报大）
 /// 会让下游的命中率 > 100%。与 `usage_tap::extract_usage` 同一处置。
-fn cached_tokens_of(usage: &Value) -> u64 {
+fn cached_tokens_of(usage: &Value) -> Option<u64> {
     let read = |key: &str| usage.get(key).and_then(Value::as_u64);
     let hit = read("prompt_cache_hit_tokens")
         .or_else(|| {
@@ -103,10 +103,9 @@ fn cached_tokens_of(usage: &Value) -> u64 {
                 .and_then(Value::as_u64)
         })
         .or_else(|| read("cache_read_input_tokens"))
-        .or_else(|| read("cached_tokens"))
-        .unwrap_or(0);
+        .or_else(|| read("cached_tokens"))?;
     let prompt = read("prompt_tokens").unwrap_or(0);
-    hit.min(prompt)
+    Some(hit.min(prompt))
 }
 
 /// 一个解析完成的 SOLO 事件。
@@ -944,7 +943,7 @@ mod tests {
                 "prompt_tokens": 100, "completion_tokens": 1, "prompt_cache_hit_tokens": 90
             }))
             .cached,
-            90
+            Some(90)
         );
         // OpenAI 明细
         assert_eq!(
@@ -953,7 +952,7 @@ mod tests {
                 "prompt_tokens_details": { "cached_tokens": 70 }
             }))
             .cached,
-            70
+            Some(70)
         );
         // Anthropic
         assert_eq!(
@@ -961,7 +960,7 @@ mod tests {
                 "prompt_tokens": 100, "completion_tokens": 1, "cache_read_input_tokens": 60
             }))
             .cached,
-            60
+            Some(60)
         );
         // 裸字段 + 缺字段（= 0 = 上游没报）
         assert_eq!(
@@ -969,11 +968,11 @@ mod tests {
                 "prompt_tokens": 100, "completion_tokens": 1, "cached_tokens": 50
             }))
             .cached,
-            50
+            Some(50)
         );
         assert_eq!(
             TokenUsage::from_value(&json!({"prompt_tokens": 100, "completion_tokens": 1})).cached,
-            0
+            None
         );
         // 脏数：命中量报得比 prompt 还大 ⇒ 钳到 prompt
         assert_eq!(
@@ -981,7 +980,7 @@ mod tests {
                 "prompt_tokens": 10, "completion_tokens": 1, "prompt_cache_hit_tokens": 999
             }))
             .cached,
-            10
+            Some(10)
         );
     }
 
@@ -1071,7 +1070,7 @@ mod tests {
             completion: 20,
             total: 1020,
             reasoning: 0,
-            cached: 900,
+            cached: Some(900),
         }
         .to_openai();
         assert_eq!(

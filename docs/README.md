@@ -64,6 +64,7 @@
 | [`RISK-ACCOUNT-ISOLATION.md`](specs/RISK-ACCOUNT-ISOLATION.md) | 本地认证快照、共享出站客户端与风控状态的适用边界 | 现行 · 2026-11-13 |
 | [`RISK-CONTROLS-DESIGN.md`](specs/RISK-CONTROLS-DESIGN.md) | WorkBuddy / Trae / Qoder 网关合规风控设置设计（方案 A） | 现行 · 2026-11-13 落地 |
 | [`2026-11-13-three-platform-risk-controls.md`](superpowers/plans/2026-11-13-three-platform-risk-controls.md) | 三平台合规风控设置实施计划 | 已完成 · 2026-11-13 |
+| [`2026-11-14-agent-session-isolation.md`](superpowers/plans/2026-11-14-agent-session-isolation.md) | 多 Agent Responses 会话身份隔离、续接状态保活与历史裁剪诊断实施计划 | 已完成 · 2026-11-14 |
 | [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |
 
 ### 分期架构（P3–P15）

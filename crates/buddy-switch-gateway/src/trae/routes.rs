@@ -11,8 +11,8 @@
 //!
 //! | 路径 | 连接期失败（HTTP 非 2xx / 传输层错误） | 流内失败（`event:error`） |
 //! |:---|:---|:---|
-//! | 流式 | 冷却该账号 → **换号重试**（最多 `max_rotate` 次） | 冷却该账号 → **不换号** |
-//! | 非流式 | 冷却该账号 → **换号重试** | 冷却该账号 → **换号重试** |
+//! | 流式 | 暂时性故障最多重试 `max_rotate` 次；账号终态不换号 | 冷却该账号 → **不换号** |
+//! | 非流式 | 暂时性故障最多重试 `max_rotate` 次；账号终态不换号 | 冷却该账号 → **不换号** |
 //!
 //! 差别来自「响应头是否已经发出」：流式一旦把 `200 + text/event-stream` 发给客户端，
 //! 就只能把错误塞进事件流里（补一条 `data: {...error...}` 再 `data: [DONE]`）；
@@ -730,6 +730,7 @@ pub async fn responses(
     State(state): State<TraeGatewayState>,
     Extension(key_variant): Extension<TraeKeyVariant>,
     key_ctx: Option<Extension<TraeKeyContext>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let key = key_ctx.map(|Extension(ctx)| ctx.0);
@@ -741,7 +742,7 @@ pub async fn responses(
             "trae",
         ))
     });
-    responses_for_variant(state, key_variant.0, body, actor).await
+    responses_for_variant(state, key_variant.0, body, actor, headers).await
 }
 
 /// 一趟 Trae **Responses** 中继（认证之后的全部逻辑）—— 产品线入口与统一网关共用。
@@ -763,6 +764,7 @@ pub async fn responses_for_variant(
     body: Bytes,
     // ★ issue #76：同 `chat_for_variant`。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
+    headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
     // ★ issue #76：配额判定（选号前）。
@@ -787,7 +789,7 @@ pub async fn responses_for_variant(
         );
     };
 
-    let response_state_scope = format!(
+    let base_response_state_scope = format!(
         "trae:{}:{}:{}",
         variant.as_str(),
         key.as_deref().map(|actor| actor.scope).unwrap_or("local"),
@@ -795,15 +797,19 @@ pub async fn responses_for_variant(
             .map(|actor| actor.key_id.as_str())
             .unwrap_or("anonymous"),
     );
-    let (parsed, response_transcript) = match crate::protocol::responses::prepare_request_with_state(
-        &parsed,
-        &response_state_scope,
-    ) {
-        Ok(prepared) => prepared,
-        Err(message) => {
-            return openai_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message);
-        }
-    };
+    let response_identity = crate::session_headers::response_session_identity(&parsed, &headers);
+    let response_state_scope = crate::protocol::responses::state_scope_for_session(
+        &base_response_state_scope,
+        response_identity.as_deref(),
+    );
+    let (parsed, response_transcript, response_state_scope) =
+        match crate::protocol::responses::prepare_request_with_state(&parsed, &response_state_scope)
+        {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                return openai_error(StatusCode::BAD_REQUEST, "invalid_request_error", &message);
+            }
+        };
 
     /* freeform（custom）工具名必须从**原始**请求体取：转换之后它们已被降级成普通
     function，`type` 没了，名字还在但语义丢失 —— 出站要靠这份集合还原成
@@ -1340,7 +1346,11 @@ fn anthropic_wants_stream(parsed: &Value) -> bool {
 /// 变体进键是必须的：两条产品线的账号库**分家**，粘到一起会指向另一条线的账号。
 fn sticky_key_of(parsed: &Value, variant: TraeVariant, model: &str) -> Option<String> {
     crate::protocol::responses::session_identity_of(parsed)
-        .map(|conversation| sticky::sticky_key(variant.as_str(), model, conversation))
+        .map(str::to_string)
+        // Codex 的 Chat Completions 请求常不携带会话字段。此时复用上游会话 ID
+        // 的内容指纹绑定账号，避免多账号池每轮换号导致提示词缓存反复冷启动。
+        .or_else(|| payload::conversation_sticky_identity(parsed))
+        .map(|conversation| sticky::sticky_key(variant.as_str(), model, &conversation))
 }
 
 /// 合并两个偏好来源，得到本次选号的偏好 uid。
@@ -1843,7 +1853,7 @@ async fn settle_failure(
             stream,
             0,
             0,
-            0,
+            None,
             Some(failure.message.clone()),
             variant,
             key_id,

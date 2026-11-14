@@ -92,10 +92,18 @@ pub async fn chat_for_region(
     let started = Instant::now();
     let mut region = region;
 
-    let parsed = match parse_body(&body) {
+    let mut parsed = match parse_body(&body) {
         Ok(value) => value,
         Err(error) => return openai_error(error),
     };
+    let mut history_trimmed = false;
+    if let Some(messages) = parsed.get("messages").cloned() {
+        let trimmed = crate::protocol::responses::trim_chat_messages(&messages);
+        history_trimmed = trimmed != messages;
+        if let Some(object) = parsed.as_object_mut() {
+            object.insert("messages".into(), trimmed);
+        }
+    }
     let requested_model = parsed
         .get("model")
         .and_then(|value| value.as_str())
@@ -145,9 +153,16 @@ pub async fn chat_for_region(
         }
     }
 
-    let raw_source = String::from_utf8_lossy(&body);
+    // Keep the original bytes on the common path; only serialize after the shared
+    // history policy actually changed `messages`.
+    let raw_source = if history_trimmed {
+        serde_json::to_string(&parsed)
+            .unwrap_or_else(|_| String::from_utf8_lossy(&body).into_owned())
+    } else {
+        String::from_utf8_lossy(&body).into_owned()
+    };
     let raw = if model == requested_model {
-        raw_source.to_string()
+        raw_source
     } else {
         crate::model_route::rewrite_body_model(&raw_source, &model)
     };
@@ -155,7 +170,11 @@ pub async fn chat_for_region(
     // ★ issue #150：粘性键不能只认 body 的 `metadata.conversation_id` —— Claude Code
     //   发 `x-claude-code-session-id` 头、Codex 发 body `session_id`，都要认
     //   （见 `session_headers::session_key_of`）。出站 `X-Conversation-ID` 同样用它。
-    let session_key = session_headers::session_key_of(&parsed, &headers);
+    let session_key = session_headers::session_key_of(&parsed, &headers).or_else(|| {
+        // Some OpenAI-compatible clients omit session headers. Use a stable,
+        // content-derived fallback so one conversation keeps the same account.
+        session_headers::chat_content_identity(&parsed)
+    });
     let turn_key = session_headers::turn_key(&parsed);
     let inbound_request_id = header_of(&headers, "x-conversation-request-id");
     let trace_id = header_of(&headers, "x-trace-id");
@@ -225,7 +244,7 @@ pub async fn chat_for_region(
                     total_ms: elapsed,
                     prompt_tokens: 0,
                     completion_tokens: 0,
-                    cached_tokens: 0,
+                    cached_tokens: None,
                     credit: 0.0,
                     stream: true,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -256,7 +275,7 @@ pub async fn chat_for_region(
                     total_ms: elapsed_ms,
                     prompt_tokens: 0,
                     completion_tokens: 0,
-                    cached_tokens: 0,
+                    cached_tokens: None,
                     credit: 0.0,
                     stream: wants_stream,
                     // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -314,7 +333,7 @@ pub async fn chat_for_region(
                         total_ms: 0,
                         prompt_tokens: 0,
                         completion_tokens: 0,
-                        cached_tokens: 0,
+                        cached_tokens: None,
                         credit: 0.0,
                         stream: true,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -402,7 +421,10 @@ pub async fn chat_for_region(
                         total_ms: started.elapsed().as_millis() as i64,
                         prompt_tokens: accumulator.prompt_tokens.unwrap_or(0),
                         completion_tokens: accumulator.completion_tokens.unwrap_or(0),
-                        cached_tokens: 0,
+                        cached_tokens: accumulator
+                            .raw_usage
+                            .as_ref()
+                            .and_then(crate::protocol::usage_tap::cached_tokens_from_usage),
                         credit: accumulator.credit.unwrap_or(0.0),
                         stream: false,
                         // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -470,7 +492,7 @@ async fn envelope_error_response(
             total_ms: elapsed_ms,
             prompt_tokens: 0,
             completion_tokens: 0,
-            cached_tokens: 0,
+            cached_tokens: None,
             credit: 0.0,
             stream: false,
             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。

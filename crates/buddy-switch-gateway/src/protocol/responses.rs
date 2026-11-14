@@ -28,6 +28,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -409,10 +410,80 @@ pub fn to_upstream_request(body: &Value) -> Value {
     Value::Object(out)
 }
 
-/// Responses clients commonly resend the entire conversation on every turn.
-/// Cap historical input while keeping instruction items and the newest full
-/// user turn intact; older turns are admitted whole, newest first.
-const MAX_INPUT_HISTORY_BYTES: usize = 64 * 1024;
+/// OpenAI-compatible clients commonly resend the entire conversation on every turn.
+/// Cap historical input while keeping instruction items and the newest user
+/// message intact; oversized turns retain only a recent suffix of complete items.
+const MAX_INPUT_HISTORY_BYTES: usize = 256 * 1024;
+
+/// Split an oversized turn into removable units. A batch of parallel function
+/// calls stays with all of its matching outputs, so trimming cannot leave a
+/// dangling call/result pair in the transcript.
+fn activity_units(items: &[Value], group: &[usize]) -> Vec<Vec<usize>> {
+    let mut units = Vec::new();
+    let mut cursor = 0;
+    while cursor < group.len() {
+        let index = group[cursor];
+        let call_ids_of = |item: &Value| -> Vec<String> {
+            if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                return item
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .into_iter()
+                    .collect();
+            }
+            if item.get("role").and_then(Value::as_str) == Some("assistant") {
+                return item
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|call| call.get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
+            }
+            Vec::new()
+        };
+        let initial_call_ids = call_ids_of(&items[index]);
+        if initial_call_ids.is_empty() {
+            units.push(vec![index]);
+            cursor += 1;
+            continue;
+        }
+
+        let start = cursor;
+        let mut call_ids: HashSet<String> = initial_call_ids.into_iter().collect();
+        cursor += 1;
+        while cursor < group.len() {
+            if items[group[cursor]].get("type").and_then(Value::as_str) != Some("function_call") {
+                break;
+            }
+            call_ids.extend(call_ids_of(&items[group[cursor]]));
+            cursor += 1;
+        }
+
+        let mut outputs = HashSet::new();
+        while cursor < group.len() && outputs.len() < call_ids.len() {
+            let item = &items[group[cursor]];
+            let output_id =
+                if item.get("type").and_then(Value::as_str) == Some("function_call_output") {
+                    item.get("call_id").and_then(Value::as_str)
+                } else if item.get("role").and_then(Value::as_str) == Some("tool") {
+                    item.get("tool_call_id").and_then(Value::as_str)
+                } else {
+                    None
+                };
+            if let Some(call_id) = output_id.filter(|call_id| call_ids.contains(*call_id)) {
+                outputs.insert(call_id.to_string());
+            }
+            cursor += 1;
+        }
+        // An incomplete call batch is kept atomic. If it does not fit, the
+        // suffix selector drops the whole batch instead of emitting half of it.
+        units.push(group[start..cursor].to_vec());
+    }
+    units
+}
 
 fn trim_input_history(input: &Value) -> Value {
     let Some(items) = input.as_array() else {
@@ -447,49 +518,234 @@ fn trim_input_history(input: &Value) -> Value {
 
     let mut keep = instruction_indices;
     let mut used_bytes: usize = keep.iter().map(|index| encoded_size(&items[*index])).sum();
-    // The newest turn is mandatory even when it alone exceeds the budget.
-    for group in groups.iter().rev() {
+    for (group_index, group) in groups.iter().enumerate().rev() {
         let group_bytes: usize = group.iter().map(|index| encoded_size(&items[*index])).sum();
-        let is_latest = groups.last() == Some(group);
-        if !is_latest && used_bytes.saturating_add(group_bytes) > MAX_INPUT_HISTORY_BYTES {
-            // Keep a contiguous suffix of complete turns; older turns cannot leapfrog a skipped one.
-            break;
+        if used_bytes.saturating_add(group_bytes) <= MAX_INPUT_HISTORY_BYTES {
+            used_bytes = used_bytes.saturating_add(group_bytes);
+            keep.extend(group.iter().copied());
+            continue;
         }
-        used_bytes = used_bytes.saturating_add(group_bytes);
-        keep.extend(group.iter().copied());
+
+        if group_index + 1 == groups.len() {
+            // Keep the latest user prompt intact. Long tool-heavy tasks can
+            // contain many tool cycles without another user message; retain a
+            // recent suffix of complete cycles rather than letting that turn
+            // grow without bound.
+            let latest_user = group.iter().copied().find(|index| {
+                matches!(
+                    items[*index].get("type").and_then(Value::as_str),
+                    Some("message") | None
+                ) && items[*index].get("role").and_then(Value::as_str) == Some("user")
+            });
+            if let Some(index) = latest_user {
+                keep.insert(index);
+                used_bytes = used_bytes.saturating_add(encoded_size(&items[index]));
+            }
+            let activity: Vec<usize> = group
+                .iter()
+                .copied()
+                .filter(|index| Some(*index) != latest_user)
+                .collect();
+            for unit in activity_units(items, &activity).iter().rev() {
+                let unit_bytes: usize = unit.iter().map(|index| encoded_size(&items[*index])).sum();
+                if used_bytes.saturating_add(unit_bytes) > MAX_INPUT_HISTORY_BYTES {
+                    break;
+                }
+                used_bytes = used_bytes.saturating_add(unit_bytes);
+                keep.extend(unit.iter().copied());
+            }
+            continue;
+        }
+
+        // Keep a contiguous suffix of complete turns; older turns cannot leapfrog a skipped one.
+        break;
     }
 
-    Value::Array(
-        items
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| keep.contains(index))
-            .map(|(_, item)| item.clone())
-            .collect(),
-    )
+    let kept: Vec<Value> = items
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| keep.contains(index))
+        .map(|(_, item)| item.clone())
+        .collect();
+    let kept_bytes: usize = kept.iter().map(encoded_size).sum();
+    eprintln!(
+        "[gateway] Responses history trimmed: input_bytes={total_size} kept_bytes={kept_bytes} removed_items={} budget_bytes={MAX_INPUT_HISTORY_BYTES}",
+        items.len().saturating_sub(kept.len())
+    );
+    Value::Array(kept)
 }
 
-const RESPONSE_STATE_TTL: Duration = Duration::from_secs(60 * 60);
-const RESPONSE_STATE_CAPACITY: usize = 256;
+/// Apply the shared history policy to a Chat Completions `messages` array.
+pub(crate) fn trim_chat_messages(messages: &Value) -> Value {
+    trim_input_history(messages)
+}
+
+const RESPONSE_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_RESPONSE_STATE_BYTES: usize = 512 * 1024;
+// Serialized JSON is smaller than its in-memory serde_json representation. Use a
+// conservative estimate for admission and eviction so the registry has a useful
+// process-level memory ceiling without retaining full allocator-specific objects.
+const RESPONSE_STATE_MEMORY_FACTOR: usize = 4;
+const RESPONSE_STATE_ENTRY_OVERHEAD_BYTES: usize = 1024;
+const MAX_RESPONSE_STATE_MEMORY_BYTES: usize = 128 * 1024 * 1024;
+const MAX_RESPONSE_STATE_ENTRIES: usize = 1024;
+const MAX_RESPONSE_SCOPE_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RESPONSE_SCOPE_ENTRIES: usize = 512;
+const MAX_RESPONSE_SESSION_MEMORY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_RESPONSE_SESSION_ENTRIES: usize = 64;
+const RESPONSE_STATE_METRICS_EVERY_INSERTS: u64 = 100;
+
+static RESPONSE_STATE_INSERTIONS: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_STATE_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_STATE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_STATE_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 
 struct ResponseStateEntry {
     transcript: Vec<Value>,
+    estimated_memory_bytes: usize,
     updated_at: Instant,
 }
 
-static RESPONSE_STATES: OnceLock<Mutex<HashMap<(String, String), ResponseStateEntry>>> =
+type ResponseStateKey = (String, Option<String>, String);
+
+static RESPONSE_STATES: OnceLock<Mutex<HashMap<ResponseStateKey, ResponseStateEntry>>> =
     OnceLock::new();
 
-fn response_states() -> &'static Mutex<HashMap<(String, String), ResponseStateEntry>> {
+fn response_states() -> &'static Mutex<HashMap<ResponseStateKey, ResponseStateEntry>> {
     RESPONSE_STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn estimated_state_memory_bytes(serialized_bytes: usize) -> usize {
+    serialized_bytes
+        .saturating_mul(RESPONSE_STATE_MEMORY_FACTOR)
+        .saturating_add(RESPONSE_STATE_ENTRY_OVERHEAD_BYTES)
+}
+
+fn state_memory_bytes(states: &HashMap<ResponseStateKey, ResponseStateEntry>) -> usize {
+    states
+        .values()
+        .map(|entry| entry.estimated_memory_bytes)
+        .sum()
+}
+
+fn scoped_state_usage(
+    states: &HashMap<ResponseStateKey, ResponseStateEntry>,
+    mut matches: impl FnMut(&ResponseStateKey) -> bool,
+) -> (usize, usize) {
+    states.iter().filter(|(key, _)| matches(key)).fold(
+        (0usize, 0usize),
+        |(count, bytes), (_, entry)| {
+            (
+                count.saturating_add(1),
+                bytes.saturating_add(entry.estimated_memory_bytes),
+            )
+        },
+    )
+}
+
+fn remove_oldest_matching(
+    states: &mut HashMap<ResponseStateKey, ResponseStateEntry>,
+    mut matches: impl FnMut(&ResponseStateKey) -> bool,
+) -> Option<ResponseStateEntry> {
+    let oldest = states
+        .iter()
+        .filter(|(key, _)| matches(key))
+        .min_by_key(|(_, entry)| entry.updated_at)
+        .map(|(key, _)| key.clone())?;
+    states.remove(&oldest)
+}
+
+fn remove_expired_states(
+    states: &mut HashMap<ResponseStateKey, ResponseStateEntry>,
+) -> (usize, usize) {
+    let mut expired_count = 0usize;
+    let mut expired_bytes = 0usize;
+    states.retain(|_, entry| {
+        let keep = entry.updated_at.elapsed() < RESPONSE_STATE_TTL;
+        if !keep {
+            expired_count = expired_count.saturating_add(1);
+            expired_bytes = expired_bytes.saturating_add(entry.estimated_memory_bytes);
+        }
+        keep
+    });
+    (expired_count, expired_bytes)
+}
+
+fn log_state_maintenance(
+    reason: &str,
+    removed_count: usize,
+    removed_bytes: usize,
+    states: &HashMap<ResponseStateKey, ResponseStateEntry>,
+) {
+    if removed_count == 0 {
+        return;
+    }
+    let evictions = RESPONSE_STATE_EVICTIONS
+        .fetch_add(removed_count as u64, Ordering::Relaxed)
+        .saturating_add(removed_count as u64);
+    eprintln!(
+        "[gateway] Responses state maintenance: reason={reason} removed_entries={removed_count} removed_estimated_bytes={removed_bytes} remaining_entries={} remaining_estimated_bytes={} cumulative_evictions={evictions} expired_total={} rejected_total={}",
+        states.len(),
+        state_memory_bytes(states),
+        RESPONSE_STATE_EXPIRATIONS.load(Ordering::Relaxed),
+        RESPONSE_STATE_REJECTIONS.load(Ordering::Relaxed),
+    );
+}
+
+fn log_expiration_summary(
+    expired_count: usize,
+    expired_bytes: usize,
+    states: &HashMap<ResponseStateKey, ResponseStateEntry>,
+) {
+    if expired_count == 0 {
+        return;
+    }
+    let expired_total = RESPONSE_STATE_EXPIRATIONS
+        .fetch_add(expired_count as u64, Ordering::Relaxed)
+        .saturating_add(expired_count as u64);
+    eprintln!(
+        "[gateway] Responses state maintenance: reason=idle_expiration removed_entries={expired_count} removed_estimated_bytes={expired_bytes} remaining_entries={} remaining_estimated_bytes={} expired_total={expired_total} cumulative_evictions={} rejected_total={}",
+        states.len(),
+        state_memory_bytes(states),
+        RESPONSE_STATE_EVICTIONS.load(Ordering::Relaxed),
+        RESPONSE_STATE_REJECTIONS.load(Ordering::Relaxed),
+    );
+}
+
+fn log_state_insert_snapshot(states: &HashMap<ResponseStateKey, ResponseStateEntry>) {
+    let insertions = RESPONSE_STATE_INSERTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+    if insertions % RESPONSE_STATE_METRICS_EVERY_INSERTS == 0 {
+        eprintln!(
+            "[gateway] Responses state snapshot: entries={} estimated_bytes={} insertions={insertions} cumulative_evictions={} expired_total={} rejected_total={}",
+            states.len(),
+            state_memory_bytes(states),
+            RESPONSE_STATE_EVICTIONS.load(Ordering::Relaxed),
+            RESPONSE_STATE_EXPIRATIONS.load(Ordering::Relaxed),
+            RESPONSE_STATE_REJECTIONS.load(Ordering::Relaxed),
+        );
+    }
+}
+
+fn split_response_scope(scope: &str) -> (&str, Option<&str>) {
+    scope
+        .rsplit_once(":session:")
+        .map_or((scope, None), |(base, fingerprint)| {
+            (base, Some(fingerprint))
+        })
+}
+
+fn response_scope_with_fingerprint(base: &str, fingerprint: Option<&str>) -> String {
+    fingerprint.map_or_else(
+        || base.to_string(),
+        |fingerprint| format!("{base}:session:{fingerprint}"),
+    )
 }
 
 /// Expand `previous_response_id` into the bounded transcript used for this turn.
 pub fn prepare_request_with_state(
     body: &Value,
     scope: &str,
-) -> Result<(Value, Vec<Value>), String> {
+) -> Result<(Value, Vec<Value>, String), String> {
     let current_input = match body.get("input") {
         Some(Value::String(text)) => {
             vec![json!({"type": "message", "role": "user", "content": text})]
@@ -503,19 +759,71 @@ pub fn prepare_request_with_state(
         .map(str::trim)
         .filter(|id| !id.is_empty());
 
-    let mut transcript = if let Some(previous_id) = previous_id {
+    let (base_scope, requested_fingerprint) = split_response_scope(scope);
+    let (mut transcript, effective_fingerprint) = if let Some(previous_id) = previous_id {
         let mut states = response_states()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        states.retain(|_, entry| entry.updated_at.elapsed() < RESPONSE_STATE_TTL);
-        states
-            .get(&(scope.to_string(), previous_id.to_string()))
-            .map(|entry| entry.transcript.clone())
+        let (expired_count, expired_bytes) = remove_expired_states(&mut states);
+        log_expiration_summary(expired_count, expired_bytes, &states);
+        let exact_key = (
+            base_scope.to_string(),
+            requested_fingerprint.map(str::to_string),
+            previous_id.to_string(),
+        );
+        let state_key = if states.contains_key(&exact_key) {
+            Some(exact_key)
+        } else if requested_fingerprint.is_some() {
+            // If the first turn had no identity, bind its unique response chain
+            // to the first stable identity supplied by a later turn.
+            let unscoped_key = (base_scope.to_string(), None, previous_id.to_string());
+            states.contains_key(&unscoped_key).then_some(unscoped_key)
+        } else {
+            // Some clients omit their session header intermittently. Continue only
+            // when this response ID resolves to exactly one session in the base scope.
+            let candidates: Vec<ResponseStateKey> = states
+                .keys()
+                .filter(|(base, _, id)| base == base_scope && id == previous_id)
+                .cloned()
+                .collect();
+            (candidates.len() == 1).then(|| candidates[0].clone())
+        };
+        let (transcript, effective_fingerprint) = state_key
+            .and_then(|state_key| {
+                states.get_mut(&state_key).map(|entry| {
+                    // Expiration and capacity eviction both use last access, not only
+                    // the time the response was first written.
+                    entry.updated_at = Instant::now();
+                    let transcript = entry.transcript.clone();
+                    let effective_fingerprint = requested_fingerprint
+                        .map(str::to_string)
+                        .or_else(|| state_key.1.clone());
+                    (state_key, transcript, effective_fingerprint)
+                })
+            })
+            .map(|(state_key, transcript, effective_fingerprint)| {
+                let bound_key = (
+                    base_scope.to_string(),
+                    effective_fingerprint.clone(),
+                    previous_id.to_string(),
+                );
+                if state_key != bound_key {
+                    if let Some(entry) = states.remove(&state_key) {
+                        states.insert(bound_key, entry);
+                    }
+                }
+                (transcript, effective_fingerprint)
+            })
             .ok_or_else(|| {
+                eprintln!(
+                    "[gateway] Responses continuation state unavailable: session_scoped={}",
+                    requested_fingerprint.is_some()
+                );
                 format!("previous_response_id '{previous_id}' was not found or has expired")
-            })?
+            })?;
+        (transcript, effective_fingerprint)
     } else {
-        Vec::new()
+        (Vec::new(), requested_fingerprint.map(str::to_string))
     };
     transcript.extend(current_input);
     let bounded = trim_input_history(&Value::Array(transcript));
@@ -527,7 +835,11 @@ pub fn prepare_request_with_state(
             object.insert("input".to_string(), Value::Array(transcript.clone()));
         }
     }
-    Ok((prepared, transcript))
+    Ok((
+        prepared,
+        transcript,
+        response_scope_with_fingerprint(base_scope, effective_fingerprint.as_deref()),
+    ))
 }
 
 /// Keep response state volatile, scoped, expiring, and bounded by count/history size.
@@ -551,28 +863,114 @@ pub fn remember_response_state(
         .map(|item| {
             serde_json::to_vec(item).map_or(MAX_RESPONSE_STATE_BYTES + 1, |bytes| bytes.len())
         })
-        .sum();
+        .fold(0usize, usize::saturating_add);
     if serialized_bytes > MAX_RESPONSE_STATE_BYTES {
+        let rejected = RESPONSE_STATE_REJECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+        let states = response_states()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        eprintln!(
+            "[gateway] Responses state not stored: reason=entry_too_large transcript_bytes={serialized_bytes} entry_limit_bytes={MAX_RESPONSE_STATE_BYTES} entries={} estimated_bytes={} rejected_total={rejected}",
+            states.len(),
+            state_memory_bytes(&states),
+        );
         return;
     }
     let entry = ResponseStateEntry {
         transcript: transcript.clone(),
+        estimated_memory_bytes: estimated_state_memory_bytes(serialized_bytes),
         updated_at: Instant::now(),
     };
     let mut states = response_states()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    states.retain(|_, old| old.updated_at.elapsed() < RESPONSE_STATE_TTL);
-    if states.len() >= RESPONSE_STATE_CAPACITY {
-        if let Some(oldest) = states
-            .iter()
-            .min_by_key(|(_, value)| value.updated_at)
-            .map(|(key, _)| key.clone())
-        {
-            states.remove(&oldest);
-        }
+    let (base_scope, fingerprint) = split_response_scope(scope);
+    let session_fingerprint = fingerprint.map(str::to_string);
+    let key = (
+        base_scope.to_string(),
+        session_fingerprint.clone(),
+        response_id.to_string(),
+    );
+    let (expired_count, expired_bytes) = remove_expired_states(&mut states);
+    log_expiration_summary(expired_count, expired_bytes, &states);
+
+    // A response ID should be unique, but replace an existing key defensively
+    // without counting it as an eviction.
+    states.remove(&key);
+
+    let session_matches = |candidate: &ResponseStateKey| {
+        candidate.0 == base_scope && candidate.1 == session_fingerprint
+    };
+    let scope_matches = |candidate: &ResponseStateKey| candidate.0 == base_scope;
+    let mut removed_count = 0usize;
+    let mut removed_bytes = 0usize;
+
+    while {
+        let (count, bytes) = scoped_state_usage(&states, session_matches);
+        count >= MAX_RESPONSE_SESSION_ENTRIES
+            || bytes.saturating_add(entry.estimated_memory_bytes)
+                > MAX_RESPONSE_SESSION_MEMORY_BYTES
+    } {
+        let Some(removed) = remove_oldest_matching(&mut states, session_matches) else {
+            break;
+        };
+        removed_count += 1;
+        removed_bytes = removed_bytes.saturating_add(removed.estimated_memory_bytes);
     }
-    states.insert((scope.to_string(), response_id.to_string()), entry);
+    if removed_count > 0 {
+        log_state_maintenance("session_quota", removed_count, removed_bytes, &states);
+        removed_count = 0;
+        removed_bytes = 0;
+    }
+
+    while {
+        let (count, bytes) = scoped_state_usage(&states, scope_matches);
+        count >= MAX_RESPONSE_SCOPE_ENTRIES
+            || bytes.saturating_add(entry.estimated_memory_bytes) > MAX_RESPONSE_SCOPE_MEMORY_BYTES
+    } {
+        let Some(removed) = remove_oldest_matching(&mut states, scope_matches) else {
+            break;
+        };
+        removed_count += 1;
+        removed_bytes = removed_bytes.saturating_add(removed.estimated_memory_bytes);
+    }
+    if removed_count > 0 {
+        log_state_maintenance("api_key_quota", removed_count, removed_bytes, &states);
+        removed_count = 0;
+        removed_bytes = 0;
+    }
+
+    while states.len() >= MAX_RESPONSE_STATE_ENTRIES
+        || state_memory_bytes(&states).saturating_add(entry.estimated_memory_bytes)
+            > MAX_RESPONSE_STATE_MEMORY_BYTES
+    {
+        // Evict from the most heavily used API-key scope first. Session and scope
+        // quotas above prevent a single conversation or key from monopolizing memory.
+        let mut bytes_by_scope: HashMap<&str, usize> = HashMap::new();
+        for (candidate, old) in states.iter() {
+            let bytes = bytes_by_scope.entry(candidate.0.as_str()).or_default();
+            *bytes = bytes.saturating_add(old.estimated_memory_bytes);
+        }
+        let Some(heaviest_scope) = bytes_by_scope
+            .into_iter()
+            .max_by_key(|(_, bytes)| *bytes)
+            .map(|(scope, _)| scope.to_string())
+        else {
+            break;
+        };
+        let Some(removed) =
+            remove_oldest_matching(&mut states, |candidate| candidate.0 == heaviest_scope)
+        else {
+            break;
+        };
+        removed_count += 1;
+        removed_bytes = removed_bytes.saturating_add(removed.estimated_memory_bytes);
+    }
+    if removed_count > 0 {
+        log_state_maintenance("global_budget", removed_count, removed_bytes, &states);
+    }
+    states.insert(key, entry);
+    log_state_insert_snapshot(&states);
 }
 
 /// Stable client session identity shared by Responses gateway adapters.
@@ -593,6 +991,23 @@ pub fn session_identity_of(body: &Value) -> Option<&str> {
     .flatten()
     .map(str::trim)
     .find(|value| !value.is_empty())
+}
+
+/// Add a client-session fingerprint to the existing product/region/API-key scope.
+///
+/// The raw client identifier never becomes part of the in-memory map key. When a
+/// client supplies no stable identity, retain the legacy scope for compatibility.
+pub fn state_scope_for_session(scope: &str, session_identity: Option<&str>) -> String {
+    match session_identity
+        .map(str::trim)
+        .filter(|identity| !identity.is_empty())
+    {
+        Some(identity) => format!(
+            "{scope}:session:{}",
+            crate::session_headers::request_id_for_session("responses-state", identity)
+        ),
+        None => scope.to_string(),
+    }
 }
 
 /// 展开 Responses 的 `input`（字符串或 items 数组）到 chat `messages`。
@@ -1807,7 +2222,7 @@ mod tests {
             std::slice::from_ref(&prior_output),
         );
 
-        let (prepared, transcript) = prepare_request_with_state(
+        let (prepared, transcript, _) = prepare_request_with_state(
             &json!({"previous_response_id": response_id, "input": "next"}),
             &scope,
         )
@@ -1821,6 +2236,57 @@ mod tests {
         assert!(prepare_request_with_state(
             &json!({"previous_response_id": response_id, "input": "must not leak"}),
             &other_scope,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn response_state_identity_is_inherited_when_a_continuation_omits_identity() {
+        let base_scope = format!("state-chain-identity:{}", uuid::Uuid::new_v4());
+        let scoped = state_scope_for_session(&base_scope, Some("agent-session-a"));
+        let response_id = new_id("resp");
+        let input = json!({"type": "message", "role": "user", "content": "first"});
+        let output = json!({"type": "message", "role": "assistant", "content": []});
+        remember_response_state(
+            &scoped,
+            &response_id,
+            std::slice::from_ref(&input),
+            std::slice::from_ref(&output),
+        );
+
+        let (_, _, continued_scope) = prepare_request_with_state(
+            &json!({"previous_response_id": response_id, "input": "next"}),
+            &base_scope,
+        )
+        .expect("an ID-less continuation should inherit its unique stored session scope");
+        assert_eq!(continued_scope, scoped);
+    }
+
+    #[test]
+    fn response_state_rejects_a_different_session_and_binds_an_unscoped_chain() {
+        let base_scope = format!("state-chain-binding:{}", uuid::Uuid::new_v4());
+        let response_id = new_id("resp");
+        let input = json!({"type": "message", "role": "user", "content": "first"});
+        let output = json!({"type": "message", "role": "assistant", "content": []});
+        remember_response_state(
+            &base_scope,
+            &response_id,
+            std::slice::from_ref(&input),
+            std::slice::from_ref(&output),
+        );
+
+        let session_a = state_scope_for_session(&base_scope, Some("agent-session-a"));
+        let (_, _, bound_scope) = prepare_request_with_state(
+            &json!({"previous_response_id": response_id, "input": "next"}),
+            &session_a,
+        )
+        .expect("the first stable session identity should bind an unscoped chain");
+        assert_eq!(bound_scope, session_a);
+
+        let session_b = state_scope_for_session(&base_scope, Some("agent-session-b"));
+        assert!(prepare_request_with_state(
+            &json!({"previous_response_id": response_id, "input": "must not leak"}),
+            &session_b,
         )
         .is_err());
     }
@@ -2076,7 +2542,7 @@ mod tests {
 
     #[test]
     fn response_object_includes_function_calls() {
-        let sse =             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let sse = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
         let accumulator = CompletionAccumulator::from_sse(sse);
         let response = to_response_object(&accumulator, "m", &HashSet::new());
         assert_eq!(response["output"][0]["type"], "function_call");
@@ -2099,7 +2565,9 @@ mod tests {
         let input = vec![
             chunk("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"),
             chunk("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n"),
-            chunk("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n"),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n",
+            ),
             chunk("data: [DONE]\n\n"),
         ];
         let stream = ResponsesSseStream::new(
@@ -2266,7 +2734,9 @@ mod tests {
     #[tokio::test]
     async fn stream_surfaces_upstream_error_frame_as_error_event() {
         let input = vec![
-            chunk("data: {\"error\":{\"message\":\"上游错误（HTTP 429）：rate limited\",\"type\":\"upstream_error\",\"code\":429}}\n\n"),
+            chunk(
+                "data: {\"error\":{\"message\":\"上游错误（HTTP 429）：rate limited\",\"type\":\"upstream_error\",\"code\":429}}\n\n",
+            ),
             chunk("data: [DONE]\n\n"),
         ];
         let stream = ResponsesSseStream::new(
@@ -2396,7 +2866,9 @@ mod tests {
     #[tokio::test]
     async fn stream_restores_namespace_and_original_name() {
         let input = vec![
-            chunk("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"mcp__search__ns__search\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"mcp__search__ns__search\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            ),
             chunk("data: [DONE]\n\n"),
         ];
         let stream = ResponsesSseStream::new(
@@ -2531,7 +3003,9 @@ mod tests {
     #[tokio::test]
     async fn stream_emits_custom_tool_call_events() {
         let input = vec![
-            chunk("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"*** Begin Patch\\\"}\"}}]}}]}\n\n"),
+            chunk(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"*** Begin Patch\\\"}\"}}]}}]}\n\n",
+            ),
             chunk("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"),
             chunk("data: [DONE]\n\n"),
         ];
@@ -2618,7 +3092,9 @@ mod tests {
     async fn stream_emits_cache_details_in_terminal_response() {
         let input = vec![
             chunk("data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n"),
-            chunk("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":800},\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n"),
+            chunk(
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":10,\"prompt_tokens_details\":{\"cached_tokens\":800},\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n",
+            ),
         ];
         let stream = ResponsesSseStream::new(
             futures_util::stream::iter(input),

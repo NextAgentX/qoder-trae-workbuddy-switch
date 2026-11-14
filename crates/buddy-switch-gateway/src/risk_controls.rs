@@ -154,4 +154,51 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn persisted_safety_states_survive_disabled_rate_controls() {
+        let dir = std::env::temp_dir().join(format!(
+            "buddy-switch-gateway-risk-disabled-{}-{}",
+            std::process::id(),
+            buddy_switch_core::modules::config::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = RiskStore::open(dir.join("risk.json")).unwrap();
+
+        let workbuddy = RiskScope::new("workbuddy", "cn").unwrap();
+        store
+            .record_outcome_at(
+                &workbuddy,
+                "uid-cooling",
+                RiskOutcome::RateLimited("upstream 429".into()),
+                None,
+                1_000,
+                60,
+            )
+            .unwrap();
+
+        let qoder = RiskScope::new("qoder", "cn").unwrap();
+        store
+            .record_outcome_at(
+                &qoder,
+                "uid-model-cooling",
+                RiskOutcome::RateLimited("model 429".into()),
+                None,
+                1_000,
+                60,
+            )
+            .unwrap();
+
+        let store = Ok(store);
+        assert!(
+            account_blocked(&store, "workbuddy", "cn", "uid-cooling", 1_001),
+            "关闭速率限制不得放行已冷却的 WorkBuddy 账号"
+        );
+        assert!(
+            !account_blocked(&store, "qoder", "cn", "uid-model-cooling", 1_001),
+            "Qoder 的模型级冷却必须由模型池判断，不能在选号前按账号整体排除"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

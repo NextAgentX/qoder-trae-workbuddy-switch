@@ -77,8 +77,8 @@ pub struct RequestMeta {
     /// 为什么进日志：命中率与**选号**强相关（缓存按账号分家），而此前日志只有
     /// promptTokens / completionTokens ⇒ 「命中率掉了」与「换号了」这两件事在日志里
     /// **无法 join**，只能靠客户端界面上的一个百分比去猜。
-    /// `0` = 上游没报 / 本入口拿不到（不是「没命中」）。
-    pub cached_tokens: u64,
+    /// `None` = 上游未返回缓存字段；`Some(0)` = 上游明确报告未命中。
+    pub cached_tokens: Option<u64>,
     /// **上游上报的积分消耗**（`usage.credit`，与客户端 jsonl 的 `usage.credit` 同单位）。
     ///
     /// 为什么进日志：用量页的「积分」视图要按**来源**拆消耗（客户端 / 网关），
@@ -190,10 +190,12 @@ impl UsageSink for StreamingLogSink {
             Some(usage) => (
                 u64::try_from(usage.prompt_tokens).unwrap_or(0),
                 u64::try_from(usage.completion_tokens).unwrap_or(0),
-                u64::try_from(usage.cached_tokens).unwrap_or(0),
+                usage
+                    .cached_tokens
+                    .and_then(|tokens| u64::try_from(tokens).ok()),
                 usage.credit,
             ),
-            None => (0, 0, 0, 0.0),
+            None => (0, 0, None, 0.0),
         };
         // ★ issue #129：流中途失败 ⇒ 日志写**真实**状态码 + 摘要。
         //   不这么做的话，一次「账号在流中途挂掉」在日志页会显示成成功的 200 请求
@@ -419,7 +421,7 @@ mod tests {
             total_ms: 3456,
             prompt_tokens: 10,
             completion_tokens: 2,
-            cached_tokens: 0,
+            cached_tokens: None,
             credit: 0.0,
             stream: false,
             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
@@ -495,7 +497,7 @@ mod tests {
             total_ms: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
-            cached_tokens: 0,
+            cached_tokens: None,
             credit: 0.0,
             stream: true,
             // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。

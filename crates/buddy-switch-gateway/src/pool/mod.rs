@@ -1757,7 +1757,7 @@ impl Pool {
                 entry.note_session_dead(config.session_dead_threshold, "12153 session dead")
             }
             UpstreamEvent::AuthRejected => {
-                // 401/403：**短冷却 + 换号**，不计数、不禁用（见 `AuthRejected` 的文档）。
+                // 401/403：**短冷却、不换号**，不计数、不禁用（见 `AuthRejected` 的文档）。
                 // 冷却时长与 404 同档：一分钟足够让本轮请求换到别的号，
                 // 又短到「保活刷新出新的 access token 后」不必人工干预就能自己恢复。
                 entry.cooldown_fixed(

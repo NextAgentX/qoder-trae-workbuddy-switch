@@ -612,13 +612,13 @@ async fn orphan_tool_history_is_cleaned_before_reaching_upstream() {
     assert!(!body.contains("\"c9\""), "悬空结果必须清掉：{body}");
 }
 
-/// 换号重试：第一个账号 429 ⇒ 自动换到下一个并成功。
+/// 429 是终态：首个账号被限流后必须直接失败，不得由第二个账号接力。
 #[tokio::test]
-async fn chat_rotates_on_429() {
+async fn chat_does_not_rotate_on_429() {
     let _guard = guard();
     let counter = Arc::new(AtomicUsize::new(0));
     let (state, key) = gateway_for(
-        "rotate",
+        "rate-limit",
         &[("q1", "dt-1"), ("q2", "dt-2")],
         Behavior::FailFirstTimes(counter.clone()),
     )
@@ -630,14 +630,19 @@ async fn chat_rotates_on_429() {
         ))
         .await
         .expect("请求");
-    assert_eq!(response.status(), StatusCode::OK);
-    let text = body_text(response).await;
-    assert!(
-        text.contains("来自 q1") || text.contains("来自 q2"),
-        "{text}"
+    assert_eq!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "429 必须原样返回，不得换号重试"
     );
-    assert!(counter.load(Ordering::SeqCst) >= 2, "必须发生过换号重试");
-    // 429 的账号被写回**模型级**冷却（池状态可见）。
+    let text = body_text(response).await;
+    assert!(text.contains("429"), "{text}");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "只允许首个账号发一次请求"
+    );
+    // 429 的账号被写回**模型级**冷却（池状态可见）；另一个账号不得被调用。
     let pools = state.pools.lock().await;
     let pool = pools.get(&QoderRegion::Cn).expect("池存在");
     let cooling = pool
@@ -647,9 +652,9 @@ async fn chat_rotates_on_429() {
     assert_eq!(cooling, 1, "恰有一个账号被记入模型级冷却");
 }
 
-/// 轮换耗尽：全部 429 ⇒ 503 + 可读原因（不静默、不悬挂）。
+/// 单一账号持续 429 ⇒ 仍直接返回 429（不是被包装成 503）。
 #[tokio::test]
-async fn chat_exhausted_rotation_is_503_with_reason() {
+async fn chat_rate_limit_is_429_with_reason() {
     let _guard = guard();
     let (state, key) = gateway_for("exhausted", &[("q1", "dt-1")], Behavior::Always429).await;
     let response = router(state)
@@ -659,7 +664,7 @@ async fn chat_exhausted_rotation_is_503_with_reason() {
         ))
         .await
         .expect("请求");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let text = body_text(response).await;
     assert!(text.contains("429"), "{text}");
 }

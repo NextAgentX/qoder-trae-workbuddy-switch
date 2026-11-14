@@ -28,10 +28,12 @@ pub fn wants_stream(parsed: &Value) -> bool {
 
 /// 会话粘性键（`metadata.conversation_id` 优先，回落 `metadata.session_id`；
 /// Responses 客户端（Codex 等）没有 `metadata`，用 `prompt_cache_key`
-/// —— 它本身就是「同一段会话复用同一前缀」的语义，与粘性同目的；
-/// 都没有 ⇒ `None`，调用方整段跳过粘性——绝不退化成轮级键）。
+/// —— 它本身就是「同一段会话复用同一前缀」的语义，与粘性同目的；Chat 请求缺少
+/// 显式 ID 时以 system + 首条 user 内容的哈希指纹兜底，固定 `user` 不用于粘性。
 pub fn sticky_key_of(parsed: &Value) -> Option<String> {
-    crate::protocol::responses::session_identity_of(parsed).map(str::to_string)
+    crate::protocol::responses::session_identity_of(parsed)
+        .map(str::to_string)
+        .or_else(|| crate::session_headers::chat_content_identity(parsed))
 }
 
 /// Responses 请求（`POST /v1/responses`）→ 上游 chat 形态。

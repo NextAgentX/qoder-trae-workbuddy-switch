@@ -476,6 +476,13 @@ fn conversation_identity_source(object: &Map<String, Value>) -> Option<String> {
         .map(|value| format!("user:{value}"))
 }
 
+/// 为没有显式会话标识的 Chat Completions 请求生成稳定、不可逆的选号身份。
+/// 与上游会话 ID 使用相同的身份来源，避免同一对话因账号轮换而缓存冷启动。
+pub(crate) fn conversation_sticky_identity(object: &Value) -> Option<String> {
+    let source = conversation_identity_source(object.as_object()?)?;
+    Some(stable_conversation_id(&source, "sticky:"))
+}
+
 /// 内容指纹：`system` 提示 + 首条 `user` 消息的文本拼串。
 ///
 /// 只取**头部两段**而不是整段历史：多轮对话的历史在 `messages` 头部只增不改，
@@ -576,6 +583,12 @@ pub fn prepare_llm_chat_body(
     };
 
     normalize_messages(object);
+    if let Some(messages) = object.get("messages").cloned() {
+        object.insert(
+            "messages".into(),
+            crate::protocol::responses::trim_chat_messages(&messages),
+        );
+    }
     normalize_tool_choice(object);
     normalize_tools(object);
 

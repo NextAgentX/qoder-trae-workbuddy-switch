@@ -114,6 +114,7 @@ async fn relay_on_scope_inner(
                 body,
                 crate::qoder::routes::Protocol::OpenAi,
                 key,
+                headers,
             )
             .await
         }

@@ -54,7 +54,9 @@ export function RiskControlsForm({
         <label className="mb-4 flex items-center justify-between gap-4 rounded-md border p-3">
           <span className="space-y-1">
             <span className="block text-xs font-medium">启用请求风控</span>
-            <span className="block text-xs text-muted-foreground">关闭时不执行本软件的速率、并发、间隔和暂停拦截，恢复旧版请求行为。</span>
+            <span className="block text-xs text-muted-foreground">
+              关闭时不执行速率、并发和最小间隔限制；已记录的账号暂停或冷却仍会阻止该账号被选中。
+            </span>
           </span>
           <Switch
             checked={draft.enabled}

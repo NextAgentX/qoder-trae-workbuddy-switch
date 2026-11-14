@@ -280,6 +280,7 @@ async fn relay_llm(
                         variant,
                         rewritten,
                         Some(actor.clone()),
+                        headers.clone(),
                     )
                     .await
                 }
@@ -298,6 +299,7 @@ async fn relay_llm(
                         rewritten,
                         crate::qoder::routes::Protocol::OpenAi,
                         Some(actor.clone()),
+                        headers.clone(),
                     )
                     .await
                 }
@@ -308,6 +310,7 @@ async fn relay_llm(
                         rewritten,
                         crate::qoder::routes::Protocol::Anthropic,
                         Some(actor.clone()),
+                        headers.clone(),
                     )
                     .await
                 }
@@ -320,6 +323,7 @@ async fn relay_llm(
                         rewritten,
                         crate::qoder::routes::Protocol::Responses,
                         Some(actor.clone()),
+                        headers.clone(),
                     )
                     .await
                 }

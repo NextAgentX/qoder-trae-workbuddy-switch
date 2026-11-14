@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
@@ -235,6 +235,7 @@ pub async fn chat_completions(
     Extension(key): Extension<QoderKeyRegion>,
     // ★ issue #76：整条 Key（配额 / 白名单 / 记账）。
     key_ctx: Option<Extension<QoderKeyContext>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // 变量名避开 `key`（那是 region 扩展）—— 两者是不同东西。
@@ -248,7 +249,7 @@ pub async fn chat_completions(
             "qoder",
         ))
     });
-    chat_for_region(state, key.0, body, Protocol::OpenAi, actor).await
+    chat_for_region(state, key.0, body, Protocol::OpenAi, actor, headers).await
 }
 
 /// `POST /v1/messages`。
@@ -257,6 +258,7 @@ pub async fn messages(
     Extension(key): Extension<QoderKeyRegion>,
     // ★ issue #76：整条 Key（配额 / 白名单 / 记账）。
     key_ctx: Option<Extension<QoderKeyContext>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let key_record = key_ctx.map(|Extension(ctx)| ctx.0);
@@ -269,7 +271,7 @@ pub async fn messages(
             "qoder",
         ))
     });
-    chat_for_region(state, key.0, body, Protocol::Anthropic, actor).await
+    chat_for_region(state, key.0, body, Protocol::Anthropic, actor, headers).await
 }
 
 /// `POST /v1/responses`（OpenAI Responses API）。
@@ -281,6 +283,7 @@ pub async fn responses(
     State(state): State<QoderGatewayState>,
     Extension(key): Extension<QoderKeyRegion>,
     key_ctx: Option<Extension<QoderKeyContext>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let key_record = key_ctx.map(|Extension(ctx)| ctx.0);
@@ -293,7 +296,7 @@ pub async fn responses(
             "qoder",
         ))
     });
-    chat_for_region(state, key.0, body, Protocol::Responses, actor).await
+    chat_for_region(state, key.0, body, Protocol::Responses, actor, headers).await
 }
 
 /// 把 Key 策略的账号范围展开成 uid 集合（`None` = 全部账号，不过滤）。
@@ -321,6 +324,7 @@ pub async fn chat_for_region(
     protocol: Protocol,
     // ★ issue #76：调用方的 Key（`None` = 无 Key 的调用 ⇒ 不判配额、不过白名单、不记账）。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
+    headers: HeaderMap,
 ) -> Response {
     // 整轮请求的起点（降级事件用它算耗时；`_once` 内部另算它自己那一跳的）。
     let request_started = Instant::now();
@@ -354,7 +358,7 @@ pub async fn chat_for_region(
                 );
             }
         };
-        let state_scope = format!(
+        let base_state_scope = format!(
             "qoder:{}:{}:{}",
             region.as_str(),
             key.as_deref().map(|actor| actor.scope).unwrap_or("local"),
@@ -362,7 +366,13 @@ pub async fn chat_for_region(
                 .map(|actor| actor.key_id.as_str())
                 .unwrap_or("anonymous"),
         );
-        let (prepared, transcript) =
+        let response_identity =
+            crate::session_headers::response_session_identity(&parsed, &headers);
+        let state_scope = crate::protocol::responses::state_scope_for_session(
+            &base_state_scope,
+            response_identity.as_deref(),
+        );
+        let (prepared, transcript, state_scope) =
             match crate::protocol::responses::prepare_request_with_state(&parsed, &state_scope) {
                 Ok(prepared) => prepared,
                 Err(message) => {
@@ -552,7 +562,7 @@ pub async fn chat_for_region_once(
     // 限额护栏（三条，`0` = 关闭）：一次请求取一次配置快照，循环里不再读锁。
     let quota_limits = config.quota_limits();
     // 非 OpenAI 入口先转成 OpenAI chat 形态（中继内部只认一份形态）。
-    let openai_payload = match protocol {
+    let mut openai_payload = match protocol {
         Protocol::OpenAi => parsed.clone(),
         // ★ Qoder 上游只读 message content 里的结构化 `image_url` parts ⇒
         // Anthropic 的 `image` block 必须转成多模态 part，不能只取文本
@@ -561,6 +571,14 @@ pub async fn chat_for_region_once(
         Protocol::Anthropic => crate::protocol::anthropic::to_upstream_request_with_images(&parsed),
         Protocol::Responses => payload::responses_to_chat(&parsed),
     };
+    if let Some(messages) = openai_payload.get("messages").cloned() {
+        if let Some(object) = openai_payload.as_object_mut() {
+            object.insert(
+                "messages".into(),
+                crate::protocol::responses::trim_chat_messages(&messages),
+            );
+        }
+    }
     let wants_stream = payload::wants_stream(&parsed);
     let catalog = state.catalog_for(region).await;
 
@@ -981,7 +999,7 @@ pub async fn chat_for_region_once(
                         wants_stream,
                         0,
                         0,
-                        0,
+                        None,
                         0.0,
                         Some(detail.clone()),
                         key.as_deref().map(|actor| actor.key_id.as_str()),
@@ -1067,7 +1085,7 @@ pub async fn chat_for_region_once(
             wants_stream,
             0,
             0,
-            0,
+            None,
             0.0,
             Some(message.clone()),
             key.as_deref().map(|actor| actor.key_id.as_str()),
@@ -1171,7 +1189,7 @@ fn usage_counts(usage: &Value) -> (u64, u64) {
 /// | 裸字段 | `cached_tokens` |
 ///
 /// **上限钳到 `prompt_tokens`**：命中量是输入的子集，脏数据会让下游命中率 > 100%。
-fn usage_cached(usage: &Value) -> u64 {
+fn usage_cached(usage: &Value) -> Option<u64> {
     let read = |key: &str| usage.get(key).and_then(Value::as_u64);
     let hit = read("prompt_cache_hit_tokens")
         .or_else(|| {
@@ -1181,9 +1199,8 @@ fn usage_cached(usage: &Value) -> u64 {
                 .and_then(Value::as_u64)
         })
         .or_else(|| read("cache_read_input_tokens"))
-        .or_else(|| read("cached_tokens"))
-        .unwrap_or(0);
-    hit.min(read("prompt_tokens").unwrap_or(0))
+        .or_else(|| read("cached_tokens"))?;
+    Some(hit.min(read("prompt_tokens").unwrap_or(0)))
 }
 
 /// 本发消耗的 **credit**（上游 `usage.credits`，浮点；缺 `credits` 时回落
@@ -1316,7 +1333,7 @@ async fn stream_relay(
                     usage_cached(usage),
                 )
             }
-            None => (0, 0, 0.0, 0),
+            None => (0, 0, 0.0, None),
         };
         // 上游中途发过错误帧 ⇒ 记 502 + 详情，别写成「200 / 0 token / 无错误」
         // （那正是 issue #46 里最难排查的形态）。
@@ -1369,7 +1386,7 @@ async fn stream_relay(
                 true,
                 prompt_tokens as i64,
                 completion_tokens as i64,
-                cached_tokens as i64,
+                cached_tokens,
                 credits,
                 error,
                 key_for_task.as_ref().map(|actor| actor.key_id.as_str()),
@@ -1412,7 +1429,7 @@ async fn aggregate_relay(
                 usage_cached(usage),
             )
         }
-        None => (0, 0, 0.0, 0),
+        None => (0, 0, 0.0, None),
     };
     // ★ 账本先定「这一请求到底成没成」再落：上游只要给过错误帧就不是 200，
     //   否则日志会显示「200 + 0 token + error:null」（issue #46 的隐身故障）。
@@ -1449,7 +1466,7 @@ async fn aggregate_relay(
             false,
             prompt_tokens as i64,
             completion_tokens as i64,
-            cached_tokens as i64,
+            cached_tokens,
             credits,
             log_error,
             key.as_ref().map(|actor| actor.key_id.as_str()),

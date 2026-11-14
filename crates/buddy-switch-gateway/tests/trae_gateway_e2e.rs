@@ -528,9 +528,10 @@ async fn upstream_429_cools_the_account_without_disabling_it() {
 }
 
 #[tokio::test]
-async fn rotation_retries_with_the_next_account_and_reports_success() {
+async fn auth_rejection_does_not_rotate_to_another_account() {
     let _guard = guard();
-    // 账号 A 会被 mock 拒绝，账号 B 正常。选号顺序沿用账号库顺序，因此先试 A。
+    // 账号 A 会被 mock 以裸 401 拒绝，账号 B 正常。原用例断言「换到 B 成功」，
+    // 与现行风控规范冲突：认证拒绝是终态，不得由账号 B 接力。
     let home = isolated_home("rotate", &[("uid-a", "jwt-a"), ("uid-b", "jwt-b")]);
     let (state, key) = gateway_for(Behavior::FailForJwt("jwt-a".into())).await;
 
@@ -544,25 +545,25 @@ async fn rotation_retries_with_the_next_account_and_reports_success() {
 
     assert_eq!(
         response.status(),
-        StatusCode::OK,
-        "首个账号失败后必须换号重试并成功，而不是把失败直接透给客户端"
+        StatusCode::UNAUTHORIZED,
+        "首个账号认证被拒后必须直接失败，不得换号重试"
     );
     let text = body_text(response).await;
-    let parsed: serde_json::Value = serde_json::from_str(&text).expect("聚合 JSON");
-    assert_eq!(
-        parsed["choices"][0]["message"]["content"], "jwt-b",
-        "最终必须由第二个账号完成请求\n{text}"
+    assert!(
+        text.contains("jwt-a") || text.contains("uid-a"),
+        "错误必须指向真正被拒的首个账号，而不是另一个账号\n{text}"
+    );
+    assert!(
+        !text.contains("jwt-b"),
+        "第二个账号不得收到此次请求\n{text}"
     );
 
-    // A 被标记为「凭据被拒」（裸 401，无 12153）⇒ 浅冷却 + 换号，B 不得被牵连。
-    //
-    // ★ issue #108：这里原来是 `SessionDead` —— 那意味着「一次 401 就把号打死」。
-    // 现在裸 401 只冷 60 秒，但**换号行为不变**（这才是本用例真正要钉的东西）。
+    // A 被标记为「凭据被拒」（裸 401，无 12153）⇒ 浅冷却；B 不得被牵连。
     let file = cooldowns(&home);
     assert_eq!(file["cooldowns"]["uid-a"]["type"], "AuthRejected", "{file}");
     assert!(
         file["cooldowns"].get("uid-b").is_none(),
-        "成功完成的账号不得被写入冷却\n{file}"
+        "未收到的账号不得被写入冷却\n{file}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }
