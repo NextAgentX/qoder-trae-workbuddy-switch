@@ -253,6 +253,33 @@ impl RiskStore {
         settings: &RiskControlSettings,
         now: u64,
     ) -> Result<RiskPermit, String> {
+        self.begin_request_with_cooling_policy(scope, account_id, settings, now, false)
+    }
+
+    /// Admit a request while ignoring persistent account-wide cooling.
+    ///
+    /// Qoder gateway 429s are scoped to a model and tracked by its account
+    /// pool. A shared account-level cooling record must not block that account
+    /// for every model. Paused accounts and all configured admission limits
+    /// remain enforced.
+    pub fn begin_request_ignoring_cooling_at(
+        &self,
+        scope: &RiskScope,
+        account_id: &str,
+        settings: &RiskControlSettings,
+        now: u64,
+    ) -> Result<RiskPermit, String> {
+        self.begin_request_with_cooling_policy(scope, account_id, settings, now, true)
+    }
+
+    fn begin_request_with_cooling_policy(
+        &self,
+        scope: &RiskScope,
+        account_id: &str,
+        settings: &RiskControlSettings,
+        now: u64,
+        ignore_active_cooling: bool,
+    ) -> Result<RiskPermit, String> {
         settings.validate()?;
         if account_id.trim().is_empty() {
             return Err("account id is required".into());
@@ -268,13 +295,16 @@ impl RiskStore {
             AccountRiskState::Paused { reason } => {
                 return Err(format!("account automation paused: {reason}"))
             }
-            AccountRiskState::Cooling { until_ms, reason } if now < until_ms => {
+            AccountRiskState::Cooling { until_ms, reason }
+                if now < until_ms && !ignore_active_cooling =>
+            {
                 return Err(format!("account cooling until {until_ms}: {reason}"))
             }
-            AccountRiskState::Cooling { .. } => {
+            AccountRiskState::Cooling { until_ms, .. } if now >= until_ms => {
                 runtime.states.remove(&key);
                 persist(&self.inner.path, &runtime.states)?;
             }
+            AccountRiskState::Cooling { .. } => {}
             AccountRiskState::Active => {}
         }
         let requests = runtime.requests.entry(key.clone()).or_default();

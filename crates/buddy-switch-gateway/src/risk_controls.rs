@@ -18,10 +18,16 @@ pub fn admit_request(
         .as_ref()
         .map_err(|error| format!("risk state unavailable: {error}"))?;
     let scope = RiskScope::new(product, region)?;
-    store.begin_request_at(&scope, account_id, &settings, now_ms)
+    if product == "qoder" {
+        store.begin_request_ignoring_cooling_at(&scope, account_id, &settings, now_ms)
+    } else {
+        store.begin_request_at(&scope, account_id, &settings, now_ms)
+    }
 }
 
-/// Exclude accounts with a persisted pause/cooldown before the pool chooses one.
+/// Exclude accounts with persisted risk states before the pool chooses one.
+/// Qoder model-level cooldowns are handled by its pool, so account-wide
+/// `Cooling` records do not exclude a Qoder account across all models.
 /// Failure to read risk state is fail-closed; admission will reject it as well.
 pub fn account_blocked(
     store: &Result<RiskStore, String>,
@@ -36,15 +42,16 @@ pub fn account_blocked(
     let Ok(scope) = RiskScope::new(product, region) else {
         return true;
     };
-    // Persisted pause/cooling is a safety state, not an optional rate limiter.
-    // It must continue to exclude the account even while the shared limiter is
-    // disabled, otherwise turning the UI switch off silently re-enables an
-    // account that the platform has already rejected.
-    matches!(
-        store.state_at(&scope, account_id, now_ms),
-        buddy_switch_core::modules::risk_control::AccountRiskState::Paused { .. }
-            | buddy_switch_core::modules::risk_control::AccountRiskState::Cooling { .. }
-    )
+    // Persisted pauses remain a safety state even while the shared limiter is
+    // disabled. Qoder account-wide cooling is deliberately ignored here: its
+    // gateway tracks 429 cooldowns per model in the Qoder pool.
+    match store.state_at(&scope, account_id, now_ms) {
+        buddy_switch_core::modules::risk_control::AccountRiskState::Paused { .. } => true,
+        buddy_switch_core::modules::risk_control::AccountRiskState::Cooling { .. } => {
+            product != "qoder"
+        }
+        buddy_switch_core::modules::risk_control::AccountRiskState::Active => false,
+    }
 }
 
 pub fn record_rate_limit(

@@ -9,6 +9,7 @@
 | [`guides/`](guides/) | 怎么装、怎么开发、客户端怎么接网关 | 跟着版本更新 |
 | [`policies/`](policies/) | 许可与免责声明（README 引用它们） | 极少 |
 | [`specs/`](specs/) | 现行架构与决策：改代码前该读的依据 | **随代码一起改** |
+| [`superpowers/specs/`](superpowers/specs/) | 已确认实现设计的短文档 | 随设计归档 |
 | [`superpowers/plans/`](superpowers/plans/) | 经确认设计对应的分步实施计划 | 实施期间更新，完成后归档 |
 | [`history/`](history/) | 已完结的一次性报告：审计、探针、外部调研、旧方案 | **只读，不再改** |
 | [`prototype/`](prototype/) | 可点原型 + JSDOM 校验套件（门禁读这里的文件） | 新增交互先进这里 |
@@ -41,7 +42,7 @@
 | 想知道某功能当初为什么这么做 | [`specs/DECISIONS.md`](specs/DECISIONS.md)（D1–D46） |
 | 加新交互（先原型、后代码） | [`prototype/`](prototype/) → `index.html` 可直接打开 |
 | 账号页「客户端限流」怎么和网关「限流探测」联动（同一份数据 + 两处入口） | [`prototype/limit-link-proto.html`](prototype/limit-link-proto.html)（可点设计稿，**已落地**）+ [`prototype/verify-limit-link.mjs`](prototype/verify-limit-link.mjs)（34 条行为校验）+ [`specs/MODEL-LIMIT-PROBE-PLAN.md`](specs/MODEL-LIMIT-PROBE-PLAN.md) §5.9（口径） |
-| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.131448`](releases/v2026.11.131448.md)） |
+| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.141118`](releases/v2026.11.141118.md)） |
 
 ---
 

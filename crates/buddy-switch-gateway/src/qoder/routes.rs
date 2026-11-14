@@ -945,17 +945,9 @@ pub async fn chat_for_region_once(
                         now_ms,
                     );
                 }
-                QoderErrKind::RateLimited => {
-                    let _ = crate::risk_controls::record_rate_limit(
-                        &state.risk_store,
-                        "qoder",
-                        region.as_str(),
-                        &uid,
-                        detail.clone(),
-                        None,
-                        now_ms,
-                    );
-                }
+                // The Qoder pool below records 429 as a model-level cooldown.
+                // Do not also write a shared account-level Cooling state: it
+                // would make this account unavailable to every other model.
                 _ => {}
             }
             // 遥测：与分类**同一处**记一次（别在别处重复计数，见 `qoder::risk`）。
