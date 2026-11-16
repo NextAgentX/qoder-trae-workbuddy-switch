@@ -138,6 +138,51 @@ impl CampaignItem {
         let kind = self.benefit_kind.trim().to_ascii_uppercase();
         kind.is_empty() || kind == "CREDITS"
     }
+
+    /// 是否为「每日签到」类活动（区别于一次性体验包 / 首购特惠等单次促销）。
+    ///
+    /// 判据：
+    /// 1. 必须是积分类（`is_credit_kind`）；
+    /// 2. 标题 / 描述 / 活动键包含每日签到特征词（如「每天」、「每日」、「签到」、「打卡」、「daily」、「checkin」等），
+    ///    或者活动实例周期约为 1 天（`start_at > 0 && end_at > start_at && (end_at - start_at) <= 90_000`）；
+    /// 3. 且排除明确的一次性促销特征（如「限时体验」、「体验包」、「首购」且周期大于 1 天）。
+    pub fn is_daily_checkin(&self) -> bool {
+        if !self.is_credit_kind() {
+            return false;
+        }
+        let title_lower = self.title.to_lowercase();
+        let desc_lower = self.description.to_lowercase();
+        let key_lower = self.campaign_key.to_lowercase();
+
+        let has_daily_kw = [
+            "每天", "每日", "签到", "打卡",
+            "daily", "checkin", "check-in", "check in", "everyday", "every day",
+        ]
+        .iter()
+        .any(|kw| title_lower.contains(kw) || desc_lower.contains(kw) || key_lower.contains(kw));
+
+        let duration = if self.start_at > 0 && self.end_at > self.start_at {
+            self.end_at - self.start_at
+        } else {
+            0
+        };
+
+        // 每日活动的实例窗口通常为 24 小时（实测 10:00 → 次日 09:59 为 86340 秒）
+        let is_daily_duration = duration > 0 && duration <= 90_000;
+
+        let has_one_time_kw = [
+            "限时体验", "首购", "体验包", "新人", "新手", "升级包",
+            "trial", "welcome", "experience", "promo", "package",
+        ]
+        .iter()
+        .any(|kw| title_lower.contains(kw) || desc_lower.contains(kw));
+
+        if has_one_time_kw && duration > 90_000 {
+            return false;
+        }
+
+        has_daily_kw || is_daily_duration
+    }
 }
 
 /// 一条活动的**处置分类**（纯函数，见 [`classify`]）。
@@ -162,14 +207,15 @@ pub enum CampaignClass {
 /// 官方在**领取后**会把 `actionType` 降级成 `VIEW_DETAILS`（国际版实测）。若先按
 /// `action_type` 过滤，一条**已经领到**的活动会被归成「详情类」，界面上就变成
 /// 「当前账号暂无可领取的官方活动」——把「已领」的事实丢掉。
-/// ⇒ 判据：`CLAIMED` 且（有奖励 **或** `action_type` 仍是可领类）⇒ 已领取。
+/// ⇒ 判据：`CLAIMED` 且是每日签到类活动且（有奖励 **或** `action_type` 仍是可领类）⇒ 已领取。
+/// 一次性活动（如「极致模型限时体验」）领过之后属于历史已领，归为 `View`，不得让它伪装成每日签到已完成。
 ///
 /// 可证伪：把 `Already` 分支挪到 `action_type` 过滤之后 ⇒ `claimed_then_downgraded_to_view`
 /// 用例立即变红。
 pub fn classify(item: &CampaignItem) -> CampaignClass {
     let actionable = item.action_type.is_empty() || item.action_type == "CLAIM_BENEFIT";
     if item.claim_status == "CLAIMED" {
-        return if item.benefit_amount > 0 || actionable {
+        return if item.is_daily_checkin() && (item.benefit_amount > 0 || actionable) {
             CampaignClass::Already
         } else {
             CampaignClass::View
@@ -1203,9 +1249,13 @@ pub async fn checkin_for(region: QoderRegion, uid: &str) -> Result<Value, String
     }
 
     let now = now_secs();
-    // 「有没有积分类活动」决定第三档语义（issue #58 §5 / #46-D）：
+    // 「有没有当前可领或每日签到活动」决定第三档语义（issue #58 §5 / #46-D）：
     // 一条都没有 ⇒ 未开放（`ok:false` + `disabled:true`），**不得**报成功。
-    let has_benefit = snapshot.items.iter().any(|item| item.is_credit_kind());
+    // 历史已领的一次性活动不提供签到权益，不得误判为「有活动可领 / 已签到」。
+    let has_benefit = snapshot
+        .items
+        .iter()
+        .any(|item| item.is_daily_checkin() || (item.is_credit_kind() && item.claim_status == "CLAIMABLE"));
     let blocked_map: BTreeMap<String, i64> = account.campaign_blocked_until.clone();
     let mut claimed: Vec<Value> = Vec::new();
     let mut already: Vec<Value> = Vec::new();
@@ -1380,7 +1430,7 @@ mod tests {
         CampaignItem {
             campaign_id: id.into(),
             campaign_key: format!("key-{id}"),
-            title: format!("活动 {id}"),
+            title: format!("每日活动 {id}"),
             description: String::new(),
             detail_url: String::new(),
             button_text: String::new(),
@@ -1395,6 +1445,27 @@ mod tests {
             end_at: 0,
         }
     }
+
+    fn one_time_item(id: &str, action: &str, status: &str, amount: i64) -> CampaignItem {
+        CampaignItem {
+            campaign_id: id.into(),
+            campaign_key: format!("promo-{id}"),
+            title: format!("极致模型限时体验 {id}"),
+            description: "限时体验包".into(),
+            detail_url: String::new(),
+            button_text: String::new(),
+            action_type: action.into(),
+            claim_status: status.into(),
+            benefit_kind: "CREDITS".into(),
+            benefit_amount: amount,
+            required_achievement_key: String::new(),
+            achievement_completed: true,
+            unavailable_reason: String::new(),
+            start_at: 1000,
+            end_at: 1000 + 7 * 86400,
+        }
+    }
+
 
     /// ★ 五种分类逐一钉死（这是「领什么、报什么」的唯一判据）。
     ///
@@ -1450,6 +1521,19 @@ mod tests {
             classify(&item("y", "", "CLAIMED", 0)),
             CampaignClass::Already
         );
+    }
+
+    /// ★ 一次性活动（如「极致模型限时体验」）已领后归为 `View`，不得误判为 `Already`（issue #58）。
+    #[test]
+    fn one_time_promo_claimed_is_view_not_already() {
+        let claimable = one_time_item("p1", "CLAIM_BENEFIT", "CLAIMABLE", 500);
+        assert_eq!(classify(&claimable), CampaignClass::Claimable);
+
+        let claimed = one_time_item("p2", "CLAIM_BENEFIT", "CLAIMED", 500);
+        assert_eq!(classify(&claimed), CampaignClass::View);
+
+        let claimed_downgraded = one_time_item("p3", "VIEW_DETAILS", "CLAIMED", 500);
+        assert_eq!(classify(&claimed_downgraded), CampaignClass::View);
     }
 
     /// 活动列表解析：中文标题优先、逐字段抽取、缺 id 的条目丢弃。
@@ -1662,6 +1746,42 @@ mod tests {
             !checkin_ok(&["上游 500".to_string()], false),
             "既无活动又报错 ⇒ 失败"
         );
+    }
+
+    /// ★ `is_daily_checkin` 判据：能正确区分每日签到活动与一次性促销体验包。
+    #[test]
+    fn is_daily_checkin_distinguishes_daily_from_one_time() {
+        let daily_zh = item("d1", "CLAIM_BENEFIT", "CLAIMABLE", 100);
+        assert!(daily_zh.is_daily_checkin());
+
+        let mut daily_with_duration = item("d2", "CLAIM_BENEFIT", "CLAIMABLE", 100);
+        daily_with_duration.title = "Credits Reward".into();
+        daily_with_duration.start_at = 1794794400;
+        daily_with_duration.end_at = 1794880740; // 86340s
+        assert!(daily_with_duration.is_daily_checkin());
+
+        let one_time = one_time_item("p1", "CLAIM_BENEFIT", "CLAIMED", 500);
+        assert!(!one_time.is_daily_checkin());
+
+        let mut coupon = item("c1", "CLAIM_BENEFIT", "CLAIMABLE", 0);
+        coupon.benefit_kind = "COUPON".into();
+        assert!(!coupon.is_daily_checkin());
+    }
+
+    /// ★ 只有已领一次性促销包的账号：has_benefit 必须为 false，避免误判为今日已签到（issue #58）。
+    #[test]
+    fn account_with_only_claimed_one_time_promo_has_no_benefit() {
+        let mut view_promo = item("v1", "VIEW_DETAILS", "CLAIMED", 0);
+        view_promo.title = "限时福利！首购加赠".into();
+        let items = vec![
+            one_time_item("p1", "CLAIM_BENEFIT", "CLAIMED", 500),
+            view_promo,
+        ];
+        let has_benefit = items
+            .iter()
+            .any(|item| item.is_daily_checkin() || (item.is_credit_kind() && item.claim_status == "CLAIMABLE"));
+        assert!(!has_benefit, "只有已领一次性活动时不得视为有签到权益");
+        assert!(!checkin_ok(&[], has_benefit));
     }
 
     // ── 真机探针（issue #58 第 0 步；本机无账号，刻意保留位）──
