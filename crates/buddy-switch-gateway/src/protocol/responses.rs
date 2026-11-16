@@ -410,10 +410,40 @@ pub fn to_upstream_request(body: &Value) -> Value {
     Value::Object(out)
 }
 
-/// OpenAI-compatible clients commonly resend the entire conversation on every turn.
-/// Cap historical input while keeping instruction items and the newest user
-/// message intact; oversized turns retain only a recent suffix of complete items.
-const MAX_INPUT_HISTORY_BYTES: usize = 256 * 1024;
+/// 上游模型窗口普遍 ≥ 200k tokens；原 256 KiB 仅折合约 50k~60k tokens，
+/// 现代编程 Agent（尤其是多步骤工具调用、长历史）极易在数轮内触发裁剪导致上下文丢失。
+/// 默认上限提升至 1.5 MiB（≈380k tokens），同时支持通过环境变量覆盖。
+pub const DEFAULT_MAX_INPUT_HISTORY_BYTES: usize = 1536 * 1024;
+
+/// 环境变量覆盖：设为正整数自定义字节上限；设为 0 表示完全禁用裁剪（全量透传）。
+pub const MAX_INPUT_HISTORY_BYTES_ENV: &str = "BUDDY_SWITCH_MAX_INPUT_BYTES";
+
+/// 解析输入历史预算（字节数）：
+/// - 未设置或空字符串：回退默认 1.5 MiB (`DEFAULT_MAX_INPUT_HISTORY_BYTES`)；
+/// - 设为 `0`：禁用裁剪，返回 `None`；
+/// - 设为合法的正整数：返回指定的字节上限；
+/// - 设为非法值：打印警告并回退默认值。
+pub(crate) fn max_input_history_bytes() -> Option<usize> {
+    match std::env::var(MAX_INPUT_HISTORY_BYTES_ENV) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Some(DEFAULT_MAX_INPUT_HISTORY_BYTES);
+            }
+            match trimmed.parse::<usize>() {
+                Ok(0) => None,
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    eprintln!(
+                        "[gateway] 环境变量 {MAX_INPUT_HISTORY_BYTES_ENV}={trimmed:?} 无效（{err}），回退默认 {DEFAULT_MAX_INPUT_HISTORY_BYTES} 字节"
+                    );
+                    Some(DEFAULT_MAX_INPUT_HISTORY_BYTES)
+                }
+            }
+        }
+        Err(_) => Some(DEFAULT_MAX_INPUT_HISTORY_BYTES),
+    }
+}
 
 /// Split an oversized turn into removable units. A batch of parallel function
 /// calls stays with all of its matching outputs, so trimming cannot leave a
@@ -489,9 +519,12 @@ fn trim_input_history(input: &Value) -> Value {
     let Some(items) = input.as_array() else {
         return input.clone();
     };
+    let Some(budget_bytes) = max_input_history_bytes() else {
+        return input.clone();
+    };
     let encoded_size = |item: &Value| serde_json::to_vec(item).map_or(0, |bytes| bytes.len());
     let total_size: usize = items.iter().map(encoded_size).sum();
-    if total_size <= MAX_INPUT_HISTORY_BYTES {
+    if total_size <= budget_bytes {
         return input.clone();
     }
 
@@ -520,7 +553,7 @@ fn trim_input_history(input: &Value) -> Value {
     let mut used_bytes: usize = keep.iter().map(|index| encoded_size(&items[*index])).sum();
     for (group_index, group) in groups.iter().enumerate().rev() {
         let group_bytes: usize = group.iter().map(|index| encoded_size(&items[*index])).sum();
-        if used_bytes.saturating_add(group_bytes) <= MAX_INPUT_HISTORY_BYTES {
+        if used_bytes.saturating_add(group_bytes) <= budget_bytes {
             used_bytes = used_bytes.saturating_add(group_bytes);
             keep.extend(group.iter().copied());
             continue;
@@ -548,7 +581,7 @@ fn trim_input_history(input: &Value) -> Value {
                 .collect();
             for unit in activity_units(items, &activity).iter().rev() {
                 let unit_bytes: usize = unit.iter().map(|index| encoded_size(&items[*index])).sum();
-                if used_bytes.saturating_add(unit_bytes) > MAX_INPUT_HISTORY_BYTES {
+                if used_bytes.saturating_add(unit_bytes) > budget_bytes {
                     break;
                 }
                 used_bytes = used_bytes.saturating_add(unit_bytes);
@@ -569,7 +602,7 @@ fn trim_input_history(input: &Value) -> Value {
         .collect();
     let kept_bytes: usize = kept.iter().map(encoded_size).sum();
     eprintln!(
-        "[gateway] Responses history trimmed: input_bytes={total_size} kept_bytes={kept_bytes} removed_items={} budget_bytes={MAX_INPUT_HISTORY_BYTES}",
+        "[gateway] Responses history trimmed: input_bytes={total_size} kept_bytes={kept_bytes} removed_items={} budget_bytes={budget_bytes}",
         items.len().saturating_sub(kept.len())
     );
     Value::Array(kept)
@@ -581,7 +614,13 @@ pub(crate) fn trim_chat_messages(messages: &Value) -> Value {
 }
 
 const RESPONSE_STATE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_RESPONSE_STATE_BYTES: usize = 512 * 1024;
+const DEFAULT_MAX_RESPONSE_STATE_BYTES: usize = 2 * 1024 * 1024;
+
+fn max_response_state_bytes() -> usize {
+    max_input_history_bytes()
+        .unwrap_or(DEFAULT_MAX_INPUT_HISTORY_BYTES)
+        .max(DEFAULT_MAX_RESPONSE_STATE_BYTES)
+}
 // Serialized JSON is smaller than its in-memory serde_json representation. Use a
 // conservative estimate for admission and eviction so the registry has a useful
 // process-level memory ceiling without retaining full allocator-specific objects.
@@ -858,19 +897,18 @@ pub fn remember_response_state(
     let Some(transcript) = bounded.as_array() else {
         return;
     };
+    let entry_limit_bytes = max_response_state_bytes();
     let serialized_bytes: usize = transcript
         .iter()
-        .map(|item| {
-            serde_json::to_vec(item).map_or(MAX_RESPONSE_STATE_BYTES + 1, |bytes| bytes.len())
-        })
+        .map(|item| serde_json::to_vec(item).map_or(entry_limit_bytes + 1, |bytes| bytes.len()))
         .fold(0usize, usize::saturating_add);
-    if serialized_bytes > MAX_RESPONSE_STATE_BYTES {
+    if serialized_bytes > entry_limit_bytes {
         let rejected = RESPONSE_STATE_REJECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
         let states = response_states()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         eprintln!(
-            "[gateway] Responses state not stored: reason=entry_too_large transcript_bytes={serialized_bytes} entry_limit_bytes={MAX_RESPONSE_STATE_BYTES} entries={} estimated_bytes={} rejected_total={rejected}",
+            "[gateway] Responses state not stored: reason=entry_too_large transcript_bytes={serialized_bytes} entry_limit_bytes={entry_limit_bytes} entries={} estimated_bytes={} rejected_total={rejected}",
             states.len(),
             state_memory_bytes(&states),
         );
@@ -3109,5 +3147,104 @@ mod tests {
         assert_eq!(usage["output_tokens"], 10);
         assert_eq!(usage["input_tokens_details"]["cached_tokens"], 800);
         assert_eq!(usage["output_tokens_details"]["reasoning_tokens"], 5);
+    }
+
+    /// 验证在默认 1.5MB 预算下，超过原 256KB 的 500KB 历史对话完全保留不被裁剪。
+    #[test]
+    fn trim_input_history_keeps_500kb_under_default_1_5mb_budget() {
+        let padding = "A".repeat(250 * 1024);
+        let items = json!([
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": padding},
+            {"role": "assistant", "content": "I received 250KB."},
+            {"role": "user", "content": "What is 1+1?"}
+        ]);
+        let trimmed = trim_input_history(&items);
+        assert_eq!(trimmed, items, "500KB 历史在新 1.5MB 默认预算下不应被截断");
+    }
+
+    /// 验证超过 1.5MB 默认上限的超长对话仍会按 turn 保留最新 prompt 与 system 进行安全修剪。
+    #[test]
+    fn trim_input_history_trims_when_exceeding_default_budget() {
+        let big_padding = "B".repeat(600 * 1024);
+        let items = json!([
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": big_padding.clone()},
+            {"role": "assistant", "content": "turn 1 done"},
+            {"role": "user", "content": big_padding.clone()},
+            {"role": "assistant", "content": "turn 2 done"},
+            {"role": "user", "content": big_padding},
+            {"role": "assistant", "content": "turn 3 done"},
+            {"role": "user", "content": "latest user question"}
+        ]);
+        let trimmed = trim_input_history(&items);
+        let trimmed_arr = trimmed.as_array().expect("array");
+        assert!(
+            trimmed_arr.len() < items.as_array().unwrap().len(),
+            "超限应发生裁剪"
+        );
+        assert_eq!(
+            trimmed_arr.last().unwrap()["content"],
+            "latest user question"
+        );
+        assert_eq!(trimmed_arr.first().unwrap()["content"], "System prompt");
+    }
+
+    /// 验证环境变量 BUDDY_SWITCH_MAX_INPUT_BYTES 覆盖自定义阈值生效。
+    #[test]
+    fn trim_input_history_respects_custom_env_budget() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let old = std::env::var(MAX_INPUT_HISTORY_BYTES_ENV).ok();
+        let _guard = EnvGuard(MAX_INPUT_HISTORY_BYTES_ENV, old);
+
+        std::env::set_var(MAX_INPUT_HISTORY_BYTES_ENV, "200");
+        let items = json!([
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "First long prompt with some padding: 123456789012345678901234567890"},
+            {"role": "assistant", "content": "First reply with some padding: 123456789012345678901234567890"},
+            {"role": "user", "content": "Latest question"}
+        ]);
+        let trimmed = trim_input_history(&items);
+        let trimmed_arr = trimmed.as_array().expect("array");
+        assert!(trimmed_arr.len() < items.as_array().unwrap().len());
+        assert_eq!(trimmed_arr.last().unwrap()["content"], "Latest question");
+    }
+
+    /// 验证环境变量 BUDDY_SWITCH_MAX_INPUT_BYTES=0 时完全禁用裁剪（超大输入全量透传）。
+    #[test]
+    fn trim_input_history_disabled_when_env_zero() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match &self.1 {
+                    Some(v) => std::env::set_var(self.0, v),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+        let old = std::env::var(MAX_INPUT_HISTORY_BYTES_ENV).ok();
+        let _guard = EnvGuard(MAX_INPUT_HISTORY_BYTES_ENV, old);
+
+        std::env::set_var(MAX_INPUT_HISTORY_BYTES_ENV, "0");
+        let big_padding = "X".repeat(800 * 1024);
+        let items = json!([
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": big_padding.clone()},
+            {"role": "assistant", "content": big_padding.clone()},
+            {"role": "user", "content": big_padding}
+        ]);
+        let trimmed = trim_input_history(&items);
+        assert_eq!(
+            trimmed, items,
+            "环境变量设为 0 时应完全禁用裁剪（全量保留）"
+        );
     }
 }
