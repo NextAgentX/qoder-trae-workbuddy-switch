@@ -2233,14 +2233,22 @@ pub struct QuotaView {
 
 /// 解析额度响应。
 ///
-/// **退化守卫**（与官方客户端的判断一致，保守放行）：两个 quota 键都缺失，
+/// **退化守卫**（与官方客户端的判断一致，保守放行）：三个 quota 来源都缺失，
 /// 或 `isQuotaExceeded=true` 且 remain 与 size 合计全 0（「从没有过额度」）⇒ `Err`
 /// —— **拒绝把解析不了的响应写成 0 余额**（0 是谎报，报错是诚实）。
 pub fn parse_quota(payload: &Value) -> Result<QuotaView, String> {
     let user_quota = payload.get("userQuota").and_then(Value::as_object);
     let add_on_quota = payload.get("addOnQuota").and_then(Value::as_object);
-    if user_quota.is_none() && add_on_quota.is_none() {
-        return Err("额度响应缺少 userQuota / addOnQuota（解析不了，拒绝写 0）".to_string());
+    let dedicated_packages = payload
+        .get("dedicatedResourcePackages")
+        .or_else(|| payload.get("dedicated_resource_packages"))
+        .and_then(Value::as_array);
+
+    if user_quota.is_none() && add_on_quota.is_none() && dedicated_packages.is_none() {
+        return Err(
+            "额度响应缺少 userQuota / addOnQuota / dedicatedResourcePackages（解析不了，拒绝写 0）"
+                .to_string(),
+        );
     }
     // ⚠️ 走 [`as_num`]（同时接受浮点）—— 实测上游给的就是 `99.0 / 100.0 / 1.0`，
     //    用 `as_i64` 会把一份**有余额**的额度解析成 `0 / 0 / 0`（谎报「已用完」）。
@@ -2250,9 +2258,34 @@ pub fn parse_quota(payload: &Value) -> Result<QuotaView, String> {
             .and_then(as_num)
             .unwrap_or(0)
     };
-    let remaining = num(user_quota, "remaining") + num(add_on_quota, "remaining");
-    let used = num(user_quota, "used") + num(add_on_quota, "used");
-    let total = num(user_quota, "total") + num(add_on_quota, "total");
+
+    let mut dedicated_remaining = 0i64;
+    let mut dedicated_used = 0i64;
+    let mut dedicated_total = 0i64;
+
+    if let Some(packages) = dedicated_packages {
+        for pkg in packages {
+            if pkg.get("available").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
+            if let Some(status) = pkg.get("status").and_then(Value::as_str) {
+                let s = status.to_ascii_uppercase();
+                if s.contains("EXPIRED") || s.contains("INACTIVE") || s.contains("DISABLED") {
+                    continue;
+                }
+            }
+            if let Some(obj) = pkg.as_object() {
+                dedicated_remaining += num(Some(obj), "remaining");
+                dedicated_used += num(Some(obj), "used");
+                dedicated_total += num(Some(obj), "total");
+            }
+        }
+    }
+
+    let remaining =
+        num(user_quota, "remaining") + num(add_on_quota, "remaining") + dedicated_remaining;
+    let used = num(user_quota, "used") + num(add_on_quota, "used") + dedicated_used;
+    let total = num(user_quota, "total") + num(add_on_quota, "total") + dedicated_total;
     let is_exceeded = payload
         .get("isQuotaExceeded")
         .and_then(Value::as_bool)
@@ -3915,6 +3948,87 @@ mod tests {
             (as_text.remaining, as_text.used, as_text.total),
             (12, 3, 15)
         );
+    }
+
+    /// ★★ `dedicatedResourcePackages`（专属活动资源包 / 专项模型积分包）必须被累加。
+    ///
+    /// 真机取证（2026-11-16）：新导入账号或参与签到活动的账号，其获得的活动额度（如「极致专属积分 500」、
+    /// 「SOTA 专属积分 2000」）由上游以 `dedicatedResourcePackages` 数组下发，而 `addOnQuota` 仅有
+    /// 默认基础 100 积分。漏掉该字段会导致用户所有领到的活动积分被丢弃，全显示为「100 积分」。
+    #[test]
+    fn quota_parses_dedicated_resource_packages_and_accumulates() {
+        let view = parse_quota(&serde_json::json!({
+            "addOnQuota": {
+                "remaining": 100.0,
+                "total": 100.0,
+                "used": 0.0,
+                "unit": "credits"
+            },
+            "userQuota": {
+                "remaining": 0.0,
+                "total": 0.0,
+                "used": 0.0,
+                "unit": "credits"
+            },
+            "dedicatedResourcePackages": [
+                {
+                    "name": "act-sota",
+                    "status": "QUOTA_DETAIL_STATUS_ACTIVE",
+                    "available": true,
+                    "remaining": 2000.0,
+                    "total": 2000.0,
+                    "used": 0.0
+                },
+                {
+                    "name": "act-ultimate",
+                    "status": "QUOTA_DETAIL_STATUS_ACTIVE",
+                    "available": true,
+                    "remaining": 500.0,
+                    "total": 500.0,
+                    "used": 0.0
+                },
+                // 不可用的包（available=false）不得计入
+                {
+                    "name": "act-unavailable",
+                    "status": "QUOTA_DETAIL_STATUS_ACTIVE",
+                    "available": false,
+                    "remaining": 300.0,
+                    "total": 300.0,
+                    "used": 0.0
+                },
+                // 已过期的包不得计入
+                {
+                    "name": "act-expired",
+                    "status": "QUOTA_DETAIL_STATUS_EXPIRED",
+                    "available": true,
+                    "remaining": 400.0,
+                    "total": 400.0,
+                    "used": 0.0
+                }
+            ],
+            "isQuotaExceeded": false
+        }))
+        .unwrap();
+
+        assert_eq!(view.remaining, 2600, "100 基础 + 2000 SOTA + 500 极致 = 2600");
+        assert_eq!(view.total, 2600);
+        assert_eq!(view.used, 0);
+
+        // snake_case 候选键 `dedicated_resource_packages` 亦可兼容解析
+        let snake = parse_quota(&serde_json::json!({
+            "dedicated_resource_packages": [
+                {
+                    "available": true,
+                    "remaining": 150,
+                    "total": 150,
+                    "used": 50
+                }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(snake.remaining, 150);
+        assert_eq!(snake.total, 150);
+        assert_eq!(snake.used, 50);
     }
 
     #[test]

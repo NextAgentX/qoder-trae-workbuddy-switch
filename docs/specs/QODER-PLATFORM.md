@@ -90,7 +90,7 @@ macOS 上永远查不到钥匙串条目 ⇒ 解密失败 ⇒ 「桌面端检测�
 | 能力 | 有 | 说明 |
 |:---|:---:|:---|
 | 每日签到领积分 | ✅ | 走**活动平台**：`GET /sash/api/v1/me/campaigns` → 筛 `CLAIM_BENEFIT` + `CLAIMABLE` → 逐个 `POST …/{id}/claim`，累加 Credits；已领 ⇒ 幂等「今日已领」。旧 `/sash/daily-check-in` 只在**整区没有活动平台**（404/405/410）时兜底。三档语义不变：**没有积分类活动 ⇒ 未开放（`ok:false` + `disabled`）**，不谎报成功。★ **上游实例在 10:00（UTC+8）切换，窗口 10:00 → 次日 09:59**（2026-11-09 真机取证：`startAt`=10:00、`endAt`=次日 09:59）；活动列表**依赖 `cosy-machine*` 原生头**——不带 `runtime-info` 身份时上游直接返回空列表（`showCampaign:false`），带了才有「每天领 100 Credits」 |
-| 积分 / 额度查询 | ✅ | quota/usage + 套餐快照 |
+| 积分 / 额度查询 | ✅ | quota/usage + 套餐快照（聚合 `userQuota` + `addOnQuota` + `dedicatedResourcePackages` 专属活动/模型资源包） |
 | Pro 福利包 | ❌ | **未实现**：`PATH_PRO_CLAIM` 只有常量定义、零调用点（issue #58 第 1 阶段一并落地） |
 | OAuth 设备授权 | ✅ | **PKCE S256**；两区 URL 参数不同（国内带 `redirect_uri`，国际不带） |
 | PAT 导入 | ✅ | 前缀 `pt-`，导入后自动交换 jobToken |
