@@ -1,4 +1,4 @@
-//! **统一网关**：把两个产品线的模型合成一个入口（`wb-cn:` / `trae-global:` 这类命名空间前缀）。
+//! **统一网关**：把多个产品线的模型合成一个入口（新格式 `wb-cn/` / `trae-global/`，兼容旧冒号格式）。
 //!
 //! 设计依据：`docs/specs/UNIFIED-GATEWAY-ARCH.md`（架构与契约）+ `UNIFIED-GATEWAY-UI.md`（交互）。
 //!

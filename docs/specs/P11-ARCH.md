@@ -743,7 +743,7 @@ graph TD
 报障现场（issue #101）：客户端（DeepSeek Harness）接本网关后读图报
 
 ```
-model "wb-cn:deepseek-v4.1-flash" does not declare image input
+model "wb-cn/deepseek-v4.1-flash" does not declare image input
 ```
 
 这句话是**客户端自己**打的：它按本地模型注册表判断能力，条目没勾「支持图片输入」时

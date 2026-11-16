@@ -68,7 +68,7 @@ pub mod proxy;
 pub mod qoder;
 pub mod refresh;
 pub mod region;
-// 统一网关的**模型命名空间**（`wb-cn:` / `trae-global:` 前缀）——
+// 统一网关的**模型命名空间**（新格式 `wb-cn/` / `trae-global/`，兼容旧 `:` 前缀）——
 // 派生层由 `Scope::all()` 生成 ⇒ 新增平台时命名空间自动出现；详见模块头。
 pub mod gateway_namespace;
 // Trae / Qoder 的**网关逐日账本**（用量页「账本」视图的数据源）。

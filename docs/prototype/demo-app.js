@@ -2889,13 +2889,13 @@ const uniKeysUsing = (ns) => UNI.keys.filter((k) => k.ns.includes(ns));
    ★ 2026-10-22：Trae 侧补齐 `/v1/responses`，原先那条 501 示例已移除。 */
 const UNI_ERRORS = [
   ["裸模型名被拒", "400 namespace_prefix_required",
-    "统一网关要求模型名带命名空间前缀。本网关启用的命名空间：wb-cn: / wb-global: / trae-cn: / trae-global: / qoder-cn: / qoder-global:。\n你填的是 `deepseek-v4.1-flash`，请改成 `wb-cn:deepseek-v4.1-flash` 这类形式。"],
+    "统一网关要求模型名带命名空间前缀。本网关启用的命名空间：wb-cn/ / wb-global/ / trae-cn/ / trae-global/ / qoder-cn/ / qoder-global/。\n你填的是 `deepseek-v4.1-flash`，请改成 `wb-cn/deepseek-v4.1-flash` 这类形式；旧配置里的冒号格式仍兼容。"],
   ["命名空间未授权", "403 namespace_forbidden",
     "该 API Key 未被授权使用命名空间 `trae-global`（它只授权了 wb-cn、wb-global）。\n请到「网关 → 统一网关 → 密钥」为该 Key 勾选，或另建一把。"],
   ["命名空间未启用", "400 namespace_not_enabled",
     "命名空间 `traework-cn` 未在本网关启用（下方「启用的命名空间」里没有它）。"],
   ["在旧端口填命名空间", "400 namespace_not_parsed_here",
-    "模型名 `wb-cn:deepseek-v4.1-flash` 看起来是统一网关的命名空间前缀，\n但本端口（57891）不解析命名空间。请改用统一网关 http://127.0.0.1:57892/v1，\n或去掉前缀、改用 `cn:` / `global:` 前缀。"],
+    "模型名 `wb-cn/deepseek-v4.1-flash` 看起来是统一网关的命名空间前缀，\n但本端口（57891）不解析命名空间。请改用统一网关 http://127.0.0.1:57892/v1，\n或去掉前缀、改用 `cn:` / `global:` 前缀。"],
 ];
 
 /* ── 命名空间勾选（按平台分组 · 表驱动）──
@@ -3062,7 +3062,7 @@ function uniOverviewSection() {
   /* 失败态走深链（`?err=unified`），与既有 `?err=gateway` / `?err=usage` 同一口径。 */
   const errBlock = state.errors.unified ? errorState({
     title: "最近一次请求失败：命名空间背后没有可用账号",
-    desc: "请求 `trae-global:deepseek-v4.1-flash` 已按契约回落到自动择优，但 trae-global 的池里一个账号都没有。网关不会因此拒绝服务 —— 它返回一条可诊断的错误。",
+    desc: "请求 `trae-global/deepseek-v4.1-flash` 已按契约回落到自动择优，但 trae-global 的池里一个账号都没有。网关不会因此拒绝服务 —— 它返回一条可诊断的错误。",
     action: { label: "重试校验", act: "retry|unified" },
   }) : "";
   return `${errBlock}
@@ -3102,7 +3102,7 @@ function uniOverviewSection() {
 function uniGuideCard() {
   const base = `http://127.0.0.1:${UNI.port}`;
   const api = state.gwApi || "openai";
-  const model = "wb-cn:deepseek-v4.1-flash";
+  const model = "wb-cn/deepseek-v4.1-flash";
   const snippet = api === "anthropic"
     ? `curl ${base}/v1/messages \\
   -H "x-api-key: $BUDDY_SWITCH_KEY" \\

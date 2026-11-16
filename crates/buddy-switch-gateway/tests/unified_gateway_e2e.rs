@@ -347,7 +347,7 @@ async fn models_aggregates_every_enabled_namespace_with_a_reason_per_segment() {
             let id = model["id"].as_str().expect("模型应有 id");
             let namespace = model["namespace"].as_str().expect("模型应有 namespace");
             assert!(
-                id.starts_with(&format!("{namespace}:")),
+                id.starts_with(&format!("{namespace}/")),
                 "id `{id}` 的前缀应与 namespace `{namespace}` 一致"
             );
         }
@@ -377,7 +377,7 @@ async fn namespace_guards_reject_in_the_documented_order() {
         body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("wb-cn:"),
+            .contains("wb-cn/"),
         "应列出可用前缀：{}",
         body["error"]["message"]
     );

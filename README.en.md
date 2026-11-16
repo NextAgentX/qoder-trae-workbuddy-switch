@@ -318,11 +318,12 @@ flowchart LR
 - **Key quota & allowlist**: each key can cap its consumption (limit × reset window — unit is either tokens or request count; window: none / daily / weekly / calendar month) and be restricted to a chosen set of accounts (whole groups can be picked at once). Over-quota returns 429 `quota_exceeded`; when every allowlisted account is unavailable it returns 401 `no_credential` (same code as an empty pool; the `message` states how many accounts the allowlist covers and why they are unusable) and **does not fall back to the full pool**.
 - **Account pool**: picks accounts by balance and rate-limit state, can exclude unusable ones, probes "account × model" limits, and revives them with one click.
 
-The **unified gateway** solves "the same model name overwriting itself across platforms": model names become `<namespace>:<model-id>`, where namespaces derive from the scope registry (currently six: `wb-cn` / `wb-global` / `trae-cn` / `trae-global` / `qoder-cn` / `qoder-global`).
+The **unified gateway** solves "the same model name overwriting itself across platforms": model names become `<namespace>/<model-id>`, where namespaces derive from the scope registry (currently six: `wb-cn` / `wb-global` / `trae-cn` / `trae-global` / `qoder-cn` / `qoder-global`). Requests using the legacy colon format remain supported.
 
 | Rule | Behaviour |
 | --- | --- |
 | Bare model name (no prefix) | **400** with the list of valid prefixes (no guessing a default and silently hitting the wrong pool) |
+| Separator | New model IDs use `/`; requests from existing clients using `:` remain supported |
 | Namespace parsing | **Whole-segment exact match only** (`trae` / `traework` / `traecode` are prefixes of one another) |
 | One key, many platforms | A single `sk-uni-` key can authorize several platforms at once |
 | `/v1/responses` | Served for every namespace (Trae joined on 2026-10-22; Qoder translates to chat internally) |

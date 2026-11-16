@@ -1,4 +1,4 @@
-//! 统一网关的**模型命名空间**（`wb-cn:` / `trae-global:` 这类前缀）。
+//! 统一网关的**模型命名空间**（`wb-cn/` / `trae-global/` 这类前缀，兼容旧 `:`）。
 //!
 //! 设计依据：`docs/specs/UNIFIED-GATEWAY-ARCH.md` §2（命名规则）与 §11（新增平台契约）。
 //!
@@ -40,7 +40,7 @@
 //!
 //! 旧前缀属 **WorkBuddy 独立端口**（`gateway/model_route.rs`），语义是「跨域重路由」；
 //! 本模块属**统一入口**，语义是「选择来源」。**两套前缀不跨入口混用**：
-//! 统一入口不认 `cn:` / `global:`（除非它同时也是命名空间，如 `wb-cn:`）。
+//! 统一入口不认 `cn/` / `global/`（除非它同时也是命名空间，如 `wb-cn/`）。
 
 use std::sync::LazyLock;
 
@@ -51,11 +51,11 @@ use crate::modules::region::Region;
 use crate::modules::trae::region::{TraeProgram, TraeRegion};
 use crate::modules::trae::variant::TraeVariant;
 
-/// 命名空间与模型名之间的分隔符。
-///
-/// 取**第一个** `:`；词法上 `split_once(':')` 即够（本仓既有的 `model_route::split_model_prefix`
-/// 用的是同一套词法）。
-pub const NAMESPACE_SEPARATOR: char = ':';
+/// 命名空间与模型名之间的新分隔符。
+pub const NAMESPACE_SEPARATOR: char = '/';
+
+/// 旧版统一网关模型 ID 的兼容分隔符。
+const LEGACY_NAMESPACE_SEPARATOR: char = ':';
 
 /// Trae 的**主程序位**（两段式命名空间 `trae-cn` / `trae-global` 落到这里）。
 ///
@@ -169,25 +169,32 @@ pub struct Split<'a> {
     pub bare: &'a str,
 }
 
-/// 按**第一个** `:` 切分模型名的命名空间前缀（**不校验是否启用/是否授权** —— 那是配置层的事）。
+/// 按第一个 `/` 或 `:` 切分模型名的命名空间前缀（**不校验是否启用/是否授权** —— 那是配置层的事）。
 ///
 /// 规则：
-/// - 取第一个 `:`；其前段**整段精确等于**某个命名空间 id 才认（[`parse`]）⇒ 剥离；
+/// - 取第一个 `/` 或 `:`；其前段**整段精确等于**某个命名空间 id 才认（[`parse`]）⇒ 剥离；
 /// - 否则视为无前缀，模型名**原样保留**（例：`vendor:model` / `gpt-5.6-sol` / 裸名）；
-/// - `wb-cn:`（空前缀后段）会返回 `spec=Some, bare=""` —— **空模型名由调用方拒绝**，
+/// - `wb-cn/` 或旧格式 `wb-cn:`（空前缀后段）会返回 `spec=Some, bare=""` —— **空模型名由调用方拒绝**，
 ///   本函数不替调用方决定错误文案。
 pub fn split(model: &str) -> Split<'_> {
-    match model.split_once(NAMESPACE_SEPARATOR) {
-        Some((head, tail)) => match parse(head) {
-            Some(spec) => Split {
-                spec: Some(spec),
-                bare: tail,
-            },
-            None => Split {
-                spec: None,
-                bare: model,
-            },
-        },
+    let separator = model
+        .char_indices()
+        .find(|(_, ch)| *ch == NAMESPACE_SEPARATOR || *ch == LEGACY_NAMESPACE_SEPARATOR);
+    match separator {
+        Some((index, separator)) => {
+            let head = &model[..index];
+            let tail = &model[index + separator.len_utf8()..];
+            match parse(head) {
+                Some(spec) => Split {
+                    spec: Some(spec),
+                    bare: tail,
+                },
+                None => Split {
+                    spec: None,
+                    bare: model,
+                },
+            }
+        }
         None => Split {
             spec: None,
             bare: model,
@@ -195,7 +202,7 @@ pub fn split(model: &str) -> Split<'_> {
     }
 }
 
-/// 拼出对外 id（`{命名空间}:{真实模型名}`）。
+/// 拼出新格式对外 ID（`{命名空间}/{真实模型名}`）。
 pub fn compose(namespace: &str, model: &str) -> String {
     format!("{namespace}{NAMESPACE_SEPARATOR}{model}")
 }
@@ -204,20 +211,24 @@ pub fn compose(namespace: &str, model: &str) -> String {
 ///
 /// ## 为什么需要它
 ///
-/// 旧端口（57891）不解析命名空间。用户若把 `wb-cn:deepseek-v4.1-flash` 填进去，
+/// 旧端口（57891）不解析命名空间。用户若把 `wb-cn/deepseek-v4.1-flash` 填进去，
 /// 模型名会被**原样转发给上游** ⇒ 用户只看到「模型不存在」，联想不到是端口用错了。
 /// 本函数让旧端口能识别「这看起来是统一入口的前缀」并给出出路。
 ///
 /// ## 判据（**保守**：宁可漏判，不误判真实模型名）
 ///
-/// 取第一个 `:` 之前的前段 `head`，命中下列任一形状即算：
+/// 取第一个 `/` 或 `:` 之前的前段 `head`，命中下列任一形状即算：
 /// ① 在册命名空间 id（整段相等）；
 /// ② 平台短标识本身（`wb` / `trae`）；
 /// ③ `<任意>-cn` / `<任意>-global`（**未来新增平台的命名空间就是这形状**，无需改本函数）。
 pub fn looks_like_namespace(model: &str) -> bool {
-    let Some((head, _)) = model.split_once(NAMESPACE_SEPARATOR) else {
+    let Some((index, _)) = model
+        .char_indices()
+        .find(|(_, ch)| *ch == NAMESPACE_SEPARATOR || *ch == LEGACY_NAMESPACE_SEPARATOR)
+    else {
         return false;
     };
+    let head = &model[..index];
     if parse(head).is_some() {
         return true;
     }
@@ -714,7 +725,7 @@ mod tests {
     fn compose_round_trips_with_split() {
         for spec in all_specs() {
             let id = compose(spec.id, "deepseek-v4.1-flash");
-            assert_eq!(id, format!("{}:deepseek-v4.1-flash", spec.id));
+            assert_eq!(id, format!("{}/deepseek-v4.1-flash", spec.id));
             let back = split(&id);
             assert_eq!(back.spec.map(|hit| hit.id), Some(spec.id));
             assert_eq!(back.bare, "deepseek-v4.1-flash");

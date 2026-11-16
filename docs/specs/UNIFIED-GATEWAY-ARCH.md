@@ -95,6 +95,8 @@
 
 ### 2.2 命名规则（v3.1 · 由 §10-D2 定稿）
 
+对外模型 ID 使用 `{命名空间}/{模型id}`（例如 `wb-cn/deepseek-v4.1-flash`），`GET /v1/models` 只返回斜杠格式。请求解析同时接受斜杠和旧版冒号（`wb-cn:deepseek-v4.1-flash`）；两种格式进入同一精确命名空间、启用状态、Key 授权与 relay 检查，上游只收到剥离命名空间后的模型 ID。分隔符不属于 OpenAI 或 Anthropic API 协议本身。
+
 ```
 {名字}-{区域}
 ```
@@ -286,19 +288,19 @@ pub fn parse(id: &str) -> Option<NamespaceTarget> {
 {
   "object": "list",
   "data": [
-    { "id": "wb-cn:deepseek-v4.1-flash", "object": "model", "namespace": "wb-cn",
+    { "id": "wb-cn/deepseek-v4.1-flash", "object": "model", "namespace": "wb-cn",
       "owned_by": "workbuddy", "context_window": 1000000, "max_tokens": 128000,
       "supports_images": true, "credits": "x0.03 credits", "badges": ["独家优惠"], "free": false },
 
-    { "id": "wb-global:deepseek-v4.1-flash", "object": "model", "namespace": "wb-global",
+    { "id": "wb-global/deepseek-v4.1-flash", "object": "model", "namespace": "wb-global",
       "owned_by": "workbuddy", "context_window": 300000, "max_tokens": 128000,
       "supports_images": true, "credits": null, "badges": [], "free": false },
 
-    { "id": "trae-cn:deepseek-v4.1-flash", "object": "model", "namespace": "trae-cn",
+    { "id": "trae-cn/deepseek-v4.1-flash", "object": "model", "namespace": "trae-cn",
       "owned_by": "trae", "context_window": 131072, "max_tokens": null,
       "supports_images": true, "credits": null, "badges": [], "free": false },
 
-    { "id": "trae-global:glm-5.3", "object": "model", "namespace": "trae-global",
+    { "id": "trae-global/glm-5.3", "object": "model", "namespace": "trae-global",
       "owned_by": "trae", "context_window": 131072, "max_tokens": null,
       "supports_images": true, "credits": null, "badges": [], "free": false }
   ],
@@ -326,24 +328,24 @@ BASE=http://127.0.0.1:57892
 
 # ① 国内版 WorkBuddy
 curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"wb-cn:deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"wb-cn/deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 
 # ② 国际版 WorkBuddy
 curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"wb-global:deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"wb-global/deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 
 # ③ 国内 Trae（合并版客户端 Trae CN）
 curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"trae-cn:deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"trae-cn/deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 
 # ④ 国际 Trae（合并版客户端 Trae）
 curl -s $BASE/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"model":"trae-global:glm-5.3","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"trae-global/glm-5.3","messages":[{"role":"user","content":"hi"}]}'
 
 # ⑤ Anthropic 协议（协议头不同，Key 同一个）
 curl -s $BASE/v1/messages -H "Authorization: Bearer $KEY" \
   -H "anthropic-version: 2023-06-01" -H "Content-Type: application/json" \
-  -d '{"model":"wb-cn:deepseek-v4.1-flash","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"wb-cn/deepseek-v4.1-flash","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ### 4.3 错误响应（全部**有出路**，不静默）
@@ -351,7 +353,7 @@ curl -s $BASE/v1/messages -H "Authorization: Bearer $KEY" \
 **① 裸模型名被拒（400）**
 ```json
 { "error": {
-    "message": "统一网关要求模型名带命名空间前缀。本入口启用的命名空间：wb-cn: / wb-global: / trae-cn: / trae-global:。你填的是 `deepseek-v4.1-flash`，请改成 `wb-cn:deepseek-v4.1-flash` 这类形式。",
+    "message": "统一网关要求模型名带命名空间前缀。本入口启用的命名空间：wb-cn/ / wb-global/ / trae-cn/ / trae-global/。你填的是 `deepseek-v4.1-flash`，请改成 `wb-cn/deepseek-v4.1-flash` 这类形式。",
     "type": "invalid_request_error", "code": "namespace_prefix_required" } }
 ```
 
@@ -388,17 +390,17 @@ Trae 侧已补齐 `/v1/responses`（入站 Responses → chat、出站 chat SSE 
 **⑤ 在**旧**端口（57891）填命名空间（400）** —— 低成本补救，建议加
 ```json
 { "error": {
-    "message": "模型名 `wb-cn:deepseek-v4.1-flash` 看起来是统一网关的命名空间前缀，但本端口（57891）不解析命名空间。请改用统一网关 http://127.0.0.1:57892/v1，或去掉前缀、改用 `cn:` / `global:` 前缀。",
+    "message": "模型名 `wb-cn/deepseek-v4.1-flash` 看起来是统一网关的命名空间前缀，但本端口（57891）不解析命名空间。请改用统一网关 http://127.0.0.1:57892/v1，或去掉前缀、改用 `cn:` / `global:` 前缀。",
     "type": "invalid_request_error", "code": "namespace_not_parsed_here" } }
 ```
-不加这条的话，`wb-cn:x` 会被**原样转发给上游** ⇒ 用户只看到「模型不存在」，联想不到是端口用错了。
+不加这条的话，`wb-cn/x` 会被**原样转发给上游** ⇒ 用户只看到「模型不存在」，联想不到是端口用错了。
 
 ### 4.4 禁用 / 日志 / 粘性 / 统计
 
 | 处 | 统一入口上的做法 | 为什么 |
 |:--|:--|:--|
-| **模型禁用** | **键 = 底层 region（`cn` / `global`）**，与两个既有入口**共用同一份** `gateway_disabled_models.json`。命名空间 → region 走既有 **`trae/mod.rs::region_of_variant`**（不是新写的映射） | 三入口语义一致、零重复，且**与 Trae 侧既有口径同源**（禁用存储本来就是 region 粒度 —— `region_of_variant` 的函数注释把它写成了「决策 #4」）。代价：统一入口禁用 `wb-cn:x` 会同时影响 57891 —— **这是正确的**（同一个上游模型） |
-| **请求日志** | 加 `namespace`（`String`）+ `resolved_model` + `program`；`region` 字段**保留**（既有统计页依赖它） | `RequestMeta.region` 是 `Region` 枚举，**不能**把 Trae 程序位塞进去；`resolved_model` 让排查能看到「`trae-cn:x` 实际发的是什么上游模型名」 |
+| **模型禁用** | **键 = 底层 region（`cn` / `global`）**，与两个既有入口**共用同一份** `gateway_disabled_models.json`。命名空间 → region 走既有 **`trae/mod.rs::region_of_variant`**（不是新写的映射） | 三入口语义一致、零重复，且**与 Trae 侧既有口径同源**（禁用存储本来就是 region 粒度 —— `region_of_variant` 的函数注释把它写成了「决策 #4」）。代价：统一入口禁用 `wb-cn/x` 会同时影响 57891 —— **这是正确的**（同一个上游模型） |
+| **请求日志** | 加 `namespace`（`String`）+ `resolved_model` + `program`；`region` 字段**保留**（既有统计页依赖它） | `RequestMeta.region` 是 `Region` 枚举，**不能**把 Trae 程序位塞进去；`resolved_model` 让排查能看到「`trae-cn/x` 实际发的是什么上游模型名」 |
 | **会话粘性** | 键**继续用 region** | 两个产品线的账号池都是**区域级** ⇒ region 就是池的粒度；再加一维只会把粘性切碎 |
 | **Token / 积分统计** | 按 region 聚合（既有）；Trae 侧行键仍为 `<region>:<uid>` | 不折叠（既有规则） |
 
@@ -447,7 +449,7 @@ Trae 侧已补齐 `/v1/responses`（入站 Responses → chat、出站 chat SSE 
 
 ### 5.1 Codex（`~/.codex/config.toml`）
 ```toml
-model = "wb-cn:deepseek-v4.1-flash"
+model = "wb-cn/deepseek-v4.1-flash"
 model_provider = "buddy_unified"
 
 [model_providers.buddy_unified]
@@ -464,7 +466,7 @@ export BUDDY_SWITCH_KEY="sk-uni-..."
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:57892"     # 根地址，别加 /v1
 export ANTHROPIC_AUTH_TOKEN="sk-uni-..."
-export ANTHROPIC_MODEL="wb-cn:deepseek-v4.1-flash"
+export ANTHROPIC_MODEL="wb-cn/deepseek-v4.1-flash"
 ```
 （只留 `ANTHROPIC_AUTH_TOKEN`，别同时设 `ANTHROPIC_API_KEY`。）
 
@@ -479,9 +481,9 @@ export ANTHROPIC_MODEL="wb-cn:deepseek-v4.1-flash"
         baseURL: http://127.0.0.1:57892/v1
         defaultInput: [text, image]   # 路由级兜底；条目非空 input 优先
         models:
-          - id: wb-cn:deepseek-v4.1-flash
-          - id: wb-global:deepseek-v4.1-flash
-          - id: trae-cn:deepseek-v4.1-flash
+          - id: wb-cn/deepseek-v4.1-flash
+          - id: wb-global/deepseek-v4.1-flash
+          - id: trae-cn/deepseek-v4.1-flash
             input: [text, image]
 ```
 （`<profile>`：`dsh web` 为 `web`，桌面版为 `desktop`；密钥在 `$DSH_HOME/.credentials.yaml`。
@@ -492,20 +494,20 @@ export ANTHROPIC_MODEL="wb-cn:deepseek-v4.1-flash"
 ```json
 {
   "models": [
-    { "id": "wb-cn:deepseek-v4.1-flash",     "name": "WB 国内 · Flash",  "vendor": "OpenAI",
+    { "id": "wb-cn/deepseek-v4.1-flash",     "name": "WB 国内 · Flash",  "vendor": "OpenAI",
       "url": "http://127.0.0.1:57892/v1/chat/completions", "apiKey": "${BUDDY_SWITCH_KEY}",
       "maxInputTokens": 1000000, "maxOutputTokens": 128000, "supportsToolCall": true, "supportsImages": true },
-    { "id": "wb-global:deepseek-v4.1-flash", "name": "WB 国际 · Flash",  "vendor": "OpenAI",
+    { "id": "wb-global/deepseek-v4.1-flash", "name": "WB 国际 · Flash",  "vendor": "OpenAI",
       "url": "http://127.0.0.1:57892/v1/chat/completions", "apiKey": "${BUDDY_SWITCH_KEY}",
       "maxInputTokens": 300000, "maxOutputTokens": 128000, "supportsToolCall": true, "supportsImages": true },
-    { "id": "trae-cn:deepseek-v4.1-flash",   "name": "Trae 国内 · Flash", "vendor": "OpenAI",
+    { "id": "trae-cn/deepseek-v4.1-flash",   "name": "Trae 国内 · Flash", "vendor": "OpenAI",
       "url": "http://127.0.0.1:57892/v1/chat/completions", "apiKey": "${BUDDY_SWITCH_KEY}",
       "maxInputTokens": 131072, "maxOutputTokens": 8192, "supportsToolCall": true, "supportsImages": true },
-    { "id": "trae-global:glm-5.3",           "name": "Trae 国际 · GLM",  "vendor": "OpenAI",
+    { "id": "trae-global/glm-5.3",           "name": "Trae 国际 · GLM",  "vendor": "OpenAI",
       "url": "http://127.0.0.1:57892/v1/chat/completions", "apiKey": "${BUDDY_SWITCH_KEY}",
       "maxInputTokens": 131072, "maxOutputTokens": 8192, "supportsToolCall": true, "supportsImages": false }
   ],
-  "availableModels": ["wb-cn:deepseek-v4.1-flash","wb-global:deepseek-v4.1-flash","trae-cn:deepseek-v4.1-flash","trae-global:glm-5.3"]
+  "availableModels": ["wb-cn/deepseek-v4.1-flash","wb-global/deepseek-v4.1-flash","trae-cn/deepseek-v4.1-flash","trae-global/glm-5.3"]
 }
 ```
 ★ 四条 id **两两不同** ⇒ **不再被判「已存在」、不再互相覆盖**。这正是本需求要的结果。
@@ -710,7 +712,7 @@ WB 侧再抽 `messages_for_region` / `responses_for_region`，Trae 侧再抽 `me
 
 ### D3 · 禁用三入口共用一份、按底层 region ｜ 决定：**接受**
 与 Trae 侧既有口径**同源**（`region_of_variant` 的存在理由就是「禁用存储是 region 粒度」），零重复、语义正确
-（同一个上游模型）。代价是「统一入口禁 `wb-cn:x` 会同时影响 57891」⇒ **UI 必须显式说明**（UI 方案 §6）。
+（同一个上游模型）。代价是「统一入口禁 `wb-cn/x` 会同时影响 57891」⇒ **UI 必须显式说明**（UI 方案 §6）。
 
 ### D4 · `/biz/*path` 的命名空间来源 ｜ 决定：**统一 Key 的 `biz_namespace` 字段（B1）**
 显式优于隐式（与「裸名拒绝」同一哲学）；且真实调用方是客户端自身，**加不了自定义头** ⇒ 请求头方案实务不可用。
@@ -732,7 +734,7 @@ WB 侧再抽 `messages_for_region` / `responses_for_region`，Trae 侧再抽 `me
 实测证据（见 D1）：
 - `Trae CN`（国内合并版）清单存在，分组 `builder / builder_v3 / chat_v3 / code_reviewer / code_review_summary / refactor / solo_agent`，`chat_v3` **19 条**，含 `deepseek-v4.1-flash`；其中 1 条是第三方 bypass（`openrouter//stealth/ox-alpha`，既有的 `servable_entries` 会正确过滤）。
 - `Trae`（国际合并版）同为 7 组。
-⇒ `trae-cn:deepseek-v4.1-flash` 与 `trae-global:*` **本机可直接用**，无需 `traework-*`。
+⇒ `trae-cn/deepseek-v4.1-flash` 与 `trae-global/*` **本机可直接用**，无需 `traework-*`。
 
 > ⚠️ 八条全部有结论。**唯一仍未核实**：`trae-global`（国际合并版）的凭据从未对真实上游跑通过（本仓既有诚实边界，非本次引入）—— 它可能「列得出来、调不动」。启用前先发一条真实请求验证。
 

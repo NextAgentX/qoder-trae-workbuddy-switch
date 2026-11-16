@@ -137,7 +137,7 @@ function keysOf(payload: unknown): api.UnifiedApiKeyView[] {
 }
 
 /** 代码样例里的模型 —— **带命名空间前缀**，这正是统一网关最容易踩的坑。 */
-const SAMPLE_MODEL = "wb-cn:deepseek-v4.1-flash";
+const SAMPLE_MODEL = "wb-cn/deepseek-v4.1-flash";
 
 /**
  * 错误响应样例（原型 UNI_ERRORS）。

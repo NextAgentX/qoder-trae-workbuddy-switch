@@ -42,7 +42,7 @@
 | 想知道某功能当初为什么这么做 | [`specs/DECISIONS.md`](specs/DECISIONS.md)（D1–D46） |
 | 加新交互（先原型、后代码） | [`prototype/`](prototype/) → `index.html` 可直接打开 |
 | 账号页「客户端限流」怎么和网关「限流探测」联动（同一份数据 + 两处入口） | [`prototype/limit-link-proto.html`](prototype/limit-link-proto.html)（可点设计稿，**已落地**）+ [`prototype/verify-limit-link.mjs`](prototype/verify-limit-link.mjs)（34 条行为校验）+ [`specs/MODEL-LIMIT-PROBE-PLAN.md`](specs/MODEL-LIMIT-PROBE-PLAN.md) §5.9（口径） |
-| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.161428`](releases/v2026.11.161428.md)） |
+| 查这版改了什么 | [`releases/`](releases/)（最新：[`v2026.11.161923`](releases/v2026.11.161923.md)） |
 
 ---
 
@@ -65,6 +65,8 @@
 | [`RISK-CONTROLS-DESIGN.md`](specs/RISK-CONTROLS-DESIGN.md) | WorkBuddy / Trae / Qoder 网关合规风控设置设计（方案 A） | 现行 · 2026-11-13 落地 |
 | [`2026-11-13-three-platform-risk-controls.md`](superpowers/plans/2026-11-13-three-platform-risk-controls.md) | 三平台合规风控设置实施计划 | 已完成 · 2026-11-13 |
 | [`2026-11-14-agent-session-isolation.md`](superpowers/plans/2026-11-14-agent-session-isolation.md) | 多 Agent Responses 会话身份隔离、续接状态保活与历史裁剪诊断实施计划 | 已完成 · 2026-11-14 |
+| [`2026-11-16-unified-gateway-slash-model-ids-design.md`](superpowers/specs/2026-11-16-unified-gateway-slash-model-ids-design.md) | 统一网关模型 ID 改斜杠并兼容冒号请求 | 已确认 |
+| [`2026-11-16-unified-gateway-slash-model-ids.md`](superpowers/plans/2026-11-16-unified-gateway-slash-model-ids.md) | 统一网关斜杠模型 ID 实施计划 | 已完成 · 2026-11-16 |
 | [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |
 
 ### 分期架构（P3–P15）

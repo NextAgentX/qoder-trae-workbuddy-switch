@@ -81,7 +81,7 @@ pub async fn status(State(state): State<UnifiedGatewayState>, headers: HeaderMap
 
 /// `GET /v1/models`：**聚合**该 Key 已授权且已启用的命名空间下的模型清单。
 ///
-/// - id 一律带命名空间前缀（`wb-cn:deepseek-v4.1-flash`）⇒ 客户端**自动发现即可用**，
+/// - id 一律带命名空间前缀（`wb-cn/deepseek-v4.1-flash`）⇒ 客户端**自动发现即可用**，
 ///   且同名模型不会再互相覆盖；
 /// - 顶层 `namespaces` **逐段**给出 `source` / `fetched_at` / `note` ——
 ///   沿用「非实时必有原因」契约，一个总徽标糊过去是不允许的。
@@ -207,7 +207,7 @@ async fn relay_llm(
     ));
 
     // ④ 把 body 里的 `model` 改写成**裸名**（中继与「模型禁用」判定都用裸名；
-    //    留着前缀会让上游看到 `wb-cn:deepseek-…` 这种它不认识的模型名）
+    //    留着前缀会让上游看到 `wb-cn/deepseek-…` 这种它不认识的模型名）
     let rewritten = Bytes::from(crate::model_route::rewrite_body_model(&raw, bare));
 
     match gateway_namespace::relay_target_of(spec) {
@@ -357,7 +357,7 @@ fn requested_model_of(raw: &str) -> Result<String, HttpError> {
 ///
 /// 四道，顺序**不能换**：
 /// 1. **必须在册**（整段精确匹配，禁前缀推断）⇒ 否则 400 并列出可用前缀；
-/// 2. 前缀后不得为空（`wb-cn:` 是无效请求）；
+/// 2. 前缀后不得为空（`wb-cn/` 与旧格式 `wb-cn:` 都是无效请求）；
 /// 3. **本入口启用**（400）—— 与 Key 无关，换一把 Key 也没用，故**先于**授权判定；
 /// 4. **该 Key 已授权**（403）。
 ///
@@ -391,7 +391,7 @@ fn guard_namespace<'a>(
                         code: "namespace_prefix_required",
                         message: format!(
                             "统一网关要求模型名带命名空间前缀。本入口启用的命名空间：{}。\
-                             你填的是 `{requested}`，请改成 `{}:…` 这类形式（用不了的命名空间会被明确拒绝，不会静默改路由）。\
+                             你填的是 `{requested}`，请改成 `{}/…` 这类形式（旧配置里的冒号格式仍兼容；用不了的命名空间会被明确拒绝，不会静默改路由）。\
                              若希望裸模型名可用，请在统一网关设置里指定「默认命名空间」。",
                             enabled_prefixes(config),
                             config
@@ -410,7 +410,10 @@ fn guard_namespace<'a>(
             status: StatusCode::BAD_REQUEST,
             kind: "invalid_request_error",
             code: "empty_model_name",
-            message: format!("命名空间 `{}:` 后面缺少模型名。", spec.id),
+            message: format!(
+                "命名空间 `{}/` 或旧格式 `{}:` 后面缺少模型名。",
+                spec.id, spec.id
+            ),
         });
     }
     if !config.is_enabled(spec.id) {
@@ -585,7 +588,7 @@ fn enabled_prefixes(config: &UnifiedGatewayConfig) -> String {
     config
         .enabled_namespaces()
         .iter()
-        .map(|spec| format!("{}:", spec.id))
+        .map(|spec| format!("{}/", spec.id))
         .collect::<Vec<_>>()
         .join(" / ")
 }
@@ -635,7 +638,7 @@ pub struct NamespaceModels {
 
 /// 组装 `/v1/models` 响应体（**纯函数** —— 不起 HTTP 就能测）。
 ///
-/// 做两件事：① 把每个模型的 `id` 改写成 `<命名空间>:<裸名>` 并补 `namespace` 字段；
+/// 做两件事：① 把每个模型的 `id` 改写成 `<命名空间>/<裸名>` 并补 `namespace` 字段；
 /// ② 顶层给出**逐段**的来源与原因。
 ///
 /// ⚠️ **不改写裸名以外的字段**：上游的 `context_window` / `credits` / `badges` 等原样透出，
@@ -1023,12 +1026,12 @@ mod tests {
         }
     }
 
-    /// ★ id 必须被改写成 `<命名空间>:<裸名>`，且补上 `namespace` 字段。
+    /// ★ id 必须被改写成 `<命名空间>/<裸名>`，且补上 `namespace` 字段。
     #[test]
     fn ids_are_prefixed_and_tagged() {
         let response = build_models_response(&[entry("wb-cn", "live", &["deepseek-v4.1-flash"])]);
         assert_eq!(response["object"], "list");
-        assert_eq!(response["data"][0]["id"], "wb-cn:deepseek-v4.1-flash");
+        assert_eq!(response["data"][0]["id"], "wb-cn/deepseek-v4.1-flash");
         assert_eq!(response["data"][0]["namespace"], "wb-cn");
         assert_eq!(
             response["data"][0]["object"], "model",
@@ -1051,7 +1054,7 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            vec!["wb-cn:deepseek-v4.1-flash", "wb-global:deepseek-v4.1-flash"]
+            vec!["wb-cn/deepseek-v4.1-flash", "wb-global/deepseek-v4.1-flash"]
         );
         assert_ne!(ids[0], ids[1], "两条 id 必须不同，否则客户端仍会按 id 去重");
     }
@@ -1119,7 +1122,7 @@ mod tests {
         };
         let response = build_models_response(&[dirty]);
         assert_eq!(
-            response["data"][0]["id"], "wb-cn:",
+            response["data"][0]["id"], "wb-cn/",
             "裸名缺失时只留前缀，不 panic"
         );
     }
@@ -1230,9 +1233,9 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "namespace_prefix_required");
         let message = body["error"]["message"].as_str().unwrap();
-        assert!(message.contains("wb-cn:"), "应列出可用前缀：{message}");
+        assert!(message.contains("wb-cn/"), "应列出可用前缀：{message}");
         assert!(
-            message.contains("trae-global:"),
+            message.contains("trae-global/"),
             "应列出全部启用项：{message}"
         );
         assert!(
