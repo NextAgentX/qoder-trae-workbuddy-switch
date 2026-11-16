@@ -88,12 +88,22 @@ fn protocol_error(protocol: Protocol, status: StatusCode, code: &str, message: &
         Protocol::Anthropic => anthropic_error(
             status,
             match code {
-                "authentication_error" | "invalid_request_error" => code,
+                "authentication_error" | "invalid_request_error" | "rate_limit_error" => code,
                 _ => "api_error",
             },
             message,
         ),
     }
+}
+
+fn with_retry_after(mut response: Response, seconds: Option<i64>) -> Response {
+    if let Some(seconds) = seconds {
+        response.headers_mut().insert(
+            header::RETRY_AFTER,
+            seconds.to_string().parse().expect("正整数秒可作 HTTP 头"),
+        );
+    }
+    response
 }
 
 /// 下游协议。
@@ -411,14 +421,30 @@ pub async fn chat_for_region(
     let origin_model = qoder_model_of(&state, region, &body, protocol).await;
     if origin_model.is_empty() {
         // 模型还没定（清单为空）⇒ 交给 `_once` 走它自己的「未指定模型」错误路径。
-        return chat_for_region_once(state, region, body, protocol, key, response_state_chain)
-            .await;
+        return chat_for_region_once(
+            state,
+            region,
+            body,
+            protocol,
+            key,
+            response_state_chain,
+            headers,
+        )
+        .await;
     }
     let fallback = crate::routes::fallback::FallbackLoop::plan(scope, &origin_model).await;
     // 没有可用链 ⇒ 走原路径（绝大多数用户是这一条）。
     if fallback.len() <= 1 {
-        return chat_for_region_once(state, region, body, protocol, key, response_state_chain)
-            .await;
+        return chat_for_region_once(
+            state,
+            region,
+            body,
+            protocol,
+            key,
+            response_state_chain,
+            headers,
+        )
+        .await;
     }
     let raw_body = String::from_utf8_lossy(&body).to_string();
     let mut hop = 0usize;
@@ -468,6 +494,7 @@ pub async fn chat_for_region(
                 protocol,
                 key.clone(),
                 response_state_chain.clone(),
+                headers.clone(),
             )
             .await
         };
@@ -542,6 +569,7 @@ pub async fn chat_for_region_once(
     // ★ issue #76：调用方的 Key（`None` = 无 Key 的调用 ⇒ 不判配额、不过白名单、不记账）。
     key: Option<std::sync::Arc<crate::apikey::KeyActor>>,
     response_state_chain: Option<(String, Vec<Value>)>,
+    headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
     // ★ issue #76：配额判定已**上移到 `chat_for_region`**（降级循环之外）——
@@ -571,6 +599,8 @@ pub async fn chat_for_region_once(
         Protocol::Anthropic => crate::protocol::anthropic::to_upstream_request_with_images(&parsed),
         Protocol::Responses => payload::responses_to_chat(&parsed),
     };
+    // Resolve identity before history trimming can drop the first user turn.
+    let sticky_key = payload::sticky_identity_for_request(&parsed, &headers, &openai_payload);
     if let Some(messages) = openai_payload.get("messages").cloned() {
         if let Some(object) = openai_payload.as_object_mut() {
             object.insert(
@@ -642,7 +672,6 @@ pub async fn chat_for_region_once(
     之后它们已被降级成普通 function，名字还在，但 `type` 已经没了。 */
     let responses_custom =
         std::sync::Arc::new(crate::protocol::responses::custom_tool_names(&parsed));
-    let sticky_key = payload::sticky_key_of(&parsed);
     let preferred = {
         let configured = config.preferred_uid.trim();
         if !configured.is_empty() {
@@ -925,13 +954,11 @@ pub async fn chat_for_region_once(
             }
 
             let status_code = status.as_u16();
-            let detail: String = response
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .take(300)
-                .collect();
+            let received_detail = response.text().await.unwrap_or_default();
+            // #204：排队标记或真正的会话失效词可能在长错误体末尾；先完整分类，
+            // 再截断供客户端、日志与池状态展示的详情，避免误暂停健康账号。
+            let kind = classify_http_with_detail(status_code, &received_detail);
+            let detail: String = received_detail.chars().take(300).collect();
 
             /* ★ 自动降级（issue #72）：结构化历史被上游按**参数错**拒 ⇒ 记下这条结论，
             用同一账号、文本模式重发一次。
@@ -950,7 +977,6 @@ pub async fn chat_for_region_once(
                 continue 'attempt;
             }
 
-            let kind = classify_http_with_detail(status_code, &detail);
             let now_ms = buddy_switch_core::modules::config::now_ms().max(0) as u64;
             match kind {
                 QoderErrKind::AuthDead => {
@@ -976,12 +1002,26 @@ pub async fn chat_for_region_once(
                 QoderErrKind::BalanceExhausted => super::risk::note_exhausted(),
                 QoderErrKind::AuthDead | QoderErrKind::Transient => {}
             }
-            {
+            let rate_retry_after = {
                 let mut pools = state.pools.lock().await;
                 if let Some(pool) = pools.get_mut(&region) {
                     pool.apply_error(&uid, kind, &detail, &model);
+                    if kind == QoderErrKind::RateLimited {
+                        // 当前请求不换号；只按刚失败账号的真实模型冷却建议等待。
+                        let only = HashSet::from([uid.clone()]);
+                        pool.model_cooldown_retry_after(
+                            &model,
+                            &HashSet::new(),
+                            Some(&only),
+                            buddy_switch_core::modules::config::now_ms(),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-            }
+            };
             if kind == QoderErrKind::Queued {
                 queued += 1;
             }
@@ -1006,11 +1046,14 @@ pub async fn chat_for_region_once(
                         key.as_deref().map(|actor| actor.scope),
                     )
                     .await;
-                return protocol_error(
-                    protocol,
-                    StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
-                    "upstream_error",
-                    &format!("上游拒绝（HTTP {status_code}）：{detail}"),
+                return with_retry_after(
+                    protocol_error(
+                        protocol,
+                        StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+                        "upstream_error",
+                        &format!("上游拒绝（HTTP {status_code}）：{detail}"),
+                    ),
+                    rate_retry_after,
                 );
             }
             break 'attempt;
@@ -1018,12 +1061,27 @@ pub async fn chat_for_region_once(
     }
 
     // 轮换耗尽 / 无可用账号。
+    // #204：没有实际失败时，区分「该模型暂时冷却」与「缺少可用凭据」。
+    // 已有失败仍按原分类收尾，不能把限额 / 传输等混合失败盖成模型限流。
+    let model_retry_after = if failures.is_empty() {
+        let pools = state.pools.lock().await;
+        pools.get(&region).and_then(|pool| {
+            pool.model_cooldown_retry_after(&model, &tried, allowed.as_ref(), now_ms())
+        })
+    } else {
+        None
+    };
     // ★ 若「全部失败都是排队」⇒ 明确说是**上游排队**，别让用户去查账号/凭据。
     let all_queued = queued > 0 && queued == failures.len();
     // ★ 若「全部失败都是被限额拦下」⇒ 说清是**限额**（去网关页调阈值 / 等重置），
     //   报 429 而不是 503 —— 503 会被读成「服务坏了」，这里是**预期行为**。
     let all_quota = quota_blocked_count > 0 && quota_blocked_count == failures.len();
-    let message = if failures.is_empty() {
+    let message = if let Some(seconds) = model_retry_after {
+        format!(
+            "HTTP 429：{} 的模型 {model} 正在冷却，请在 {seconds} 秒后重试",
+            region.display_name()
+        )
+    } else if failures.is_empty() {
         // ★ 白名单生效时点明「名单覆盖几个、名单外不会被使用」（issue #76）：
         //   否则用户看到「没有可用账号」会去账号页反复导入，而问题在名单上。
         let scope_hint = match allowed.as_ref() {
@@ -1069,7 +1127,7 @@ pub async fn chat_for_region_once(
             failures.join("；")
         )
     };
-    let exhausted_status = if all_queued || all_quota {
+    let exhausted_status = if model_retry_after.is_some() || all_queued || all_quota {
         StatusCode::TOO_MANY_REQUESTS
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -1092,14 +1150,19 @@ pub async fn chat_for_region_once(
             key.as_deref().map(|actor| actor.scope),
         )
         .await;
-    let code = if all_queued {
+    let code = if model_retry_after.is_some() {
+        "rate_limit_error"
+    } else if all_queued {
         "upstream_queued"
     } else if all_quota {
         "quota_exceeded"
     } else {
         "no_available_account"
     };
-    protocol_error(protocol, exhausted_status, code, &message)
+    with_retry_after(
+        protocol_error(protocol, exhausted_status, code, &message),
+        model_retry_after,
+    )
 }
 
 /// 对**单个账号**发**一次**上游 chat 请求（含候选主机 failover），**不换号、不重试**。

@@ -96,6 +96,9 @@ pub async fn chat_for_region(
         Ok(value) => value,
         Err(error) => return openai_error(error),
     };
+    // Resolve a content fallback against the original messages before trimming can
+    // remove the first user turn and make later requests look like another session.
+    let session_key = session_headers::session_key_or_content_identity(&parsed, &headers, &parsed);
     let mut history_trimmed = false;
     if let Some(messages) = parsed.get("messages").cloned() {
         let trimmed = crate::protocol::responses::trim_chat_messages(&messages);
@@ -170,11 +173,6 @@ pub async fn chat_for_region(
     // ★ issue #150：粘性键不能只认 body 的 `metadata.conversation_id` —— Claude Code
     //   发 `x-claude-code-session-id` 头、Codex 发 body `session_id`，都要认
     //   （见 `session_headers::session_key_of`）。出站 `X-Conversation-ID` 同样用它。
-    let session_key = session_headers::session_key_of(&parsed, &headers).or_else(|| {
-        // Some OpenAI-compatible clients omit session headers. Use a stable,
-        // content-derived fallback so one conversation keeps the same account.
-        session_headers::chat_content_identity(&parsed)
-    });
     let turn_key = session_headers::turn_key(&parsed);
     let inbound_request_id = header_of(&headers, "x-conversation-request-id");
     let trace_id = header_of(&headers, "x-trace-id");
@@ -258,6 +256,8 @@ pub async fn chat_for_region(
             // 先取轨迹：下面的日志会把 `failure.uid` move 走，之后再借整条 `failure` 就晚了。
             let note = relay::fallback_summary_json(&failure);
             let http_status = failure.error.status();
+            let error =
+                crate::logging::request_failure_detail(&failure.upstream_message, &failure.error);
             let elapsed_ms = started.elapsed().as_millis() as i64;
             state.log.record(
                 RequestMeta {
@@ -278,8 +278,7 @@ pub async fn chat_for_region(
                     cached_tokens: None,
                     credit: 0.0,
                     stream: wants_stream,
-                    // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
-                    error: None,
+                    error: Some(error),
                 }
                 .to_value(),
             );
@@ -441,6 +440,54 @@ pub async fn chat_for_region(
             }
             resp
         }
+    }
+}
+
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 环境变量是进程级全局状态：用守卫保证用例结束后恢复原值。
+    struct EnvGuard(&'static str, Option<String>);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.1 {
+                Some(value) => std::env::set_var(self.0, value),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    #[test]
+    fn content_identity_is_captured_before_history_trimming() {
+        let old = std::env::var(crate::protocol::responses::MAX_INPUT_HISTORY_BYTES_ENV).ok();
+        let _guard = EnvGuard(crate::protocol::responses::MAX_INPUT_HISTORY_BYTES_ENV, old);
+        // 用一个小预算把「首轮 user 会被裁掉」变成确定事实，避免依赖默认预算大小。
+        std::env::set_var(
+            crate::protocol::responses::MAX_INPUT_HISTORY_BYTES_ENV,
+            "4096",
+        );
+
+        let body = json!({
+            "messages": [
+                {"role": "developer", "content": "Project identity"},
+                {"role": "user", "content": "The first request"},
+                {"role": "assistant", "content": "First response"},
+                {"role": "user", "content": "large follow up ".repeat(2_000)}
+            ]
+        });
+        let headers = HeaderMap::new();
+        let captured = session_headers::session_key_or_content_identity(&body, &headers, &body);
+        let trimmed = crate::protocol::responses::trim_chat_messages(&body["messages"]);
+
+        assert_eq!(captured, session_headers::chat_content_identity(&body));
+        assert_ne!(
+            captured,
+            session_headers::chat_content_identity(&json!({"messages": trimmed})),
+            "the old first user turn is removed by the configured history budget"
+        );
     }
 }
 

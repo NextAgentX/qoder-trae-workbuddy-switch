@@ -164,7 +164,7 @@ pub async fn responses_for_region(
     //   （见 `session_headers::session_key_of`）。出站 `X-Conversation-ID` 同样用它。
     // Codex Responses 可能只提供 `prompt_cache_key`；普通会话键解析器不读它。
     // 回退到 Responses 共享会话身份，避免 Current 策略每轮重新加权选号。
-    let session_key = session_key_of(&parsed, &headers);
+    let session_key = session_key_for_request(&parsed, &headers, &upstream_body);
     let turn_key = session_headers::turn_key(&parsed);
     let inbound_request_id = header_of(&headers, "x-conversation-request-id");
     let trace_id = header_of(&headers, "x-trace-id");
@@ -246,6 +246,8 @@ pub async fn responses_for_region(
             // 先取轨迹：下面的日志会把 `failure.uid` move 走，之后再借整条 `failure` 就晚了。
             let note = relay::fallback_summary_json(&failure);
             let http_status = failure.error.status();
+            let error =
+                crate::logging::request_failure_detail(&failure.upstream_message, &failure.error);
             let elapsed_ms = started.elapsed().as_millis() as i64;
             state.log.record(
                 RequestMeta {
@@ -266,8 +268,7 @@ pub async fn responses_for_region(
                     cached_tokens: None,
                     credit: 0.0,
                     stream: wants_stream,
-                    // ★ issue #129：流中途失败摘要（`None` = 正常结束 / 老条目）。
-                    error: None,
+                    error: Some(error),
                 }
                 .to_value(),
             );
@@ -513,6 +514,10 @@ fn session_key_of(body: &Value, headers: &HeaderMap) -> Option<String> {
         .or_else(|| crate::protocol::responses::session_identity_of(body).map(str::to_string))
 }
 
+fn session_key_for_request(body: &Value, headers: &HeaderMap, chat_body: &Value) -> Option<String> {
+    session_key_of(body, headers).or_else(|| session_headers::chat_content_identity(chat_body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +540,19 @@ mod tests {
         assert_eq!(
             session_key_of(&body, &headers).as_deref(),
             Some("explicit-session")
+        );
+    }
+
+    #[test]
+    fn responses_without_session_id_fall_back_to_converted_chat_identity() {
+        let body = json!({
+            "instructions": "Project A instructions",
+            "input": "Fix the failing test"
+        });
+        let upstream = to_upstream_request(&body);
+        assert!(
+            session_key_for_request(&body, &HeaderMap::new(), &upstream).is_some(),
+            "Responses input must provide a stable identity after conversion to chat messages"
         );
     }
 }

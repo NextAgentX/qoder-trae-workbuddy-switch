@@ -445,6 +445,24 @@ fn conversation_identity_source(object: &Map<String, Value>) -> Option<String> {
     {
         return Some(format!("session:{value}"));
     }
+    if let Some(value) = object
+        .get("conversation_id")
+        .or_else(|| {
+            object
+                .get("metadata")
+                .and_then(|metadata| metadata.get("conversation_id"))
+                .or_else(|| {
+                    object
+                        .get("metadata")
+                        .and_then(|metadata| metadata.get("conversationId"))
+                })
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(format!("conversation:{value}"));
+    }
     for (prefix, field) in [
         ("cache_key:", "prompt_cache_key"),
         ("metadata:", "metadata"),
@@ -483,16 +501,28 @@ pub(crate) fn conversation_sticky_identity(object: &Value) -> Option<String> {
     Some(stable_conversation_id(&source, "sticky:"))
 }
 
-/// 内容指纹：`system` 提示 + 首条 `user` 消息的文本拼串。
+/// Preserve a client session identity in the upstream Chat payload. Trae derives
+/// provider session/project IDs from `session_id`, so header-only sessions must be
+/// copied here before its body adapter generates those IDs.
+pub(crate) fn set_session_id(body: &mut Value, identity: Option<&str>) {
+    if let (Some(identity), Some(object)) = (identity, body.as_object_mut()) {
+        let identity = identity.trim();
+        if !identity.is_empty() {
+            object.insert("session_id".into(), Value::String(identity.to_string()));
+        }
+    }
+}
+
+/// 内容指纹：首条 user 消息和它之前的 system/developer 指令。
 ///
-/// 只取**头部两段**而不是整段历史：多轮对话的历史在 `messages` 头部只增不改，
-/// 头部两段就足以区分对话，同时不必扫描越来越长的历史数组。
+/// 只取首轮指令和首条 user，而不是整段历史：多轮对话追加历史后仍稳定，
+/// 同时不必扫描越来越长的历史数组。
 ///
 /// 分段数组等复杂 `content` 整体序列化 —— 同客户端同请求形态下序列化结果稳定。
 /// 返回 `None` 表示两段都取不到（无消息 / 空消息），交给调用方兜底。
 fn content_fingerprint(object: &Map<String, Value>) -> Option<String> {
     let messages = object.get("messages")?.as_array()?;
-    let mut system_text: Option<String> = None;
+    let mut instruction_texts: Vec<(String, String)> = Vec::new();
     let mut user_text: Option<String> = None;
     for message in messages {
         let (Some(role), Some(content)) = (
@@ -507,20 +537,22 @@ fn content_fingerprint(object: &Map<String, Value>) -> Option<String> {
             other => serde_json::to_string(other).ok(),
         };
         match (role, text) {
-            ("system", Some(text)) if system_text.is_none() => system_text = Some(text),
+            ("system" | "developer", Some(text)) if user_text.is_none() => {
+                instruction_texts.push((role.to_string(), text))
+            }
             ("user", Some(text)) if user_text.is_none() => user_text = Some(text),
             _ => {}
         }
-        if system_text.is_some() && user_text.is_some() {
-            break; // 两段都取到，无需继续扫描长对话。
+        if user_text.is_some() {
+            break; // 首条 user 与前置项目指令已经足以区分会话。
         }
     }
     let mut parts = Vec::new();
-    if let Some(text) = system_text {
-        parts.push(format!("system:{text}"));
+    for (role, text) in instruction_texts {
+        parts.push(format!("{role}:{}:{text}", text.len()));
     }
     if let Some(text) = user_text {
-        parts.push(format!("user:{text}"));
+        parts.push(format!("user:{}:{text}", text.len()));
     }
     (!parts.is_empty()).then(|| parts.join("|"))
 }
@@ -583,6 +615,9 @@ pub fn prepare_llm_chat_body(
     };
 
     normalize_messages(object);
+    // Derive session IDs from the incoming conversation prefix before history trimming.
+    // Trimming may remove the first user turn and otherwise change the IDs on later turns.
+    let identity_source = conversation_identity_source(object);
     if let Some(messages) = object.get("messages").cloned() {
         object.insert(
             "messages".into(),
@@ -617,7 +652,6 @@ pub fn prepare_llm_chat_body(
     // `uid` 必须混入哈希：两个账号发起内容相同的对话时，若只按内容派生
     // 会得到完全相同的 ID —— 跨账号同会话号是典型的风控特征。
     // 实测上游对任意 UUID 形态的值都接受（随机 v4 也一直通过）。
-    let identity_source = conversation_identity_source(object);
     let derive_id = |salt: &str| {
         identity_source
             .as_deref()
@@ -857,6 +891,67 @@ mod tests {
         }));
         for field in ["conversation_id", "session_id", "project_id"] {
             assert_ne!(first[field], other[field], "{field} 不同对话必须不同");
+        }
+    }
+
+    #[test]
+    fn provider_session_identity_is_carried_into_upstream_payload() {
+        let mut body = json!({"messages": [{"role": "user", "content": "hello"}]});
+        set_session_id(&mut body, Some("header-session-1"));
+        assert_eq!(body["session_id"], "header-session-1");
+
+        set_session_id(&mut body, Some("header-session-2"));
+        assert_eq!(
+            body["session_id"], "header-session-2",
+            "the resolved client identity is authoritative"
+        );
+        set_session_id(&mut body, Some("  "));
+        assert_eq!(body["session_id"], "header-session-2");
+    }
+
+    #[test]
+    fn conversation_ids_distinguish_developer_instructions() {
+        let project = |instructions: &str| {
+            prepared(json!({
+                "messages": [
+                    {"role": "developer", "content": instructions},
+                    {"role": "user", "content": "Fix the failing test"}
+                ]
+            }))
+        };
+        let a = project("Project A: use Rust");
+        let b = project("Project B: use TypeScript");
+        for field in ["conversation_id", "session_id", "project_id"] {
+            assert_ne!(
+                a[field], b[field],
+                "{field} must separate projects with different developer instructions"
+            );
+        }
+    }
+
+    #[test]
+    fn conversation_ids_remain_stable_when_history_trimming_drops_old_user_turns() {
+        let initial = prepared(json!({
+            "messages": [
+                {"role": "system", "content": "Project instructions"},
+                {"role": "user", "content": "The first request"}
+            ]
+        }));
+        let long_follow_up = "large follow up ".repeat(20_000);
+        let later = prepared(json!({
+            "messages": [
+                {"role": "system", "content": "Project instructions"},
+                {"role": "user", "content": "The first request"},
+                {"role": "assistant", "content": "First response"},
+                {"role": "user", "content": long_follow_up}
+            ]
+        }));
+
+        for field in ["conversation_id", "session_id", "project_id"] {
+            assert_eq!(
+                initial[field], later[field],
+                "trimming older turns must not change the conversation {field}"
+            );
         }
     }
 

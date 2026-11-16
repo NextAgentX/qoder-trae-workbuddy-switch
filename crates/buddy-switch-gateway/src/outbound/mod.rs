@@ -471,6 +471,47 @@ mod tests {
         cn_with_efforts(source, None)
     }
 
+    #[test]
+    fn responses_developer_roles_are_normalized_after_protocol_conversion() {
+        let input = json!({
+            "model":"hy3",
+            "instructions":"private instructions",
+            "input":[
+                {"role":"developer", "content":"first rules"},
+                {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"hi"}]},
+                {"type":"additional_tools", "role":"developer", "content":"tool patch"},
+                {"type":"message", "role":"developer", "content":[{"type":"input_text", "text":"last rules"}]}
+            ]
+        });
+        let converted = crate::protocol::responses::to_upstream_request(&input);
+        for degraded in [false, true] {
+            for region in [Region::Cn, Region::Global] {
+                let prepared = prepare_outbound_body(
+                    region,
+                    &converted.to_string(),
+                    &OutboundOptions::default(),
+                    &meta(),
+                    degraded,
+                    None,
+                );
+                let prepared: Value = serde_json::from_str(&prepared).unwrap();
+                let messages = prepared["messages"].as_array().unwrap();
+                let roles: Vec<&str> = messages
+                    .iter()
+                    .map(|m| m["role"].as_str().unwrap())
+                    .collect();
+                if degraded {
+                    assert_eq!(roles, ["system", "user"]);
+                    assert_eq!(messages[0]["content"], DEGRADED_SYSTEM_PROMPT);
+                } else {
+                    assert_eq!(roles, ["system", "system", "user", "system"]);
+                    assert_eq!(messages[1]["content"], "first rules");
+                    assert_eq!(messages[3]["content"], "last rules");
+                }
+            }
+        }
+    }
+
     /// 带 per-model 配置的 CN 出站改写（`model_efforts` 为用户配置）。
     fn cn_with_efforts(
         source: &str,

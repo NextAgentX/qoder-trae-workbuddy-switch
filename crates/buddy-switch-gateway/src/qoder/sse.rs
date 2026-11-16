@@ -312,6 +312,67 @@ where
 /// 探测读流的字节上限（见 [`first_upstream_error`]）。
 pub const PROBE_ERROR_SCAN_MAX_BYTES: usize = 64 * 1024;
 
+fn cache_hits_in_usage(usage: &Value) -> Option<u64> {
+    usage
+        .get("prompt_cache_hit_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .or_else(|| usage.get("cached_tokens").and_then(Value::as_u64))
+}
+
+fn merge_usage_values(previous: Option<&Value>, latest: &Value) -> Value {
+    let Some(latest_object) = latest.as_object() else {
+        return latest.clone();
+    };
+    let mut merged = previous
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in latest_object {
+        if key == "prompt_tokens_details" {
+            if let (Some(previous_details), Some(latest_details)) = (
+                merged.get(key).and_then(Value::as_object),
+                value.as_object(),
+            ) {
+                let mut details = previous_details.clone();
+                details.extend(latest_details.clone());
+                merged.insert(key.clone(), Value::Object(details));
+                continue;
+            }
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+
+    let previous_hits = previous.and_then(cache_hits_in_usage);
+    if let Some(previous_hits) = previous_hits.filter(|_| cache_hits_in_usage(latest).is_none()) {
+        if latest_object.contains_key("prompt_cache_hit_tokens") {
+            merged.insert("prompt_cache_hit_tokens".into(), json!(previous_hits));
+        } else if latest_object
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .is_some()
+        {
+            if let Some(details) = merged
+                .get_mut("prompt_tokens_details")
+                .and_then(Value::as_object_mut)
+            {
+                details.insert("cached_tokens".into(), json!(previous_hits));
+            }
+        } else if latest_object.contains_key("cache_read_input_tokens") {
+            merged.insert("cache_read_input_tokens".into(), json!(previous_hits));
+        } else if latest_object.contains_key("cached_tokens") {
+            merged.insert("cached_tokens".into(), json!(previous_hits));
+        }
+    }
+    Value::Object(merged)
+}
+
 /// 一行里有没有上游错误帧？（复用 [`api::unwrap_envelope_line`] —— 判据零新造）
 fn error_in_line(line: &str) -> Option<(u16, String)> {
     match api::unwrap_envelope_line(line.trim_end()) {
@@ -388,7 +449,7 @@ where
         }
         if let Some(usage) = chunk.get("usage") {
             if !usage.is_null() {
-                out.usage = Some(usage.clone());
+                out.usage = Some(merge_usage_values(out.usage.as_ref(), usage));
             }
         }
         let Some(choices) = chunk.get("choices").and_then(Value::as_array) else {
@@ -1840,6 +1901,41 @@ mod tests {
         assert_eq!(out.tool_calls[0]["function"]["arguments"], "{\"q\":\"bj\"");
         assert_eq!(out.finish_reason, "tool_calls");
         assert_eq!(out.usage.unwrap()["total_tokens"], 15);
+    }
+
+    #[tokio::test]
+    async fn aggregate_keeps_cache_hits_from_earlier_partial_usage() {
+        let frames = vec![
+            frame(&json!({"usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 90
+            }})),
+            frame(&json!({"usage": {
+                "prompt_tokens": 110,
+                "completion_tokens": 11
+            }})),
+        ];
+        let out = aggregate(upstream_from(&frames), None).await;
+        assert_eq!(out.usage.unwrap()["prompt_cache_hit_tokens"], 90);
+    }
+
+    #[tokio::test]
+    async fn aggregate_honors_explicit_zero_cache_hits() {
+        let frames = vec![
+            frame(&json!({"usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 90
+            }})),
+            frame(&json!({"usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 12,
+                "prompt_cache_hit_tokens": 0
+            }})),
+        ];
+        let out = aggregate(upstream_from(&frames), None).await;
+        assert_eq!(out.usage.unwrap()["prompt_cache_hit_tokens"], 0);
     }
 
     /// 泄漏回声：严格形态被还原成结构化调用并清空正文。

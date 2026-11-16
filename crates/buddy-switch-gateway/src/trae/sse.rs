@@ -108,6 +108,13 @@ fn cached_tokens_of(usage: &Value) -> Option<u64> {
     Some(hit.min(prompt))
 }
 
+fn merge_token_usage(previous: Option<TokenUsage>, mut latest: TokenUsage) -> TokenUsage {
+    if latest.cached.is_none() {
+        latest.cached = previous.and_then(|usage| usage.cached);
+    }
+    latest
+}
+
 /// 一个解析完成的 SOLO 事件。
 #[derive(Debug, Clone, Default)]
 pub struct SoloEvent {
@@ -682,8 +689,9 @@ async fn emit(
         }
         "token_usage" => {
             if let Some(usage) = event.usage {
-                *pending_usage = Some(usage);
-                outcome.usage = usage;
+                let latest = merge_token_usage(*pending_usage, usage);
+                *pending_usage = Some(latest);
+                outcome.usage = latest;
             }
             Ok(())
         }
@@ -774,7 +782,7 @@ pub async fn aggregate(
             }
             "token_usage" => {
                 if let Some(value) = event.usage {
-                    *usage = value;
+                    *usage = merge_token_usage(Some(*usage), value);
                 }
             }
             "done" | "turn_completion" => {
@@ -981,6 +989,25 @@ mod tests {
             }))
             .cached,
             Some(10)
+        );
+    }
+
+    #[test]
+    fn later_partial_token_usage_does_not_erase_cache_hits() {
+        let first = TokenUsage::from_value(&json!({
+            "prompt_tokens": 100, "completion_tokens": 10, "prompt_cache_hit_tokens": 90
+        }));
+        let partial = TokenUsage::from_value(&json!({
+            "prompt_tokens": 110, "completion_tokens": 11
+        }));
+        assert_eq!(merge_token_usage(Some(first), partial).cached, Some(90));
+
+        let explicit_zero = TokenUsage::from_value(&json!({
+            "prompt_tokens": 120, "completion_tokens": 12, "prompt_cache_hit_tokens": 0
+        }));
+        assert_eq!(
+            merge_token_usage(Some(first), explicit_zero).cached,
+            Some(0)
         );
     }
 

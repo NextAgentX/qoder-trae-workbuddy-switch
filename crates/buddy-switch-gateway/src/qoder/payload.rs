@@ -36,6 +36,21 @@ pub fn sticky_key_of(parsed: &Value) -> Option<String> {
         .or_else(|| crate::session_headers::chat_content_identity(parsed))
 }
 
+/// Resolve explicit body/header identity first, then fall back to content in the
+/// original or translated Chat payload. The translated payload is required for
+/// Responses and Anthropic inputs, whose wire formats do not contain `messages`.
+pub fn sticky_identity_for_request(
+    parsed: &Value,
+    headers: &axum::http::HeaderMap,
+    chat_payload: &Value,
+) -> Option<String> {
+    crate::protocol::responses::session_identity_of(parsed)
+        .map(str::to_string)
+        .or_else(|| crate::session_headers::response_session_identity(parsed, headers))
+        .or_else(|| crate::session_headers::chat_content_identity(parsed))
+        .or_else(|| crate::session_headers::chat_content_identity(chat_payload))
+}
+
 /// Responses 请求（`POST /v1/responses`）→ 上游 chat 形态。
 ///
 /// 与 WB 那条线**共用** [`crate::protocol::responses::to_upstream_request`]
@@ -439,6 +454,42 @@ mod tests {
         assert_eq!(sticky_key_of(&json!({})), None);
         assert_eq!(sticky_key_of(&json!({"metadata": {}})), None);
         assert_eq!(sticky_key_of(&json!({"prompt_cache_key": ""})), None);
+    }
+
+    #[test]
+    fn responses_identity_uses_converted_messages_and_keeps_project_isolation() {
+        let request = |instructions: &str| {
+            json!({
+                "instructions": instructions,
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Fix the failing test"}]
+                }]
+            })
+        };
+        let a = request("Project A: use Rust");
+        let b = request("Project B: use TypeScript");
+        let a_chat = responses_to_chat(&a);
+        let b_chat = responses_to_chat(&b);
+        let identity_a = sticky_identity_for_request(&a, &axum::http::HeaderMap::new(), &a_chat);
+        let identity_b = sticky_identity_for_request(&b, &axum::http::HeaderMap::new(), &b_chat);
+        assert!(
+            identity_a.is_some(),
+            "Responses without cache/session IDs need a fallback"
+        );
+        assert_ne!(
+            identity_a, identity_b,
+            "project instructions must separate sessions"
+        );
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-session-id", "qoder-session".parse().unwrap());
+        assert_eq!(
+            sticky_identity_for_request(&a, &headers, &a_chat),
+            crate::session_headers::response_session_identity(&a, &headers),
+            "explicit client session headers must win over content fallback"
+        );
     }
 
     /// Responses → chat：复用 `protocol::responses` 的那份翻译，并按 Qoder 上游

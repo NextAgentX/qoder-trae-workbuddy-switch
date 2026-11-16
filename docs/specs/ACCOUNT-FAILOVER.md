@@ -42,6 +42,21 @@
 Qoder 侧额外把原文放进错误帧的非标准字段 `error.upstream`（客户端忽略），
 给本进程的 `UsageTapStream` 记日志用。
 
+### WB 请求失败诊断（issue #204，2026-11-14）
+
+WB 的 Chat Completions、Messages、Responses 三个入口在中继失败时，也将上游错误摘要写入
+`gateway_logs.json` 的 `error`；写入前脱敏并截断，不再仅靠客户端显示的错误排查。
+成功请求仍为 `error: null`，每日用量统计文件仍不包含错误正文。
+
+CN 的 LLM 请求在 core 实际发送边界再次执行基础规范化（`developer` → `system`、强制流式、
+规范化 `tool_choice`），与入口的出站管线共用实现；业务请求仍按原文发送。
+Responses 的 `input` / `instructions` 先转换为 chat `messages`，只规范化消息角色，
+不递归改写正文、工具参数或元数据中的同名字段。
+
+上游 HTTP 非 2xx 时，运行日志的 `[wb-chat]` 行记录实际出站消息数、`developer` 总数和
+最多 64 个角色标签（未知角色统一记为 `other`），不记录提示词、工具参数或凭据。
+该诊断用于核对 400/11128 的真实请求形状；补齐发送边界不能证明用户实际 400 的根因已确认。
+
 ## 三、三协议出口的改造点
 
 | 协议 | 出口 | 断流（`Err`） | 流内错误帧 |

@@ -10,9 +10,12 @@
 >
 > 2026-11-14 Agent 会话连续性：Responses 状态按客户端会话身份指纹进一步隔离（字段来源带命名空间）；状态访问刷新 24 小时空闲 TTL（由 1 小时调高）。状态容量按估算内存分配：全局 128 MiB / 1024 条、每 API Key+区域+产品线 scope 64 MiB / 512 条、每会话 32 MiB / 64 条（由 16 MiB / 32 条调高）；超额优先在对应会话或 scope 内淘汰 LRU，全局压力优先回收占用最大的 scope。日志记录不含会话 ID、Key 或正文的状态量 / 淘汰摘要。输入历史预算由 64 KiB 提高到 256 KiB。续接中身份暂缺时，唯一的 response ID 会继承其原身份；从首轮起均无稳定身份时仍沿用旧 scope，服务端无法推断项目归属。
 > 2026-11-14 Trae 连续请求实测：CC Switch 的 proxy 记录与本机 Trae 网关日志在同一时间窗均显示 `/v1/responses`、同一账号、输入约 800K–897K、缓存读数 0；账号轮换不是该批 0 命中的原因。原始上游 `token_usage` 抓取关闭，暂不能区分上游明确报 0 与未返回缓存字段。Trae/Qoder 网关日志现将 `cachedTokens` 记为 `null | number`，保留这一区别。
+> 2026-11-14 Trae Responses 账号粘性：选号复用状态隔离用的会话身份（body 会话字段 / 会话请求头 / `prompt_cache_key`）；都缺失时，以转换后 system 指令 + 首条 user 内容指纹兜底。`previous_response_id` 逐轮变化，不作为粘性身份。
+> 2026-11-14 Trae 新样本：本机 `/v1/responses` DeepSeek 最近 20 条输入为 195,730–232,500，网关可识别的 `cachedTokens=0` 共 20 条，只有 1 个账号；抓取开关关闭且没有原始抓取文件。由此可排除这组请求的账号轮换；尚不能判断实际发送前缀是否变化、上游是否另带未识别缓存字段，或 Trae 上游缓存行为是否不同。
 > 2026-11-14 Chat 缓存连续性：WorkBuddy、Trae、Qoder 的 Chat Completions 缺少显式会话身份时，均以 system 指令 + 首条 user 内容的 SHA-256 指纹作为账号粘性兜底，固定安装级 `user` 不参与。Responses 与 Chat Completions 均走共享的历史裁剪。
 > 2026-11-14 WorkBuddy 缓存观测：`cachedTokens` 在原始请求日志中写为 `null | number`；`null` 表示上游未返回缓存字段，`0` 表示明确报 0。旧日志和聚合账本仍按 0 处理缺失字段，不反推其缓存状态。
 > 2026-11-14 Responses 长单轮裁剪：旧策略完整保留最新 user turn，工具调用密集的单轮仍可长到 800K 输入。现在保留最新 user 消息，并仅从该轮尾部纳入完整条目；function_call 与对应 function_call_output 成组，避免悬空工具记录。system/developer 指令与最新 user 消息不会截断，单个必保留项超预算时请求仍可能超过 256 KiB。
+> 2026-11-14 连续性与用量审查补充：会话指纹纳入首轮 system/developer 指令；WorkBuddy/Qoder 在历史裁剪前计算身份，Trae 在裁剪前派生上游会话 ID；Trae Chat/Messages 与三平台的 Qoder/Responses 入口保留请求头或转换后消息中的身份。三平台的 usage 聚合仅在后帧缺少缓存字段时继承前值；后帧明确报告 0 时以 0 为准，避免把未命中误记成命中。
 >
 > 2026-11-10 Codex Responses 缓存连续性修复：共用转换器保留 `prompt_cache_key` / 会话字段；
 > WorkBuddy 在选号后按实际账号重绑网关生成的空 UID 缓存键；Trae / Qoder 将 Codex 顶层
@@ -143,7 +146,7 @@ OpenTelemetry GenAI 语义约定明确 `gen_ai.usage.input_tokens` **SHOULD incl
 |:--|:--|
 | `protocol/usage_tap.rs:58` | `cached_tokens: i64` → `Option<i64>` |
 | `protocol/usage_tap.rs:91-130` | 读不到 ⇒ `None`；`cached > prompt` ⇒ `prompt += cached`（归一，不再 clamp）；`cached <= prompt` ⇒ 原样 |
-| `protocol/usage_tap.rs:281-306` | ★ **`observe_frame` 由「整块覆盖」改为逐字段合并**：后到的 `Some` 覆盖，`None` / 0 不得抹掉已有非 0 值（否则末帧只带 output 时会把已见到的缓存数打成 0）。依据见 §13.2 |
+| `protocol/usage_tap.rs:281-306` | ★ **`observe_frame` 由「整块覆盖」改为逐字段合并**：后到的 `Some` 覆盖，只有 `None` 保留已有值；明确的 `Some(0)` 必须覆盖非零值（否则未命中可能被误记为命中）。依据见 §13.2 |
 | `logging.rs:79,119` | `cached_tokens: Option<u64>`，序列化 `cachedTokens: null \| number`（键固定，与 `keyId`/`error` 同纪律） |
 | `logging.rs:184-219` | `StreamingLogSink::finish`：`None` 写 `null`，不写 0 |
 | `routes/{chat,messages,responses}.rs` | 5 处 `cached_tokens: 0` 占位改 `None` |
@@ -397,11 +400,11 @@ grep -o '"cachedTokens":[^,]*' \
 
 ### 13.2 三条直接改变本方案的结论
 
-**① `UsageTap` 的「后到整块覆盖」会丢缓存数（必须改）**
+**① `UsageTap` 的「后到整块覆盖」会丢缓存数（已修复）**
 
-现状 `usage_tap.rs:302-304` 是 `self.latest = Some(usage)` —— 后一帧整块替换前一帧。demesne 的做法相反：`message_delta` 只在 `if ev.Usage.CacheReadInputTokens > 0` 时才覆盖（`internal/proxies/anthropic/usage.go` 的 `applyDelta`），因为末帧常常只带部分字段。
+原实现 `observe_frame` 用最后一帧整块替换前一帧；末帧缺少缓存字段时会抹掉先前缓存读数。现在总用量仍以后到帧为准，但缓存读数独立合并：后续缺字段时继承前值，后续明确报告 `0` 时以 `0` 为准。Trae 的 `TokenUsage` 合并与 Qoder 的 SSE usage 聚合也采用相同规则。
 
-⇒ 本方案 §4.1 增加一条：`observe_frame` 改为**逐字段合并**（后到的 `Some` 覆盖，`None` 与 0 不得抹掉已有非 0 值），否则「上游先报 900 缓存、末帧只报 output」会把命中率打成 0。
+回归用例覆盖「先报缓存、后报部分 usage」以及后帧显式 0 覆盖前值的情况。
 
 **② 能力判断用「静态表 + 运行时观测」，而不是写死 `unsupported_note`**
 

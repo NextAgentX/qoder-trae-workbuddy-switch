@@ -256,17 +256,47 @@ pub fn prepare_international_chat_body(source: &str) -> String {
 /// 按 region 规范化 chat 请求体（纯函数，无 I/O、无状态）。
 ///
 /// 分派规则：
-/// - [`Region::Cn`]：直传已由调用方规范化的 `body_json`（`to_string` 拷贝）；
+/// - [`Region::Cn`]：在实际发送边界再次执行 [`prepare_chat_body`]；
 /// - [`Region::Global`]：走 [`prepare_international_chat_body`]
 ///   （内部已含 [`prepare_chat_body`]，幂等）。
 ///
-/// 从 [`UpstreamClient::chat_stream`] 内联的 `match region { ... }` 提取而来，
-/// 行为与提取前逐字节一致；提取目的是让该分派可被无 I/O 的单测直接覆盖。
+/// 调用方的出站管线仍负责协议转换；此处兜底避免其他 LLM 调用方漏掉
+/// `developer` → `system` 等基础规范化（issue #204）。业务转发不经过此函数。
 fn chat_body_for(region: Region, body_json: &str) -> String {
     match region {
         Region::Global => prepare_international_chat_body(body_json),
-        Region::Cn => body_json.to_string(),
+        Region::Cn => prepare_chat_body(body_json),
     }
+}
+
+/// 有界的出站消息形状，不包含正文、工具参数、账号或任意客户端字符串。
+fn chat_role_summary(body_json: &str) -> Value {
+    let body = serde_json::from_str::<Value>(body_json).unwrap_or(Value::Null);
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return json!({"messages": null});
+    };
+    let roles: Vec<&str> = messages
+        .iter()
+        .take(64)
+        .map(
+            |message| match message.get("role").and_then(Value::as_str) {
+                Some("system") => "system",
+                Some("developer") => "developer",
+                Some("user") => "user",
+                Some("assistant") => "assistant",
+                Some("tool") => "tool",
+                Some("function") => "function",
+                Some(_) => "other",
+                None => "missing",
+            },
+        )
+        .collect();
+    json!({
+        "messages": messages.len(),
+        "developer": messages.iter().filter(|message| message.get("role").and_then(Value::as_str) == Some("developer")).count(),
+        "roles": roles,
+        "truncated": messages.len() > roles.len(),
+    })
 }
 
 /// 上游失败（含状态码与分类）。
@@ -579,16 +609,31 @@ impl UpstreamClient {
                 }
             }
         };
-        self.forward_with_method_on(
-            &http,
-            &url,
-            headers,
-            chat_body_for(region, body_json),
-            signal,
-            &user_agent,
-            reqwest::Method::POST,
-        )
-        .await
+        let prepared_body = chat_body_for(region, body_json);
+        let role_summary = chat_role_summary(&prepared_body);
+        let result = self
+            .forward_with_method_on(
+                &http,
+                &url,
+                headers,
+                prepared_body,
+                signal,
+                &user_agent,
+                reqwest::Method::POST,
+            )
+            .await;
+        if let UpstreamChatResult::Err { status, .. } = &result {
+            if *status >= 400 {
+                crate::modules::runtime_log::warn(
+                    "wb-chat",
+                    format!(
+                        "region={} url={url} status={status} outbound={role_summary}",
+                        region.as_str()
+                    ),
+                );
+            }
+        }
+        result
     }
 
     /// POST 刷新端点；`X-Refresh-Token` 仅在此出现。
@@ -1498,6 +1543,49 @@ mod tests {
     fn chat_body_for_dispatches_cn_as_exact_passthrough() {
         let source = "not-json with preserved whitespace";
         assert_eq!(chat_body_for(Region::Cn, source), source);
+    }
+
+    #[test]
+    fn chat_body_for_cn_normalizes_at_the_send_boundary() {
+        let source = r#"{"messages":[{"role":"developer","content":"rules"},{"role":"user","content":"hi"}],"stream":false}"#;
+        let prepared: Value = serde_json::from_str(&chat_body_for(Region::Cn, source)).unwrap();
+        assert_eq!(prepared["messages"][0]["role"], "system");
+        assert_eq!(prepared["messages"][1]["role"], "user");
+        assert_eq!(prepared["stream"], true);
+        assert_eq!(
+            chat_body_for(Region::Cn, &prepared.to_string()),
+            prepared.to_string()
+        );
+    }
+
+    #[test]
+    fn chat_body_for_cn_preserves_user_data_and_does_not_add_system() {
+        let source = r#"{"messages":[{"role":"user","content":"{\"role\":\"developer\"}"}],"metadata":{"role":"developer"}}"#;
+        let prepared: Value = serde_json::from_str(&chat_body_for(Region::Cn, source)).unwrap();
+        assert_eq!(prepared["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(prepared["messages"][0]["role"], "user");
+        assert_eq!(
+            prepared["messages"][0]["content"],
+            r#"{"role":"developer"}"#
+        );
+        assert_eq!(prepared["metadata"]["role"], "developer");
+    }
+
+    #[test]
+    fn chat_role_summary_is_bounded_and_never_copies_client_strings() {
+        let mut messages = vec![json!({"role":"user", "content":"private prompt"}); 70];
+        messages[0] = json!({"role":"secret-client-value", "content":"private prompt"});
+        messages[69] = json!({"role":"developer", "content":"private instructions"});
+        let summary = chat_role_summary(&json!({"messages":messages}).to_string());
+        assert_eq!(summary["messages"], 70);
+        assert_eq!(summary["developer"], 1, "计数覆盖截断之后的消息");
+        assert_eq!(summary["roles"].as_array().unwrap().len(), 64);
+        assert_eq!(summary["roles"][0], "other");
+        assert_eq!(summary["truncated"], true);
+        let text = summary.to_string();
+        assert!(!text.contains("private"));
+        assert!(!text.contains("secret-client-value"));
+        assert_eq!(chat_role_summary("not JSON"), json!({"messages":null}));
     }
 
     #[test]
