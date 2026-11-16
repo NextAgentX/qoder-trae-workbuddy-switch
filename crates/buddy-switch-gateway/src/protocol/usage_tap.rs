@@ -172,7 +172,7 @@ pub struct UsageTap<S> {
     /// 已经回调过错误（同一条流只报一次；错误帧之后通常就是断流）。
     error_reported: bool,
     buffer: Vec<u8>,
-    /// 最近一次见到的用量（后到的帧覆盖先到的）。
+    /// 最近一次见到的总用量；缓存命中数单独合并，避免后到的部分 usage 帧抹掉它。
     latest: Option<UsageReport>,
     reported: bool,
     finished: bool,
@@ -313,7 +313,11 @@ impl<S> UsageTap<S> {
                 continue;
             };
             if let Some(usage) = extract_usage(&value) {
-                self.latest = Some(usage);
+                let mut latest = usage;
+                if latest.cached_tokens.is_none() {
+                    latest.cached_tokens = self.latest.and_then(|previous| previous.cached_tokens);
+                }
+                self.latest = Some(latest);
             }
         }
     }
@@ -632,6 +636,37 @@ mod tests {
             vec![report(9.0, 10, 10)],
             "后到的用量应覆盖先到的"
         );
+    }
+
+    #[tokio::test]
+    async fn later_partial_usage_does_not_erase_observed_cache_hits() {
+        let sink = Arc::new(RecordingSink::default());
+        let stream = stream_of(vec![
+            "data: {\"usage\":{\"credit\":1.0,\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_cache_hit_tokens\":90}}\n\n",
+            "data: {\"usage\":{\"credit\":1.2,\"prompt_tokens\":110,\"completion_tokens\":11}}\n\n",
+        ]);
+        let _ = UsageTap::new(stream, only(&sink)).collect::<Vec<_>>().await;
+        assert_eq!(
+            sink.calls(),
+            vec![Some(UsageReport {
+                credit: 1.2,
+                prompt_tokens: 110,
+                completion_tokens: 11,
+                cached_tokens: Some(90),
+            })],
+            "the latest totals should win while an omitted cache field retains the earlier observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn later_explicit_zero_replaces_an_earlier_cache_hit_count() {
+        let sink = Arc::new(RecordingSink::default());
+        let stream = stream_of(vec![
+            "data: {\"usage\":{\"credit\":1.0,\"prompt_tokens\":100,\"completion_tokens\":10,\"prompt_cache_hit_tokens\":90}}\n\n",
+            "data: {\"usage\":{\"credit\":1.3,\"prompt_tokens\":120,\"completion_tokens\":12,\"prompt_cache_hit_tokens\":0}}\n\n",
+        ]);
+        let _ = UsageTap::new(stream, only(&sink)).collect::<Vec<_>>().await;
+        assert_eq!(sink.calls()[0].as_ref().unwrap().cached_tokens, Some(0));
     }
 
     /// ★ 没有可用用量时**仍要回报一次 `None`** —— 日志类 sink 靠它记下「这次请求发生过」。

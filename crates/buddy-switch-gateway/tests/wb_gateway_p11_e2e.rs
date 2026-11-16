@@ -215,3 +215,65 @@ async fn wb_disabled_in_one_region_does_not_hide_the_other() {
     }
     let _ = std::fs::remove_dir_all(&home);
 }
+
+async fn assert_no_account_failure_is_logged(endpoint: &str) {
+    let _guard = guard();
+    let _home = isolated_home(&format!("failure-log-{}", endpoint.replace('/', "-")));
+    let state = GatewayState::new(GatewayConfig::default());
+    let (_record, key) = state.keys.create("e2e-wb-failure-log".into(), Region::Cn);
+    let app = router(state.clone());
+    let prompt = "private-prompt-must-not-appear-in-request-log";
+    let mut body = serde_json::json!({"model": "glm-5.3", "stream": false});
+    if endpoint == "/v1/responses" {
+        body["input"] = serde_json::json!(prompt);
+    } else {
+        body["messages"] = serde_json::json!([{"role": "user", "content": prompt}]);
+        if endpoint == "/v1/messages" {
+            body["max_tokens"] = serde_json::json!(16);
+        }
+    }
+    let request = Request::builder()
+        .method("POST")
+        .uri(endpoint)
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::from(body.to_string()))
+        .expect("构造请求");
+    let response = app.oneshot(request).await.expect("请求应完成");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response: serde_json::Value =
+        serde_json::from_str(&body_text(response).await).expect("错误响应应为 JSON");
+    // 证明请求在选号阶段失败，绝不调用真实上游。
+    assert_eq!(response["error"]["type"], "no_credential");
+
+    let entries = state.log.list();
+    assert_eq!(entries.len(), 1, "失败必须写入一条日志");
+    let entry = &entries[0];
+    assert_eq!(entry["endpoint"], endpoint);
+    assert_eq!(entry["status"], 401);
+    assert!(
+        entry["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty()),
+        "{endpoint} 的失败日志必须保留错误原因，不能是 null"
+    );
+    assert_eq!(entry["error"], response["error"]["message"]);
+    let logged = entry.to_string();
+    assert!(!logged.contains(prompt), "日志不得包含请求正文");
+    assert!(!logged.contains(&key), "日志不得包含认证 token");
+}
+
+#[tokio::test]
+async fn wb_chat_no_account_failure_is_logged() {
+    assert_no_account_failure_is_logged("/v1/chat/completions").await;
+}
+
+#[tokio::test]
+async fn wb_messages_no_account_failure_is_logged() {
+    assert_no_account_failure_is_logged("/v1/messages").await;
+}
+
+#[tokio::test]
+async fn wb_responses_no_account_failure_is_logged() {
+    assert_no_account_failure_is_logged("/v1/responses").await;
+}

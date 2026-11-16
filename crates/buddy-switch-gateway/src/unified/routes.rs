@@ -260,6 +260,7 @@ async fn relay_llm(
                         variant,
                         rewritten,
                         Some(actor.clone()),
+                        headers.clone(),
                     )
                     .await
                 }
@@ -269,6 +270,7 @@ async fn relay_llm(
                         variant,
                         rewritten,
                         Some(actor.clone()),
+                        headers.clone(),
                     )
                     .await
                 }

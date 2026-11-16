@@ -25,9 +25,9 @@
 //! 与 `body_limit.rs` 同一套路：`BUDDY_SWITCH_HOME` 指向已存在的临时目录，
 //! 同进程内用一把互斥锁串行化（env 是进程级全局状态）。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::Response;
@@ -204,6 +204,68 @@ async fn spawn_mock(behavior: Behavior) -> String {
         let _ = axum::serve(listener, app).await;
     });
     format!("http://{addr}")
+}
+
+/// Collect the actual Trae request bodies for Responses cache regression tests.
+#[derive(Clone, Default)]
+struct CacheProbe {
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+async fn cache_probe_upstream(
+    State(probe): State<CacheProbe>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let uid = headers
+        .get("x-ide-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&body).expect("gateway upstream body should be JSON");
+    let call = {
+        let mut requests = probe.requests.lock().expect("lock probe records");
+        requests.push(serde_json::json!({"uid": uid, "payload": payload}));
+        requests.len()
+    };
+    // Simulate an upstream cache hit on the second identical request.
+    let cached = if call == 2 { 180_000 } else { 0 };
+    let body = format!(
+        "id:1\nevent:output\ndata:{{\"response\":\"synthetic-ok\"}}\n\n\
+         id:2\nevent:token_usage\ndata:{{\"prompt_tokens\":200000,\"completion_tokens\":2,\"total_tokens\":200002,\"prompt_cache_hit_tokens\":{cached}}}\n\n\
+         id:3\nevent:done\ndata:{{\"finish_reason\":\"stop\"}}\n\n"
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .body(Body::from(body))
+        .expect("build cache probe response")
+}
+
+async fn spawn_cache_probe() -> (String, CacheProbe) {
+    let probe = CacheProbe::default();
+    let app = axum::Router::new()
+        .route("/api/agent/v3/llm_utils_chat", post(cache_probe_upstream))
+        .with_state(probe.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cache probe mock upstream");
+    let addr = listener.local_addr().expect("read mock address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), probe)
+}
+
+fn responses_request(key: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::from(body.to_string()))
+        .expect("build Responses request")
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1064,104 @@ async fn anthropic_streaming_emits_anthropic_events() {
         !text.contains("chat.completion.chunk"),
         "不应出现 OpenAI chunk（转换层没接上）：{text}"
     );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A large repeated Responses prefix must keep stable Trae IDs, isolate a different
+/// project prefix, and report upstream cache usage in both the API response and log.
+#[tokio::test]
+async fn responses_large_prefix_preserves_cache_identity_and_usage() {
+    let _guard = guard();
+    let home = isolated_home("responses-cache-probe", &[("uid-cache", "jwt-cache")]);
+    let (base, probe) = spawn_cache_probe().await;
+    let mut state = TraeGatewayState::new(TraeGatewayConfig::default());
+    state.upstream = base;
+    let key = create_key(&home, TraeVariant::default());
+    let app = router(state);
+
+    // Synthetic text only. Its size crosses the adapter's history budget while
+    // remaining well below the gateway's request body limit.
+    let large_prefix = "synthetic-cache-prefix ".repeat(20_000);
+    let request_body = |instructions: &str, input: &str| {
+        serde_json::json!({
+            "model": "deepseek-v4.1-flash",
+            "stream": false,
+            "instructions": instructions,
+            "input": input,
+        })
+    };
+    let project_a = request_body("synthetic project A", &large_prefix);
+    let project_b = request_body("synthetic project B", &format!("project-b-{large_prefix}"));
+
+    let mut usages = Vec::new();
+    for body in [&project_a, &project_a, &project_b] {
+        let response = app
+            .clone()
+            .oneshot(responses_request(&key, body))
+            .await
+            .expect("Responses gateway request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = body_text(response).await;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .unwrap_or_else(|_| panic!("expected JSON response: {text}"));
+        usages.push(value["usage"].clone());
+    }
+
+    assert_eq!(usages[0]["input_tokens"], 200_000);
+    assert_eq!(usages[0]["input_tokens_details"]["cached_tokens"], 0);
+    assert_eq!(usages[1]["input_tokens"], 200_000);
+    assert_eq!(usages[1]["input_tokens_details"]["cached_tokens"], 180_000);
+    assert_eq!(usages[2]["input_tokens_details"]["cached_tokens"], 0);
+
+    let captured = probe.requests.lock().expect("lock probe records").clone();
+    assert_eq!(
+        captured.len(),
+        3,
+        "all three requests should reach the mock upstream"
+    );
+    for index in 0..2 {
+        assert!(
+            serde_json::to_vec(&captured[index]["payload"])
+                .unwrap()
+                .len()
+                > 256 * 1024,
+            "large synthetic prompt should reach the upstream intact"
+        );
+        for field in ["conversation_id", "session_id", "project_id"] {
+            assert_eq!(
+                captured[0]["payload"][field], captured[index]["payload"][field],
+                "same project prefix must reuse upstream {field}"
+            );
+        }
+    }
+    for field in ["conversation_id", "session_id", "project_id"] {
+        assert_ne!(
+            captured[0]["payload"][field], captured[2]["payload"][field],
+            "different project prompts must not share upstream {field}"
+        );
+    }
+
+    let log_text = std::fs::read_to_string(
+        home.join(".buddy-switch")
+            .join("trae")
+            .join("api_gateway_logs.json"),
+    )
+    .expect("gateway usage log should be written");
+    let entries: serde_json::Value = serde_json::from_str(&log_text).expect("log should be JSON");
+    let responses: Vec<_> = entries
+        .as_array()
+        .expect("log should be an array")
+        .iter()
+        .filter(|entry| entry["endpoint"] == "/v1/responses")
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert!(responses
+        .iter()
+        .all(|entry| entry["promptTokens"] == 200_000));
+    assert_eq!(responses[0]["cachedTokens"].as_u64().unwrap_or(0), 0);
+    assert_eq!(responses[1]["cachedTokens"], 180_000);
+    assert_eq!(responses[2]["cachedTokens"].as_u64().unwrap_or(0), 0);
 
     let _ = std::fs::remove_dir_all(&home);
 }

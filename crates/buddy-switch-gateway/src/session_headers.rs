@@ -124,12 +124,12 @@ pub fn conversation_id_of(body: &Value) -> Option<String> {
 
 /// 为缺少显式会话 ID 的 Chat Completions 请求生成内容指纹。
 ///
-/// 取 system 指令和首条 user 消息，与 Trae 上游会话身份的稳定前缀一致；只返回
-/// SHA-256 摘要，避免把提示词正文作为选号表键。固定 user/install ID 不参与，
-/// 否则同一客户端的不同会话会被错误地绑定到同一账号。
+/// 取首条 user 消息和首轮前的 system/developer 指令；只返回 SHA-256 摘要，避免
+/// 把提示词正文作为选号表键。固定 user/install ID 不参与，否则同一客户端的不同
+/// 会话会被错误地绑定到同一账号。
 pub fn chat_content_identity(body: &Value) -> Option<String> {
     let messages = body.get("messages")?.as_array()?;
-    let mut system = None;
+    let mut instructions = Vec::new();
     let mut first_user = None;
     for message in messages {
         let (Some(role), Some(content)) = (
@@ -142,27 +142,28 @@ pub fn chat_content_identity(body: &Value) -> Option<String> {
             continue;
         }
         match role {
-            "system" if system.is_none() => system = Some(content),
+            "system" | "developer" if first_user.is_none() => instructions.push((role, content)),
             "user" if first_user.is_none() => first_user = Some(content),
             _ => {}
         }
-        if system.is_some() && first_user.is_some() {
+        if first_user.is_some() {
             break;
         }
     }
-    if system.is_none() && first_user.is_none() {
+    if instructions.is_empty() && first_user.is_none() {
         return None;
     }
 
     let mut hasher = Sha256::new();
-    hasher.update(b"chat-content-session-v1|");
-    for (role, content) in [("system", system), ("user", first_user)] {
-        if let Some(content) = content {
-            let encoded = serde_json::to_vec(content).ok()?;
-            hasher.update(role.as_bytes());
-            hasher.update((encoded.len() as u64).to_be_bytes());
-            hasher.update(encoded);
-        }
+    hasher.update(b"chat-content-session-v2|");
+    for (role, content) in instructions
+        .into_iter()
+        .chain(first_user.map(|content| ("user", content)))
+    {
+        let encoded = serde_json::to_vec(content).ok()?;
+        hasher.update(role.as_bytes());
+        hasher.update((encoded.len() as u64).to_be_bytes());
+        hasher.update(encoded);
     }
     Some(
         hasher
@@ -171,6 +172,16 @@ pub fn chat_content_identity(body: &Value) -> Option<String> {
             .map(|byte| format!("{byte:02x}"))
             .collect(),
     )
+}
+
+/// 会话标识优先使用客户端 ID/请求头；无 ID 时对转换后的 Chat 消息生成内容指纹。
+/// `body` 保留原协议，`chat_body` 是上游实际使用的消息形态（Messages/Responses 需要转换）。
+pub fn session_key_or_content_identity(
+    body: &Value,
+    headers: &HeaderMap,
+    chat_body: &Value,
+) -> Option<String> {
+    session_key_of(body, headers).or_else(|| chat_content_identity(chat_body))
 }
 
 /// 入站会话标识头的候选顺序（issue #150）。
@@ -414,6 +425,51 @@ mod tests {
             conversation_id_of(&json!({"conversation_id": "x"})),
             None,
             "只认 metadata 内的键，不认顶层同名字段"
+        );
+    }
+
+    #[test]
+    fn chat_content_identity_distinguishes_project_developer_instructions() {
+        let request = |instructions: &str| {
+            json!({
+                "messages": [
+                    {"role": "developer", "content": instructions},
+                    {"role": "user", "content": "Fix the failing test"}
+                ]
+            })
+        };
+
+        assert_ne!(
+            chat_content_identity(&request("Project A: use Rust")),
+            chat_content_identity(&request("Project B: use TypeScript")),
+            "developer instructions can carry project identity and must separate sessions"
+        );
+    }
+
+    #[test]
+    fn session_key_falls_back_to_converted_chat_content_after_headers() {
+        let source =
+            json!({"system": "Project A", "messages": [{"role": "user", "content": "Fix it"}]});
+        let converted = json!({"messages": [
+            {"role": "system", "content": "Project A"},
+            {"role": "user", "content": "Fix it"}
+        ]});
+        let headers = HeaderMap::new();
+        assert_eq!(
+            session_key_or_content_identity(&source, &headers, &converted),
+            chat_content_identity(&converted),
+            "converted Anthropic/Responses messages provide the content fallback"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-claude-code-session-id",
+            "stable-session".parse().unwrap(),
+        );
+        assert_eq!(
+            session_key_or_content_identity(&source, &headers, &converted).as_deref(),
+            Some("stable-session"),
+            "an explicit client session header wins over content-derived identity"
         );
     }
 

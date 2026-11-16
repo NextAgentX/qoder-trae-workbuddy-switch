@@ -104,7 +104,7 @@ async fn relay_on_scope_inner(
                 return unsupported(target);
             };
             let state = <crate::trae::TraeGateway as crate::GatewayProduct>::shared_state();
-            crate::trae::routes::chat_for_variant(state, variant, body, key).await
+            crate::trae::routes::chat_for_variant(state, variant, body, key, headers).await
         }
         Product::Qoder => {
             let state = <crate::qoder::QoderGateway as crate::GatewayProduct>::shared_state();
