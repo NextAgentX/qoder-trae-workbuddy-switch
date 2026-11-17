@@ -67,7 +67,7 @@ impl UsageReport {
 /// 用量回报接收方。
 ///
 /// 抽象成 trait 是为了让单测用记录型替身，不必真的起账号池 / 日志文件；
-/// 与 `cat.rs` 的 `CatIo` / `school.rs` 的 `SchoolIo` 是同一套可注入缝思路。
+/// 与 `cat.rs` 的 `CatIo` 是同一套可注入缝思路。
 pub trait UsageSink: Send + Sync + 'static {
     /// 流结束时调用**恰好一次**。
     ///

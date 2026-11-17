@@ -337,7 +337,7 @@ Schedules support **minute-level** times (e.g. `09:37`), multiple times per task
 
 | Side | Tasks |
 | --- | --- |
-| WorkBuddy (6) | Check-in · cat travel · activity map · token keepalive · back-to-school · night owl |
+| WorkBuddy (5) | Check-in · cat travel · activity map · token keepalive · night owl |
 | Trae (2) | Check-in · automatic JWT renewal |
 | Qoder (2) | Check-in · token keepalive |
 

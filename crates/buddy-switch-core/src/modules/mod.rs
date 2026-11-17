@@ -82,7 +82,6 @@ pub mod rotate;
 pub mod runtime_log;
 pub mod schedule;
 pub mod scheduler;
-pub mod school;
 pub mod session;
 pub mod session_bundle;
 // 追加型 jsonl 的尾部窗口读取（token_daily / client_limits 共用的唯一实现）。

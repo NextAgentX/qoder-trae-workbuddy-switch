@@ -335,7 +335,7 @@ flowchart LR
 
 | 侧 | 任务 |
 | --- | --- |
-| WorkBuddy（6 类） | 签到 · 猫猫旅行 · 活跃地图 · Token 保活 · 开学季 · 夜猫子 |
+| WorkBuddy（5 类） | 签到 · 猫猫旅行 · 活跃地图 · Token 保活 · 夜猫子 |
 | Trae（2 类） | 签到 · JWT 自动续期 |
 | Qoder（2 类） | 签到 · 令牌保活 |
 

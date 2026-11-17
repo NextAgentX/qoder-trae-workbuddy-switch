@@ -82,7 +82,7 @@ pub type CatResponse = (u16, Value);
 /// **绝不发起真实请求**，从而可驱动真实入口 [`run_cat_cycle_for_with`]。
 ///
 /// `Send + Sync` 超级约束：调度器在 `tokio::spawn` 里调用，要求 `&dyn CatIo` 可跨线程
-/// （与 `school::SchoolIo` 完全一致）。
+/// （与可注入 IO 缝的既有约定保持一致）。
 pub trait CatIo: Send + Sync {
     /// 发起一次请求。`method` 为 `"GET"` / `"POST"`；`body` 仅 POST 携带；
     /// `extra` 为追加请求头（chat 域为 `x-client-platform: web`，billing 域为空，
@@ -288,7 +288,7 @@ pub async fn run_cat_cycle() -> Value {
 /// 按 region 执行一轮夜猫子任务（生产入口）。CN 专有；非窗口 / 非 CN 一律跳过并正常退出。
 ///
 /// 生产路径：取真实 `now_ms()` + 加载账号 + 注入 [`RealCatIo`]（真实 HTTP），转调
-/// [`run_cat_cycle_for_with`]。二者共享同一段主循环逻辑（与 `school::run_school_cycle_for`
+/// [`run_cat_cycle_for_with`]。二者共享同一段主循环逻辑（与 `run_cat_cycle_for`
 /// :502/:510 的结构完全同构）。
 pub async fn run_cat_cycle_for(region: Region) -> Value {
     if region != Region::Cn {
@@ -299,7 +299,7 @@ pub async fn run_cat_cycle_for(region: Region) -> Value {
 
 /// 可注入版本：时钟、账号与 HTTP 取值点均由调用方提供，便于单测**驱动真实入口**且不发网络。
 ///
-/// 窗口判定一律使用传入的 `now_ms`（不再直取真实时钟），与 `school::run_school_cycle_for_with`
+/// 窗口判定一律使用传入的 `now_ms`（不再直取真实时钟），与 `run_cat_cycle_for_with`
 /// 同构。
 pub async fn run_cat_cycle_for_with(
     region: Region,

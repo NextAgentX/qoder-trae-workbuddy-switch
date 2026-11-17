@@ -1206,7 +1206,6 @@ type ScheduleTimesField =
   | "travel_times"
   | "activity_times"
   | "keepalive_times"
-  | "school_times"
   | "cat_times";
 
 type ScheduleJitterField =
@@ -1214,7 +1213,6 @@ type ScheduleJitterField =
   | "travel_jitter_minutes"
   | "activity_jitter_minutes"
   | "keepalive_jitter_minutes"
-  | "school_jitter_minutes"
   | "cat_jitter_minutes";
 
 type ScheduleEnabledField =
@@ -1222,7 +1220,6 @@ type ScheduleEnabledField =
   | "travel_enabled"
   | "activity_enabled"
   | "keepalive_enabled"
-  | "school_enabled"
   | "cat_enabled";
 
 interface ScheduleTaskDef {
@@ -1236,7 +1233,7 @@ interface ScheduleTaskDef {
 }
 
 /**
- * WorkBuddy 分区**六类**定时任务的展示定义（顺序与后端 `ScheduleTask::all()` 的前六类一致）。
+ * WorkBuddy 分区**五类**定时任务的展示定义（顺序与后端 `ScheduleTask::all()` 的前六类一致）。
  *
  * ⚠️ 后端 `all()` 还有**第七类** `trae_checkin`（Trae 分区的自动签到），它**刻意不在此表**：
  * 本页是 WorkBuddy 分区的设置页，把另一条产品线的开关摆进来会让人误以为它属于本产品。
@@ -1248,7 +1245,6 @@ const SCHEDULE_TASKS: ScheduleTaskDef[] = [
   { key: "travel", labelKey: "wbSettings.schedule.task.travel.label", descKey: "wbSettings.schedule.task.travel.desc", timesField: "travel_times", jitterField: "travel_jitter_minutes", enabledField: "travel_enabled" },
   { key: "activity", labelKey: "wbSettings.schedule.task.activity.label", descKey: "wbSettings.schedule.task.activity.desc", timesField: "activity_times", jitterField: "activity_jitter_minutes", enabledField: "activity_enabled" },
   { key: "keepalive", labelKey: "wbSettings.schedule.task.keepalive.label", descKey: "wbSettings.schedule.task.keepalive.desc", timesField: "keepalive_times", jitterField: "keepalive_jitter_minutes", enabledField: "keepalive_enabled" },
-  { key: "school", labelKey: "wbSettings.schedule.task.school.label", descKey: "wbSettings.schedule.task.school.desc", timesField: "school_times", jitterField: "school_jitter_minutes", enabledField: "school_enabled" },
   { key: "cat", labelKey: "wbSettings.schedule.task.cat.label", descKey: "wbSettings.schedule.task.cat.desc", timesField: "cat_times", jitterField: "cat_jitter_minutes", enabledField: "cat_enabled" },
 ];
 
@@ -1285,7 +1281,7 @@ function summarizeScheduleRun(
     : { key: "wbSettings.schedule.summaryStreak", params: { reported, streak } };
 }
 
-/** 定时任务排程配置：六类任务各自独立开关与时点表 + 活跃上报次数。 */
+/** 定时任务排程配置：五类任务各自独立开关与时点表 + 活跃上报次数。 */
 function ScheduleCard() {
   const t = useT();
   const [cfg, setCfg] = useState<ScheduleConfig | null>(null);

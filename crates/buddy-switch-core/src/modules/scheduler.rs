@@ -25,7 +25,7 @@ use super::{
     activity, cat, checkin, config, qoder, refresh,
     region::Region,
     schedule::{self, ScheduleConfig, ScheduleTask},
-    school, travel,
+    travel,
 };
 
 /// 任务被禁用（`hours` 为空）时重查配置的间隔：1 分钟。
@@ -67,7 +67,7 @@ fn clear_pending_retry(task: ScheduleTask) {
 /// 哪些任务在**进程启动时补跑一轮**。
 ///
 /// 只补「今天该做但还没做」的几类：签到核验（WorkBuddy 与 Trae 各一）、Trae JWT 续期、
-/// 旅行派出+领取、保活。活跃上报 / 开学季 / 夜猫子不在其中——它们是「每天至多一次」的
+/// 旅行派出+领取、保活。活跃上报 / 夜猫子不在其中——它们是「每天至多一次」的
 /// 积分动作，交给排程小时表即可，启动就跑会让「我明明设了 10 点」的语义失效。
 ///
 /// Trae 签到**在其中**：排程定在 9 点、而用户 10 点才开这个应用是常态，
@@ -106,7 +106,7 @@ pub fn startup_tasks(cfg: &ScheduleConfig) -> Vec<ScheduleTask> {
 /// 返回值供「立即执行」这类手动入口展示：各业务模块自身的返回原样内嵌，便于定位到具体
 /// region / 账号（例如活跃上报会带回每个账号的 `reported` 与 `streakDays`）。
 ///
-/// CN / Global 的 region 隔离在此收敛：签到 / 旅行 / 开学季 / 夜猫子只有 CN 有对应上游
+/// CN / Global 的 region 隔离在此收敛：签到 / 旅行 / 夜猫子只有 CN 有对应上游
 /// （Global 侧由各模块自行返回结构化 `unsupported`，独立降级）；活跃上报与保活按 region
 /// 各自执行。
 pub async fn run_scheduled_task(task: ScheduleTask) -> Value {
@@ -143,9 +143,6 @@ pub async fn run_scheduled_task(task: ScheduleTask) -> Value {
                 regions.push(refresh::run_keepalive_cycle_for(region).await);
             }
             json!({ "task": task.as_str(), "regions": regions })
-        }
-        ScheduleTask::School => {
-            json!({ "task": task.as_str(), "result": school::run_school_cycle_for(Region::Cn).await })
         }
         ScheduleTask::Cat => {
             json!({ "task": task.as_str(), "result": cat::run_cat_cycle_for(Region::Cn).await })
@@ -367,7 +364,7 @@ mod tests {
             "关 keepalive 不能带走 Trae 签到 / Trae JWT 续期"
         );
 
-        // 活跃上报 / 开学季 / 夜猫子**不在**启动补跑里（交给排程小时表）。
+        // 活跃上报 / 夜猫子**不在**启动补跑里（交给排程小时表）。
         let only_others = schedule::ScheduleConfig {
             checkin_enabled: false,
             travel_enabled: false,

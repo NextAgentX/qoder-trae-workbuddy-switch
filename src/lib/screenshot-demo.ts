@@ -3432,7 +3432,6 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       travel_times: ["09:00", "21:00"],
       activity_times: ["10:00"],
       keepalive_times: ["22:00"],
-      school_times: ["12:00"],
       cat_times: ["01:00"],
       trae_checkin_times: ["09:00", "21:00"],
       trae_jwt_refresh_times: ["09:00", "21:00"],
@@ -3445,7 +3444,6 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       travel_jitter_minutes: 0,
       activity_jitter_minutes: 0,
       keepalive_jitter_minutes: 0,
-      school_jitter_minutes: 0,
       cat_jitter_minutes: 0,
       trae_checkin_jitter_minutes: 0,
       trae_jwt_refresh_jitter_minutes: 0,
@@ -3455,7 +3453,6 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
       travel_enabled: true,
       activity_enabled: true,
       keepalive_enabled: true,
-      school_enabled: true,
       cat_enabled: true,
       // 与后端默认值一致（Trae 自动签到默认关闭）——演示数据也必须如实，
       // 否则截图会误导成「装上就是开着的」。
