@@ -101,6 +101,8 @@ export const en = {
   "wbAccounts.card.priority": "Priority",
   "wbAccounts.card.priorityTip": "Recommended priority",
   "wbAccounts.card.expiringChip": "Closest expiry in {days} days · {amount} credits",
+  /* Under an hour the badge speaks in minutes, so the last hour keeps moving. */
+  "wbAccounts.card.expiringChipMinutes": "Closest expiry in {minutes} min · {amount} credits",
   /* Within 48 hours the badge speaks in hours, so 25h and 47h stay distinguishable. */
   "wbAccounts.card.expiringChipHours": "Closest expiry in {hours} hrs · {amount} credits",
   "wbAccounts.card.expiringTipTitle": "Expiring batches ({n})",
@@ -399,6 +401,7 @@ export const en = {
   "wbAccounts.table.creditExpiry": "Credit expiry",
   "wbAccounts.table.creditExpiryDays": "{value} days",
   "wbAccounts.table.creditExpiryHours": "{value} hrs",
+  "wbAccounts.table.creditExpiryMinutes": "{value} min",
   "wbAccounts.table.tokenExpiry": "Token expiry",
   "wbAccounts.table.programs": "Programs",
   "wbAccounts.table.current": "Current",

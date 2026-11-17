@@ -684,31 +684,37 @@ const isCurrentAccount = programSlots.some((slot) => slot.active);
   );
 
   /**
-   * 「最近到期 {N天|N小时} · {金额} 积分」——原型 `.acct-chips` 的第三条
+   * 「最近到期 {N分钟|N小时|N天} · {金额} 积分」——原型 `.acct-chips` 的第三条
    * （`demo-app.js` 的 `expiringChipText()`；徽章只在**最快那批**存在时渲染）。
    *
    * ★ 2026-11-09 **口径修正**：徽章只报**最快到期的那一批** —— 天数与金额同批
    * （`summarizeExpiring` 的 `soonestDays` / `soonestAmount`）。
    * 此前「金额 = 全部临期之和」配「天数 = 最晚那一刻」会让徽章说成「2 天内过期」，
    * 而实际上明天就有一批要作废。逐批明细（最快排第一、绝对时刻）放进 tooltip。
-   * ★ 粒度（≤48 小时说小时）由 `remainingSpan` 唯一决定，卡片与账号表格列同源。
+   * ★ 粒度（<1 小时用分钟、≤48 小时用小时）由 `remainingSpan` 唯一决定，
+   *   卡片与账号表格列同源。1 分钟以内显示 0 分钟（刻意：不设秒档）。
    *
    * ⚠️ 窗口不再是前端自设的 3 天，而是**后端的 `expiringSoon`（7 天）**——统计页 / 总览页
    * 读的就是同一口径（`expiringSoonRemaining`），卡片若另设窗口，同一件事会出现两个数字。
    * 拿不到临期批次 ⇒ **整条不渲染**（绝不写一个猜出来的「N 天」标签）。
    */
   const expiring = credit?.ok ? summarizeExpiring(metricResources, { now: expiryNow }) : null;
-  /* 徽章文案：≤ 48 小时用小时，超过才用天（与 `summarizeExpiring.soonestUnit` 同源）。 */
+  /* 徽章文案：<1 小时用分钟、≤ 48 小时用小时，超过才用天（与 `summarizeExpiring.soonestUnit` 同源）。 */
   const expiringChipText = expiring
-    ? expiring.soonestUnit === "hours"
-      ? t("wbAccounts.card.expiringChipHours", {
+    ? expiring.soonestUnit === "minutes"
+      ? t("wbAccounts.card.expiringChipMinutes", {
           amount: formatCredits(expiring.soonestAmount),
-          hours: expiring.soonestHours,
+          minutes: expiring.soonestMinutes,
         })
-      : t("wbAccounts.card.expiringChip", {
-          amount: formatCredits(expiring.soonestAmount),
-          days: expiring.soonestDays,
-        })
+      : expiring.soonestUnit === "hours"
+        ? t("wbAccounts.card.expiringChipHours", {
+            amount: formatCredits(expiring.soonestAmount),
+            hours: expiring.soonestHours,
+          })
+        : t("wbAccounts.card.expiringChip", {
+            amount: formatCredits(expiring.soonestAmount),
+            days: expiring.soonestDays,
+          })
     : "";
   const expiringChip = expiring ? (
     <Tooltip>

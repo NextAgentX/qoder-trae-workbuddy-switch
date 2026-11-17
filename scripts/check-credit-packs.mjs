@@ -299,30 +299,88 @@ check("★ 临期窗口只剩两档：后端标记，或镜像后端的 7 天常
  * 仍用只到天的 `daysUntil()` ⇒ 2 小时后到期的批在徽章上「2小时」、在同一行的表格里
  * 「1 天」。这类分叉不会被 tsc 抓（两个函数都合法），只能靠行为断言把「同源」钉住。
  *
+ * 2026-11-17：补 **< 1 小时 ⇒ 分钟**，分钟与小时档改为向下取整；天档继续向上取整
+ * （宁可说晚不说早）。**不设秒档**：1 分钟以内显示 0 分钟（「马上到期」的读数）。
+ *
  * 可证伪点：
- * ① 边界：48 小时（含等号）仍算小时，49 小时才是 3 天（向上取整、宁可说晚）；
+ * ① 边界：59.5 秒向下取整到 0 分钟（不足 1 分钟即 0）；60 秒正好 1 分钟；
+ *    59.5 分钟向下取整到 59 分钟；60 分钟（含等号）说 1 小时；48 小时（含等号）仍算小时，
+ *    49 小时按天向上取整成 3 天；
  * ② 同源：`summarizeExpiring().soonestUnit` 必须等于 `remainingSpan()` 对同一剩余时长的
  *    结论 —— 变异：把 summarizeExpiring 里的 `remainingSpan(remaining).unit` 换回
  *    内联三元 ⇒ 这一组仍可能过，所以还要 ③；
- * ③ 用法：表格列读 `remainingSpan`，且 `daysUntil` 这个「只到天」的旧出口已删除
- *    （留着它，下一个人一定会再用一次）。
+ * ③ 用法：表格列读 `remainingSpan`；四个展示点（三张卡片 + 表格列）都接了「分钟」档
+ *    （漏接时 tsc 不报，界面会把 20 分钟渲染成「1小时」）；
+ *    `daysUntil` 这个「只到天」的旧出口已删除（留着它，下一个人一定会再用一次）。
  */
 check("★ 剩余时长粒度只有一处判据（remainingSpan）：徽章与表格列同源", () => {
+  const MINUTE = 60_000;
   const HOUR = 3_600_000;
+  eq(remainingSpan(999), { unit: "minutes", value: 0 }, "不足 1 分钟显示 0 分钟（不设秒档）");
+  eq(remainingSpan(45 * 1_000), { unit: "minutes", value: 0 }, "45 秒是 0 分钟");
+  eq(remainingSpan(59_500), { unit: "minutes", value: 0 }, "59.5 秒向下取整到 0 分钟");
+  eq(remainingSpan(MINUTE), { unit: "minutes", value: 1 }, "正好 60 秒是 1 分钟");
+  eq(remainingSpan(20 * MINUTE), { unit: "minutes", value: 20 }, "20 分钟");
+  eq(remainingSpan(59 * MINUTE), { unit: "minutes", value: 59 }, "59 分钟");
+  eq(remainingSpan(59 * MINUTE + 30_000), { unit: "minutes", value: 59 }, "59.5 分钟向下取整到 59 分钟");
+  eq(remainingSpan(HOUR), { unit: "hours", value: 1 }, "正好 60 分钟不再算分钟档，进入小时档");
   eq(remainingSpan(2 * HOUR), { unit: "hours", value: 2 }, "2 小时");
   eq(remainingSpan(48 * HOUR), { unit: "hours", value: 48 }, "48 小时（边界含等号）");
-  eq(remainingSpan(49 * HOUR), { unit: "days", value: 3 }, "49 小时应向上取整成 3 天");
+  eq(remainingSpan(48 * HOUR + 1), { unit: "days", value: 3 }, "48 小时 + 1 毫秒进入天档（向上取整）");
+  eq(remainingSpan(49 * HOUR), { unit: "days", value: 3 }, "49 小时向上取整成 3 天");
+  eq(remainingSpan(72 * HOUR), { unit: "days", value: 3 }, "72 小时正好 3 天");
   eq(remainingSpan(3 * DAY), { unit: "days", value: 3 }, "3 天");
   const only = (hours) => [
     { expireAt: NOW + hours * HOUR, remaining: 10, expired: false, expiringSoon: true },
   ];
-  for (const hours of [1, 47, 48, 49, 72]) {
+  for (const hours of [0.5, 1, 47, 48, 49, 72]) {
     const summary = summarizeExpiring(only(hours), { now: NOW });
     eq(summary.soonestUnit, remainingSpan(hours * HOUR).unit, `${hours} 小时后徽章的单位`);
   }
+  eq(summarizeExpiring(only(0.5), { now: NOW }).soonestMinutes, 30, "半小时徽章要拿到 30 分钟");
+  eq(summarizeExpiring(only(49), { now: NOW }).soonestDays, 3, "49 小时徽章要拿到 3 天");
+  eq(
+    summarizeExpiring(
+      [{ expireAt: NOW + 30_000, remaining: 10, expired: false, expiringSoon: true }],
+      { now: NOW },
+    ).soonestMinutes,
+    0,
+    "不足 1 分钟徽章要拿到 0 分钟",
+  );
   const page = readFileSync(path.join(root, "src/pages/AccountsPage.tsx"), "utf8");
   if (!/remainingSpan\(/.test(page)) {
     throw new Error("AccountsPage 的「积分到期」列没读 remainingSpan —— 会与卡片徽章的粒度分叉");
+  }
+  /* 漏接「分钟」档不会报编译错误，只会把 20 分钟渲染成「1小时」。 */
+  const displays = {
+    "src/pages/AccountsPage.tsx": {
+      key: "wbAccounts.table.creditExpiryMinutes",
+      branch: /span\.unit\s*===\s*["']minutes["']/,
+    },
+    "src/components/account-card.tsx": {
+      key: "wbAccounts.card.expiringChipMinutes",
+      branch: /expiring\.soonestUnit\s*===\s*["']minutes["']/,
+    },
+    "src/components/trae-account-card.tsx": {
+      key: "trae.comp.card.chip.expiringMinutes",
+      branch: /expiring\.soonestUnit\s*===\s*["']minutes["']/,
+    },
+    "src/components/qoder/qoder-account-card.tsx": {
+      key: "qoder.page.accounts.metric.expiringChipMinutes",
+      branch: /expiring\.soonestUnit\s*===\s*["']minutes["']/,
+    },
+  };
+  for (const [rel, { key, branch }] of Object.entries(displays)) {
+    const code = readFileSync(path.join(root, rel), "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+      .join("\n");
+    const keyPattern = new RegExp(
+      `["']${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`,
+    );
+    if (!branch.test(code) || !keyPattern.test(code)) {
+      throw new Error(`${rel} 没有真正接「分钟」档（缺分钟分支或 ${key}）`);
+    }
   }
   const pageCode = page
     .split("\n")

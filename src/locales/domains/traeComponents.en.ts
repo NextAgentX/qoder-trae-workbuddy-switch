@@ -61,6 +61,8 @@ export const en = {
   "trae.comp.card.chip.expired": "Credentials expired",
   "trae.comp.card.chip.needRelogin": "Needs re-login",
   "trae.comp.card.chip.expiring": "Closest expiry in {days} days · {amount} credits",
+  /* Under an hour the badge speaks in minutes, so the last hour keeps moving. */
+  "trae.comp.card.chip.expiringMinutes": "Closest expiry in {minutes} min · {amount} credits",
   /* Within 48 hours the badge speaks in hours, so 25h and 47h stay distinguishable. */
   "trae.comp.card.chip.expiringHours": "Closest expiry in {hours} hrs · {amount} credits",
   /* Badge tooltip detail — same shape as WB / Qoder (one line per batch, merge by expiry,

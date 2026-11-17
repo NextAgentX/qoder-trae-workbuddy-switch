@@ -94,6 +94,9 @@ export const zh = {
   // 「最近到期 {days}天 · {amount} 积分」—— 天数与金额都取**最快到期的那一批**。
   // 不把窗口总量和某一批的天数拼在一起：那是两批积分，怎么拼都有半句假话。
   "trae.comp.card.chip.expiring": "最近到期 {days}天 · {amount} 积分",
+  /* < 1 小时说分钟：与 `summarizeExpiring.soonestUnit` 同源；
+     1 分钟以内向下取整到 0 分钟（刻意不设秒档）。 */
+  "trae.comp.card.chip.expiringMinutes": "最近到期 {minutes}分钟 · {amount} 积分",
   /* ≤ 48 小时用小时：与 `summarizeExpiring.soonestUnit` 同源。 */
   "trae.comp.card.chip.expiringHours": "最近到期 {hours}小时 · {amount} 积分",
   /* 徽章浮层的逐批明细 —— **与 WB / Qoder 同一形状**（一行一批、按到期时刻合并、不带包名）。

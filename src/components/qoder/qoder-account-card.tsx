@@ -556,17 +556,23 @@ export function QoderAccountCard({
     </>
   );
 
-  /* 徽章文案：≤ 48 小时用小时，超过才用天（与 `summarizeExpiring.soonestUnit` 同源）。 */
+  /* 徽章文案：<1 小时用分钟、≤ 48 小时用小时，超过才用天
+     （与 `summarizeExpiring.soonestUnit` 同源）。 */
   const expiringChipText = expiring
-    ? expiring.soonestUnit === "hours"
-      ? t("qoder.page.accounts.metric.expiringChipHours", {
+    ? expiring.soonestUnit === "minutes"
+      ? t("qoder.page.accounts.metric.expiringChipMinutes", {
           amount: formatCredits(expiring.soonestAmount),
-          hours: expiring.soonestHours,
+          minutes: expiring.soonestMinutes,
         })
-      : t("qoder.page.accounts.metric.expiringChip", {
-          amount: formatCredits(expiring.soonestAmount),
-          days: expiring.soonestDays,
-        })
+      : expiring.soonestUnit === "hours"
+        ? t("qoder.page.accounts.metric.expiringChipHours", {
+            amount: formatCredits(expiring.soonestAmount),
+            hours: expiring.soonestHours,
+          })
+        : t("qoder.page.accounts.metric.expiringChip", {
+            amount: formatCredits(expiring.soonestAmount),
+            days: expiring.soonestDays,
+          })
     : "";
   const expiryChip = expiring ? (
     <Tooltip>

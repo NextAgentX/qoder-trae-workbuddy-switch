@@ -208,6 +208,8 @@ export const en = {
   // Expiry badge (issue #166): warning = expiring soon (7-day window, same as WB / Trae).
   // Badge reports the **closest-expiring batch only**; per-batch absolute timestamps go in the tooltip.
   "qoder.page.accounts.metric.expiringChip": "Closest expiry in {days} days · {amount} credits",
+  /* Under an hour the badge speaks in minutes, so the last hour keeps moving. */
+  "qoder.page.accounts.metric.expiringChipMinutes": "Closest expiry in {minutes} min · {amount} credits",
   /* Within 48 hours the badge speaks in hours, so 25h and 47h stay distinguishable. */
   "qoder.page.accounts.metric.expiringChipHours": "Closest expiry in {hours} hrs · {amount} credits",
   "qoder.page.accounts.metric.expiringTipTitle": "Expiring batches ({n})",

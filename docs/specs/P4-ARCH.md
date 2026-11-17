@@ -181,7 +181,9 @@ export interface DetailPack {
 > Trae `trae/credits.rs::EXPIRING_SOON_SECS`、前端两个镜像常量（`TRAE_EXPIRING_SOON_MS` /
 > `EXPIRING_SOON_MS`）四处必须相等 —— 跨语言不能共享常量，由 `check-credit-packs.mjs` 钉住。
 > 同一文件还钉住「剩余时长的粒度」只有一处判据 `credit-expiry.ts::remainingSpan`
-> （≤ 48 小时说小时；卡片徽章与账号表格列共用，别再长出只到天的第二个函数）。
+> （< 1 小时说分钟、≤ 48 小时说小时；分钟与小时档向下取整，天档向上取整；
+> **不设秒档**，1 分钟以内显示「0 分钟」；分钟值是渲染时快照，随数据刷新或重渲染更新，
+> 不做秒级倒计时；卡片徽章与账号表格列共用，别再长出只到天的第二个函数）。
 >
 > ★ **余额是可用口径**（同 D57）：`credit_result` 的 `totalRemaining` / `totalCapacity`
 > **剔除已过期包**，浪费量走 `expiredRemaining`；因此 WB 侧的资源包明细也必须剔过期包
