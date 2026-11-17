@@ -72,15 +72,26 @@ export function dimTotals(
       const key = keyOf(entry);
       if (key === undefined) continue;
       const current =
-        map.get(key) ?? { key, tokens: 0, input: 0, cached: 0, requests: 0, failed: 0, credit: 0 };
+        map.get(key) ?? {
+          key,
+          tokens: 0,
+          input: 0,
+          observedInput: 0,
+          cached: 0,
+          observed: false,
+          requests: 0,
+          failed: 0,
+          credit: 0,
+        };
       current.tokens += entry.total;
       current.input += entry.input;
-      /* ★ issue #154：`null`（没观测到）不参与求和 —— 把 null 当 0 求和与
-         「确实一次没命中」在结果上无法区分，而后者会让命中率被错误地算低。
-         只要窗口内有一天给出过值，这个按钮聚合就有值。 */
-      current.cached += entry.cached ?? 0;
+      const observed = entry.cacheObserved ?? entry.cached != null;
+      if (observed) {
+        current.observedInput += entry.input;
+        current.cached += entry.cached ?? 0;
+        current.observed = true;
+      }
       current.requests += entry.requests;
-      current.failed += entry.failed;
       current.credit += entry.credit;
       map.set(key, current);
     }
@@ -95,6 +106,11 @@ export interface DimTotal {
   tokens: number;
   /** 输入侧合计 —— 命中率的分母。 */
   input: number;
+  /** 命中上游前缀缓存的输入 token 合计（`input` 的子集；0 = 窗口内没观测到）。 */
+  /** 可判定缓存样本的输入侧合计；未观测请求不进入命中率分母。 */
+  observedInput: number;
+  /** 窗口内是否至少有一笔可判定的缓存样本（包含明确 0）。 */
+  observed: boolean;
   /** 命中上游前缀缓存的输入 token 合计（`input` 的子集；0 = 窗口内没观测到）。 */
   cached: number;
   requests: number;
@@ -132,21 +148,21 @@ export function gatewayCacheHit(
        选 `models` 而不是 `endpoints`：端点维度的 `input` 在部分历史数据里是 0
        （它当初只为「请求数分布」而生），拿它当分母会把命中率算成 null。 */
     for (const entry of day.models) {
-      input += entry.input;
-      if (entry.cached != null) {
-        cached += entry.cached;
+      const hasObservation = entry.cacheObserved ?? entry.cached != null;
+      if (hasObservation) {
+        input += entry.input;
+        cached += entry.cached ?? 0;
         observed = true;
       }
     }
   }
   if (input === 0) return { ...empty, observed };
   /* ★ 一条命中数据都没有时**必须**给 null：此时 `cached` 恒为 0，
-    直接除会得到「0% 命中」—— 与「确实全 miss」在界面上无法区分，
-    而那两句提示会把用户送去查一个并不存在的缓存问题（issue #154 的教训）。 */
+     直接除会得到「0% 命中」—— 与「确实全 miss」在界面上无法区分，
+     而那两句提示会把用户送去查一个并不存在的缓存问题（issue #154 的教训）。 */
   if (!observed) return { hitRate: null, input, cached: 0, observed };
   return { hitRate: cached / input, input, cached, observed };
 }
-
 /** 模型维度（`models[]` 的键）。 */
 export const modelKey = (entry: GatewayDimEntry) => entry.model;
 /** 账号维度（`accounts[]` 的键）。 */

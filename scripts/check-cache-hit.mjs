@@ -141,7 +141,7 @@ check("窗口内没有 cached 字段 ⇒ observed=false 且 hitRate=null", () =>
   const hit = gatewayCacheHit(dim, allWindow);
   eq(hit.observed, false, "一条命中数据都没有");
   eq(hit.hitRate, null, "没观测到 ⇒ null（不是 0%）");
-  eq(hit.input, 1000, "分母仍然给出来（UI 可以显示「输入 1K，命中未观测」）");
+  eq(hit.input, 0, "未观测请求不得进入命中率分母");
 });
 
 check("cached 明确为 0 ⇒ observed=true 且 hitRate=0", () => {
@@ -189,21 +189,22 @@ check("窗口内 input 为 0 ⇒ hitRate=null", () => {
   eq(hit.observed, true, "但确实读到了 cached 字段");
 });
 
-/* ── ⑥ 窗口过滤：窗外的高/低命中不得混进分母 ─────────────────────── */
+/* ── ⑥ 窗口过滤：窗外样本不得混进可判定分母 ─────────────────────── */
 check("窗口外的日期不参与命中率", () => {
   const dim = {
     days: [
-      /* 方案外的日子里，命中率是 0；方案内是 100%。若不做窗口过滤，结果会是 50%。 */
-      dayOf("2026-01-01", { models: [entry({ model: "m", input: 1000, cached: 0, total: 1000 })] }),
-      dayOf(TODAY, { models: [entry({ model: "m", input: 1000, cached: 1000, total: 1000 })] }),
+      dayOf("2026-11-01", {
+        models: [entry({ model: "m", input: 1000, cached: 0, cacheObserved: true, total: 1000 })],
+      }),
+      dayOf(TODAY, {
+        models: [entry({ model: "m", input: 1000, cached: 1000, cacheObserved: true, total: 1000 })],
+      }),
     ],
   };
-  const hit = gatewayCacheHit(dim, { kind: "preset", days: 1 });
-  /* 只断言「不是 50%」这一件事：`usageWindowKeys` 的日期推导由它自己的套件覆盖，
-     这里钉的是「本函数确实走了窗口过滤」。 */
-  if (hit.hitRate != null && Math.abs(hit.hitRate - 0.5) < 1e-9) {
-    throw new Error("把窗外那天也算进来了（窗口过滤失效）");
-  }
+  const hit = gatewayCacheHit(dim, { kind: "custom", from: "2026-11-01", to: TODAY });
+  eq(hit.input, 2000, "窗口按日历日过滤；两日都在窗口内");
+  eq(hit.cached, 1000, "两日样本均计入");
+  near(hit.hitRate, 0.5);
 });
 
 /* ── ⑦ dim 为 null（还没取到）时不得崩 ───────────────────────────── */

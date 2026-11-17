@@ -232,7 +232,8 @@ async fn cache_probe_upstream(
     // Simulate an upstream cache hit on the second identical request.
     let cached = if call == 2 { 180_000 } else { 0 };
     let body = format!(
-        "id:1\nevent:output\ndata:{{\"response\":\"synthetic-ok\"}}\n\n\
+        "id:0\nevent:metadata\ndata:{{\"prompt_cache_pool_record\":{{\"id\":\"synthetic-pool\"}}}}\n\n\
+         id:1\nevent:output\ndata:{{\"response\":\"synthetic-ok\"}}\n\n\
          id:2\nevent:token_usage\ndata:{{\"prompt_tokens\":200000,\"completion_tokens\":2,\"total_tokens\":200002,\"prompt_cache_hit_tokens\":{cached}}}\n\n\
          id:3\nevent:done\ndata:{{\"finish_reason\":\"stop\"}}\n\n"
     );
@@ -1166,6 +1167,76 @@ async fn responses_large_prefix_preserves_cache_identity_and_usage() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// Trae explicitly marked this request as having no prompt-cache pool. Its
+/// zero cache counter is therefore unobserved, not a measured miss, and must
+/// stay absent at both the Responses API boundary and the gateway log.
+#[tokio::test]
+async fn responses_no_cache_pool_does_not_publish_measured_zero() {
+    let _guard = guard();
+    let home = isolated_home("responses-no-cache-pool", &[("uid-no-pool", "jwt-no-pool")]);
+    let upstream = axum::Router::new().route(
+        "/api/agent/v3/llm_utils_chat",
+        post(|| async {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(concat!(
+                    "event:metadata\ndata:{\"prompt_cache_pool_record\":null}\n\n",
+                    "event:output\ndata:{\"response\":\"synthetic-ok\"}\n\n",
+                    "event:token_usage\ndata:{\"prompt_tokens\":200,\"completion_tokens\":2,\"total_tokens\":202,\"cache_read_input_tokens\":0}\n\n",
+                    "event:done\ndata:{\"finish_reason\":\"stop\"}\n\n",
+                )))
+                .expect("build no-pool response")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind no-pool upstream");
+    let address = listener.local_addr().expect("read no-pool address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, upstream).await;
+    });
+    let mut state = TraeGatewayState::new(TraeGatewayConfig::default());
+    state.upstream = format!("http://{address}");
+    let key = create_key(&home, TraeVariant::default());
+    let body = serde_json::json!({
+        "model": "deepseek-v4.1-flash",
+        "stream": false,
+        "input": "synthetic no-pool request",
+    });
+    let response = router(state)
+        .oneshot(responses_request(&key, &body))
+        .await
+        .expect("no-pool Responses request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("expected JSON response: {text}"));
+    assert_eq!(value["usage"]["input_tokens"], 200);
+    assert_eq!(
+        value["usage"]["input_tokens_details"]["cached_tokens"],
+        serde_json::Value::Null,
+        "no pool means no measured cache zero"
+    );
+
+    let log_text = std::fs::read_to_string(
+        home.join(".buddy-switch")
+            .join("trae")
+            .join("api_gateway_logs.json"),
+    )
+    .expect("gateway usage log should be written");
+    let entries: serde_json::Value = serde_json::from_str(&log_text).expect("log should be JSON");
+    let log = entries
+        .as_array()
+        .expect("log array")
+        .iter()
+        .find(|entry| entry["endpoint"] == "/v1/responses")
+        .expect("Responses log entry");
+    assert_eq!(log["promptTokens"], 200);
+    assert_eq!(log["cachedTokens"], serde_json::Value::Null);
+
+    let _ = std::fs::remove_dir_all(&home);
+}
 // ---------------------------------------------------------------------------
 // P11 模型禁用：出口① / 出口② 的**路由级**端到端（T04 #5）
 // ---------------------------------------------------------------------------

@@ -168,10 +168,15 @@ export interface GatewayDimEntry {
   /**
    * 命中上游前缀缓存的输入 token（`input` 的**子集**，不参与 `total`）。
    *
-   * `null` = 这天没观测到命中（老账本无此列 / 上游没报），**不是「命中为 0」**。
-   * 命中率 = `cached / input`，与后端 `token_stats::cacheHitRate` 同口径。
+   * `null` = 这天没有可判定的缓存样本（老账本无此列 / 上游未分配池）。
+   * 命中率以各条目的已观测输入为分母，与后端账本同口径。
    */
   cached?: number | null;
+  /**
+   * 后端是否至少有一笔可判定的缓存样本（包含明确 0）。
+   * 缺省只为兼容旧账本；新账本用它区分「全部未观测」与「已测得 0%」。
+   */
+  cacheObserved?: boolean;
   requests: number;
   /** HTTP `>= 400` 的条数（429 也在内）。 */
   failed: number;

@@ -182,22 +182,19 @@ struct DimBucket {
     input: u64,
     #[serde(default)]
     output: u64,
-    /// 命中上游前缀缓存的输入 token（`input` 的子集；0 = 上游没报，不是「没命中」）。
-    ///
+    /// 命中上游前缀缓存的输入 token（`input` 的子集）。`cache_observed` 独立保存
+    /// 「有明确 0」与「全部未观测」的区别；老账本缺列时按未观测读入。
     /// ★ issue #154：账本级命中率的唯一来源（环形日志只覆盖几分钟）。
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     cached: u64,
+    #[serde(default)]
+    cache_observed: bool,
     #[serde(default)]
     requests: u64,
     #[serde(default)]
     failed: u64,
     #[serde(default)]
     credit: f64,
-}
-
-/// `skip_serializing_if` 谓词：0 不落盘（老读码器读到缺字段也是 0，语义不变）。
-fn is_zero(value: &u64) -> bool {
-    *value == 0
 }
 
 impl DimBucket {
@@ -210,6 +207,7 @@ impl DimBucket {
         self.input = self.input.saturating_add(other.input);
         self.output = self.output.saturating_add(other.output);
         self.cached = self.cached.saturating_add(other.cached);
+        self.cache_observed |= other.cache_observed;
         self.requests = self.requests.saturating_add(other.requests);
         self.failed = self.failed.saturating_add(other.failed);
         self.credit += other.credit;
@@ -220,6 +218,7 @@ impl DimBucket {
         self.input = self.input.max(other.input);
         self.output = self.output.max(other.output);
         self.cached = self.cached.max(other.cached);
+        self.cache_observed |= other.cache_observed;
         self.requests = self.requests.max(other.requests);
         self.failed = self.failed.max(other.failed);
         if other.credit > self.credit {
@@ -382,8 +381,9 @@ struct Row {
     status: u16,
     input: u64,
     output: u64,
-    /// 命中上游前缀缓存的输入 token（`input` 的子集；缺字段 = 0 = 上游没报）。
-    cached: u64,
+    /// 命中上游前缀缓存的输入 token（`input` 的子集）。`None` 表示证据不足，
+    /// **不是**明确 0；`Some(0)` 才是可计入命中率的实测 miss。
+    cached: Option<u64>,
     credit: f64,
 }
 
@@ -495,7 +495,7 @@ fn parse_rows(product: LedgerProduct, entries: &[Value]) -> Vec<Row> {
                     .unwrap_or(0),
                 // ★ issue #154：原值（`promptTokens` 的子集），不做减法 —— 减法只在
                 //   Anthropic 出口的协议换算里做。缺字段 / 老条目 = 0 = 没观测到。
-                cached: value.get("cachedTokens").and_then(number_u64).unwrap_or(0),
+                cached: value.get("cachedTokens").and_then(number_u64),
                 credit: row_credit(value),
             })
         })
@@ -549,7 +549,10 @@ fn bucket_rows(
         let bucket = out.entry(key_of(row)).or_default();
         bucket.input = bucket.input.saturating_add(row.input);
         bucket.output = bucket.output.saturating_add(row.output);
-        bucket.cached = bucket.cached.saturating_add(row.cached);
+        if let Some(cached) = row.cached {
+            bucket.cached = bucket.cached.saturating_add(cached);
+            bucket.cache_observed = true;
+        }
         bucket.requests = bucket.requests.saturating_add(1);
         if row.status >= 400 {
             bucket.failed = bucket.failed.saturating_add(1);
@@ -766,7 +769,8 @@ fn dim_groups(map: &BTreeMap<String, DimBucket>, key_name: &str) -> Vec<Value> {
                     /* ★ issue #154：命中上游前缀缓存的输入 token（`input` 的子集）。
                     `null` = 这天没观测到命中（老账本无此列 / 上游没报），**不是 0 命中**
                     —— 与 `token_daily::dim_groups` 逐字同形，前端一套判据即可。 */
-                    "cached": (bucket.cached > 0).then_some(bucket.cached),
+                    "cached": bucket.cache_observed.then_some(bucket.cached),
+                    "cacheObserved": bucket.cache_observed,
                     "requests": bucket.requests,
                     "failed": bucket.failed,
                     "credit": round3(bucket.credit),
@@ -882,7 +886,7 @@ mod tests {
                 status: 200,
                 input: 10,
                 output: 2,
-                cached: 9,
+                cached: Some(9),
                 credit: 0.5,
             },
             Row {
@@ -896,7 +900,7 @@ mod tests {
                 status: 502,
                 input: 7,
                 output: 1,
-                cached: 0,
+                cached: Some(0),
                 credit: 0.0,
             },
         ];
@@ -908,6 +912,7 @@ mod tests {
                 input: 17,
                 output: 3,
                 cached: 9,
+                cache_observed: true,
                 requests: 2,
                 failed: 1,
                 credit: 0.5
@@ -950,7 +955,7 @@ mod tests {
             status: 200,
             input: 10,
             output: 2,
-            cached: 0,
+            cached: Some(0),
             credit: 0.0,
         }];
         let first = round(&rows, LedgerScope::Cn, &day, None);
@@ -977,7 +982,7 @@ mod tests {
             status: 200,
             input,
             output: 0,
-            cached: 0,
+            cached: Some(0),
             credit: 0.0,
         };
         let first = round(&[row(ts_early, 100)], LedgerScope::Cn, &day, None);
@@ -1027,6 +1032,35 @@ mod tests {
     /// 落盘往返（`record` → `usage_dim`）留给集成测试
     /// `tests/gateway_ledger.rs` —— 它会改进程级 `BUDDY_SWITCH_HOME`，
     /// 放进单元测试会与并行运行的其他用例互相污染。
+    /// 上游「未观测到缓存」的桶输出 null；但只要同一桶里有过明确的 0，
+    /// 就仍须返回可测得的 0。
+    #[test]
+    fn cache_observation_stays_null_until_an_explicit_zero_exists() {
+        let mut map: BTreeMap<String, DimBucket> = BTreeMap::new();
+        map.insert(
+            "unknown".into(),
+            DimBucket {
+                input: 100,
+                ..Default::default()
+            },
+        );
+        let rows = dim_groups(&map, "model");
+        assert_eq!(rows[0]["cached"], Value::Null);
+
+        map.insert(
+            "measured-zero".into(),
+            DimBucket {
+                input: 100,
+                cached: 0,
+                cache_observed: true,
+                ..Default::default()
+            },
+        );
+        let rows = dim_groups(&map, "model");
+        assert_eq!(rows[0]["cached"], 0);
+        assert_eq!(rows[1]["cached"], Value::Null);
+    }
+
     #[test]
     fn dim_groups_sorts_by_total_and_keeps_every_key() {
         let mut map: BTreeMap<String, DimBucket> = BTreeMap::new();
@@ -1036,6 +1070,7 @@ mod tests {
                 input: 10,
                 output: 5,
                 cached: 4,
+                cache_observed: true,
                 requests: 2,
                 failed: 1,
                 credit: 0.125,
@@ -1047,6 +1082,7 @@ mod tests {
                 input: 100,
                 output: 50,
                 cached: 0,
+                cache_observed: true,
                 requests: 7,
                 failed: 0,
                 credit: 0.0,

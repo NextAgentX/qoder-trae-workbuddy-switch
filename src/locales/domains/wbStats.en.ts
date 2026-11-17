@@ -270,6 +270,7 @@ export const en = {
   "wbStats.usage.trend.cacheHit": "Cache hits",
   "wbStats.usage.trend.cacheHitHint": "{rate} hit · {input} input",
   "wbStats.usage.trend.cacheHitUnobserved": "No cache data in this window",
+  "wbStats.usage.trend.cacheHitZeroInput": "Cache counter received, but no observable input tokens",
   "wbStats.usage.trend.cacheHitTitle": "The part of gateway input that hit the upstream prefix cache. The denominator is input only (output excluded) — distinct from the double-counting bug that halved hit rate to 50% (#154)",
   "wbStats.usage.trend.totalClient": "Client tokens",
   "wbStats.usage.trend.totalGateway": "Gateway tokens",

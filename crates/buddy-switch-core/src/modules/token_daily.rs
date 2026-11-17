@@ -160,14 +160,12 @@ struct Bucket {
     input: u64,
     #[serde(default)]
     output: u64,
-    /// 命中上游前缀缓存的输入 token（`input` 的**子集**；0 = 上游没报，不是「没命中」）。
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// 命中上游前缀缓存的输入 token（`input` 的**子集**）。
+    #[serde(default)]
     cached: u64,
-}
-
-/// `skip_serializing_if` 的谓词：0 不落盘（老读码器读到缺字段也是 0，语义不变）。
-fn is_zero(value: &u64) -> bool {
-    *value == 0
+    /// 是否至少有一笔明确上报的缓存样本（含明确 0）；老账本缺列 = 未观测。
+    #[serde(default)]
+    cache_observed: bool,
 }
 
 /// 网关的**维度桶**：模型 / 账号 / 端点共用一套形状。
@@ -184,12 +182,15 @@ struct DimBucket {
     input: u64,
     #[serde(default)]
     output: u64,
-    /// 命中上游前缀缓存的输入 token（`input` 的**子集**；0 = 上游没报，不是「没命中」）。
+    /// 命中上游前缀缓存的输入 token（`input` 的**子集**）。
     ///
     /// ★ issue #154：只有这一列能让「按日 / 按账号 / 按密钥的命中率」从环形日志
     /// （`log_keep` 缺省 200 ≈ 几分钟）升级成账本级统计。
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     cached: u64,
+    /// 是否至少有一笔明确上报的缓存样本（含明确 0）；老账本缺列 = 未观测。
+    #[serde(default)]
+    cache_observed: bool,
     #[serde(default)]
     requests: u64,
     #[serde(default)]
@@ -605,9 +606,8 @@ struct GatewayRow {
     day: String,
     input: u64,
     output: u64,
-    /// 命中上游前缀缓存的输入 token（`input` 的子集；缺字段 = 0 = 上游没报）。
-    cached: u64,
-    /// 模型名（空 ⇒ [`UNKNOWN_MODEL`]）。
+    /// 命中上游前缀缓存的输入 token（`input` 的子集）；缺字段/null = 未观测。
+    cached: Option<u64>,
     model: String,
     /// 端点（`/v1/chat/completions` 等）。
     endpoint: String,
@@ -658,7 +658,7 @@ fn parse_gateway_rows(entries: &[Value]) -> Vec<GatewayRow> {
                 **子集**，不需要也不应该在这里做减法 —— 减法只发生在 Anthropic 出口
                 的协议换算（`protocol/anthropic.rs::anthropic_input_tokens`）。
                 缺字段 / 老条目 = 0 = 上游没报（不是「没命中」）。 */
-                cached: value.get("cachedTokens").and_then(number_u64).unwrap_or(0),
+                cached: value.get("cachedTokens").and_then(number_u64),
                 model: value
                     .get("model")
                     .and_then(Value::as_str)
@@ -716,7 +716,10 @@ fn bucket_gateway(
         let bucket = out.entry(key).or_default();
         bucket.input = bucket.input.saturating_add(row.input);
         bucket.output = bucket.output.saturating_add(row.output);
-        bucket.cached = bucket.cached.saturating_add(row.cached);
+        if let Some(cached) = row.cached {
+            bucket.cached = bucket.cached.saturating_add(cached);
+            bucket.cache_observed = true;
+        }
     }
     out
 }
@@ -743,7 +746,10 @@ fn bucket_dim(
         let bucket = out.entry(key_of(row)).or_default();
         bucket.input = bucket.input.saturating_add(row.input);
         bucket.output = bucket.output.saturating_add(row.output);
-        bucket.cached = bucket.cached.saturating_add(row.cached);
+        if let Some(cached) = row.cached {
+            bucket.cached = bucket.cached.saturating_add(cached);
+            bucket.cache_observed = true;
+        }
         bucket.requests = bucket.requests.saturating_add(1);
         if row.status >= 400 {
             bucket.failed = bucket.failed.saturating_add(1);
@@ -1509,6 +1515,7 @@ fn apply_gateway_round(
                 entry.gateway.input = entry.gateway.input.saturating_add(bucket.input);
                 entry.gateway.output = entry.gateway.output.saturating_add(bucket.output);
                 entry.gateway.cached = entry.gateway.cached.saturating_add(bucket.cached);
+                entry.gateway.cache_observed |= bucket.cache_observed;
             }
         }
         GatewayWrite::Correct(snapshot) => {
@@ -1524,6 +1531,7 @@ fn apply_gateway_round(
                     entry.gateway.input = bucket.input;
                     entry.gateway.output = bucket.output;
                     entry.gateway.cached = bucket.cached;
+                    entry.gateway.cache_observed = bucket.cache_observed;
                 }
             }
         }
@@ -1561,6 +1569,7 @@ fn apply_dim_write(target: &mut BTreeMap<String, DimBucket>, write: DimWrite) {
                 entry.input = entry.input.saturating_add(bucket.input);
                 entry.output = entry.output.saturating_add(bucket.output);
                 entry.cached = entry.cached.saturating_add(bucket.cached);
+                entry.cache_observed |= bucket.cache_observed;
                 entry.requests = entry.requests.saturating_add(bucket.requests);
                 entry.failed = entry.failed.saturating_add(bucket.failed);
                 entry.credit += bucket.credit;
@@ -1673,7 +1682,8 @@ fn build_response(day: &str, record: Option<&DayRecord>) -> Value {
                         /* ★ issue #154：本轮命中上游前缀缓存的输入 token（`gatewayIn` 的**子集**）。
                         `null`（不是 0）= 该账号今日还没观测到命中量（老条目 / 上游没报）
                         —— 与 `gatewayIn` 写 0 的诚实口径一致：**没报 ≠ 没命中**。 */
-                        "gatewayCached": (account.gateway.cached > 0).then_some(account.gateway.cached),
+                        "gatewayCached": account.gateway.cache_observed.then_some(account.gateway.cached),
+                        "gatewayCacheObserved": account.gateway.cache_observed,
                     })
                 })
                 .collect()
@@ -1807,7 +1817,8 @@ fn dim_groups(map: &BTreeMap<String, DimBucket>, key_name: &str) -> Vec<Value> {
                 /* ★ issue #154：命中上游前缀缓存的输入 token（`input` 的子集）。
                 `null` = 这一天没观测到命中（老账本无此列 / 上游没报），**不是 0 命中**
                 —— 前端据此区分「没数据」与「确实全 miss」。 */
-                "cached": (bucket.cached > 0).then_some(bucket.cached),
+                "cached": bucket.cache_observed.then_some(bucket.cached),
+                "cacheObserved": bucket.cache_observed,
                 "requests": bucket.requests,
                 "failed": bucket.failed,
                 "credit": (bucket.credit * 1000.0).round() / 1000.0,

@@ -1306,19 +1306,16 @@ pub(crate) fn build_responses_usage(
             }
         }
         // 若 prompt_tokens_details 未包含或为 0，回退尝试 prompt_cache_hit_tokens / cache_read_input_tokens / cached_tokens
+        // Presence and value are separate here: an explicitly reported zero is
+        // a measured miss, while a missing cache field means the upstream did
+        // not observe cache state for this request.
         if cached_tokens.is_none() || cached_tokens == Some(0) {
             if let Some(hit) = raw.get("prompt_cache_hit_tokens").and_then(Value::as_u64) {
-                if hit > 0 {
-                    cached_tokens = Some(hit);
-                }
+                cached_tokens = Some(hit);
             } else if let Some(hit) = raw.get("cache_read_input_tokens").and_then(Value::as_u64) {
-                if hit > 0 {
-                    cached_tokens = Some(hit);
-                }
+                cached_tokens = Some(hit);
             } else if let Some(hit) = raw.get("cached_tokens").and_then(Value::as_u64) {
-                if hit > 0 {
-                    cached_tokens = Some(hit);
-                }
+                cached_tokens = Some(hit);
             }
         }
 
@@ -1345,10 +1342,7 @@ pub(crate) fn build_responses_usage(
     }
 
     let mut input_details = serde_json::Map::new();
-    input_details.insert(
-        "cached_tokens".to_string(),
-        json!(cached_tokens.unwrap_or(0)),
-    );
+    input_details.insert("cached_tokens".to_string(), json!(cached_tokens));
 
     let mut output_details = serde_json::Map::new();
     output_details.insert(
@@ -3111,6 +3105,39 @@ mod tests {
     }
 
     /// 验证 Responses usage 能兼容厂商自定义的缓存命中与思考字段。
+    #[test]
+    fn build_responses_usage_distinguishes_missing_cache_from_measured_zero() {
+        let absent = build_responses_usage(
+            Some(&json!({
+                "prompt_tokens": 200,
+                "completion_tokens": 2,
+                "total_tokens": 202
+            })),
+            200,
+            2,
+        );
+        assert_eq!(
+            absent["input_tokens_details"]["cached_tokens"],
+            Value::Null,
+            "missing cache observation must not become a measured zero"
+        );
+
+        let measured_zero = build_responses_usage(
+            Some(&json!({
+                "prompt_tokens": 200,
+                "completion_tokens": 2,
+                "total_tokens": 202,
+                "cache_read_input_tokens": 0
+            })),
+            200,
+            2,
+        );
+        assert_eq!(
+            measured_zero["input_tokens_details"]["cached_tokens"], 0,
+            "an explicit observed zero must remain zero"
+        );
+    }
+
     #[test]
     fn build_responses_usage_falls_back_to_vendor_cache_and_thinking_fields() {
         let raw = json!({

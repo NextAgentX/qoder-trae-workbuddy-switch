@@ -299,6 +299,7 @@ export const zh = {
   "wbStats.usage.trend.cacheHit": "缓存命中",
   "wbStats.usage.trend.cacheHitHint": "命中率 {rate} · 输入 {input}",
   "wbStats.usage.trend.cacheHitUnobserved": "窗口内未观测到命中量",
+  "wbStats.usage.trend.cacheHitZeroInput": "已收到缓存计数，但没有可判定的输入 token",
   "wbStats.usage.trend.cacheHitTitle": "经本网关的输入里，命中上游前缀缓存的部分。分母是输入侧（不含输出），与「命中量被算两遍」是两回事 —— 后者曾让命中率凭空腰斩到 50%（#154）",
   "wbStats.usage.trend.totalClient": "客户端 Token",
   "wbStats.usage.trend.totalGateway": "网关 Token",

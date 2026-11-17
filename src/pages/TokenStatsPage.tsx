@@ -338,16 +338,16 @@ function TrendView({
           icon: DatabaseZap,
           label: t("wbStats.usage.trend.cacheHit"),
           value: cacheHit.observed ? compactTokens(cacheHit.cached) : "—",
-          hint: cacheHit.observed
-            ? t("wbStats.usage.trend.cacheHitHint", {
-                rate: `${Math.round((cacheHit.hitRate ?? 0) * 100)}%`,
-                input: compactTokens(cacheHit.input),
-              })
-            : t("wbStats.usage.trend.cacheHitUnobserved"),
-          title: t("wbStats.usage.trend.cacheHitTitle"),
+          hint: !cacheHit.observed
+            ? t("wbStats.usage.trend.cacheHitUnobserved")
+            : cacheHit.hitRate == null
+              ? t("wbStats.usage.trend.cacheHitZeroInput")
+              : t("wbStats.usage.trend.cacheHitHint", {
+                  rate: `${Math.round(cacheHit.hitRate * 100)}%`,
+                  input: compactTokens(cacheHit.input),
+                }),
         }
-      : null;
-  const tiles: StatTile[] = [
+      : null;  const tiles: StatTile[] = [
     totalTile,
     ...(cacheTile ? [cacheTile] : []),
     { icon: TrendingUp, label: t("wbStats.usage.trend.avg"), value: compactTokens(average), hint: t("wbStats.usage.trend.avgHint") },
@@ -475,7 +475,7 @@ function ModelsView({
         failed: model.failed,
         /* ★ issue #154：命中率 = `cached / input`（分母是**输入侧**，不含输出）。
            `cached === 0 && input === 0` ⇒ null（没观测到），别写成 0%。 */
-        hitRate: model.input > 0 && model.cached > 0 ? model.cached / model.input : null,
+        hitRate: model.observed && model.observedInput > 0 ? model.cached / model.observedInput : null,
       })),
     [dim, viewWindow, t],
   );
