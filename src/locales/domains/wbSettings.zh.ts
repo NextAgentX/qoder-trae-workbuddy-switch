@@ -168,24 +168,6 @@ export const zh = {
   "wbSettings.version.cn": "国内版",
   "wbSettings.version.global": "国际版",
 
-  // ---- API 网关 ----
-  "wbSettings.gateway.groupTitle": "API 网关",
-  "wbSettings.gateway.saved": "网关配置已保存",
-  "wbSettings.gateway.bindLabel": "网关默认监听地址",
-  "wbSettings.gateway.bindDesc": "默认仅监听回环地址；0.0.0.0 表示允许局域网访问",
-  "wbSettings.gateway.bindLoopback": "127.0.0.1（仅本机）",
-  "wbSettings.gateway.bindLan": "0.0.0.0（局域网）",
-  "wbSettings.gateway.portLabel": "网关默认端口",
-  "wbSettings.gateway.portDesc": "默认 57891，与 webui 端口区分",
-  "wbSettings.gateway.keepLabel": "请求日志保留条数",
-  "wbSettings.gateway.keepDesc": "仅记录元数据",
-  "wbSettings.gateway.bodiesLabel": "记录请求正文",
-  "wbSettings.gateway.bodiesDesc": "含隐私风险；默认关闭，仅记录时间/模型/状态码等元数据",
-  "wbSettings.gateway.invalidPort": "端口需为 1-65535 之间的整数",
-  "wbSettings.gateway.invalidKeep": "保留条数需为 0-10000 之间的整数",
-  "wbSettings.gateway.enabledLabel": "启用本地网关",
-  "wbSettings.gateway.enabledDesc": "在 127.0.0.1 上提供 OpenAI / Anthropic 兼容接口",
-
   // ---- 定时任务排程 ----
   "wbSettings.schedule.groupTitle": "定时任务排程",
   "wbSettings.schedule.intro": "六类任务各自独立开关与时点表，到点由调度器触发。时点使用 24 小时制本地时间，可精确到分钟（如 09:37），可配置多个；每个任务还可叠加「抖动」（±5/15/30 分钟），让每天的实际触发时刻错开。改完可用「立即执行」当场跑一轮验证，无需等到下一个时点。",

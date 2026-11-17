@@ -2,15 +2,14 @@ import { useEffect, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { Globe, MonitorSmartphone, ShieldAlert } from "lucide-react";
 
-import { AppSettingsGroups } from "@/components/app-settings";
 import { QoderLocalSourceRow } from "@/components/qoder/qoder-local-source-row";
 import { TimesEditor } from "@/components/schedule-times-editor";
 import { BackupSection } from "@/components/settings/backup-section";
 import { SettingsFieldRow, SettingsGroup } from "@/components/settings-primitives";
 import {
   parseSettingsSubnav,
+  QODER_SETTINGS_SECTIONS,
   SettingsSubnav,
-  SETTINGS_SUBNAV,
   type SettingsSubnavId,
 } from "@/components/settings/settings-subnav";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
@@ -40,28 +39,18 @@ import { toast } from "sonner";
  *
  * ## 与另两个设置页的关系
  *
- * 子导航**共用同一张表**（`SETTINGS_SUBNAV`，PLAN §3.9 / D12），版式同构：
- * `data-split-layout` + `parseSettingsSubnav` 的 URL 承载 + 主区 16px 间距。
+ * 子导航**共用同一张表**（`SETTINGS_SUBNAV`）与同一份产品白名单
+ *（`QODER_SETTINGS_SECTIONS`），版式同构：`data-split-layout` + `parseSettingsSubnav`
+ * 的 URL 承载 + 主区 16px 间距。
  *
  * ## ★ 为什么只列「已有内容」的分区
  *
- * 表里 9 项是按 WB / Trae 的内容收敛出来的；Qoder 侧目前**只有四处有真内容**：
- * 通用（应用级设置）、客户端检测（本机凭据四态探测）、计划任务（签到 / 令牌保活排程）、
- * 备份与恢复。其余五项（账号 / 签到 / 网关 / 权限与诊断 / 日志）在 Qoder 侧**没有设置项**
+ * Qoder 侧目前**只有四处有真内容**：计划任务（签到 / 令牌保活排程）、客户端检测
+ *（本机凭据四态探测）、网络（出站代理）、备份与恢复。其余项在 Qoder 侧**没有设置项**
  * —— 摆上去就是 §1.7 说的**假控件**（点了只有一句「尚未接入」，比不摆更糟）。
- * 因此用 `SettingsSubnav` 的 `items` 收窄，而不是复制一份表（复制即漂移的种子）。
- * 对应功能落地后，把它的 id 加进 {@link QODER_SETTINGS_SECTIONS} 即可。
+ * 白名单在 `settings-subnav.tsx`（不复制表 —— 复制即漂移的种子），落地新功能时
+ * 把它的 id 加进去即可。
  */
-const QODER_SECTION_IDS: readonly SettingsSubnavId[] = [
-  "general",
-  "client",
-  "network",
-  "schedule",
-  "backup",
-];
-
-/** 收窄后的子导航项（顺序取自共享表，不另排）。 */
-const QODER_SETTINGS_SECTIONS = SETTINGS_SUBNAV.filter((item) => QODER_SECTION_IDS.includes(item.id));
 
 export default function QoderSettingsPage() {
   const t = useT();
@@ -153,12 +142,14 @@ export default function QoderSettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   /**
    * ★ 初始分区从 URL 读，且**按本页的分区集校验**：`?section=gateway` 这类
-   * （表里有、本页没有）必须 fail-closed 回 `general` —— 否则会渲染出一个空的主区，
+   * （表里有、本页没有）必须 fail-closed 回本页第一项 —— 否则会渲染出一个空的主区，
    * 用户看到「点了没反应」。
    */
   const [section, setSection] = useState<SettingsSubnavId>(() => {
     const parsed = parseSettingsSubnav(searchParams.get("section"));
-    return QODER_SECTION_IDS.includes(parsed) ? parsed : "general";
+    return QODER_SETTINGS_SECTIONS.some((item) => item.id === parsed)
+      ? parsed
+      : QODER_SETTINGS_SECTIONS[0].id;
   });
 
   const [sources, setSources] = useState<QoderLocalSourcesView | null>(null);
@@ -243,8 +234,6 @@ export default function QoderSettingsPage() {
         <SettingsSubnav items={QODER_SETTINGS_SECTIONS} active={section} onSelect={goSection} />
 
         <div className="min-w-0 flex-1 space-y-4">
-          {section === "general" && <AppSettingsGroups />}
-
           {section === "client" && (
             <Card className="gap-0 py-0">
               <div className="flex flex-wrap items-start gap-3 px-4 py-3.5">

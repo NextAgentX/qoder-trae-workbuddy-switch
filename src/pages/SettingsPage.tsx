@@ -32,25 +32,22 @@ import {
   parseSettingsSubnav,
   SETTINGS_SCOPE,
   SettingsSubnav,
+  WB_SETTINGS_SECTIONS,
   type SettingsSubnavId,
 } from "@/components/settings/settings-subnav";
 import { BackupSection } from "@/components/settings/backup-section";
 import { CodebuddyCliCard } from "@/components/settings/codebuddy-cli-card";
 import { CacheSection } from "@/components/settings/cache-section";
 import { RuntimeLogCard } from "@/components/settings/runtime-log-card";
-import { AppSettingsGroups } from "@/components/app-settings";
-import { RiskControlsForm } from "@/components/gateway/risk-controls-form";
 // 时点表编辑器与 Trae 设置页**共用同一份实现**（校验规则属于规则，不属于版式）。
 import { TimesEditor } from "@/components/schedule-times-editor";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import * as api from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { regionDescriptor } from "@/lib/region";
-import { DEFAULT_RISK_CONTROL_SETTINGS } from "@/lib/risk-controls";
 import { scopeOf } from "@/lib/scope";
 import { useScope } from "@/lib/use-scope";
 import type { TranslationKey } from "@/locales/zh";
@@ -60,11 +57,9 @@ import type {
   CheckinLog,
   CodeBuddyCliStatus,
   CodeBuddyCnIdeStatus,
-  GatewayConfig,
   Region,
   RotateLog,
   RotateStatus,
-  RiskControlSettings,
   ScheduleConfig,
   ScheduleRunResult,
   SwitchConfig,
@@ -1202,180 +1197,6 @@ function VersionAccountsCard() {
   );
 }
 
-/** API 网关：默认监听地址 / 端口 / 日志保留条数 / 正文记录 / 独立端口模式。 */
-function GatewaySettingsCard() {
-  const t = useT();
-  const config = useGatewayStore((s) => s.config);
-  const loadConfig = useGatewayStore((s) => s.loadConfig);
-  const saveConfig = useGatewayStore((s) => s.saveConfig);
-  const [portDraft, setPortDraft] = useState(String(config.port));
-  const [keepDraft, setKeepDraft] = useState(String(config.log_keep));
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    void loadConfig();
-  }, [loadConfig]);
-
-  useEffect(() => setPortDraft(String(config.port)), [config.port]);
-  useEffect(() => setKeepDraft(String(config.log_keep)), [config.log_keep]);
-
-  async function persist(next: Partial<GatewayConfig>) {
-    setSaving(true);
-    try {
-      await saveConfig({ ...config, ...next });
-      toast.success(t("wbSettings.gateway.saved"));
-    } catch (e) {
-      toast.error(t("wbSettings.common.saveFailed"), { description: api.asError(e) });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function commitPort() {
-    const parsed = Number.parseInt(portDraft, 10);
-    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) {
-      toast.error(t("wbSettings.gateway.invalidPort"));
-      setPortDraft(String(config.port));
-      return;
-    }
-    if (parsed !== config.port) void persist({ port: parsed });
-  }
-
-  function commitKeep() {
-    const parsed = Number.parseInt(keepDraft, 10);
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10000) {
-      toast.error(t("wbSettings.gateway.invalidKeep"));
-      setKeepDraft(String(config.log_keep));
-      return;
-    }
-    if (parsed !== config.log_keep) void persist({ log_keep: parsed });
-  }
-
-  return (
-    <SettingsGroup id="settings-gateway" title={t("wbSettings.gateway.groupTitle")}>
-      <CardContent className="space-y-0 p-0">
-        <SettingsFieldRow
-          label={t("wbSettings.gateway.enabledLabel")}
-          description={t("wbSettings.gateway.enabledDesc")}
-          htmlFor="gw-enabled"
-          operational
-        >
-          <Switch
-            id="gw-enabled"
-            checked={config.enabled}
-            disabled={saving}
-            onCheckedChange={(checked) => void persist({ enabled: checked })}
-            aria-label={t("wbSettings.gateway.enabledLabel")}
-          />
-        </SettingsFieldRow>
-
-        <SettingsFieldRow
-          label={t("wbSettings.gateway.bindLabel")}
-          description={t("wbSettings.gateway.bindDesc")}
-          htmlFor="gw-addr"
-          operational
-        >
-          <Select
-            value={config.bind_addr}
-            onValueChange={(value) => void persist({ bind_addr: value, allow_non_loopback: value !== "127.0.0.1" })}
-            disabled={saving}
-          >
-            <SelectTrigger
-              id="gw-addr"
-              size="sm"
-              className="w-full sm:w-44"
-              aria-label={t("wbSettings.gateway.bindLabel")}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="127.0.0.1">{t("wbSettings.gateway.bindLoopback")}</SelectItem>
-              <SelectItem value="0.0.0.0">{t("wbSettings.gateway.bindLan")}</SelectItem>
-            </SelectContent>
-          </Select>
-        </SettingsFieldRow>
-
-        <SettingsFieldRow
-          label={t("wbSettings.gateway.portLabel")}
-          description={t("wbSettings.gateway.portDesc")}
-          htmlFor="gw-port"
-          operational
-        >
-          <Input
-            id="gw-port"
-            className="w-full sm:w-44"
-            inputMode="numeric"
-            value={portDraft}
-            onChange={(event) => setPortDraft(event.target.value)}
-            onBlur={commitPort}
-          />
-        </SettingsFieldRow>
-
-        <SettingsFieldRow
-          label={t("wbSettings.gateway.keepLabel")}
-          description={t("wbSettings.gateway.keepDesc")}
-          htmlFor="gw-keep"
-          operational
-        >
-          <Input
-            id="gw-keep"
-            className="w-full sm:w-44"
-            inputMode="numeric"
-            value={keepDraft}
-            onChange={(event) => setKeepDraft(event.target.value)}
-            onBlur={commitKeep}
-          />
-        </SettingsFieldRow>
-
-        <SettingsFieldRow
-          className="border-b-0"
-          label={t("wbSettings.gateway.bodiesLabel")}
-          description={t("wbSettings.gateway.bodiesDesc")}
-          htmlFor="gw-bodies"
-          operational
-        >
-          <Switch
-            id="gw-bodies"
-            checked={config.log_bodies}
-            disabled={saving}
-            onCheckedChange={(checked) => void persist({ log_bodies: checked })}
-            aria-label={t("wbSettings.gateway.bodiesLabel")}
-          />
-        </SettingsFieldRow>
-      </CardContent>
-    </SettingsGroup>
-  );
-}
-
-function GlobalRiskControlsCard() {
-  const [settings, setSettings] = useState<RiskControlSettings>(DEFAULT_RISK_CONTROL_SETTINGS);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    void api.getRiskControlSettings()
-      .then((value) => { if (active) setSettings(value); })
-      .catch((error) => toast.error("读取风控设置失败", { description: api.asError(error) }))
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, []);
-
-  async function persist(value: RiskControlSettings) {
-    setSaving(true);
-    try {
-      setSettings(await api.saveRiskControlSettings(value));
-      toast.success("公共风控设置已保存");
-    } catch (error) {
-      toast.error("公共风控设置保存失败", { description: api.asError(error) });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return <RiskControlsForm value={settings} saving={loading || saving} onSave={persist} />;
-}
-
 // ---------------------------------------------------------------------------
 // 定时任务排程（六类任务：各自独立开关 + 独立时点表）
 // ---------------------------------------------------------------------------
@@ -1655,29 +1476,30 @@ function ScheduleCard() {
 }
 
 /**
- * 设置页：**产品级**设置（P7 起改为 **9 项子导航**，§3.9）。
+ * 设置页：**产品级**设置（子导航表见 `settings/settings-subnav.tsx`）。
  *
- * ## 为什么从「一屏长滚动」改成子导航
+ * ## 这里不放什么
  *
- * 现状是 7 张卡纵向堆叠（Trae 侧 10 组），用户找一项设置要滚很久、且看不出「还有哪些类」。
- * 子导航先把**有哪几类**摆出来，再按类展示 —— 与 Trae 设置页共用同一套分区名。
+ * 应用框架级设置（语言 / 外观 / 快捷键 / 启动 / 授权 / 更新 / 作用域可见性 / 积分自动
+ * 刷新）的唯一入口是顶栏 ⚙「应用设置」抽屉。网关开关 / 监听 / 端口 / 请求日志的唯一
+ * 入口是「网关」工作台。两边此前各有一份副本，同一个开关在三个地方各出现一次 ——
+ * 已删除，用户不用再猜「改哪个才生效」。
  *
- * ## 9 项与内容的对应（WB 侧）
+ * ## 各分区的对应（WB 侧）
  *
  * | 子导航 | 内容 |
  * |:---|:---|
- * | 通用 | 应用级设置（外观 / 语言 / 快捷键 / 启动 / 更新，与侧栏弹层同一份实现） |
  * | 账号与登录 | 版本与账号库路径、切换行为 |
  * | 签到与积分 | 自动签到 + 日志 |
- * | 网关 | 网关配置 |
  * | 计划任务 | 六类定时任务排程 |
- * | 客户端 | CodeBuddy CLI 自动轮换 |
- * | 权限与诊断 | 认证文件写权限自检 |
- * | 日志 | WorkBuddy 无独立运行日志 ⇒ **空态 + 出口**（§3.6 四要素） |
- * | 备份与恢复 | 全局备份（P7 新增，第 9 项） |
+ * | 客户端 | 客户端检测 + 会话监听 |
+ * | CodeBuddy CLI | 接入方式（二选一）+ 切换向导 |
+ * | 权限与诊断 | 认证文件写权限自检 + 危险操作 |
+ * | 日志 | 本工具自身的运行日志 |
+ * | 备份与恢复 | 全局备份 + 缓存清理 |
  *
- * ⚠️ 「客户端 / 日志」是 **Trae 侧**的子项（PLAN §3.9）；WB 侧没有对应内容时**不硬塞**
- * （§3.4 规则 1：无数据不渲染），而是给一个**说明原因 + 有出口**的空态。
+ * ⚠️ 没有内容的分区**不硬塞**（§3.4 规则 1）——「网络」只有 Qoder 有内容，
+ * WB / Trae 的白名单已排除它。
  */
 export default function SettingsPage() {
   const t = useT();
@@ -1688,9 +1510,9 @@ export default function SettingsPage() {
   /* ★ P0-4a：`section` 的**初始值从 URL 读**（`?section=diagnostics`）——
      否则「未检测到程序位 → 去设置」只能落到设置页**首页**，到不了「权限与诊断」子项
      （原型断言 `P0-4a` 要求点了之后能跳到「权限与诊断」）。
-     ⚠️ 必须**校验合法性**：非法值 fail-closed 回 "general"，不把任意串塞进 state。
-     解析走 `parseSettingsSubnav`（与网关页的 `parseGatewaySubnav` 同一形状），
-     Trae 设置页接的是同一个函数 —— 两平台同一件事只有一份实现。 */
+     ⚠️ 必须**校验合法性**：非法值 fail-closed 回 `DEFAULT_SETTINGS_SUBNAV`，不把任意串
+     塞进 state。解析走 `parseSettingsSubnav`（与网关页的 `parseGatewaySubnav` 同一形状），
+     Trae / Qoder 设置页接的是同一个函数 —— 三平台同一件事只有一份实现。 */
   const [searchParams, setSearchParams] = useSearchParams();
   const [section, setSection] = useState<SettingsSubnavId>(() =>
     parseSettingsSubnav(searchParams.get("section")),
@@ -1727,7 +1549,7 @@ export default function SettingsPage() {
           `[data-split-layout]` 里（含 900px 转纵向），故这里不再写 `flex-col` /
           `lg:flex-row` / `gap-*` —— utilities 会盖过 base 层，导致断点失效。 */}
       <div data-split-layout className="min-w-0">
-        <SettingsSubnav active={section} onSelect={goSection} />
+        <SettingsSubnav items={WB_SETTINGS_SECTIONS} active={section} onSelect={goSection} />
 
         {/* 主区 `.split-main`：分区之间 16px（原型 `:378`）。 */}
         <div className="min-w-0 flex-1 space-y-4">
@@ -1746,13 +1568,6 @@ export default function SettingsPage() {
             </span>
           </div>
 
-          {section === "general" && (
-            <>
-              <AppSettingsGroups />
-              <GlobalRiskControlsCard />
-            </>
-          )}
-
           {section === "account" && (
             <>
               <VersionAccountsCard />
@@ -1769,8 +1584,6 @@ export default function SettingsPage() {
               <AutoRotateCard />
             </>
           )}
-
-          {section === "gateway" && <GatewaySettingsCard />}
 
           {/* CodeBuddy CLI 的**接入方式**（issue #109）：状态条 + 两张模式卡 + 切换向导。
               它是全局一次性配置（CLI 的凭据只有一份），与账号卡上的「切到 CLI」是两个层次。 */}

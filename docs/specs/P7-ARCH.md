@@ -211,7 +211,7 @@ pub fn merge_import_record(
 |:---|:---|
 | `crates/buddy-switch-core/src/modules/backup.rs` | envelope 契约（`kind` / `formatVersion` / `includesCredentials`）+ 导出组装 + 导入编排（预览 / 合并 / 汇总）+ 快照 + 定时备份 + `CREDENTIAL_KEYS` |
 | `crates/buddy-switch-core/src/modules/backup_sections.rs` | `BackupSectionSpec` **表驱动**（`accounts` / `config` / `gateway` 三行：read / merge） |
-| `src/components/settings/settings-subnav.tsx` | 设置页 **9 项子导航**（数据驱动；「备份与恢复」第 9 项） |
+| `src/components/settings/settings-subnav.tsx` | 设置页子导航（数据驱动；只列**产品设置**，「备份与恢复」为最后一项；应用框架设置归顶栏 ⚙ 抽屉） |
 | `src/components/settings/backup-section.tsx` | 「备份与恢复」页：导出勾选（三态）+ 凭据开关 + 预估 + 结果区 |
 | `src/components/settings/backup-import-preview.tsx` | 导入预览卡：契约版本头 + 逐 scope 计数 + 需重新登录提示 + 冲突策略选择器 |
 | `src/stores/backup.ts` | 备份页状态（selection / creds / preview / result / pending） |
@@ -228,9 +228,9 @@ pub fn merge_import_record(
 | `src-tauri/src/commands.rs` + `crates/buddy-switch-server/src/api.rs` | 新命令：`export_backup` / `preview_import_backup` / `import_backup` / `list_auto_backups` / `restore_auto_backup`（**两宿主同步**） |
 | `src-tauri/src/lib.rs` + `crates/buddy-switch-server/src/main.rs` | **登记自动备份 `BackgroundTask`**（两宿主各一条）+ `generate_handler!` / `.route` |
 | `src/lib/api.ts` | 新命令接线（`call` + ROUTES/ALIASES + `DEMO_READ_COMMANDS`） |
-| `src/pages/SettingsPage.tsx` | 长滚动分块 → **9 项子导航**接线 |
+| `src/pages/SettingsPage.tsx` | 长滚动分块 → 子导航接线 |
 | `src/lib/screenshot-demo.ts` | 新 case（备份页演示态） |
-| `src/locales/domains/shell.zh.ts` / `shell.en.ts` | 子导航 9 项标签（应用级导航，与 `appSettings` 同域） |
+| `src/locales/domains/shell.zh.ts` / `shell.en.ts` | 子导航标签（应用级导航，与 `appSettings` 同域） |
 | `src/components/command-palette/*` | 两个动作（「导出全部备份」/「从备份导入」）—— ⚠️ **本期不做**，**推到 P6 之后**（§7 #6：P6 未落 ⇒ 无法接线 ⇒ 死代码）。此处仅登记归属，**不产出代码** |
 
 > **不修改**：账号级 `export-accounts-dialog.tsx` / `import-accounts-dialog.tsx`（**保留不动**，§3.14）；`account.rs` 的 `resolve_account_key`（P5 已统一，§1.4）。
@@ -537,16 +537,16 @@ sequenceDiagram
   - **定时备份**（D17）：每日一次、保留 7 份、**两宿主登记** `BackgroundTask`（P5 R9）；**默认开 + 存 `appSettings`（§7 #7）**；⚠️ **必须提供「关掉」开关**（关闭后不再产生新备份，已产生的保留）。
   - 结果走 §3.6 **部分失败态**（失败计数 + 可重试）。
 
-### T03 · 前端：设置 9 项子导航 + 备份与恢复页 + 接线 + 词条 ｜ P0
+### T03 · 前端：设置子导航 + 备份与恢复页 + 接线 + 词条 ｜ P0
 - **源文件**
   - 新建 `src/components/settings/settings-subnav.tsx`、`backup-section.tsx`、`backup-import-preview.tsx`、`src/stores/backup.ts`、`src/lib/app-settings-snapshot.ts`
-  - 修改 `src/pages/SettingsPage.tsx`（9 项子导航接线）
+  - 修改 `src/pages/SettingsPage.tsx`（子导航接线）
   - 新增 `src/lib/app-settings-snapshot.ts`（**§7 #3：读写 appSettings localStorage 段**——语言 `i18n.ts` / 外观 `theme.ts` / 紧凑模式 / 上次作用域；导出取值、导入回写）
   - 修改 `src/lib/screenshot-demo.ts`（备份页 case）
-  - 修改 `src/locales/domains/shell.zh.ts` / `.en.ts`（子导航 9 项）+ 新建 `backup.zh.ts` / `.en.ts`
+  - 修改 `src/locales/domains/shell.zh.ts` / `.en.ts`（子导航标签）+ 新建 `backup.zh.ts` / `.en.ts`
 - **依赖**：T01（命令接口冻结）；T02（导入命令）
 - **要点**
-  - **9 项子导航**：`通用 / 账号与登录 / 签到与积分 / 网关 / 计划任务 / 客户端 / 权限与诊断 / 日志 / 备份与恢复`（第 9 项）。
+  - **设置子导航**（现行见 `PLAN.md` §3.9 的 2026-11-17 修订）：只列产品设置；应用框架设置归顶栏 ⚙ 抽屉，网关归网关工作台。
   - **导出**：默认全选 4 作用域（D14）、凭据默认关（D15）、三态 `aria-checked="mixed"`、预估**由实际勾选推导**、全不勾 ⇒ 导出 `disabled`。
   - **凭据开关**：打开 ⇒ 红警告 + 主按钮文案变 + 二次确认；关闭 ⇒ 回落。
   - **导入**：先预览后落盘；预览显示 `formatVersion`；不含凭据 ⇒「需重新登录」；结果**部分失败态**。
