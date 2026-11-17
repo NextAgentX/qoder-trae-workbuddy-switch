@@ -2,7 +2,7 @@
 
 > 用途：把「Qoder 作为第三个平台接进 Buddy Switch」需要的事实与决策固定下来，
 > 作为原型评审与后续实现改造的依据。
-> 状态：**原型已落地，项目代码未动**（等确认）。
+> 状态：**现行**（Qoder 模块、账号池、签到/额度、网关与前端入口均已落地；按实测持续修订）。
 > 边界：本文只写**事实**与**本仓的决策**；不写任何外部参考实现的出处。
 
 ---
@@ -89,8 +89,8 @@ macOS 上永远查不到钥匙串条目 ⇒ 解密失败 ⇒ 「桌面端检测�
 
 | 能力 | 有 | 说明 |
 |:---|:---:|:---|
-| 每日签到领积分 | ✅ | 走**活动平台**：`GET /sash/api/v1/me/campaigns` → 筛 `CLAIM_BENEFIT` + `CLAIMABLE` → 逐个 `POST …/{id}/claim`，累加 Credits；已领 ⇒ 幂等「今日已领」。旧 `/sash/daily-check-in` 只在**整区没有活动平台**（404/405/410）时兜底。三档语义不变：**没有积分类活动 ⇒ 未开放（`ok:false` + `disabled`）**，不谎报成功。★ **上游实例在 10:00（UTC+8）切换，窗口 10:00 → 次日 09:59**（2026-11-09 真机取证：`startAt`=10:00、`endAt`=次日 09:59）；活动列表**依赖 `cosy-machine*` 原生头**——不带 `runtime-info` 身份时上游直接返回空列表（`showCampaign:false`），带了才有「每天领 100 Credits」 |
-| 积分 / 额度查询 | ✅ | quota/usage + 套餐快照 |
+| 每日签到领积分 | ✅ | 走**活动平台**：`GET /sash/api/v1/me/campaigns` → 筛 `CLAIM_BENEFIT` + `CLAIMABLE` → 逐个 `POST …/{id}/claim`，累加 Credits；已领 ⇒ 幂等「今日已领」。旧 `/sash/daily-check-in` 只在**整区没有活动平台**（404/405/410）时兜底。三档语义不变：**当前没有可领或已领的每日积分类活动 ⇒ 未开放（`ok:false` + `disabled`）**，不谎报成功。★ **区分每日签到与一次性体验包**：一次性活动（如「极致模型限时体验」）已领后归为 `View`，不计入「今日已签」；没有每日活动且无待领活动时报 `ok:false, disabled:true`，避免已领一次性活动伪装成「今日已签到」。★ **上游实例在 10:00（UTC+8）切换，窗口 10:00 → 次日 09:59**（2026-11-09 真机取证：`startAt`=10:00、`endAt`=次日 09:59）；活动列表**依赖 `cosy-machine*` 原生头**——不带 `runtime-info` 身份时上游直接返回空列表（`showCampaign:false`），带了才有「每天领 100 Credits」 |
+| 积分 / 额度查询 | ✅ | quota/usage + 套餐快照（聚合 `userQuota` + `addOnQuota` + `dedicatedResourcePackages` 专属活动/模型资源包） |
 | Pro 福利包 | ❌ | **未实现**：`PATH_PRO_CLAIM` 只有常量定义、零调用点（issue #58 第 1 阶段一并落地） |
 | OAuth 设备授权 | ✅ | **PKCE S256**；两区 URL 参数不同（国内带 `redirect_uri`，国际不带） |
 | PAT 导入 | ✅ | 前缀 `pt-`，导入后自动交换 jobToken |
@@ -438,18 +438,18 @@ issue #72 的乱码 —— 用一个「看着像乱码的退化」换一个「�
 
 ---
 
-## 11. 后续项目代码改造的清单（**等确认后再动**）
+## 11. 项目代码落地状态
 
-1. `crates/buddy-switch-core`：新增 Qoder 模块（账号池、令牌刷新按前缀路由、
+1. `crates/buddy-switch-core`：Qoder 模块已落地（账号池、令牌刷新按前缀路由、
    双区常量、签到/额度、模型清单三层、指纹派生）。
-2. 新增 `Product::Qoder` + `Scope::QoderCn/QoderGlobal`；`Scope::all()` 自动多出两个作用域
-   ⇒ 统一网关命名空间**自动出现**。
-3. `src/lib/platforms/registry.ts`：加 `qoder` 描述符 + `PlatformSlug`；
-   `src/lib/scope.ts` 的 `SCOPES` 从 4 条变 6 条
-   ⇒ **`scripts/check-scope-registry.cjs` 里写死的「4 个作用域」会变红，必须同步**。
-4. 网关：Qoder 产品线（配置 / 密钥库 / 状态 / 路由 / OpenAI + Anthropic 双协议）。
-5. 两处宿主（`buddy-switch-server/main.rs` + `src-tauri/lib.rs`）的命令注册 +
-   `BackgroundTask` 登记（**两侧各一份表，新增周期性出口先 grep 两侧**）。
-6. 前端：程序位、凭据导入方式（OAuth / PAT / 本机导入）、模型清单展示。
-7. **命名空间护栏**：解析只做整段精确匹配；测试输入必须含「比基准长一截」的形状
-   （如 `qoder-cn-x`），否则前缀实现与精确实现在现有输入集上等价、断言恒绿。
+2. `Product::Qoder` + `Scope::QoderCn/QoderGlobal` 已落地；`Scope::all()` 自动生成两个作用域
+   ⇒ 统一网关命名空间已出现。
+3. `src/lib/platforms/registry.ts` 已有 `qoder` 描述符与 `PlatformSlug`；
+   `src/lib/scope.ts` 的 `SCOPES` 已从 4 条变 6 条，`scripts/check-scope-registry.cjs`
+   同步为写死的 6 条断言。
+4. 网关：Qoder 产品线（配置 / 密钥库 / 状态 / 路由 / OpenAI + Anthropic 双协议）已落地。
+5. 两处宿主（`buddy-switch-server/main.rs` + `src-tauri/lib.rs`）的命令注册与
+   `BackgroundTask` 登记均已落地；新增周期性出口仍须两侧同时检查。
+6. 前端：程序位、凭据导入方式（OAuth / PAT / 本机导入）、模型清单展示已落地。
+7. **命名空间护栏**：解析只做整段精确匹配；测试输入覆盖了「比基准长一截」的形状
+   （如 `qoder-cn-x`），防止前缀实现与精确实现在现有输入集上等价。

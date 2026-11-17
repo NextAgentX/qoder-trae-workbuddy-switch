@@ -161,24 +161,36 @@ pub struct CampaignSummary {
 /// 把活动列表聚合成签到口径（**纯函数**）。
 ///
 /// 只统计「积分类」活动（`CREDITS` / 空 kind，见 `CampaignItem::is_credit_kind`）——
-/// 兑换码 / 详情类活动不是签到，混进来会让「今日已签」变成假阳性。
+/// 兑换码 / 详情类 / 历史已领一次性促销活动不是签到，混进来会让「今日已签」变成假阳性。
 pub fn summarize_campaigns(items: &[campaign::CampaignItem]) -> CampaignSummary {
     let mut summary = CampaignSummary::default();
+    let mut seen = std::collections::HashSet::new();
     for item in items.iter().filter(|item| item.is_credit_kind()) {
-        summary.has_benefit = true;
+        // 上游偶发重复下发同一活动；按 id（缺失时 key）去重，避免签到额度虚增。
+        let identity = if item.campaign_id.is_empty() {
+            item.campaign_key.as_str()
+        } else {
+            item.campaign_id.as_str()
+        };
+        if !identity.is_empty() && !seen.insert(identity) {
+            continue;
+        }
         match campaign::classify(item) {
             campaign::CampaignClass::Already => {
+                summary.has_benefit = true;
                 summary.claimed = true;
                 summary.claimed_amount += item.benefit_amount;
             }
             campaign::CampaignClass::Claimable => {
+                summary.has_benefit = true;
                 summary.claimable = true;
                 summary.claimable_amount += item.benefit_amount;
             }
-            // 名额发完 / 被锁 / 详情类：都不是「今天领到了」，也不算「现在能领」。
-            campaign::CampaignClass::Pending
-            | campaign::CampaignClass::Locked
-            | campaign::CampaignClass::View => {}
+            campaign::CampaignClass::Pending | campaign::CampaignClass::Locked => {
+                summary.has_benefit = true;
+            }
+            // 详情类 / 历史已领一次性促销包：不计入签到口径，也不算「今日已签」。
+            campaign::CampaignClass::View => {}
         }
     }
     summary
@@ -1014,6 +1026,26 @@ mod tests {
         }
     }
 
+    fn one_time_campaign_item(status: &str, amount: i64) -> campaign::CampaignItem {
+        campaign::CampaignItem {
+            campaign_id: "promo-1".into(),
+            campaign_key: "act-promo".into(),
+            title: "极致模型限时体验".into(),
+            description: "限时体验包".into(),
+            detail_url: String::new(),
+            button_text: String::new(),
+            action_type: "CLAIM_BENEFIT".into(),
+            claim_status: status.into(),
+            benefit_kind: "CREDITS".into(),
+            benefit_amount: amount,
+            required_achievement_key: String::new(),
+            achievement_completed: true,
+            unavailable_reason: String::new(),
+            start_at: 1000,
+            end_at: 1000 + 7 * 86400,
+        }
+    }
+
     fn snapshot(items: Vec<campaign::CampaignItem>) -> campaign::CampaignsSnapshot {
         campaign::CampaignsSnapshot {
             ok: true,
@@ -1046,6 +1078,31 @@ mod tests {
         assert!(
             !summarize_campaigns(&[campaign_item("CLAIMABLE", 0, "REDEMPTION_CODE")]).has_benefit
         );
+
+        // 历史已领一次性促销包 ⇒ 不计入签到口径（has_benefit 为 false，不被当成已签）。
+        let one_time_claimed = summarize_campaigns(&[one_time_campaign_item("CLAIMED", 500)]);
+        assert!(!one_time_claimed.has_benefit);
+        assert!(!one_time_claimed.claimed);
+        assert_eq!(one_time_claimed.claimed_amount, 0);
+
+        // 每日签到已领 + 一次性促销已领 ⇒ 仅统计每日签到额度（100，不得谎报 600）。
+        let mixed = summarize_campaigns(&[
+            campaign_item("CLAIMED", 100, "CREDITS"),
+            one_time_campaign_item("CLAIMED", 500),
+        ]);
+        assert!(mixed.has_benefit && mixed.claimed);
+        assert_eq!(mixed.claimed_amount, 100);
+    }
+
+    /// 同一活动被上游重复下发时，签到额度不得重复累加。
+    #[test]
+    fn summarize_campaigns_deduplicates_same_campaign() {
+        let summary = summarize_campaigns(&[
+            campaign_item("CLAIMED", 100, "CREDITS"),
+            campaign_item("CLAIMED", 100, "CREDITS"),
+        ]);
+        assert!(summary.claimed);
+        assert_eq!(summary.claimed_amount, 100, "同一活动只应计一次");
     }
 
     /// 状态投影：`todayCheckedIn` 只认上游 `claimStatus`；没签时 `todayCredit` 是 null。
@@ -1081,6 +1138,17 @@ mod tests {
         );
         assert_eq!(stamped_only["todayCheckedIn"], Value::Bool(false));
         assert_eq!(stamped_only["stampedToday"], Value::Bool(true));
+
+        // 只有已领一次性活动时：不伪装成今日已签，status 为 NONE。
+        let only_one_time = campaign_entry(
+            &snapshot(vec![one_time_campaign_item("CLAIMED", 500)]),
+            false,
+        );
+        assert_eq!(only_one_time["todayCheckedIn"], Value::Bool(false));
+        assert_eq!(only_one_time["todayCredit"], Value::Null);
+        assert_eq!(only_one_time["dailyCredit"], 0);
+        assert_eq!(only_one_time["status"], "NONE");
+        assert_eq!(only_one_time["active"], Value::Bool(false));
     }
 
     /// 旧契约兼容：`already` 必须是布尔、`rewardCredits` 取 `earned`。
