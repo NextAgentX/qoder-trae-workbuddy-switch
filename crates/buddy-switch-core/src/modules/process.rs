@@ -467,20 +467,6 @@ fn close_residual_error(pids: &[u32]) -> String {
     )
 }
 
-fn alive_pids_from_thread_counts(
-    pids: &[u32],
-    thread_counts: Option<&std::collections::HashMap<u32, u32>>,
-) -> Vec<u32> {
-    match thread_counts {
-        Some(counts) => pids
-            .iter()
-            .copied()
-            .filter(|pid| counts.get(pid).is_none_or(|threads| *threads > 0))
-            .collect(),
-        None => pids.to_vec(),
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn windows_rows_with_thread_counts(rows: Vec<WindowsProcessRow>) -> Vec<WindowsProcessRow> {
     let counts = windows_thread_counts();
@@ -2163,20 +2149,29 @@ mod tests {
         );
     }
 
-    /// PID 等待的线程数判据：仅明确 0 线程判死；未知计数继续 fail-closed。
+    /// PID 级判据：仅明确 0 线程判死；未知计数继续 fail-closed。
+    ///
+    /// 断言落在生产代码真正使用的 [`row_has_live_threads`] 上 —— 早先这里断言的是一个
+    /// 只在测试里出现的辅助函数，它在生产路径上没有调用点，CI 的 `-D warnings`
+    /// 会把它判成死码（真实教训：本地 `cargo check` 不开 `-D warnings` 时看不出来）。
     #[cfg(target_os = "windows")]
     #[test]
     fn zero_thread_pid_is_not_alive_while_unknown_counts_fail_closed() {
         use std::collections::HashMap;
 
-        let pids = [2201_u32, 2202, 2203];
         let counts = HashMap::from([(2201_u32, 2_u32), (2202_u32, 0_u32), (2203_u32, 7_u32)]);
+        let row = |pid: u32| WindowsProcessRow {
+            pid,
+            name: "WorkBuddy.exe".to_string(),
+            exe_path: None,
+        };
 
-        assert_eq!(
-            alive_pids_from_thread_counts(&pids, Some(&counts)),
-            vec![2201, 2203]
-        );
-        assert_eq!(alive_pids_from_thread_counts(&pids, None), pids.to_vec());
+        assert!(row_has_live_threads(&row(2201), Some(&counts)));
+        assert!(!row_has_live_threads(&row(2202), Some(&counts)));
+        assert!(row_has_live_threads(&row(2203), Some(&counts)));
+
+        // 快照不可用 ⇒ 一律按「在运行」处理（fail-closed）。
+        assert!(row_has_live_threads(&row(2202), None));
     }
 
     #[cfg(target_os = "windows")]
