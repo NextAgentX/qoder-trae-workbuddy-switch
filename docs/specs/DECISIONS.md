@@ -944,6 +944,26 @@ webview 里属 HTTPS 页面发起的回环 HTTP 请求 —— 依赖平台把 lo
 
 ---
 
+### D58 Windows 进程判活以**线程数**为准：0 线程内核残留不算「在运行」 —— ✅ **已落地（2026-11-17）**
+
+**背景**：切换账号前的进程守卫只看**映像名**是否出现在进程列表里。Windows 有一类
+**0 线程内核残留**（EPROCESS 被驱动扣住）：`tasklist` 仍列出它，但它没有任何可执行
+线程，既不能写库，也**无法被 `taskkill` 清除** ⇒ 用户被卡在「关闭并继续」的死循环，
+而客户端窗口其实早已关闭。
+
+**结论**：判据改为**以 ToolHelp 快照的线程数为准**，且只有**明确 0 线程**才判死；
+快照失败 / PID 缺失一律按**在运行**处理（fail-closed）。判据集中在
+`process::row_has_live_threads` / `alive_pids_from_thread_counts` 两个纯函数里，
+所有入口（`tasklist` 路径、CIM 路径、Trae 的 `taskkill /IM` 路径）共用同一判据。
+
+**代价与护栏**：每轮判活多一次 ToolHelp 快照（进程内 API，无子进程开销）。
+关闭超时的错误文案同步改掉，不再提示「请手动结束进程」——残留常常手动也结束不掉，
+误导用户反复重试。可证伪：把 `threads > 0` 改成 `threads >= 0`，单测
+`zero_thread_rows_are_not_live` 变红。详见
+[`PROCESS-GUARD-THREAD-HEURISTIC.md`](PROCESS-GUARD-THREAD-HEURISTIC.md)。
+
+---
+
 ### D57 积分与临期的展示口径**三平台同值**，余额改「可用口径」 —— ✅ **已落地（2026-11-09，PR #189）**
 
 **背景**：同一件事在不同页面给出不同数字，用户只能认为工具在乱报。四处分裂：

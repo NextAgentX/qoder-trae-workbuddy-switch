@@ -61,6 +61,7 @@
 | [`P5-P12-TASKS.md`](specs/P5-P12-TASKS.md) | P5–P12 的执行级任务清单 | 现行 |
 | [`UPDATE-NOTES-ARCH.md`](specs/UPDATE-NOTES-ARCH.md) | 升级前说明弹窗（版本内容）：四阶段交互、数据契约、发布侧产出与切片口径 | 现行 · 2026-10-17 落地 |
 | [`GATEWAY-UPSTREAM-NETWORK.md`](specs/GATEWAY-UPSTREAM-NETWORK.md) | 网关**出站**网络：默认直连 vs 系统代理（`no_proxy` 纪律 + 兜底回落 + 排查手法） | 现行 · 2026-11-08 落地 |
+| [`PROCESS-GUARD-THREAD-HEURISTIC.md`](specs/PROCESS-GUARD-THREAD-HEURISTIC.md) | Windows 客户端判活：0 线程内核残留不算「在运行」，快照失败仍 fail-closed | 现行 · 2026-11-17 落地 |
 | [`RISK-ACCOUNT-ISOLATION.md`](specs/RISK-ACCOUNT-ISOLATION.md) | 本地认证快照、共享出站客户端与风控状态的适用边界 | 现行 · 2026-11-13 |
 | [`RISK-CONTROLS-DESIGN.md`](specs/RISK-CONTROLS-DESIGN.md) | WorkBuddy / Trae / Qoder 网关合规风控设置设计（方案 A） | 现行 · 2026-11-13 落地 |
 | [`2026-11-13-three-platform-risk-controls.md`](superpowers/plans/2026-11-13-three-platform-risk-controls.md) | 三平台合规风控设置实施计划 | 已完成 · 2026-11-13 |
@@ -135,6 +136,7 @@
 | [`reference-workbuddy-manager.md`](history/reference-workbuddy-manager.md) | 外部同栈项目的调研记录 |
 | [`CLEANUP-2026-10-13.md`](history/CLEANUP-2026-10-13.md) | 上一轮工作区清理报告（含当时的引用扫描证据） |
 | [openrouter-docs-2026-11-16/](history/openrouter-docs-2026-11-16/) | 2026-11-16 抓取的 OpenRouter 官方文档快照（外部资料，非本仓设计依据） |
+| [`deepseek-codex-cache-research-2026-11-17.md`](history/deepseek-codex-cache-research-2026-11-17.md) | Codex 经 Buddy/Trae 使用 DeepSeek 时缓存 0% 的官方语义、统计口径与源码边界调研 |
 
 ---
 
