@@ -24,6 +24,29 @@ const BASE = __dirname;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const results = [];
 
+/* ─────────── 阶段打点（诊断用，零成本） ───────────
+ *
+ * 为什么需要它：2026-11-17 这个套件在 CI 上**偶发**挂死（linux 180s /
+ * mac 600s 被 SIGKILL），而本机复现不了（Node 22/24 都是 2 秒通过）。
+ * 父进程 `check-prototype-behaviors.cjs` 超时时会把子进程**已产生的输出**
+ * 原样转出来 —— 所以只要这里打点，下次 CI 一复现，日志里就能直接看到
+ * 「卡在第几步」，不必再靠推理。
+ *
+ * 打点写 **stderr**：stdout 会被父进程在成功时丢弃（只在失败时转出），
+ * 而 stderr 永远会被转出 —— 挂死时它就是唯一的信息来源。
+ * 用 `process.stderr.write` 而不是 console.error：后者在管道里同样有缓冲，
+ * 而 write 是同步落盘的（对 TTY/管道都是同步）。
+ */
+const T0 = Date.now();
+const trace = (msg) => {
+  try {
+    process.stderr.write(`[clientless +${String(Date.now() - T0).padStart(6)}ms] ${msg}\n`);
+  } catch {
+    /* 打点本身失败绝不能影响验收本身。 */
+  }
+};
+trace("script start");
+
 /* ─────────── 变异注入 ─────────── */
 const MUT = (process.argv.find((a) => a.startsWith("--mutate")) || "").replace("--mutate", "").replace(/^=/, "");
 const MUTATIONS = {
@@ -64,6 +87,7 @@ function prepareCopy() {
 }
 
 function check(name, fn) {
+  trace(`check start: ${name}`);
   try {
     const detail = fn();
     results.push({ ok: true, name, detail });
@@ -72,11 +96,13 @@ function check(name, fn) {
     results.push({ ok: false, name, error: e.message });
     console.log(` FAIL  ${name}  → ${e.message}`);
   }
+  trace(`check end:   ${name}`);
 }
 
 /** 单文件版（`buddy-switch-prototype.html`）—— 与 4 文件源是**双向分叉**的冻结副本，
  *  改一处必须两处同改，所以这里也验一遍，防「只改了一边」。 */
 async function bootSingle(query) {
+  trace(`bootSingle start query=${query}`);
   const html = fs.readFileSync(path.join(BASE, "buddy-switch-prototype.html"), "utf8")
     .replace('<link rel="stylesheet" href="demo.css" />', "");
   const dom = new JSDOM(html, {
@@ -84,7 +110,9 @@ async function bootSingle(query) {
     url: `https://proto.local/buddy-switch-prototype.html?${query}`,
     pretendToBeVisual: true,
   });
+  trace("bootSingle JSDOM constructed, sleeping");
   await sleep(80);
+  trace("bootSingle ready");
   return dom;
 }
 
@@ -98,7 +126,9 @@ async function boot(dir, query) {
     url: `https://proto.local/index.html?${query}`,
     pretendToBeVisual: true,
   });
+  trace(`boot JSDOM constructed query=${query}, sleeping`);
   await sleep(60);
+  trace("boot ready");
   return dom;
 }
 
@@ -114,6 +144,7 @@ const bAct = (doc, sel, act) => {
   console.log("\n无客户端形态（issue #62）· 原型验收\n");
 
   /* ① 无客户端 + 0 账号 ⇒ 引导卡 */
+  trace("phase 1: clientless + 0 accounts")
   {
     const dom = await boot(dir, "scope=trae-global&dest=accounts&hint=0");
     const d = dom.window.document;
@@ -154,6 +185,7 @@ const bAct = (doc, sel, act) => {
   }
 
   /* ④ 授权弹窗细节 */
+  trace("phase 2: auth dialog details")
   {
     const dom = await boot(dir, "scope=trae-global&dest=accounts&open=auth&hint=0");
     const d = dom.window.document;

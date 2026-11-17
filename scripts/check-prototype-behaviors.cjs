@@ -71,8 +71,8 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const failed = [];
-for (const name of files) {
+/* 跑一个套件。返回 { run, timedOut, ms }。 */
+function runSuite(name) {
   const started = Date.now();
   const run = spawnSync(process.execPath, [path.join(DIR, name)], {
     encoding: "utf8",
@@ -83,10 +83,44 @@ for (const name of files) {
     // 超时后必须**真的杀掉**：只发 SIGTERM 时，卡在同步循环里的 JS 没有机会处理它。
     killSignal: "SIGKILL",
   });
-  const ms = Date.now() - started;
-  /* 超时后 `status` 为 `null`、`signal` 为 `SIGKILL`，只看退出码会把超时当成普通失败
-     （甚至 `null === 0` 为 false 就只报 `exit=null`，看不出发生了什么）。 */
-  const timedOut = Boolean(run.error && run.error.code === "ETIMEDOUT");
+  return {
+    run,
+    ms: Date.now() - started,
+    /* 超时后 `status` 为 `null`、`signal` 为 `SIGKILL`，只看退出码会把超时当成普通失败
+       （甚至 `null === 0` 为 false 就只报 `exit=null`，看不出发生了什么）。 */
+    timedOut: Boolean(run.error && run.error.code === "ETIMEDOUT"),
+  };
+}
+
+const failed = [];
+for (const name of files) {
+  let { run, ms, timedOut } = runSuite(name);
+
+  /* ★ 超时**重试一次**（2026-11-17 起）。
+   *
+   * 背景：`verify-clientless.cjs` 在 CI 上**偶发**挂死 —— 2026-11-17 的
+   * v2026.11.171651 发布里，linux-x64 与 mac-arm64 两个平台都因它超时
+   * （180s / 600s 被 SIGKILL），而**本机复现不了**（Node 22 与 24 都是 2 秒通过，
+   * 单独跑 8 次全绿）。同一份代码在 win-x64 上 18 分钟正常构建通过 ——
+   * 即失败与平台、与本次改动都无关，是 runner 环境的偶发。
+   *
+   * 为什么不直接判红：那会让「一个与产物无关的环境抖动」**阻断整个发布**
+   * （2026-11-17 就是为此手动重跑了两个平台才把 Release 补齐）。
+   *
+   * 为什么重试是安全的：超时意味着套件**没给出任何结论**，重跑拿到的是
+   * **全新的一次执行**（不共享进程、不共享状态）。重试仍超时才判红 ——
+   * 「稳定复现的挂起」不会被放过，「偶发抖动」不会阻断发布。
+   */
+  if (timedOut) {
+    console.log(`  retry ${name.padEnd(30)} 上次超时，重跑一次确认…`);
+    ({ run, ms, timedOut } = runSuite(name));
+    if (timedOut) {
+      console.log(`  retry ${name.padEnd(30)} 仍然超时 ⇒ 判红`);
+    } else {
+      console.log(`  retry ${name.padEnd(30)} 重跑通过 ⇒ 判定为偶发抖动`);
+    }
+  }
+
   const ok = !timedOut && run.status === 0;
   // 汇总行形如 `22 passed / 0 failed`、`18 passed, 0 failed`；没有则只给退出码。
   const summary = timedOut
@@ -109,7 +143,7 @@ if (failed.length) {
   for (const { name, run, timedOut } of failed) {
     console.error(`──────── ${name} ────────`);
     if (timedOut) {
-      /* 超时**没有断言输出**可转，所以必须给一句人话 + 排查方向，否则下一个人
+      /* 超时**本来没有断言输出**可转，所以必须给一句人话 + 排查方向，否则下一个人
          只能看到一堆空白。 */
       console.error(
         `该套件超过 ${SUITE_TIMEOUT_MS / 1000}s 未退出（已被 SIGKILL）。\n` +
@@ -118,6 +152,19 @@ if (failed.length) {
           `  · 单独跑它看看：node docs/prototype/${name}\n` +
           `  · 确认是慢机器而非挂住，可临时放宽：CHECK_PROTO_TIMEOUT_MS=600000 npm run check:proto`,
       );
+      /* ★ 超时**不等于没有输出**：子进程在被 SIGKILL 之前已经打印的东西仍在
+         stdout/stderr 里。丢掉它 = 下一个人只能看到「卡了 180 秒」却不知道卡在哪一步
+         —— 2026-11-17 的 `verify-clientless.cjs` 挂起就是这样查不出根因的。
+         所以这里把「已产生的输出」原样转出来：套件自己打的阶段打点（若它有）
+         会直接指认卡点。 */
+      const partial = `${run.stdout || ""}${run.stderr || ""}`.trim();
+      if (partial) {
+        console.error(`──── ${name} 超时前已产生的输出 ────`);
+        console.error(partial);
+        console.error(`──── ${name} 输出结束 ────`);
+      } else {
+        console.error(`（${name} 超时前没有产出任何输出 ⇒ 卡在启动阶段）`);
+      }
       continue;
     }
     const text = `${run.stdout || ""}${run.stderr || ""}`;
