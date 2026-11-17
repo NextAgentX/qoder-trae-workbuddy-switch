@@ -73,12 +73,18 @@ export const TRAE_SETTINGS_SECTIONS = SETTINGS_SUBNAV.filter(
 );
 
 /**
- * Qoder：只有四处有真内容 —— 计划任务（签到 / 令牌保活）、客户端检测、
- * 网络（出站代理）、备份与恢复。其余项在 Qoder 侧**没有设置项**，
+ * Qoder：五处有真内容 —— 账号与登录、计划任务（签到 / 令牌保活）、
+ * 客户端检测、网络（出站代理）、备份与恢复。其余项在 Qoder 侧**没有设置项**，
  * 摆上去就是假控件（点了只有一句「尚未接入」，比不摆更糟）。
  * 对应功能落地后，把它的 id 加进这里即可。
  */
-const QODER_SECTION_IDS: readonly SettingsSubnavId[] = ["client", "network", "schedule", "backup"];
+const QODER_SECTION_IDS: readonly SettingsSubnavId[] = [
+  "account",
+  "client",
+  "network",
+  "schedule",
+  "backup",
+];
 
 export const QODER_SETTINGS_SECTIONS = SETTINGS_SUBNAV.filter((item) =>
   QODER_SECTION_IDS.includes(item.id),

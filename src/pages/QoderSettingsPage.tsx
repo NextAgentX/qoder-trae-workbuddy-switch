@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useLocation, useSearchParams } from "react-router-dom";
-import { Globe, MonitorSmartphone, ShieldAlert } from "lucide-react";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { ArrowRight, Globe, MonitorSmartphone, ShieldAlert } from "lucide-react";
 
 import { QoderLocalSourceRow } from "@/components/qoder/qoder-local-source-row";
 import { TimesEditor } from "@/components/schedule-times-editor";
@@ -14,6 +14,7 @@ import {
 } from "@/components/settings/settings-subnav";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
 import { Button } from "@/components/ui/button";
+import { CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -234,6 +235,31 @@ export default function QoderSettingsPage() {
         <SettingsSubnav items={QODER_SETTINGS_SECTIONS} active={section} onSelect={goSection} />
 
         <div className="min-w-0 flex-1 space-y-4">
+          {/* 账号与登录：Qoder 的账号库 / 导入 / 程序位 / 切换入口都在账号页；
+              设置页只给一个真实可达的入口，不复制一份账号表单。它也是旧 general / gateway
+              深链 fail-closed 的落点（PR #211）。 */}
+          {section === "account" && (
+            <Card className="gap-0 py-0">
+              <CardHeader className="flex-row items-center gap-4 px-4 py-3.5">
+                <ShieldAlert className="size-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 grow">
+                  <CardTitle className="text-[13px] font-[550]">
+                    {t("qoder.page.settings.account.title")}
+                  </CardTitle>
+                  <CardDescription className="mt-0.5 text-[11.5px]">
+                    {t("qoder.page.settings.account.description")}
+                  </CardDescription>
+                </div>
+                <Button asChild size="sm" variant="outline" className="h-7 shrink-0">
+                  <Link to={`/qoder/accounts?region=${region}`}>
+                    {t("qoder.page.settings.account.action")}
+                    <ArrowRight className="size-3.5" />
+                  </Link>
+                </Button>
+              </CardHeader>
+            </Card>
+          )}
+
           {section === "client" && (
             <Card className="gap-0 py-0">
               <div className="flex flex-wrap items-start gap-3 px-4 py-3.5">

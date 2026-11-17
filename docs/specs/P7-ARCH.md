@@ -1,10 +1,10 @@
 # P7 架构分解：全局备份与恢复
 
-> **状态**：设计（2026-10-04）。本文是 `P5-P12-TASKS.md` P7 段的**落地设计**，可直接交给工程师。
-> **上游**：`PLAN.md` §2.6（备份数据契约：envelope / 四条规则）、§3.14（备份与恢复 UI：导出 / 导入 / 五条行为约束）、§3.9（设置 9 项子导航）、§4.2（新增可备份内容类型）、§2.5（安全边界：fail-closed / 默认拒绝）、§2.7（能力 ≠ 偏好）、§3.4 规则 1（无数据不渲染）、§3.5（文案不许假承诺）、§3.6（状态语言：部分失败态 / 过期态）、§3.10 第 1 条（不写死数字）；`DECISIONS.md` **D14**（默认全选作用域）/ **D15**（凭据默认关）/ **D16**（冲突默认保留本地）/ **D17**（定时备份每日保留 7 份）/ **D18**（导入前快照强制）/ **D12**（允许平台专属子项）；`GAP-ANALYSIS.md` §2.4（P7 十二条全 ❌）。
+> **状态**：现行（2026-10-04 设计，2026-11-17 随设置入口去重修订）。本文是 `P5-P12-TASKS.md` P7 段的**落地设计**，可直接交给工程师。
+> **上游**：`PLAN.md` §2.6（备份数据契约：envelope / 四条规则）、§3.14（备份与恢复 UI：导出 / 导入 / 五条行为约束）、§3.9（设置产品白名单子导航）、§4.2（新增可备份内容类型）、§2.5（安全边界：fail-closed / 默认拒绝）、§2.7（能力 ≠ 偏好）、§3.4 规则 1（无数据不渲染）、§3.5（文案不许假承诺）、§3.6（状态语言：部分失败态 / 过期态）、§3.10 第 1 条（不写死数字）；`DECISIONS.md` **D14**（默认全选作用域）/ **D15**（凭据默认关）/ **D16**（冲突默认保留本地）/ **D17**（定时备份每日保留 7 份）/ **D18**（导入前快照强制）/ **D12**（允许平台专属子项）；`GAP-ANALYSIS.md` §2.4（P7 十二条全 ❌）。
 > **格式参考**：`P10-ARCH.md` / `P11-ARCH.md`（同构：实现方案 / 文件列表 / 数据结构 / 有序任务 / 共享知识 / 风险 / 待明确 / 依赖图）。
 > **下游**：§4 任务列表直接交给工程师。
-> **范围**：**仅** P7 —— ① 备份 envelope 契约（导出 / 导入）；② 设置页「备份与恢复」（第 9 项子导航）。
+> **范围**：**仅** P7 —— ① 备份 envelope 契约（导出 / 导入）；② 设置页「备份与恢复」（产品设置子导航末项）。
 > **明确排除**：账号级导入导出（`export-accounts-dialog` / `import-accounts-dialog`）**保留不动**（§3.14「并存不替换」）；**命令面板两动作（「导出全部备份」/「从备份导入」）本期不做**——P6（命令面板本体）未落，现在登记动作**无法接线 ⇒ 死代码**，**推到 P6 之后**（§7 #6）。
 > **依赖**：**P5**（`Scope::parse` fail-closed / `resolve_account_key` 统一谓词 / `BackgroundTask`）。P5 **进行中** ⇒ **本设计可以先做**（见 §1.10）。
 
@@ -672,7 +672,7 @@ sequenceDiagram
 graph TD
   P5["P5（Scope::parse / resolve_account_key / BackgroundTask）<br/>进行中"] -.-> T01["T01 后端：envelope 契约 + 分区表 + 导出 + 命令<br/>(backup.rs / backup_sections.rs / export_import.rs / 两宿主命令 / api.ts)"]
   T01 --> T02["T02 后端：导入 + 快照 + 定时备份<br/>(preview / import / snapshot / auto_backup / BackgroundTask ×2)"]
-  T01 --> T03["T03 前端：9 项子导航 + 备份页 + 接线 + 词条<br/>(settings-subnav / backup-section / preview / store / api.ts / screenshot-demo / locales)"]
+  T01 --> T03["T03 前端：产品白名单子导航 + 备份页 + 接线 + 词条<br/>(settings-subnav / backup-section / preview / store / api.ts / screenshot-demo / locales)"]
   T02 --> T03
   T02 --> T04["T04 验证与门禁<br/>(check:api / check:scope / check:api-contract / tsc / cargo test / ★ 修正判据键集 / 变异验证)"]
   T03 --> T04

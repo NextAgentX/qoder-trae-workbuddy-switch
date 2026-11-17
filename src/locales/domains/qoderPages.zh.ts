@@ -338,11 +338,15 @@ export const zh = {
   "qoder.page.settings.proxy.saving": "保存中…",
   "qoder.page.settings.proxy.saved": "代理设置已保存",
   "qoder.page.settings.proxy.saveFailed": "代理设置保存失败",
-  "qoder.page.settings.section.client": "客户端检测",
+  "qoder.page.settings.account.title": "账号与登录",
+  "qoder.page.settings.account.description":
+    "导入、切换和程序位登录态都在账号页管理；这里只提供入口，不重复同一份表单。",
+  "qoder.page.settings.account.action": "前往账号页",
   "qoder.page.settings.client.description": "本机两处官方凭据存储的探测结果（只读，不落库）。",
   "qoder.page.settings.client.error": "探测失败：{error}",
   // ★ 计划任务（Qoder 的两类排程；排程是全局单份 `schedule_config.json`）
   "qoder.page.settings.schedule.checkinGroup": "自动签到",
+  "qoder.page.settings.section.client": "客户端检测",
   "qoder.page.settings.schedule.checkinEnable": "按排程自动签到",
   "qoder.page.settings.schedule.checkinDesc":
     "到点自动领取活动平台的积分奖励（默认关闭 —— 替你去领东西，需要你明确打开）。",

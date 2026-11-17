@@ -7268,13 +7268,40 @@ check("★ 设置页只放产品设置：应用级设置归顶栏 ⚙、网关�
   if (!/AppSettingsGroups/.test(drawer)) {
     throw new Error("顶栏 ⚙ 抽屉没有渲染应用级设置 —— 删了设置页的副本却没接住唯一入口");
   }
-  const gatewayPage = stripComments(
-    fs.readFileSync(path.join(ROOT, "src/pages/ApiServicePage.tsx"), "utf8"),
-  );
-  if (!/RiskControlsCard/.test(gatewayPage)) {
-    throw new Error("请求风控没有落在网关页 —— 从设置页删除后成了不可达功能");
+  for (const page of [
+    "src/pages/ApiServicePage.tsx",
+    "src/pages/TraeApiServicePage.tsx",
+    "src/pages/QoderApiServicePage.tsx",
+  ]) {
+    const gatewayPage = stripComments(fs.readFileSync(path.join(ROOT, page), "utf8"));
+    if (!/RiskControlsCard/.test(gatewayPage)) {
+      throw new Error(`${page}: 请求风控没有落在该平台网关概览`);
+    }
   }
-  return "设置页无应用级/网关分区 · 抽屉唯一入口 · 风控在网关概览";
+
+  const nav = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/components/settings/settings-subnav.tsx"), "utf8"),
+  );
+  for (const name of ["WB_SETTINGS_SECTIONS", "TRAE_SETTINGS_SECTIONS", "QODER_SETTINGS_SECTIONS"]) {
+    if (!new RegExp(`export const ${name}`).test(nav)) {
+      throw new Error(`缺产品设置白名单 ${name}`);
+    }
+  }
+  if (!/const DEFAULT_SETTINGS_SUBNAV:[^=]+= "account"/.test(nav)) {
+    throw new Error("非法 / 旧深链的默认落点必须是 account（账号与登录）");
+  }
+  const qoderSettings = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/pages/QoderSettingsPage.tsx"), "utf8"),
+  );
+  if (!/section === "account"/.test(qoderSettings)) {
+    throw new Error("Qoder 白名单有 account，但页面没有渲染分支 —— 会显示空主区");
+  }
+  for (const section of ["client", "network", "schedule", "backup"]) {
+    if (!new RegExp(`section === "${section}"`).test(qoderSettings)) {
+      throw new Error(`Qoder 白名单的 ${section} 没有渲染分支`);
+    }
+  }
+  return "设置页无应用级/网关分区 · 抽屉唯一入口 · 三平台网关风控可达 · 产品白名单有内容";
 });
 
 check("★ P1-2 批量签到部分失败：toast 给「只重试失败项」出口", () => {
