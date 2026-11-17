@@ -218,6 +218,9 @@ export const zh = {
   // 到期徽章（issue #166）：黄=临期警告（7 天窗口，与 WB / Trae 同口径）。
   // 只报**最快到期的那一批**：天数与该批金额同批；逐批明细（绝对时刻）在 tooltip。
   "qoder.page.accounts.metric.expiringChip": "最近到期 {days}天 · {amount} 积分",
+  /* < 1 小时说分钟：与 `summarizeExpiring.soonestUnit` 同源；
+     1 分钟以内向下取整到 0 分钟（刻意不设秒档）。 */
+  "qoder.page.accounts.metric.expiringChipMinutes": "最近到期 {minutes}分钟 · {amount} 积分",
   /* ≤ 48 小时用小时：与 `summarizeExpiring.soonestUnit` 同源。 */
   "qoder.page.accounts.metric.expiringChipHours": "最近到期 {hours}小时 · {amount} 积分",
   "qoder.page.accounts.metric.expiringTipTitle": "按到期时间分批（共 {n} 批）",

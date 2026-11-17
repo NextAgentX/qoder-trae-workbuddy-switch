@@ -15,11 +15,13 @@
  * 窗口内的**总量**仍是真实有用的数（抽屉副文本「7 天内到期 X 积分」、聚合页 / 统计页
  * 的 `expiringSoonRemaining` 都读它），所以保留在 `total` 字段，只是**不进徽章**。
  *
- * ## 时间单位：≤ 48 小时用「小时」
+ * ## 时间单位：< 1 小时用「分钟」，≤ 48 小时用「小时」，再往上用「天」
  *
- * 徽章的时间单位由最快那批的剩余时长决定：**≤ 48 小时 ⇒ 小时**（`最近到期 47小时`），
- * 超过 48 小时才折算成**天**（`最近到期 3天`）。用小时是为了不让「25 小时」和「47 小时」
- * 都被说成「1 天」；天档向上取整，宁可说晚不说早。
+ * 徽章的时间单位由最快那批的剩余时长决定：**< 1 小时 ⇒ 分钟**（`最近到期 25分钟`），
+ * **≤ 48 小时 ⇒ 小时**（`最近到期 47小时`），超过 48 小时才折算成**天**（`最近到期 3天`）。
+ * 越短的区间给越细的刻度：最后一小时里「1 小时」会一动不动，用户没法判断要不要现在动手用掉。
+ * 分钟与小时档向下取整；天档仍向上取整（宁可说晚不说早）。**1 分钟以内显示「0 分钟」**
+ * —— 这是刻意的：不再给秒档，`0 分钟` 就是「马上到期」的读数。
  *
  * ## 明细放 tooltip，用绝对时刻
  *
@@ -39,6 +41,8 @@
  * {@link TRAE_EXPIRING_SOON_MS} —— 它是后端窗口的**镜像**，不是第二个口径。
  */
 
+/** 一分钟的毫秒数（徽章最后一小时用「分钟」）。 */
+const MINUTE_MS = 60_000;
 /** 一小时的毫秒数（徽章短区间用「小时」）。 */
 const HOUR_MS = 3_600_000;
 /** 一天的毫秒数。 */
@@ -73,14 +77,17 @@ export interface ExpiringSummary {
   /** 窗口内全部临期剩余积分之和（抽屉副文本 / 聚合页读它；**不进徽章**）。 */
   total: number;
   /**
-   * 徽章的**单位**：最快那批剩余 ≤ 48 小时 ⇒ `"hours"`，否则 `"days"`。
-   * 短区间用小时是因为「1 天」会把 25 小时和 47 小时说成同一个数。
+   * 徽章的**单位**：最快那批剩余 < 1 小时 ⇒ `"minutes"`，≤ 48 小时 ⇒ `"hours"`，
+   * 否则 `"days"`。短区间用更细的刻度：「1 天」会把 25 小时和 47 小时说成同一个数，
+   * 「1 小时」会让最后一段看起来停滞。1 分钟以内归入分钟档，向下取整得 0。
    */
-  soonestUnit: "hours" | "days";
-  /** 最快那批距今天数，向上取整、≥1 —— 仅 `soonestUnit === "days"` 时使用。 */
+  soonestUnit: "minutes" | "hours" | "days";
+  /** 最快那批距今天数，向上取整 —— 仅 `soonestUnit === "days"` 时使用。 */
   soonestDays: number;
-  /** 最快那批距今小时数，向上取整、≥1 —— 仅 `soonestUnit === "hours"` 时使用。 */
+  /** 最快那批距今小时数，向下取整 —— 仅 `soonestUnit === "hours"` 时使用。 */
   soonestHours: number;
+  /** 最快那批距今分钟数，向下取整、可为 0 —— 仅 `soonestUnit === "minutes"` 时使用。 */
+  soonestMinutes: number;
   /** 最快那批（`batches[0]`）的剩余积分 —— 徽章的金额，与上面的数值同批。 */
   soonestAmount: number;
   /** 按到期时刻升序的逐批明细（最快的那批排第一）。 */
@@ -140,16 +147,22 @@ export function summarizeExpiring(
   if (total <= 0) return null;
 
   /* 徽章只看最快那批：单位、数值、金额必须来自同一批（见模块头）。
-     单位（小时 / 天）与数值一律取自 {@link remainingSpan}，不在本函数里再算一遍 ——
-     账号页表格的「积分到期」列也读它，两处判据分叉就会回到
-     「徽章说 2 小时、表格说 1 天」的老样子。 */
+     当前单位的数值直接取自 {@link remainingSpan}；其余单位的冗余字段为兼容现有
+     调用方保留，不参与当前展示 —— 账号页表格的「积分到期」列也读它，两处判据
+     分叉就会回到「徽章说 2 小时、表格说 1 天」的老样子。 */
   const soonest = batches[0];
-  const remaining = soonest.expireAt - now;
+  const span = remainingSpan(soonest.expireAt - now);
   return {
     total,
-    soonestUnit: remainingSpan(remaining).unit,
-    soonestDays: Math.max(1, Math.ceil(remaining / DAY_MS)),
-    soonestHours: Math.max(1, Math.ceil(remaining / HOUR_MS)),
+    soonestUnit: span.unit,
+    soonestDays:
+      span.unit === "days" ? span.value : Math.max(1, Math.ceil((soonest.expireAt - now) / DAY_MS)),
+    soonestHours:
+      span.unit === "hours" ? span.value : Math.max(1, Math.floor((soonest.expireAt - now) / HOUR_MS)),
+    soonestMinutes:
+      span.unit === "minutes"
+        ? span.value
+        : Math.max(0, Math.floor((soonest.expireAt - now) / MINUTE_MS)),
     soonestAmount: soonest.amount,
     batches,
   };
@@ -158,8 +171,13 @@ export function summarizeExpiring(
 /**
  * 一段**剩余时长**的展示粒度 —— 全仓唯一出口。
  *
- * - `≤ 48 小时` ⇒ 小时（向上取整、≥1）：25 小时与 47 小时都能各自说准；
- * - `> 48 小时` ⇒ 天（向上取整、≥1）：宁可说晚不说早 —— 49 小时算「3 天」。
+ * - `< 1 小时` ⇒ 分钟（向下取整）：最后一小时要给到分钟刻度，否则「1 小时」
+ *   会一直挂到过期；1 分钟以内显示 0 分钟（刻意：不设秒档，0 分钟就是「马上到期」）；
+ * - `≤ 48 小时` ⇒ 小时（向下取整）：25 小时与 47 小时都能各自说准；
+ * - `> 48 小时` ⇒ 天（向上取整）：49 小时算「3 天」，宁可说晚不说早。
+ *
+ * 恰好 60 分钟仍是「1 小时」：边界含等号，沿用到上一档；
+ * 恰好 48 小时仍是「48 小时」，再多 1 毫秒才进入天档。
  *
  * ## 谁在读它
  *
@@ -171,11 +189,14 @@ export function summarizeExpiring(
  * ⚠️ 别在调用点重写 `<= 48` 这个边界：那正是这次要根除的「同一规则两处实现」。
  */
 export function remainingSpan(remainingMs: number): {
-  unit: "hours" | "days";
+  unit: "minutes" | "hours" | "days";
   value: number;
 } {
+  if (remainingMs < HOUR_MS) {
+    return { unit: "minutes", value: Math.max(0, Math.floor(remainingMs / MINUTE_MS)) };
+  }
   if (remainingMs <= HOUR_DISPLAY_LIMIT_MS) {
-    return { unit: "hours", value: Math.max(1, Math.ceil(remainingMs / HOUR_MS)) };
+    return { unit: "hours", value: Math.max(1, Math.floor(remainingMs / HOUR_MS)) };
   }
   return { unit: "days", value: Math.max(1, Math.ceil(remainingMs / DAY_MS)) };
 }
@@ -277,10 +298,10 @@ export function nearestExpiringBatch(
   return upcomingExpiries(items, options)[0] ?? null;
 }
 
-/* 曾有一个 `daysUntil(expireAt)` 只返回「向上取整的天数」，WB 表格的「积分到期」列用它 ——
-   2 小时后到期的批被说成「1 天」，与本模块 {@link remainingSpan} 的「≤48 小时用小时」
-   直接矛盾。2026-11-09 已删：需要天数就 `remainingSpan(剩余毫秒).value`，
-   判据只有一处，别再长出第二个只到天的函数。 */
+/* 曾有一个 `daysUntil(expireAt)` 只返回取整后的天数，WB 表格的「积分到期」列用它 ——
+   2 小时后到期的批被说成「1 天」，与本模块 {@link remainingSpan} 的「<1 小时用分钟、
+   ≤48 小时用小时」直接矛盾。2026-11-09 已删：需要天数就
+   `remainingSpan(剩余毫秒).value`，判据只有一处，别再长出第二个只到天的函数。 */
 
 /* ══════════════════════ 渲染约束 ══════════════════════ */
 

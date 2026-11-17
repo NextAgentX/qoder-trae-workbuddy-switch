@@ -3695,20 +3695,25 @@ const fmtTok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1
 
 /* ── 剩余时长的展示粒度（与产品 `lib/credit-expiry.ts::remainingSpan` 同规则）──
  *
- * ≤ 48 小时说小时（向上取整、≥1）：25 小时与 47 小时都能各自说准；
- * > 48 小时才折算成天（向上取整，宁可说晚不说早 —— 49 小时算「3 天」）。
- * ⚠️ 别在调用点另写 `<= 48` 的边界：产品侧就因为「徽章改了、表格没改」出过
+ * < 1 小时说分钟（向下取整）：最后一小时里「1 小时」会停滞，看不出还剩多少；
+ *   1 分钟以内向下取整到 0 分钟（刻意不设秒档 —— 0 分钟就是「马上到期」）；
+ * ≤ 48 小时说小时（向下取整）：25 小时与 47 小时都能各自说准；
+ * > 48 小时才折算成天（向上取整 —— 49 小时算「3 天」，宁可说晚不说早）。
+ * ⚠️ 别在调用点另写边界：产品侧就因为「徽章改了、表格没改」出过
  *   「2 小时 / 1 天」同屏两句话（#189 后的回归，2026-11-09 修）。 */
 const expirySpan = (ms) => {
+  const MINUTE = 60000;
   const HOUR = 3600000;
   const DAY = 86400000;
+  if (ms < HOUR) return { value: Math.max(0, Math.floor(ms / MINUTE)), unit: "minutes" };
   return ms <= 48 * HOUR
-    ? { value: Math.max(1, Math.ceil(ms / HOUR)), unit: "hours" }
+    ? { value: Math.max(1, Math.floor(ms / HOUR)), unit: "hours" }
     : { value: Math.max(1, Math.ceil(ms / DAY)), unit: "days" };
 };
-const spanUnitText = (unit) => (unit === "hours" ? "小时" : "天");
+const spanUnitText = (unit) =>
+  unit === "minutes" ? "分钟" : unit === "hours" ? "小时" : "天";
 
-/** 卡片徽章：「最近到期 {N天|N小时} · {金额} 积分」—— 数值与金额同批（`soonestExpire`）。 */
+/** 卡片徽章：「最近到期 {N分钟|N小时|N天} · {金额} 积分」—— 数值与金额同批（`soonestExpire`）。 */
 function expiringChipText(a) {
   if (!a.soonestExpire) return "";
   const span = expirySpan(a.soonestExpire.ms - Date.now());

@@ -117,6 +117,9 @@ export const zh = {
   // ★ 2026-11-09：徽章只报**最快到期的那一批** —— 天数与该批金额同批（`batches[0]`），
   //   不再把「窗口内总量」和某一批的天数拼在一起（那是两批积分，怎么拼都有半句假话）。
   "wbAccounts.card.expiringChip": "最近到期 {days}天 · {amount} 积分",
+  /* < 1 小时说分钟：最后一小时里「1 小时」会停滞，用户看不出还剩多少；
+     1 分钟以内向下取整到 0 分钟（刻意不设秒档）。 */
+  "wbAccounts.card.expiringChipMinutes": "最近到期 {minutes}分钟 · {amount} 积分",
   /* ≤ 48 小时用小时：25 小时与 47 小时各自说准，不被都写成「1 天」。 */
   "wbAccounts.card.expiringChipHours": "最近到期 {hours}小时 · {amount} 积分",
   "wbAccounts.card.expiringTipTitle": "按到期时间分批（共 {n} 批）",
@@ -447,6 +450,7 @@ export const zh = {
   "wbAccounts.table.creditExpiry": "积分到期",
   "wbAccounts.table.creditExpiryDays": "{value} 天",
   "wbAccounts.table.creditExpiryHours": "{value} 小时",
+  "wbAccounts.table.creditExpiryMinutes": "{value} 分钟",
   "wbAccounts.table.tokenExpiry": "Token 到期",
   "wbAccounts.table.programs": "程序位",
   "wbAccounts.table.current": "当前",
