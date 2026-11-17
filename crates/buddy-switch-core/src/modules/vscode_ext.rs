@@ -281,10 +281,15 @@ fn windows_code_cim_process_script() -> &'static str {
 fn windows_code_process_rows() -> Vec<process::WindowsProcessRow> {
     let self_pid = std::process::id();
     if let Some(stdout) = process::ps_output(windows_code_cim_process_script(), 5) {
-        let rows: Vec<_> = process::parse_windows_process_rows(&stdout)
-            .into_iter()
-            .filter(|row| row.pid != self_pid && keep_windows_code_row(row))
-            .collect();
+        let rows: Vec<_> = process::windows_live_process_rows(
+            process::parse_windows_process_rows(&stdout)
+                .into_iter()
+                .filter(|row| row.pid != self_pid)
+                .collect(),
+        )
+        .into_iter()
+        .filter(keep_windows_code_row)
+        .collect();
         if !rows.is_empty() {
             return rows;
         }

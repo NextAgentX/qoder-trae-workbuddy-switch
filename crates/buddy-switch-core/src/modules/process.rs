@@ -364,6 +364,145 @@ pub(crate) struct WindowsProcessRow {
     pub(crate) exe_path: Option<PathBuf>,
 }
 
+/// Windows 进程快照里的 PID → 线程数。
+///
+/// 这是识别“0 线程内核残留”的唯一事实源。`tasklist` 仍可能列出这类 EPROCESS，
+/// 但它没有任何可执行线程，既不能写库，也无法被 `taskkill` 清除。
+/// 快照失败必须返回 `None`，由调用方继续 fail-closed，不能降级为空表。
+#[cfg(target_os = "windows")]
+fn windows_process_snapshot() -> Option<Vec<WindowsSnapshotEntry>> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_NO_MORE_FILES, WIN32_ERROR};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut entries = Vec::new();
+    let mut next = unsafe { Process32FirstW(snapshot, &mut entry) };
+    let complete = loop {
+        match next {
+            Ok(()) => {
+                // `cntThreads` 是系统快照对线程数的直接观测；0 会在下方过滤。
+                entries.push(WindowsSnapshotEntry {
+                    pid: entry.th32ProcessID,
+                    image: {
+                        let raw: Vec<u16> = entry.szExeFile.iter().copied().collect();
+                        let end = raw.iter().position(|unit| *unit == 0).unwrap_or(raw.len());
+                        String::from_utf16_lossy(&raw[..end])
+                    },
+                    threads: entry.cntThreads,
+                });
+            }
+            Err(error) if WIN32_ERROR::from_error(&error) == Some(ERROR_NO_MORE_FILES) => {
+                break true
+            }
+            Err(_) => break false,
+        }
+        next = unsafe { Process32NextW(snapshot, &mut entry) };
+    };
+    unsafe {
+        let _ = CloseHandle(snapshot);
+    }
+    complete.then_some(entries)
+}
+
+/// 快照里的一个进程：PID、映像名与线程数。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WindowsSnapshotEntry {
+    pub(crate) pid: u32,
+    pub(crate) image: String,
+    pub(crate) threads: u32,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_thread_counts() -> Option<std::collections::HashMap<u32, u32>> {
+    Some(
+        windows_process_snapshot()?
+            .into_iter()
+            .map(|entry| (entry.pid, entry.threads))
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn row_has_live_threads(
+    row: &WindowsProcessRow,
+    thread_counts: Option<&std::collections::HashMap<u32, u32>>,
+) -> bool {
+    // 只有明确观测到 0 线程才判死。快照失败、PID 缺失或读取失败都必须
+    // fail-closed，避免一次枚举抖动绕过写前守卫。
+    thread_counts
+        .and_then(|counts| counts.get(&row.pid))
+        .copied()
+        .map(|threads| threads > 0)
+        .unwrap_or(true)
+}
+
+#[cfg(target_os = "windows")]
+fn filter_windows_rows_with_live_threads(
+    rows: &[WindowsProcessRow],
+    thread_counts: Option<&std::collections::HashMap<u32, u32>>,
+) -> Vec<WindowsProcessRow> {
+    rows.iter()
+        .filter(|row| row_has_live_threads(row, thread_counts))
+        .cloned()
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn close_residual_error(pids: &[u32]) -> String {
+    let list = pids
+        .iter()
+        .map(|pid| pid.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "进程仍在退出中（残留 PID: {list}）。若客户端窗口已全部关闭，这可能是系统驱动暂未回收的 0 线程内核残留，请等待片刻后重试；无需重复手动结束进程。"
+    )
+}
+
+fn alive_pids_from_thread_counts(
+    pids: &[u32],
+    thread_counts: Option<&std::collections::HashMap<u32, u32>>,
+) -> Vec<u32> {
+    match thread_counts {
+        Some(counts) => pids
+            .iter()
+            .copied()
+            .filter(|pid| counts.get(pid).is_none_or(|threads| *threads > 0))
+            .collect(),
+        None => pids.to_vec(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_rows_with_thread_counts(rows: Vec<WindowsProcessRow>) -> Vec<WindowsProcessRow> {
+    let counts = windows_thread_counts();
+    filter_windows_rows_with_live_threads(&rows, counts.as_ref())
+}
+
+/// 按映像名集合判断是否至少存在一个**具有活动线程**的进程。
+///
+/// Trae 的探测走 `tasklist /NH` 文本匹配，拿不到线程数；这里直接用 ToolHelp
+/// 快照（自带映像名与线程数）补足判据，**不再**为每个候选名起 `tasklist`
+/// 子进程。快照失败时返回 `None`，调用方必须按 fail-closed 保留原文本匹配结果。
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_has_live_image(images: &[&str]) -> Option<bool> {
+    let entries = windows_process_snapshot()?;
+    Some(entries.iter().any(|entry| {
+        entry.threads > 0
+            && images
+                .iter()
+                .any(|image| entry.image.eq_ignore_ascii_case(image))
+    }))
+}
+
 fn parse_simple_csv_line(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -541,11 +680,16 @@ pub(crate) fn ps_output(script: &str, timeout_secs: u64) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn windows_tasklist_image_rows(image: &str) -> Vec<WindowsProcessRow> {
+    windows_image_live_rows(image).unwrap_or_default()
+}
+
+/// 按映像名匹配并按线程数排除内核残留的候选；`None` 只表示 tasklist 查询失败。
+#[cfg(target_os = "windows")]
+fn windows_image_live_rows(image: &str) -> Option<Vec<WindowsProcessRow>> {
     let filter = format!("IMAGENAME eq {image}");
-    let Some(out) = run_cmd_timeout("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"], 5) else {
-        return Vec::new();
-    };
-    parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout))
+    let out = run_cmd_timeout("tasklist", &["/FI", &filter, "/FO", "CSV", "/NH"], 5)?;
+    let rows = parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout));
+    Some(windows_rows_with_thread_counts(rows))
 }
 
 /// 精确映像名收集该 region 的 WorkBuddy/CodeBuddy PID，排除本工具、自身 PID 与 crashpad。
@@ -563,6 +707,14 @@ fn windows_workbuddy_process_rows_for(region: Region) -> Vec<WindowsProcessRow> 
         .collect()
 }
 
+/// 将 CIM/PowerShell 产出的进程行再按线程数过滤一次。
+/// CIM 能拿到可执行路径，但不保证与 tasklist 相同地暴露内核残留；关闭与
+/// 判活入口必须共用同一判据，不能因为来源不同而让 0 线程幽灵漏过去。
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_live_process_rows(rows: Vec<WindowsProcessRow>) -> Vec<WindowsProcessRow> {
+    windows_rows_with_thread_counts(rows)
+}
+
 /// Windows：**一次**全量枚举当前所有 PID。
 ///
 /// 为什么是全量而不是按 PID 过滤：`tasklist` 是**子进程**，每次调用 100~200 ms。
@@ -573,9 +725,11 @@ fn windows_workbuddy_process_rows_for(region: Region) -> Vec<WindowsProcessRow> 
 #[cfg(target_os = "windows")]
 fn windows_running_pids() -> Option<std::collections::HashSet<u32>> {
     let out = run_cmd_timeout("tasklist", &["/FO", "CSV", "/NH"], 5)?;
+    let rows = parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout));
+    let thread_counts = windows_thread_counts();
     Some(
-        parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout))
-            .into_iter()
+        rows.iter()
+            .filter(|row| row_has_live_threads(row, thread_counts.as_ref()))
             .map(|row| row.pid)
             .collect(),
     )
@@ -1408,15 +1562,8 @@ pub fn is_image_running(image: &str) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        match run_cmd_timeout(
-            "tasklist",
-            &["/FI", &format!("IMAGENAME eq {image}"), "/FO", "CSV", "/NH"],
-            5,
-        ) {
-            Some(out) => windows_rows_match_image(
-                &parse_tasklist_csv(&String::from_utf8_lossy(&out.stdout)),
-                image,
-            ),
+        match windows_image_live_rows(image) {
+            Some(rows) => windows_rows_match_image(&rows, image),
             // 查询失败 ⇒ 保守视为在运行（见文档）。
             None => true,
         }
@@ -1466,11 +1613,14 @@ pub fn close_image(image: &str, timeout_secs: u64) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        let rows = windows_tasklist_image_rows(image);
-        if rows.is_empty() {
+        let pids: Vec<u32> = windows_image_live_rows(image)
+            .unwrap_or_default()
+            .iter()
+            .map(|row| row.pid)
+            .collect();
+        if pids.is_empty() {
             return Ok(());
         }
-        let pids: Vec<u32> = rows.iter().map(|row| row.pid).collect();
         for pid in &pids {
             let pid_s = pid.to_string();
             let _ = run_cmd_timeout("taskkill", &["/PID", &pid_s, "/T"], 10);
@@ -1493,8 +1643,7 @@ pub fn close_image(image: &str, timeout_secs: u64) -> Result<(), String> {
         if leftover.is_empty() {
             return Ok(());
         }
-        let list: Vec<String> = leftover.iter().map(|pid| pid.to_string()).collect();
-        Err(format!("进程无法关闭（残留 PID: {}）", list.join(", ")))
+        Err(close_residual_error(&leftover))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1603,7 +1752,7 @@ fn close_workbuddy_windows_for(region: Region, timeout_secs: i64) -> Result<(), 
     if leftover.is_empty() {
         return Ok(());
     }
-    Err("WorkBuddy 进程无法关闭，请手动结束 WorkBuddy/CodeBuddy 进程".to_string())
+    Err(close_residual_error(&leftover))
 }
 
 /// 启动 WorkBuddy（CN）。失败返回可读错误。对照 `launch_workbuddy`。
@@ -1985,6 +2134,91 @@ mod tests {
 ";
         let kept = filter_windows_workbuddy_rows(&parse_tasklist_csv(csv));
         assert!(kept.is_empty());
+    }
+
+    /// 0 线程 EPROCESS 不是可执行进程：判活与关闭都必须忽略它。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn zero_thread_rows_are_not_live() {
+        use std::collections::HashMap;
+
+        let rows = vec![
+            WindowsProcessRow {
+                pid: 1101,
+                name: "WorkBuddy.exe".to_string(),
+                exe_path: None,
+            },
+            WindowsProcessRow {
+                pid: 1102,
+                name: "WorkBuddy.exe".to_string(),
+                exe_path: None,
+            },
+        ];
+        let counts = HashMap::from([(1101_u32, 4_u32), (1102_u32, 0_u32)]);
+
+        let live = filter_windows_rows_with_live_threads(&rows, Some(&counts));
+        assert_eq!(
+            live.iter().map(|row| row.pid).collect::<Vec<_>>(),
+            vec![1101]
+        );
+    }
+
+    /// PID 等待的线程数判据：仅明确 0 线程判死；未知计数继续 fail-closed。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn zero_thread_pid_is_not_alive_while_unknown_counts_fail_closed() {
+        use std::collections::HashMap;
+
+        let pids = [2201_u32, 2202, 2203];
+        let counts = HashMap::from([(2201_u32, 2_u32), (2202_u32, 0_u32), (2203_u32, 7_u32)]);
+
+        assert_eq!(
+            alive_pids_from_thread_counts(&pids, Some(&counts)),
+            vec![2201, 2203]
+        );
+        assert_eq!(alive_pids_from_thread_counts(&pids, None), pids.to_vec());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn close_residual_hint_does_not_claim_manual_kill_is_required() {
+        let msg = close_residual_error(&[4242]);
+        assert!(msg.contains("4242"));
+        assert!(msg.contains("内核残留"));
+        assert!(!msg.contains("请手动结束"));
+    }
+
+    /// 真实快照路径：0 线程残留进程按映像名查询时**不得**被判为「在运行」，
+    /// 而有活动线程的进程**必须**被判为在运行（防空洞）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn snapshot_marks_zero_thread_process_as_not_live() {
+        let Some(entries) = windows_process_snapshot() else {
+            // 快照不可用 ⇒ 交给调用方 fail-closed，本用例无断言。
+            return;
+        };
+        for entry in entries.iter().filter(|entry| entry.threads == 0) {
+            if entry.image.is_empty() {
+                continue;
+            }
+            let live = windows_has_live_image(&[entry.image.as_str()]).expect("快照可用");
+            assert!(!live, "0 线程残留 {} 不应被判为在运行", entry.image);
+        }
+
+        // 非空洞护栏：当前测试进程**有活动线程**，必须被判为在运行 ——
+        // 否则上面的断言可能因探针恒返回 false 而空跑。
+        let own_pid = std::process::id();
+        let own_image = entries
+            .iter()
+            .find(|entry| entry.pid == own_pid)
+            .map(|entry| entry.image.clone())
+            .expect("快照应包含当前进程");
+        assert!(!own_image.is_empty());
+        assert!(
+            windows_has_live_image(&[own_image.as_str()]).expect("快照可用"),
+            "有活动线程的进程 {} 必须被判为在运行",
+            own_image
+        );
     }
 
     #[test]

@@ -284,9 +284,17 @@ pub fn is_running_for(variant: super::variant::TraeVariant) -> bool {
         match hidden_command("tasklist").args(["/NH"]).output() {
             Ok(output) => {
                 let listing = String::from_utf8_lossy(&output.stdout).to_lowercase();
-                exe_names_for(variant)
+                let matched = exe_names_for(variant)
                     .iter()
-                    .any(|exe| listing.contains(&exe.to_lowercase()))
+                    .copied()
+                    .filter(|exe| listing.contains(&exe.to_lowercase()))
+                    .collect::<Vec<_>>();
+                if matched.is_empty() {
+                    return false;
+                }
+                // 只有 ToolHelp 明确显示活动线程时才判运行；快照失败则保留
+                // 原文本匹配结果，继续 fail-closed。
+                crate::modules::process::windows_has_live_image(&matched).unwrap_or(true)
             }
             Err(_) => false,
         }
@@ -1390,11 +1398,17 @@ fn running_processes_for(variant: super::variant::TraeVariant) -> Vec<&'static s
     match hidden_command("tasklist").args(["/NH"]).output() {
         Ok(output) => {
             let listing = String::from_utf8_lossy(&output.stdout).to_lowercase();
-            exe_names_for(variant)
+            let matched = exe_names_for(variant)
                 .iter()
                 .copied()
                 .filter(|exe| listing.contains(&exe.to_lowercase()))
-                .collect()
+                .collect::<Vec<_>>();
+            if let Some(has_live) = crate::modules::process::windows_has_live_image(&matched) {
+                if !has_live {
+                    return Vec::new();
+                }
+            }
+            matched
         }
         Err(_) => Vec::new(),
     }

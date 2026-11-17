@@ -50,7 +50,7 @@ rsa = "0.9"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Diagnostics_ToolHelp"] }
 
 [dev-dependencies]
 # 已在依赖树中（版本与 Cargo.lock 锁定一致），仅用于集成测试独立解析「真实 home」。

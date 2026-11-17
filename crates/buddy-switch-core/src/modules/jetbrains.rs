@@ -363,10 +363,12 @@ fn windows_ide_process_rows() -> Vec<process::WindowsProcessRow> {
                   ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId, $_.Name, $_.ExecutablePath }";
     let mut rows: Vec<_> = process::ps_output(script, 8)
         .map(|stdout| {
-            process::parse_windows_process_rows(&stdout)
-                .into_iter()
-                .filter(|row| row.pid != self_pid)
-                .collect()
+            process::windows_live_process_rows(
+                process::parse_windows_process_rows(&stdout)
+                    .into_iter()
+                    .filter(|row| row.pid != self_pid)
+                    .collect(),
+            )
         })
         .unwrap_or_default();
     if rows.is_empty() {

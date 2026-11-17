@@ -764,7 +764,7 @@ fn close_codebuddy_cn_macos(timeout_secs: i64) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String> {
-    let rows = windows_cn_process_rows();
+    let rows = process::windows_live_process_rows(windows_cn_process_rows());
     if rows.is_empty() {
         return Ok(());
     }
