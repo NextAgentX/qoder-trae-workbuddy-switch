@@ -1,44 +1,42 @@
 /**
- * 设置页 **10 项子导航**（P7 §3.9 + issue #109）—— 数据驱动。
+ * 设置页子导航 —— 数据驱动。
  *
- * ## 为什么数据驱动
+ * ## 这里只放**产品设置**
  *
- * 各项的名字 / 图标 / 顺序只在这里声明一次，页面按 `active` 渲染对应分区。
- * 加一项 = 加一行（§4.2 同一思路），不需要在页面里再写一遍 `if`。
+ * 应用框架级设置（语言 / 外观 / 快捷键 / 启动与托盘 / 授权 / 更新 / 作用域可见性 /
+ * 积分自动刷新）的唯一入口是顶栏 ⚙「应用设置」抽屉（`shell/app-settings-drawer.tsx`）。
+ * 此前设置页还有一项「通用」渲染**同一份** `AppSettingsGroups` ⇒ 同一个开关在两条
+ * 路径上各出现一次，用户分不清「改哪个才对」。该分区已删除。
  *
- * ## 9 项从哪来（§3.9）
+ * 「网关」也同理：网关开关 / 监听 / 端口 / 请求日志在网关工作台
+ *（`gateway/gateway-subnav.tsx`）里有完整分区，设置页不再重复一份。
  *
- * 设置的真实内容是 **WB 7 组 + Trae 10 组**，6 项装不下，逐项核对后收敛为 9 项；
- * issue #109 又加了第 10 项「CodeBuddy CLI」：
- * `通用 / 账号与登录 / 签到与积分 / 网关 / 计划任务 / 客户端 / CodeBuddy CLI /
- *  权限与诊断 / 日志 / 备份与恢复`。
- * 其中「备份与恢复」是 P7 新增（**必须保持最后一项**），「CodeBuddy CLI」是 WorkBuddy 侧独有。
+ * ⇒ 设置页现在的职责只有一句话：**某个产品 / 作用域自己的设置**。
+ *
+ * ## 一项在各平台的可见性
+ *
+ * `SETTINGS_SUBNAV` 声明**全集与顺序**；每个产品用一组白名单收窄
+ *（`WB_SETTINGS_SECTIONS` / `TRAE_SETTINGS_SECTIONS` / `QODER_SETTINGS_SECTIONS`），
+ * **不复制表** —— 复制即漂移的种子。白名单只表达「这个产品有没有内容」，不改变顺序。
+ *
+ * ⚠️ `network` 只有 Qoder 有内容（出站代理按区域）。WB / Trae 若仍列出它，
+ * 点进去就是一片空白 —— 那正是白名单要挡的东西。
  *
  * ## 为什么不做成「可折叠 + 记住位置」
  *
  * 子导航回答的是「设置里有哪几类」，不是「我在哪一步」；URL 尾段才是位置真值
- * （PLAN §3.9 的层级表）。本组件只负责**切换视图**，把选中态交给调用方
- * （`active` / `onSelect`），不自持状态 —— 否则「页面刷新后回到第一项」这类
+ *（PLAN §3.9 的层级表）。本组件只负责**切换视图**，把选中态交给调用方
+ *（`active` / `onSelect`），不自持状态 —— 否则「页面刷新后回到第一项」这类
  * 问题会在两个地方各修一遍。
- *
- * ## ★ 一份表，两个产品线共用
- *
- * 原型只有一个 `viewSettings`（`buddy-switch-prototype.html:3230`），靠
- * `r.cap && p.capabilities.includes(r.cap)` 做平台差异 ⇒ **子导航表本身没有平台分支**。
- * 本仓照此办理：WorkBuddy 设置页与 Trae 设置页**接同一个 `SETTINGS_SUBNAV`**，
- * 各自渲染自己的内容（§3.9 归位表：Trae 的 10 组已全部落进这 9 项）。
- * 若某天真出现「无处安放」的项，再按 D12 走平台专属子项，而不是在这里写 `if`。
  */
 
 import { SideSubnav, type SideSubnavItem } from "@/components/shell/side-subnav";
 import { useT } from "@/lib/i18n";
 
-/** 9 个设置分区的标识。 */
+/** 设置分区的标识（全部是产品设置；应用框架设置不在设置页）。 */
 export type SettingsSubnavId =
-  | "general"
   | "account"
   | "checkin"
-  | "gateway"
   | "schedule"
   | "client"
   | "network"
@@ -51,33 +49,52 @@ export type SettingsSubnavItem = SideSubnavItem<SettingsSubnavId>;
 
 /** 唯一的一份子导航表（顺序即展示顺序）。 */
 export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
-  { id: "general", labelKey: "settings.subnav.general" },
   { id: "account", labelKey: "settings.subnav.account" },
   { id: "checkin", labelKey: "settings.subnav.checkin" },
-  { id: "gateway", labelKey: "settings.subnav.gateway" },
   { id: "schedule", labelKey: "settings.subnav.schedule" },
   { id: "client", labelKey: "settings.subnav.client" },
-  /* issue #111 收尾：Qoder 逐包取数的出站代理（按区域）。目前只有 Qoder 有内容，
-     WB / Trae 设置页仍按自己的 id 收窄，不会渲染这一项。 */
+  /* Qoder 逐包取数的出站代理（按区域）。目前只有 Qoder 有内容。 */
   { id: "network", labelKey: "settings.subnav.network" },
-  /* issue #109：CodeBuddy CLI 的**接入方式**（二选一）。放这里而不是账号卡：
+  /* CodeBuddy CLI 的**接入方式**（二选一）。放这里而不是账号卡：
      它是全局一次性配置（CLI 的凭据只有一份 `~/.codebuddy/settings.json`），
-     而账号卡上的 `cliControl` 是「按账号切默认账号」，另一层次。
-     ⚠️ 只有 WorkBuddy 侧有这一项 —— Trae / Qoder 设置页用 `items` 收窄排除它。 */
+     而账号卡上的 `cliControl` 是「按账号切默认账号」，另一层次。 */
   { id: "cli", labelKey: "settings.subnav.cli" },
   { id: "diagnostics", labelKey: "settings.subnav.diagnostics" },
   { id: "logs", labelKey: "settings.subnav.logs" },
   { id: "backup", labelKey: "settings.subnav.backup" },
 ];
 
+/** WorkBuddy：除 Qoder 专属的「网络」外全有内容。 */
+export const WB_SETTINGS_SECTIONS = SETTINGS_SUBNAV.filter((item) => item.id !== "network");
+
+/** Trae：「网络与代理」并进「客户端」（PLAN §3.9），且没有 CodeBuddy CLI。 */
+export const TRAE_SETTINGS_SECTIONS = SETTINGS_SUBNAV.filter(
+  (item) => item.id !== "network" && item.id !== "cli",
+);
+
+/**
+ * Qoder：五处有真内容 —— 账号与登录、计划任务（签到 / 令牌保活）、
+ * 客户端检测、网络（出站代理）、备份与恢复。其余项在 Qoder 侧**没有设置项**，
+ * 摆上去就是假控件（点了只有一句「尚未接入」，比不摆更糟）。
+ * 对应功能落地后，把它的 id 加进这里即可。
+ */
+const QODER_SECTION_IDS: readonly SettingsSubnavId[] = [
+  "account",
+  "client",
+  "network",
+  "schedule",
+  "backup",
+];
+
+export const QODER_SETTINGS_SECTIONS = SETTINGS_SUBNAV.filter((item) =>
+  QODER_SECTION_IDS.includes(item.id),
+);
+
 /**
  * 每个设置分区的**作用域归属**（issue #122）。
  *
- * ## 为什么需要这张表
- *
- * 设置页始终带着作用域徽标，但里面的项目其实**分两类**：一类改了对所有作用域生效
- * （主题、签到、计划任务、备份…），一类只影响当前作用域（账号库、网关密钥、模型清单…）。
- * 界面此前不区分，用户的原话是「**看起来不清楚哪些是改了影响所有作用域的**」。
+ * 设置页始终带着作用域徽标，但里面的项目分两类：一类改了对所有作用域生效，一类只影响
+ * 当前作用域。界面此前不区分，用户的原话是「看起来不清楚哪些是改了影响所有作用域的」。
  *
  * ## 判据（可复核，不是拍脑袋）
  *
@@ -85,10 +102,8 @@ export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
  *
  * | 分区 | 归属 | 依据 |
  * |:--|:--|:--|
- * | general | 全局 | 主题 / 语言在 `localStorage`，托盘在 `app_prefs.json`（单份） |
  * | account | 作用域 | 账号库按产品 + 区域分家（每个作用域一份） |
  * | checkin | 全局 | `save_auto_checkin_config(config)` —— **无 scope 参数** |
- * | gateway | 作用域 | 密钥 / 模型清单 / 图片能力均按产品线（+ 区域） |
  * | schedule | 全局 | `save_schedule_config(config)` —— 无 scope 参数 |
  * | client | 作用域 | 客户端探测按作用域（探测命令带 region） |
  * | network | 作用域 | Qoder 出站代理**按区域** |
@@ -101,10 +116,8 @@ export const SETTINGS_SUBNAV: readonly SettingsSubnavItem[] = [
  * 「页面上带着作用域徽标」不等于「这项按作用域存」。
  */
 export const SETTINGS_SCOPE: Record<SettingsSubnavId, "global" | "scoped"> = {
-  general: "global",
   account: "scoped",
   checkin: "global",
-  gateway: "scoped",
   schedule: "global",
   client: "scoped",
   network: "scoped",
@@ -114,15 +127,25 @@ export const SETTINGS_SCOPE: Record<SettingsSubnavId, "global" | "scoped"> = {
   backup: "global",
 };
 
-/** 从 URL 段解析设置分区（非法值 fail-closed 回 `general`，不把任意串塞进 state）。 */
+/**
+ * 非法 / 缺失 `?section=` 时的落点。
+ *
+ * 不用字号更小的「第一项」字面量：调用方（三个设置页 + 深链解析）都要能引用它，
+ * 否则改一次默认分区就要改三处。
+ */
+export const DEFAULT_SETTINGS_SUBNAV: SettingsSubnavId = "account";
+
+/** 从 URL 段解析设置分区（非法值 fail-closed 回 {@link DEFAULT_SETTINGS_SUBNAV}，不把任意串塞进 state）。 */
 export function parseSettingsSubnav(raw: string | null): SettingsSubnavId {
-  return SETTINGS_SUBNAV.some((item) => item.id === raw) ? (raw as SettingsSubnavId) : "general";
+  return SETTINGS_SUBNAV.some((item) => item.id === raw)
+    ? (raw as SettingsSubnavId)
+    : DEFAULT_SETTINGS_SUBNAV;
 }
 
 interface Props {
   active: SettingsSubnavId;
   onSelect: (id: SettingsSubnavId) => void;
-  /** 覆盖表（默认用 `SETTINGS_SUBNAV`）；Trae 设置页若复用可传自己的表。 */
+  /** 覆盖表（默认用 `SETTINGS_SUBNAV`）；各产品传自己的白名单。 */
   items?: readonly SettingsSubnavItem[];
   className?: string;
 }

@@ -738,7 +738,7 @@ function ShortcutsCard({ variant }: { variant: AppSettingsVariant }) {
  * 或在另一产品的设置页里关掉了它），那一行就是 `disabled + off`，**永远点不回来**。
  * 现在只在「当前作用域**已可见**」时禁用 —— 隐藏态下它必须能点回来。
  */
-function ScopeVisibilityCard() {
+function ScopeVisibilityCard({ variant }: { variant: AppSettingsVariant }) {
   const t = useT();
   const location = useLocation();
   const product = platformOfPath(location.pathname);
@@ -760,8 +760,8 @@ function ScopeVisibilityCard() {
   }
 
   return (
-    <SettingsGroup id="settings-scope-visibility" title={t("appSettings.scopeVisibility.groupTitle")}>
-      <CardContent className="space-y-0 p-0">
+    <SettingsGroup id="settings-scope-visibility" title={t("appSettings.scopeVisibility.groupTitle")} variant={variant}>
+      <GroupBody variant={variant}>
         {SCOPES.map((scope) => {
           const { product: scopeProduct } = scopeParts(scope);
           const isVisible = visibleScopes.includes(scope);
@@ -799,7 +799,7 @@ function ScopeVisibilityCard() {
         <p className="border-t border-border/60 px-4 py-3 text-xs text-muted-foreground">
           {t("appSettings.scopeVisibility.hint")}
         </p>
-      </CardContent>
+      </GroupBody>
     </SettingsGroup>
   );
 }
@@ -821,14 +821,14 @@ function ScopeVisibilityCard() {
  * （WB 统计页「刷新积分」/ Qoder 积分页「重新查询」/ Qoder 账号卡「更多 → 刷新积分」），
  * 且顶部文案要如实说「已关闭」——不能还写着「每 N 分钟自动刷新」。
  */
-function CreditsAutoRefreshCard() {
+function CreditsAutoRefreshCard({ variant }: { variant: AppSettingsVariant }) {
   const t = useT();
   const upstreamAutoRefresh = useCreditRefreshPref((state) => state.upstreamAutoRefresh);
   const setUpstreamAutoRefresh = useCreditRefreshPref((state) => state.setUpstreamAutoRefresh);
 
   return (
-    <SettingsGroup id="settings-credit-auto-refresh" title={t("appSettings.creditAutoRefresh.groupTitle")}>
-      <CardContent className="space-y-0 p-0">
+    <SettingsGroup id="settings-credit-auto-refresh" title={t("appSettings.creditAutoRefresh.groupTitle")} variant={variant}>
+      <GroupBody variant={variant}>
         <SettingsFieldRow
           label={t("appSettings.creditAutoRefresh.upstreamLabel")}
           description={t("appSettings.creditAutoRefresh.upstreamDesc")}
@@ -844,17 +844,23 @@ function CreditsAutoRefreshCard() {
         <p className="border-t border-border/60 px-4 py-3 text-xs text-muted-foreground">
           {t("appSettings.creditAutoRefresh.hint")}
         </p>
-      </CardContent>
+      </GroupBody>
     </SettingsGroup>
   );
 }
 
 /**
- * 五个应用级设置块，**门禁与原先设置页逐条对齐**。
+ * 应用框架设置的**唯一出口**（语言 / 外观 / 快捷键 / 启动与托盘 / 授权 / 更新 /
+ * 作用域可见性 / 积分自动刷新）—— 只由顶栏 ⚙「应用设置」抽屉渲染。
  *
- * 门禁必须留在这里而不是交给调用方：本模块同时被设置页与顶栏 ⚙「应用设置」抽屉引用，
- * 把判断写在页面上会让两条路径各写一遍 —— 这正是当初 `settings-primitives`
- * 出现漂移的同一种病。
+ * ## 为什么不再出现在设置页
+ *
+ * 这里的内容改的是**本应用**的状态，与 WorkBuddy / Trae / Qoder 的产品设置无关。
+ * 之前设置页另有一项「通用」渲染同一份组件 ⇒ 同一个开关有两条入口，用户分不清
+ * 「改哪个才对」。现在设置页只放产品设置，应用级设置只在这里。
+ *
+ * 门禁（桌面端才有的启动 / 授权 / 更新）必须留在这里而不是交给调用方 ——
+ * 把判断写在页面上会让两条路径各写一遍，那是 `settings-primitives` 出现漂移的同一种病。
  *
  * 顺序把**语言放在最前**：它改的是其余所有文案的语言，用户在找「设置」时最可能先要它。
  *
@@ -870,8 +876,8 @@ export function AppSettingsGroups({ variant = "card" }: { variant?: AppSettingsV
       {api.isDesktop() || api.isDemoMode() ? <StartupCard variant={variant} /> : null}
       {api.isDesktop() || api.isDemoMode() ? <AuthCard variant={variant} /> : null}
       {api.isWebui() && !api.isDemoMode() ? null : <UpdateCard variant={variant} />}
-      <ScopeVisibilityCard />
-      <CreditsAutoRefreshCard />
+      <ScopeVisibilityCard variant={variant} />
+      <CreditsAutoRefreshCard variant={variant} />
     </>
   );
 }

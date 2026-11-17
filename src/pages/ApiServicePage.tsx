@@ -21,6 +21,7 @@ import { ModelProbeCard } from "@/components/gateway/model-probe-card";
 // ⚠️ 只接 WB 侧：C 路本期不做 Trae（`proxy.rs` 的 `PROXY_GATEWAY_BASE` 只覆盖 WB 网关端口）。
 import { ProxyPanel } from "@/components/gateway/proxy-panel";
 import { RequestLog } from "@/components/gateway/request-log";
+import { RiskControlsCard } from "@/components/gateway/risk-controls-card";
 import { GatewayClientlessNotice } from "@/components/clientless-notice";
 import { GatewayShell } from "@/components/gateway/gateway-shell";
 import {
@@ -505,6 +506,11 @@ export default function ApiServicePage() {
 
               {/* 接入指引：把「怎么用这个网关」放在概览里，一眼可见。 */}
               <IntegrationGuide baseUrl={baseUrl} region={region} />
+
+              {/* 请求风控：三平台网关共用的速率 / 并发 / 间隔参数。
+                  原先挂在设置页「通用」分区 —— 那里只放应用框架设置，网关相关的参数
+                  跟随网关页面。 */}
+              <RiskControlsCard className="mt-6" />
             </>
           )}
 

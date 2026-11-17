@@ -584,7 +584,7 @@ GAP 判定的多个「整期缺失」现已实现（新增文件）：`src/compo
 
 | 行为 | 原型编号 | 期次 | 状态 | 证据 | 缺什么 |
 |:---|:---|:--:|:--:|:---|:---|
-| 设置子导航含「备份与恢复」，共 9 项 | — | P7 | ✅ | `src/components/settings/settings-subnav.tsx:60-70`（`SETTINGS_SUBNAV` 9 项，第 9 项 `backup`） | — |
+| 设置子导航含「备份与恢复」 | — | P7 | ✅ | `src/components/settings/settings-subnav.tsx`（`SETTINGS_SUBNAV`，`backup` 为最后一项） | — |
 | 默认勾选全部 4 个作用域 | — | P7 | ✅ | `src/lib/backup-selection.ts:80-84`（`defaultBackupSelection` 全 true）；`backup-section.tsx:437-486` | — |
 | 默认不含凭据 + 预估行如实声明 | — | P7 | ✅ | `src/stores/backup.ts:88`（`creds: false`）；`backup-section.tsx:511-516`（`credentials.notice`） | — |
 | 打开凭据开关：风险警告 + 主按钮文案变化 | — | P7 | ✅ | `backup-section.tsx:504-510`（警告条）+ `:532`（`buttonCreds`/`button`）+ `:713-734`（二次确认） | 多一层二次确认（更严） |

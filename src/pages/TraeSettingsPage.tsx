@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   Copy,
   Download,
-  Eraser,
   ExternalLink,
   FileText,
   HardDriveDownload,
@@ -23,14 +22,13 @@ import { toast } from "sonner";
 import { DemoAction } from "@/components/demo-action";
 import { TimesEditor } from "@/components/schedule-times-editor";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
-import { AppSettingsGroups } from "@/components/app-settings";
 import { BackupSection } from "@/components/settings/backup-section";
 import { RuntimeLogCard } from "@/components/settings/runtime-log-card";
 // 设置子导航**与 WorkBuddy 设置页共用同一张表 / 同一个解析函数**（PLAN §3.9、D12）。
 import {
   parseSettingsSubnav,
-  SETTINGS_SUBNAV,
   SettingsSubnav,
+  TRAE_SETTINGS_SECTIONS,
   type SettingsSubnavId,
 } from "@/components/settings/settings-subnav";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -58,7 +56,6 @@ import {
   saveSchedulePatch,
   SCHEDULE_CONFIG_KEY,
 } from "@/lib/schedule-config";
-import { normalizeTraeGatewayLogs } from "@/lib/trae-gateway";
 import { isAutoDetected, traeProductLabel } from "@/lib/trae-client";
 import { scopeOf } from "@/lib/scope";
 import { useDocumentVisible } from "@/lib/use-document-visible";
@@ -76,7 +73,6 @@ import {
   type TraeCapabilities,
   type TraeDeviceResetReport,
   type TraeEnvStatus,
-  type TraeGatewayLogEntry,
   type TraeLogKind,
   type TraeLogsResponse,
   type TraeProfileInfo,
@@ -465,264 +461,6 @@ function RuntimeLogsSection({ variant }: { variant: TraeVariantId }) {
 }
 
 // ---------------------------------------------------------------------------
-// 网关请求日志（原「系统日志」页的网关 Tab）
-// ---------------------------------------------------------------------------
-
-const STATUS_OPTIONS: { value: string; labelKey: TranslationKey }[] = [
-  { value: "all", labelKey: "trae.page.settings.statusAll" },
-  { value: "ok", labelKey: "trae.page.settings.statusOk" },
-  { value: "client", labelKey: "trae.page.settings.statusClient" },
-  { value: "server", labelKey: "trae.page.settings.statusServer" },
-];
-
-function formatClock(ts: number): string {
-  if (!ts) return "—";
-  const date = new Date(ts);
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-function formatTokens(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}K`;
-  return String(value);
-}
-
-function statusTone(status: number): string {
-  if (status >= 200 && status < 300) return "text-success";
-  if (status >= 400) return "text-destructive";
-  return "text-muted-foreground";
-}
-
-/**
- * 网关请求日志分组。
- *
- * 与「Token 统计」页同源（同一份 `api_gateway_logs.json`），但用途不同：
- * 统计页回答「用了多少」，这里回答「刚刚那次请求发生了什么」。
- * 提供状态码筛选、关键字搜索、逐条详情抽屉与清空。
- */
-function GatewayLogsSection() {
-  const t = useT();
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [keyword, setKeyword] = useState("");
-  const [detail, setDetail] = useState<TraeGatewayLogEntry | null>(null);
-  const [clearing, setClearing] = useState(false);
-  /**
-   * 「清空日志」失败的文案。
-   *
-   * 读侧的错误归快照缓存所有（`error` 只读），而清空是**动作**、它的失败没有快照
-   * 可挂，因此单独一个本地状态。两者共用同一个提示位，与改造前的表现一致。
-   */
-  const [actionError, setActionError] = useState<string | null>(null);
-
-  /** 日志已在加载器里归一化：消费方拿到的一定是数组，不必各自兜底。 */
-  const load = useCallback(async () => normalizeTraeGatewayLogs(await api.getTraeGatewayLogs()), []);
-
-  const {
-    data,
-    loading,
-    error,
-    refresh,
-    patch,
-  } = useCachedResource<TraeGatewayLogEntry[]>("trae:gateway-logs", load);
-  const logs = data ?? [];
-  const failure = error ?? actionError;
-
-  /* 刷新按钮的进行中态（该资源无轮询，但「有旧值时 loading 恒 false」的伪反馈问题
-     与运行日志组相同 ⇒ 同样走 `useRefreshAction`）。 */
-  const { busy, run } = useRefreshAction();
-
-  const clear = async () => {
-    setClearing(true);
-    try {
-      await api.clearTraeGatewayLogs();
-      setActionError(null);
-      patch(() => []);
-      toast.success(t("trae.page.settings.gwCleared"));
-    } catch (e) {
-      setActionError(api.asError(e));
-    } finally {
-      setClearing(false);
-    }
-  };
-
-  const visible = logs
-    .filter((entry) => {
-      if (statusFilter === "ok") return entry.status >= 200 && entry.status < 300;
-      if (statusFilter === "client") return entry.status >= 400 && entry.status < 500;
-      if (statusFilter === "server") return entry.status >= 500;
-      return true;
-    })
-    .filter((entry) => {
-      const needle = keyword.trim().toLowerCase();
-      if (!needle) return true;
-      return [entry.account, entry.model, entry.endpoint, entry.error]
-        .filter((value): value is string => typeof value === "string")
-        .some((value) => value.toLowerCase().includes(needle));
-    })
-    // 最新在前：排查问题看的是「刚刚那次」，而不是最早那次。
-    .sort((left, right) => right.ts - left.ts);
-
-  const totalTokens = visible.reduce(
-    (sum, entry) => sum + (entry.promptTokens ?? 0) + (entry.completionTokens ?? 0),
-    0,
-  );
-
-  return (
-    <SettingsGroup id="trae-settings-gateway-logs" title={t("trae.page.settings.gatewayGroup")}>
-      <CardContent className="space-y-0 p-0">
-      <div className="p-4 sm:p-5">
-        <div className="flex flex-wrap items-center gap-2">
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger size="sm" className="w-40">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {t(option.labelKey)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <div className="relative min-w-[180px] flex-1">
-            <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-              placeholder={t("trae.page.settings.gwSearchPlaceholder")}
-              className="h-8 pl-8"
-            />
-          </div>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => void run(() => refresh())}>
-            {busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-            {t("trae.page.settings.refresh")}
-          </Button>
-          <DemoAction>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={clearing || logs.length === 0}
-              onClick={() => void clear()}
-            >
-              {clearing ? <Loader2 className="animate-spin" /> : <Eraser />}
-              {t("trae.page.settings.gwClear")}
-            </Button>
-          </DemoAction>
-        </div>
-        <p className="mt-3 border-t border-border/60 pt-3 text-xs text-muted-foreground">
-          {t("trae.page.settings.gwSummary", {
-            count: visible.length,
-            filtered:
-              visible.length !== logs.length
-                ? t("trae.page.settings.gwFiltered", { total: logs.length })
-                : "",
-            tokens:
-              totalTokens > 0 ? t("trae.page.settings.gwTokens", { tokens: formatTokens(totalTokens) }) : "",
-          })}
-        </p>
-      </div>
-
-      {failure && (
-        <div className="px-4 pb-4">
-          <Alert variant="destructive">
-            <AlertTriangle />
-            <AlertTitle>{t("trae.page.settings.gwLoadFailed")}</AlertTitle>
-            <AlertDescription>{failure}</AlertDescription>
-          </Alert>
-        </div>
-      )}
-
-      <div className="max-h-[420px] overflow-auto border-t border-border/60">
-        {loading && logs.length === 0 ? (
-          <div className="space-y-2 p-4">
-            {Array.from({ length: 5 }, (_, index) => (
-              <Skeleton key={index} className="h-6 w-full" />
-            ))}
-          </div>
-        ) : visible.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 px-4 py-12 text-center">
-            <Trash2 className="size-7 text-muted-foreground/50" />
-            <p className="text-sm font-medium">{t("trae.page.settings.gwEmptyTitle")}</p>
-            <p className="max-w-md text-xs text-muted-foreground">
-              {t("trae.page.settings.gwEmptyBody")}
-            </p>
-          </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-muted/60 text-xs text-muted-foreground backdrop-blur">
-              <tr>
-                <th className="px-4 py-2 text-left font-medium">{t("trae.page.settings.colTime")}</th>
-                <th className="px-3 py-2 text-left font-medium">{t("trae.page.settings.colAccount")}</th>
-                <th className="px-3 py-2 text-left font-medium">{t("trae.page.settings.colModel")}</th>
-                <th className="px-3 py-2 text-left font-medium">{t("trae.page.settings.colStatus")}</th>
-                <th className="px-3 py-2 text-right font-medium">{t("trae.page.settings.colLatency")}</th>
-                <th className="px-3 py-2 text-right font-medium">{t("trae.page.settings.colToken")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((entry, index) => (
-                <tr
-                  key={`${entry.ts}-${index}`}
-                  className="cursor-pointer border-t border-border/60 hover:bg-muted/40"
-                  onClick={() => setDetail(entry)}
-                >
-                  <td className="whitespace-nowrap px-4 py-2 font-mono text-xs text-muted-foreground">
-                    {formatClock(entry.ts)}
-                  </td>
-                  <td className="px-3 py-2 text-xs">{entry.account ?? "—"}</td>
-                  <td className="px-3 py-2 text-xs">{entry.model ?? "—"}</td>
-                  <td className={cn("px-3 py-2 font-mono text-xs", statusTone(entry.status))}>
-                    {entry.status || "—"}
-                  </td>
-                  <td className="px-3 py-2 text-right text-xs tabular-nums text-muted-foreground">
-                    {entry.latencyMs ? `${entry.latencyMs} ms` : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-right text-xs tabular-nums text-muted-foreground">
-                    {entry.promptTokens === null && entry.completionTokens === null
-                      ? "—"
-                      : `${formatTokens(entry.promptTokens)} / ${formatTokens(entry.completionTokens)}`}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      <div className="border-t border-border/60 px-4 py-2.5 text-xs text-muted-foreground">
-        {t("trae.page.settings.gwFooter")}
-      </div>
-
-      <Dialog open={detail !== null} onOpenChange={(open) => !open && setDetail(null)}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{t("trae.page.settings.gwDetailTitle")}</DialogTitle>
-            <DialogDescription>{t("trae.page.settings.gwDetailDesc")}</DialogDescription>
-          </DialogHeader>
-          <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/50 p-3 font-mono text-xs">
-            {detail ? JSON.stringify(detail, null, 2) : ""}
-          </pre>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                detail && void copyText(JSON.stringify(detail, null, 2), t("trae.page.settings.gwDetailCopied"))
-              }
-            >
-              <Copy />
-              {t("trae.page.settings.copy")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      </CardContent>
-    </SettingsGroup>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // 登录态快照（原「登录态快照」页）
 // ---------------------------------------------------------------------------
 
@@ -1065,7 +803,7 @@ export default function TraeSettingsPage() {
   const [resetReport, setResetReport] = useState<TraeDeviceResetReport | null>(null);
 
   /**
-   * ★ 子导航选中项：**初值从 URL 读**（`?section=client`），非法值 fail-closed 回 `general`。
+   * ★ 子导航选中项：**初值从 URL 读**（`?section=client`），非法值 fail-closed 回共享默认分区。
    *
    * 与 WorkBuddy 设置页接**同一个** `parseSettingsSubnav`（`settings-subnav.tsx`）——
    * 两平台同一件事只有一份实现，不存在「一边认 `?section=`、另一边认别的」。
@@ -1292,11 +1030,8 @@ export default function TraeSettingsPage() {
           `[data-split-layout]`（含 900px 转纵向），故这里不再写 `flex-col` / `lg:flex-row`。
           此前这里是**一屏长滚动**（`space-y-12`、无子导航），与 WorkBuddy 设置页结构不同。 */}
       <div data-split-layout className="min-w-0">
-        {/* ★ 收窄：`cli`（CodeBuddy CLI 接入方式）是 WorkBuddy 侧独有的配置，
-            Trae 侧没有 CodeBuddy CLI ⇒ 不显示那一项。与 Qoder 页同一做法（白名单收窄，
-            不复制表 —— 复制即漂移的种子）。 */}
         <SettingsSubnav
-          items={SETTINGS_SUBNAV.filter((item) => item.id !== "cli")}
+          items={TRAE_SETTINGS_SECTIONS}
           active={section}
           onSelect={goSection}
         />
@@ -1599,9 +1334,10 @@ export default function TraeSettingsPage() {
         {/* ---- 账号与登录：登录态快照 ----
              PLAN §3.9 把 Trae 的 `profiles`（账号档案）归到「账号与登录」。 */}
         {section === "account" && (
+          <>
         <ProfilesSection
           data={profiles}
-          /* `pending` 覆盖「有旧值时的后台刷新」：只传 `loading` 时该场景恒为 false，
+          /* `pending` 覆盖「有值时的后台刷新」：只传 `loading` 时该场景恒为 false，
              刷新按钮点了不转、看起来像没反应（首屏骨架仍由 `loading` 负责）。 */
           loading={loading || pending}
           busy={busy}
@@ -1611,6 +1347,36 @@ export default function TraeSettingsPage() {
           onReload={() => load()}
           onRun={runProfileAction}
         />
+        {/* ---- 关于：官方站点入口 ----
+             原先挂在「通用」分区；应用框架设置收归顶栏 ⚙ 抽屉后，「关于」是**本产品**
+             的信息（站点域随区域变化，`consoleBase` 由后端给），因此并进「账号与登录」，
+             而不是塞进应用级抽屉。 */}
+        <SettingsGroup id="trae-settings-about" title={t("trae.page.settings.aboutGroup")}>
+          <CardContent className="space-y-0 p-0">
+          <SettingsRow className="flex-wrap gap-y-2">
+            <div className="min-w-0">
+              <div className="text-[12.5px] font-[550] leading-4">{t("trae.page.settings.aboutTitle")}</div>
+              <p className="mt-0.5 text-[11.5px] leading-4 text-muted-foreground">
+                {t("trae.page.settings.aboutDesc")}
+              </p>
+            </div>
+            {consoleBase ? (
+              <Button variant="ghost" size="sm" asChild>
+                <a href={consoleBase} target="_blank" rel="noreferrer">
+                  <ExternalLink />
+                  {consoleBase.replace(/^https?:\/\//, "")}
+                </a>
+              </Button>
+            ) : (
+              // 域未知时**不给死链**：宁可少一枚按钮，也不把用户导到可能错的站。
+              <span className="text-[11.5px] text-muted-foreground">
+                {t("trae.page.settings.aboutUnknownSite")}
+              </span>
+            )}
+          </SettingsRow>
+          </CardContent>
+        </SettingsGroup>
+          </>
         )}
 
         {/* ---- 权限与诊断：设备标识 + 平台能力 ----
@@ -1740,44 +1506,7 @@ export default function TraeSettingsPage() {
           </>
         )}
 
-        {/* ---- 网关：网关请求日志 ----
-             PLAN §3.9 把 Trae 的「网关日志」归到「网关」（Trae 的网关**配置**在
-             `TraeApiServicePage`，本页只呈现请求日志）。 */}
-        {section === "gateway" && <GatewayLogsSection />}
-
-        {/* ---- 通用：应用级设置（与 WorkBuddy 共用同一份实现）+ 关于 ---- */}
-        {section === "general" && (
-          <>
-        <AppSettingsGroups />
-        <SettingsGroup id="trae-settings-about" title={t("trae.page.settings.aboutGroup")}>
-          <CardContent className="space-y-0 p-0">
-          <SettingsRow className="flex-wrap gap-y-2">
-            <div className="min-w-0">
-              <div className="text-[12.5px] font-[550] leading-4">{t("trae.page.settings.aboutTitle")}</div>
-              <p className="mt-0.5 text-[11.5px] leading-4 text-muted-foreground">
-                {t("trae.page.settings.aboutDesc")}
-              </p>
-            </div>
-            {consoleBase ? (
-              <Button variant="ghost" size="sm" asChild>
-                <a href={consoleBase} target="_blank" rel="noreferrer">
-                  <ExternalLink />
-                  {consoleBase.replace(/^https?:\/\//, "")}
-                </a>
-              </Button>
-            ) : (
-              // 域未知时**不给死链**：宁可少一枚按钮，也不把用户导到可能错的站。
-              <span className="text-[11.5px] text-muted-foreground">
-                {t("trae.page.settings.aboutUnknownSite")}
-              </span>
-            )}
-          </SettingsRow>
-          </CardContent>
-        </SettingsGroup>
-          </>
-        )}
-
-        {/* ---- 备份与恢复（第 9 项；与 WorkBuddy 共用同一组件）---- */}
+        {/* ---- 备份与恢复（与 WorkBuddy 共用同一组件）---- */}
         {section === "backup" && <BackupSection />}
         </div>
       </div>

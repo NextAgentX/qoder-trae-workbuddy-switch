@@ -28,6 +28,7 @@ import { QoderApiKeyTable } from "@/components/gateway/qoder-api-key-table";
 import { QoderModelList } from "@/components/gateway/qoder-model-list";
 import { QoderQuotaGuard } from "@/components/gateway/qoder-quota-guard";
 import { ModelFallbackCard } from "@/components/gateway/model-fallback-card";
+import { RiskControlsCard } from "@/components/gateway/risk-controls-card";
 import { ModelProbeCard } from "@/components/gateway/model-probe-card";
 import { TraeIntegrationGuide } from "@/components/gateway/trae-integration-guide";
 import { TraeRequestLog } from "@/components/gateway/trae-request-log";
@@ -688,6 +689,8 @@ export default function QoderApiServicePage() {
                 noKeyLabel={t("qoder.gateway.guide.noKey")}
                 streamNote={t("qoder.gateway.guide.streamNote")}
               />
+              {/* 请求风控与 WorkBuddy / Trae 共用同一份参数；入口跟随网关概览。 */}
+              <RiskControlsCard className="mt-6" />
             </>
           )}
 

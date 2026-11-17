@@ -162,24 +162,6 @@ export const en = {
   "wbSettings.version.cn": "CN version",
   "wbSettings.version.global": "Global version",
 
-  // ---- API gateway ----
-  "wbSettings.gateway.groupTitle": "API gateway",
-  "wbSettings.gateway.saved": "Gateway settings saved",
-  "wbSettings.gateway.bindLabel": "Default gateway listen address",
-  "wbSettings.gateway.bindDesc": "Listens on the loopback address by default; 0.0.0.0 allows LAN access",
-  "wbSettings.gateway.bindLoopback": "127.0.0.1 (this machine only)",
-  "wbSettings.gateway.bindLan": "0.0.0.0 (LAN)",
-  "wbSettings.gateway.portLabel": "Default gateway port",
-  "wbSettings.gateway.portDesc": "Defaults to 57891, distinct from the webui port",
-  "wbSettings.gateway.keepLabel": "Request log entries kept",
-  "wbSettings.gateway.keepDesc": "Metadata only",
-  "wbSettings.gateway.bodiesLabel": "Log request bodies",
-  "wbSettings.gateway.bodiesDesc": "Privacy risk; off by default, only metadata such as time / model / status code is logged",
-  "wbSettings.gateway.invalidPort": "Port must be an integer between 1 and 65535",
-  "wbSettings.gateway.invalidKeep": "Entries kept must be an integer between 0 and 10000",
-  "wbSettings.gateway.enabledLabel": "Enable local gateway",
-  "wbSettings.gateway.enabledDesc": "Serve OpenAI / Anthropic compatible endpoints on 127.0.0.1",
-
   // ---- Scheduled tasks ----
   "wbSettings.schedule.groupTitle": "Scheduled tasks",
   "wbSettings.schedule.intro": "Each of the six tasks has its own toggle and time list, and is triggered by the scheduler when due. Times use 24-hour local time and can be set to the minute (e.g. 09:37); multiple times are allowed, and each task can add jitter (±5/15/30 min) so the actual trigger shifts day to day. Use \"Run now\" to verify right away without waiting for the next trigger.",

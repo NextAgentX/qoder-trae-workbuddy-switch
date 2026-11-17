@@ -24,6 +24,7 @@ import {
 } from "@/components/gateway/gateway-subnav";
 import { TraeApiKeyTable } from "@/components/gateway/trae-api-key-table";
 import { ModelFallbackCard } from "@/components/gateway/model-fallback-card";
+import { RiskControlsCard } from "@/components/gateway/risk-controls-card";
 import { ModelProbeCard } from "@/components/gateway/model-probe-card";
 import { TraeIntegrationGuide } from "@/components/gateway/trae-integration-guide";
 import { TraeModelList } from "@/components/gateway/trae-model-list";
@@ -794,6 +795,8 @@ export default function TraeApiServicePage() {
                 model={config.defaultModel}
                 keyPrefix={keyPrefix}
               />
+              {/* 请求风控与 WorkBuddy / Qoder 共用同一份参数；入口跟随网关概览。 */}
+              <RiskControlsCard className="mt-6" />
             </>
           )}
 

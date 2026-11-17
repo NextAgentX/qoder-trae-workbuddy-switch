@@ -4841,17 +4841,21 @@ const APP_SETTINGS_SNAPSHOT = "src/lib/app-settings-snapshot.ts";
 const BACKUP_LOCALE_ZH = "src/locales/domains/backup.zh.ts";
 const BACKUP_LOCALE_EN = "src/locales/domains/backup.en.ts";
 
-check("★ P7 设置 11 项子导航：11 项齐备，最后一项是「备份与恢复」，且含 CodeBuddy CLI", () => {
+check("★ P7 设置 9 项子导航：9 项齐备，最后一项是「备份与恢复」，且含 CodeBuddy CLI", () => {
   const code = readCode(BACKUP_SUBNAV);
   const m = code.match(/SETTINGS_SUBNAV[\s\S]*?=\s*\[([\s\S]*?)\];/);
   if (!m) throw new Error("找不到 `SETTINGS_SUBNAV` 表");
   const ids = [...m[1].matchAll(/id:\s*"([a-z]+)"/g)].map((x) => x[1]);
   /* ★ 项数**故意写死**：子导航是设置页唯一导航，多一项少一项都要有意识。
-     issue #109 加「CodeBuddy CLI」（`cli`）时就是靠这条提醒改这里的。
-     issue #111 收尾加「网络」（`network`，Qoder 逐包出站代理）时同理。
+     issue #109 加「CodeBuddy CLI」（`cli`）、issue #111 加「网络」（`network`）都靠这条提醒。
+     2026-11-17 去重：删掉 `general`（应用级设置归顶栏 ⚙ 抽屉）与 `gateway`
+     （网关配置归网关工作台）后从 11 项收敛为 9 项。
      ⚠️ `cli` 是 WorkBuddy 侧独有、`network` 目前只有 Qoder 侧有内容 —— 各设置页用
-     `items` 收窄排除，所以「表里有 11 项」不等于「每个平台都显示 11 项」。 */
-  if (ids.length !== 11) throw new Error(`子导航应 11 项，实际 ${ids.length}：${ids.join(",")}`);
+     产品白名单（`WB_/TRAE_/QODER_SETTINGS_SECTIONS`）收窄，所以「表里有 9 项」
+     不等于「每个平台都显示 9 项」。 */
+  if (ids.length !== 9) throw new Error(`子导航应 9 项，实际 ${ids.length}：${ids.join(",")}`);
+  if (ids.includes("general")) throw new Error("设置页不该再有 general —— 应用级设置在顶栏 ⚙ 抽屉");
+  if (ids.includes("gateway")) throw new Error("设置页不该再有 gateway —— 网关配置在网关工作台");
   if (!ids.includes("cli")) throw new Error("缺 cli（CodeBuddy CLI 接入方式，issue #109）");
   if (!ids.includes("network")) throw new Error("缺 network（逐包出站代理，issue #111）");
   if (ids[ids.length - 1] !== "backup") {
@@ -7188,14 +7192,22 @@ check("★ P0-4a 未检测程序位：「去设置」跳到「权限与诊断」
     if (!/export function parseSettingsSubnav/.test(nav)) {
       throw new Error("parseSettingsSubnav 不存在（校验被搬走却没落地）");
     }
-    if (!/SETTINGS_SUBNAV\.some/.test(nav) || !/:\s*"general"/.test(nav)) {
-      throw new Error("parseSettingsSubnav 未 fail-closed 回 general");
+    if (!/SETTINGS_SUBNAV\.some/.test(nav)) {
+      throw new Error("parseSettingsSubnav 没有校验输入 —— 非法值会被塞进 state");
+    }
+    /* fail-closed 的落点必须是**表里真实存在**的分区：写死一个已删除的 id 会让
+       `?section=...` 落到空主区（用户看到「点了没反应」）。 */
+    if (!/DEFAULT_SETTINGS_SUBNAV[^=]*=\s*"(account|checkin|schedule|client|network|cli|diagnostics|logs|backup)"/.test(nav)) {
+      throw new Error("parseSettingsSubnav 未 fail-closed 回一个真实存在的分区");
+    }
+    if (!/return SETTINGS_SUBNAV\.some\([\s\S]{0,200}?DEFAULT_SETTINGS_SUBNAV/.test(nav)) {
+      throw new Error("parseSettingsSubnav 的非法分支没有使用 DEFAULT_SETTINGS_SUBNAV");
     }
   }
   return "带锚点 + 从 URL 读 + 合法性校验";
 });
 
-check("★ 设置页两平台同构：同一张 9 项子导航表 + URL 承载 + split 布局（PLAN §3.9 / D12）", () => {
+check("★ 设置页两平台同构：同一张子导航表 + URL 承载 + split 布局（PLAN §3.9 / D12）", () => {
   /* 变异①：把 Trae 设置页退回「一屏长滚动 10 组」⇒ 子导航断言变红。
      变异②：Trae 页自建一份子导航表 ⇒ 「同一张表」断言变红。
      变异③：两页任一缺 `data-split-layout` ⇒ 900px 以下不转纵向、子导航不换行。 */
@@ -7226,6 +7238,70 @@ check("★ 设置页两平台同构：同一张 9 项子导航表 + URL 承载 +
     throw new Error("[data-side-subnav] 宽度不是原型的 186px");
   }
   return "两页同一张表 · URL 承载 · split 布局 · 16px 间距 · 186px 无图标子导航";
+});
+
+check("★ 设置页只放产品设置：应用级设置归顶栏 ⚙、网关配置归网关工作台（不重复）", () => {
+  /* 用户反馈的原始问题：「设置页面有很多重复的地方」「左侧栏的设置齿轮和网关有很多重复的设置」。
+     应用框架设置（语言 / 外观 / 快捷键 / 启动 / 更新 / 授权 / 作用域可见性 / 积分刷新）
+     曾同时出现在顶栏抽屉与设置页「通用」；网关开关 / 端口 / 日志曾同时出现在
+     设置页「网关」与网关工作台。两份副本必然漂移，且用户不知道该改哪个。
+     本断言锁住删除后的唯一入口：
+     ① 三个设置页都不得再渲染 `AppSettingsGroups`，也不得有 general / gateway 分区；
+     ② 顶栏抽屉必须仍渲染应用级设置（唯一入口不能丢）；
+     ③ 请求风控必须落在网关页（原来在设置页「通用」）。 */
+  for (const page of [
+    "src/pages/SettingsPage.tsx",
+    "src/pages/TraeSettingsPage.tsx",
+    "src/pages/QoderSettingsPage.tsx",
+  ]) {
+    const code = stripComments(fs.readFileSync(path.join(ROOT, page), "utf8"));
+    if (/AppSettingsGroups/.test(code)) {
+      throw new Error(`${page} 又渲染了应用级设置 —— 唯一入口是顶栏 ⚙ 抽屉`);
+    }
+    if (/section === "(general|gateway)"/.test(code)) {
+      throw new Error(`${page} 又有 general / gateway 分区 —— 与顶栏抽屉 / 网关工作台重复`);
+    }
+  }
+  const drawer = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/components/shell/app-settings-drawer.tsx"), "utf8"),
+  );
+  if (!/AppSettingsGroups/.test(drawer)) {
+    throw new Error("顶栏 ⚙ 抽屉没有渲染应用级设置 —— 删了设置页的副本却没接住唯一入口");
+  }
+  for (const page of [
+    "src/pages/ApiServicePage.tsx",
+    "src/pages/TraeApiServicePage.tsx",
+    "src/pages/QoderApiServicePage.tsx",
+  ]) {
+    const gatewayPage = stripComments(fs.readFileSync(path.join(ROOT, page), "utf8"));
+    if (!/RiskControlsCard/.test(gatewayPage)) {
+      throw new Error(`${page}: 请求风控没有落在该平台网关概览`);
+    }
+  }
+
+  const nav = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/components/settings/settings-subnav.tsx"), "utf8"),
+  );
+  for (const name of ["WB_SETTINGS_SECTIONS", "TRAE_SETTINGS_SECTIONS", "QODER_SETTINGS_SECTIONS"]) {
+    if (!new RegExp(`export const ${name}`).test(nav)) {
+      throw new Error(`缺产品设置白名单 ${name}`);
+    }
+  }
+  if (!/const DEFAULT_SETTINGS_SUBNAV:[^=]+= "account"/.test(nav)) {
+    throw new Error("非法 / 旧深链的默认落点必须是 account（账号与登录）");
+  }
+  const qoderSettings = stripComments(
+    fs.readFileSync(path.join(ROOT, "src/pages/QoderSettingsPage.tsx"), "utf8"),
+  );
+  if (!/section === "account"/.test(qoderSettings)) {
+    throw new Error("Qoder 白名单有 account，但页面没有渲染分支 —— 会显示空主区");
+  }
+  for (const section of ["client", "network", "schedule", "backup"]) {
+    if (!new RegExp(`section === "${section}"`).test(qoderSettings)) {
+      throw new Error(`Qoder 白名单的 ${section} 没有渲染分支`);
+    }
+  }
+  return "设置页无应用级/网关分区 · 抽屉唯一入口 · 三平台网关风控可达 · 产品白名单有内容";
 });
 
 check("★ P1-2 批量签到部分失败：toast 给「只重试失败项」出口", () => {

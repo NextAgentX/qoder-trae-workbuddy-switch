@@ -190,14 +190,12 @@ export const en = {
   /* The settings entry opens the notes dialog first instead of downloading (see UPDATE-NOTES-ARCH.md). */
   "appSettings.update.viewNotes": "View release notes",
 
-  // ---- Settings sub-nav (P7 §3.9: 9 items, the 9th is "Backup & restore") ----
+  // ---- Settings sub-nav (product settings only; app-level settings live in the top-bar ⚙ drawer) ----
   "settings.subnav.aria": "Settings sections",
-  "settings.subnav.general": "General",
   "settings.scope.global": "Global setting · applies to every scope; switching scope will not change it",
   "settings.scope.scoped": "Affects the current scope only ({scope}) · other scopes have their own settings",
   "settings.subnav.account": "Accounts & sign-in",
   "settings.subnav.checkin": "Check-in & credits",
-  "settings.subnav.gateway": "Gateway",
   "settings.subnav.schedule": "Scheduled tasks",
   "settings.subnav.client": "Client",
   "settings.subnav.cli": "CodeBuddy CLI",
