@@ -164,7 +164,17 @@ pub struct CampaignSummary {
 /// 兑换码 / 详情类 / 历史已领一次性促销活动不是签到，混进来会让「今日已签」变成假阳性。
 pub fn summarize_campaigns(items: &[campaign::CampaignItem]) -> CampaignSummary {
     let mut summary = CampaignSummary::default();
+    let mut seen = std::collections::HashSet::new();
     for item in items.iter().filter(|item| item.is_credit_kind()) {
+        // 上游偶发重复下发同一活动；按 id（缺失时 key）去重，避免签到额度虚增。
+        let identity = if item.campaign_id.is_empty() {
+            item.campaign_key.as_str()
+        } else {
+            item.campaign_id.as_str()
+        };
+        if !identity.is_empty() && !seen.insert(identity) {
+            continue;
+        }
         match campaign::classify(item) {
             campaign::CampaignClass::Already => {
                 summary.has_benefit = true;
@@ -1082,6 +1092,17 @@ mod tests {
         ]);
         assert!(mixed.has_benefit && mixed.claimed);
         assert_eq!(mixed.claimed_amount, 100);
+    }
+
+    /// 同一活动被上游重复下发时，签到额度不得重复累加。
+    #[test]
+    fn summarize_campaigns_deduplicates_same_campaign() {
+        let summary = summarize_campaigns(&[
+            campaign_item("CLAIMED", 100, "CREDITS"),
+            campaign_item("CLAIMED", 100, "CREDITS"),
+        ]);
+        assert!(summary.claimed);
+        assert_eq!(summary.claimed_amount, 100, "同一活动只应计一次");
     }
 
     /// 状态投影：`todayCheckedIn` 只认上游 `claimStatus`；没签时 `todayCredit` 是 null。

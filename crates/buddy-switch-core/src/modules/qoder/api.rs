@@ -2231,6 +2231,42 @@ pub struct QuotaView {
     pub raw: Value,
 }
 
+/// 专属资源包是否仍可用：上游显式可用、未标记过期、到期时间尚未过去。
+///
+/// `expiresAt` / `expires_at` 的数值按毫秒归一（小于 1e12 的按秒解释）；RFC3339
+/// 字符串也接受。`0` 与 9999 年哨兵都表示「无到期时间」，沿用
+/// [`super::web_usage::normalize_expires_at_ms`] 的口径。
+fn dedicated_package_is_usable(pkg: &Value, now_ms: i64) -> bool {
+    if pkg.get("available").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    if pkg.get("expired").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    if let Some(status) = pkg.get("status").and_then(Value::as_str) {
+        let status = status.to_ascii_uppercase();
+        if status.contains("EXPIRED") || status.contains("INACTIVE") || status.contains("DISABLED")
+        {
+            return false;
+        }
+    }
+    let expiry = pkg
+        .get("expiresAt")
+        .or_else(|| pkg.get("expires_at"))
+        .and_then(|value| {
+            if let Some(text) = value.as_str() {
+                if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(text) {
+                    return super::web_usage::normalize_expires_at_ms(datetime.timestamp_millis());
+                }
+            }
+            value
+                .as_i64()
+                .or_else(|| value.as_f64().map(|number| number.round() as i64))
+                .and_then(super::web_usage::normalize_expires_at_ms)
+        });
+    !expiry.is_some_and(|expires_at| expires_at <= now_ms)
+}
+
 /// 解析额度响应。
 ///
 /// **退化守卫**（与官方客户端的判断一致，保守放行）：三个 quota 来源都缺失，
@@ -2262,17 +2298,15 @@ pub fn parse_quota(payload: &Value) -> Result<QuotaView, String> {
     let mut dedicated_remaining = 0i64;
     let mut dedicated_used = 0i64;
     let mut dedicated_total = 0i64;
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0);
 
     if let Some(packages) = dedicated_packages {
         for pkg in packages {
-            if pkg.get("available").and_then(Value::as_bool) == Some(false) {
+            if !dedicated_package_is_usable(pkg, now_ms) {
                 continue;
-            }
-            if let Some(status) = pkg.get("status").and_then(Value::as_str) {
-                let s = status.to_ascii_uppercase();
-                if s.contains("EXPIRED") || s.contains("INACTIVE") || s.contains("DISABLED") {
-                    continue;
-                }
             }
             if let Some(obj) = pkg.as_object() {
                 dedicated_remaining += num(Some(obj), "remaining");
@@ -4010,7 +4044,10 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(view.remaining, 2600, "100 基础 + 2000 SOTA + 500 极致 = 2600");
+        assert_eq!(
+            view.remaining, 2600,
+            "100 基础 + 2000 SOTA + 500 极致 = 2600"
+        );
         assert_eq!(view.total, 2600);
         assert_eq!(view.used, 0);
 
@@ -4029,6 +4066,49 @@ mod tests {
         assert_eq!(snake.remaining, 150);
         assert_eq!(snake.total, 150);
         assert_eq!(snake.used, 50);
+    }
+
+    #[test]
+    fn quota_excludes_packages_marked_expired_or_past_their_expiry() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let view = parse_quota(&serde_json::json!({
+            "dedicatedResourcePackages": [
+                {
+                    "available": true,
+                    "expired": true,
+                    "remaining": 100,
+                    "total": 100,
+                    "used": 0
+                },
+                {
+                    "available": true,
+                    "expiresAt": now_ms - 60_000,
+                    "remaining": 200,
+                    "total": 200,
+                    "used": 0
+                },
+                {
+                    "available": true,
+                    "expires_at": now_ms + 86_400_000,
+                    "remaining": 300,
+                    "total": 300,
+                    "used": 0
+                },
+                {
+                    "expiresAt": now_ms + 86_400_000,
+                    "remaining": 400,
+                    "total": 400,
+                    "used": 0
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(view.remaining, 300, "只应累加未过期且可用的专属包");
+        assert_eq!(view.total, 300);
     }
 
     #[test]
