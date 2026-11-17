@@ -18,7 +18,7 @@
 //! ## 设计：可注入的取数缝
 //!
 //! 「取余额」被抽成 [`CreditFetcher`]，生产用 [`CoreCreditFetcher`]，单测用假取数器，
-//! 与既有的 `CatIo` / `SchoolIo` / `UsageSink` 是同一套思路——单测**绝不发真实网络请求**。
+//! 与既有的 `CatIo` / `UsageSink` 是同一套思路——单测**绝不发真实网络请求**。
 
 use std::future::Future;
 use std::pin::Pin;

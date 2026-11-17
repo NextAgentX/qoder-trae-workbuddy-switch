@@ -1,7 +1,7 @@
 //! 定时任务排程配置与「按点独立排程」纯函数。
 //!
 //! 对照参考实现 `internal/config/schedule.go` + `internal/scheduler/scheduler.go`：
-//! WorkBuddy 侧的六类任务（签到 / 旅行 / 活跃上报 / 保活 / 开学季 / 夜猫子）各自独立时点、
+//! WorkBuddy 侧的五类任务（签到 / 旅行 / 活跃上报 / 保活 / 夜猫子）各自独立时点、
 //! 独立开关，同一时点上的多类任务并行执行；本产品另加第七类 **Trae 自动签到**
 //! （`trae_checkin`，第二条产品线，默认关闭，见 [`default_schedule`]）。
 //!
@@ -242,7 +242,6 @@ define_schedule_tasks! {
     Travel => "travel", travel_enabled, travel_times, travel_hours, travel_jitter_minutes;
     Activity => "activity", activity_enabled, activity_times, activity_hours, activity_jitter_minutes;
     Keepalive => "keepalive", keepalive_enabled, keepalive_times, keepalive_hours, keepalive_jitter_minutes;
-    School => "school", school_enabled, school_times, school_hours, school_jitter_minutes;
     Cat => "cat", cat_enabled, cat_times, cat_hours, cat_jitter_minutes;
     // Trae 分区（第二条产品线）的自动签到。**与上面的 `checkin` 是两件事**：
     // 前者签 WorkBuddy 的账号库，本任务签 Trae 的区域账号库（两本互不相通）。
@@ -272,7 +271,6 @@ pub struct ScheduleConfig {
     pub travel_times: Vec<TimeOfDay>,
     pub activity_times: Vec<TimeOfDay>,
     pub keepalive_times: Vec<TimeOfDay>,
-    pub school_times: Vec<TimeOfDay>,
     pub cat_times: Vec<TimeOfDay>,
     /// Trae 自动签到的时点（第二条产品线，区域账号库）。
     pub trae_checkin_times: Vec<TimeOfDay>,
@@ -288,7 +286,6 @@ pub struct ScheduleConfig {
     pub travel_jitter_minutes: u32,
     pub activity_jitter_minutes: u32,
     pub keepalive_jitter_minutes: u32,
-    pub school_jitter_minutes: u32,
     pub cat_jitter_minutes: u32,
     pub trae_checkin_jitter_minutes: u32,
     pub trae_jwt_refresh_jitter_minutes: u32,
@@ -298,7 +295,6 @@ pub struct ScheduleConfig {
     pub travel_enabled: bool,
     pub activity_enabled: bool,
     pub keepalive_enabled: bool,
-    pub school_enabled: bool,
     pub cat_enabled: bool,
     /// Trae 自动签到开关。**默认关闭**，见 [`default_schedule`] 的说明。
     pub trae_checkin_enabled: bool,
@@ -356,7 +352,6 @@ pub fn default_schedule() -> ScheduleConfig {
         travel_times: vec![at(9), at(21)],
         activity_times: vec![at(10)],
         keepalive_times: vec![at(22)],
-        school_times: vec![at(12)],
         cat_times: vec![at(1)],
         trae_checkin_times: vec![at(9), at(21)],
         trae_jwt_refresh_times: vec![at(9), at(21)],
@@ -370,7 +365,6 @@ pub fn default_schedule() -> ScheduleConfig {
         travel_jitter_minutes: 0,
         activity_jitter_minutes: 0,
         keepalive_jitter_minutes: 0,
-        school_jitter_minutes: 0,
         cat_jitter_minutes: 0,
         trae_checkin_jitter_minutes: 0,
         trae_jwt_refresh_jitter_minutes: 0,
@@ -380,7 +374,6 @@ pub fn default_schedule() -> ScheduleConfig {
         travel_enabled: true,
         activity_enabled: true,
         keepalive_enabled: true,
-        school_enabled: true,
         cat_enabled: true,
         trae_checkin_enabled: false,
         trae_jwt_refresh_enabled: true,
@@ -560,7 +553,6 @@ pub fn schedule_to_value(cfg: &ScheduleConfig) -> Value {
         "travel_times": cfg.travel_times,
         "activity_times": cfg.activity_times,
         "keepalive_times": cfg.keepalive_times,
-        "school_times": cfg.school_times,
         "cat_times": cfg.cat_times,
         "trae_checkin_times": cfg.trae_checkin_times,
         "trae_jwt_refresh_times": cfg.trae_jwt_refresh_times,
@@ -570,7 +562,6 @@ pub fn schedule_to_value(cfg: &ScheduleConfig) -> Value {
         "travel_jitter_minutes": cfg.travel_jitter_minutes,
         "activity_jitter_minutes": cfg.activity_jitter_minutes,
         "keepalive_jitter_minutes": cfg.keepalive_jitter_minutes,
-        "school_jitter_minutes": cfg.school_jitter_minutes,
         "cat_jitter_minutes": cfg.cat_jitter_minutes,
         "trae_checkin_jitter_minutes": cfg.trae_checkin_jitter_minutes,
         "trae_jwt_refresh_jitter_minutes": cfg.trae_jwt_refresh_jitter_minutes,
@@ -580,7 +571,6 @@ pub fn schedule_to_value(cfg: &ScheduleConfig) -> Value {
         "travel_enabled": cfg.travel_enabled,
         "activity_enabled": cfg.activity_enabled,
         "keepalive_enabled": cfg.keepalive_enabled,
-        "school_enabled": cfg.school_enabled,
         "cat_enabled": cfg.cat_enabled,
         "trae_checkin_enabled": cfg.trae_checkin_enabled,
         "trae_jwt_refresh_enabled": cfg.trae_jwt_refresh_enabled,
@@ -739,7 +729,6 @@ mod tests {
         assert_eq!(cfg.travel_times, vec![t(9, 0), t(21, 0)]);
         assert_eq!(cfg.activity_times, vec![t(10, 0)]);
         assert_eq!(cfg.keepalive_times, vec![t(22, 0)]);
-        assert_eq!(cfg.school_times, vec![t(12, 0)]);
         assert_eq!(cfg.cat_times, vec![t(1, 0)]);
         assert_eq!(cfg.activity_report_count, 5);
         assert_eq!(cfg.trae_checkin_times, vec![t(9, 0), t(21, 0)]);
@@ -748,7 +737,7 @@ mod tests {
         // 09:00 那一轮只能重复签昨天的实例（见 `default_schedule` 里的注释）。
         assert_eq!(cfg.qoder_checkin_times, vec![t(10, 5), t(21, 0)]);
         assert_eq!(cfg.qoder_keepalive_times, vec![t(22, 0)]);
-        // WorkBuddy 的六类默认全启用（与参考实现逐字一致，改了会让老用户的功能静默消失）。
+        // WorkBuddy 的五类默认全启用（与参考实现逐字一致，改了会让老用户的功能静默消失）。
         // Trae / Qoder 各两条**方向相反**，判据相同（见 `default_schedule` 的文档）：
         //   · `*_checkin` 默认**关**（替用户去领东西，他没要求过，故 opt-in）；
         //   · `*_keepalive` / `trae_jwt_refresh` 默认**开**（维持用户自己交出来的登录态）。
@@ -811,7 +800,6 @@ mod tests {
         // 只给一个无关键，其余仍全部默认启用。
         let cfg = schedule_from_value(&json!({"activity_report_count": 2})).unwrap();
         assert_eq!(cfg.activity_report_count, 2);
-        assert!(cfg.checkin_enabled && cfg.travel_enabled && cfg.school_enabled);
     }
 
     #[test]
@@ -819,14 +807,12 @@ mod tests {
         let cfg = schedule_from_value(&json!({
             "checkin_times": [],
             "travel_times": null,
-            "school_times": [],
             // 旧键的空数组同理（老配置里出现过 `[]`，不能因此把任务静默关掉）。
             "cat_hours": [],
         }))
         .unwrap();
         assert_eq!(cfg.checkin_times, vec![t(9, 0), t(21, 0)]);
         assert_eq!(cfg.travel_times, vec![t(9, 0), t(21, 0)]);
-        assert_eq!(cfg.school_times, vec![t(12, 0)]);
         assert_eq!(cfg.cat_times, vec![t(1, 0)]);
     }
 
@@ -837,7 +823,6 @@ mod tests {
             "travel_enabled": false,
             "activity_enabled": false,
             "keepalive_enabled": false,
-            "school_enabled": false,
             "cat_enabled": false,
             "trae_checkin_enabled": false,
             "trae_jwt_refresh_enabled": false,
@@ -862,7 +847,6 @@ mod tests {
             "travel_enabled": true,
             "activity_enabled": true,
             "keepalive_enabled": true,
-            "school_enabled": true,
             "cat_enabled": true,
             "trae_checkin_enabled": true,
             "trae_jwt_refresh_enabled": true,
@@ -893,7 +877,6 @@ mod tests {
         assert_eq!(cfg.checkin_times, vec![t(9, 37), t(21, 5)]);
         assert_eq!(cfg.trae_checkin_times, vec![t(8, 15)]);
         // 未提交的任务仍保留默认（不是被清空）。
-        assert_eq!(cfg.school_times, vec![t(12, 0)]);
     }
 
     /// 旧格式 `*_hours` 必须继续可读，且**新键优先**、保存时只写新键。
@@ -945,9 +928,6 @@ mod tests {
         assert!(err.contains("cat_enabled"), "{err}");
 
         // 新键：数字是格式错误（新键的契约是 `HH:MM` 字符串）。
-        let err = schedule_from_value(&json!({"school_times": [12]})).unwrap_err();
-        assert!(err.contains("school_times"), "{err}");
-
         // 旧键：负数 / 越界仍按旧文案报错并指向开关。
         let err = schedule_from_value(&json!({"travel_hours": [9, -1]})).unwrap_err();
         assert!(err.contains("travel_hours"), "{err}");
@@ -1073,7 +1053,7 @@ mod tests {
 
     #[test]
     fn next_wake_returns_earliest_across_task_families() {
-        // 08:00：cat=1(次日) / activity=10 / school=12 / checkin&travel&trae_jwt_refresh=9 /
+        // 08:00：cat=1(次日) / activity=10 / checkin&travel&trae_jwt_refresh=9 /
         // keepalive=22 → 9 点。
         let cfg = default_schedule();
         let (at, kinds) = next_wake(&cfg, cst_ms(2026, 9, 16, 8, 0));
@@ -1103,8 +1083,8 @@ mod tests {
     }
 
     #[test]
-    fn disabling_activity_does_not_affect_school_or_cat() {
-        // 六类开关互相独立：单独关闭 activity 不应影响其它任务的排程。
+    fn disabling_activity_does_not_affect_cat() {
+        // 五类开关互相独立：单独关闭 activity 不应影响其它任务的排程。
         let mut cfg = default_schedule();
         cfg.activity_times = vec![t(10, 0)];
         let (_, all_kinds) = next_wake(&cfg, cst_ms(2026, 9, 16, 9, 30));
@@ -1116,14 +1096,29 @@ mod tests {
             !kinds.contains(&ScheduleTask::Activity),
             "关闭 activity 后不应再出现该任务"
         );
-        // school / cat 仍在候选（其自身开关未动）。
-        assert!(ScheduleTask::School.enabled(&cfg));
-        assert!(ScheduleTask::Cat.enabled(&cfg));
-        assert!(ScheduleTask::School.times(&cfg).contains(&t(12, 0)));
-        assert_eq!(ScheduleTask::Cat.times(&cfg), &[t(1, 0)]);
-        // 最近的唤醒时点 = 各启用任务的最近时点，school(12:00) 与 cat(次日 01:00) 均在其中。
-        let (at, _) = next_wake(&cfg, cst_ms(2026, 9, 16, 9, 30));
-        assert_eq!(at, Some(cst_ms(2026, 9, 16, 12, 0)));
+
+        // 全局下一个唤醒会先命中其它任务；要验证 cat 的开关独立，只保留 cat 再算。
+        for task in ScheduleTask::all() {
+            task.set_enabled(&mut cfg, task == ScheduleTask::Cat);
+        }
+        let (at, kinds) = next_wake(&cfg, cst_ms(2026, 9, 16, 12, 30));
+        assert_eq!(at, Some(cst_ms(2026, 9, 17, 1, 0)));
+        assert_eq!(kinds, vec![ScheduleTask::Cat]);
+    }
+
+    /// 旧版落盘配置里的 `school_*` 字段必须被忽略，而不是让整份排程解析失败。
+    #[test]
+    fn legacy_school_keys_are_ignored_without_error() {
+        let cfg = schedule_from_value(&json!({
+            "school_times": ["12:00"],
+            "school_enabled": true,
+            "school_jitter_minutes": 5
+        }))
+        .expect("旧 school_* 字段必须可安全忽略");
+        assert_eq!(cfg, default_schedule());
+        assert!(!ScheduleTask::all()
+            .into_iter()
+            .any(|task| task.as_str() == "school"));
     }
 
     #[test]
@@ -1133,7 +1128,6 @@ mod tests {
         cfg.travel_enabled = false;
         cfg.activity_enabled = false;
         cfg.keepalive_enabled = false;
-        cfg.school_enabled = false;
         cfg.cat_enabled = false;
         cfg.trae_jwt_refresh_enabled = false;
         // Qoder 保活**默认开启**，这里必须显式关掉，否则「全关」根本不是全关
@@ -1181,10 +1175,6 @@ mod tests {
         );
 
         // 合法边界必须通过：旧键 0 / 23，新键 00:00 / 23:59。
-        let cfg = schedule_from_value(&json!({"school_hours": [0, 23]})).unwrap();
-        assert_eq!(cfg.school_times, vec![t(0, 0), t(23, 0)]);
-        let cfg = schedule_from_value(&json!({"school_times": ["00:00", "23:59"]})).unwrap();
-        assert_eq!(cfg.school_times, vec![t(0, 0), t(23, 59)]);
     }
 
     /// 表驱动：把宏 [`define_schedule_tasks!`] 生成的**四张映射表**（`as_str` / `enabled` /
@@ -1194,11 +1184,11 @@ mod tests {
     ///
     /// 关键：配置取值必须**互相可区分**，否则「读错字段」会得到相同观察结果、测不出。
     /// - **label**：逐类断言 `as_str()` 等于自己的字面量。
-    /// - **times**：八份 `*_times` 设成互不相同的列表，逐类断言 `times()` 等于自己的列表；
+    /// - **times**：五份 `*_times` 设成互不相同的列表，逐类断言 `times()` 等于自己的列表；
     ///   任一跨字段错读必然得到别人的列表 → 暴露。
     /// - **字段名**：`times_field` / `switch_field` 必须各自指向自己的键（错误文案靠它定位）。
     /// - **enabled**：布尔只有两态，单份配置区分不了 8 个字段，故遍历「只开一个开关」的
-    ///   八份配置，断言**被启用的任务集合**恰为该开关的属主；任一跨字段错读都会在某份
+    ///   十份配置，断言**被启用的任务集合**恰为该开关的属主；任一跨字段错读都会在某份
     ///   配置里被拆穿。
     ///
     /// 断言的是「等于它自己那一列」（随字段变化），而非某个常量——否则改错映射仍可能蒙对。
@@ -1213,7 +1203,6 @@ mod tests {
             travel_times: vec![t(2, 0)],
             activity_times: vec![t(3, 0)],
             keepalive_times: vec![t(4, 0)],
-            school_times: vec![t(5, 0)],
             cat_times: vec![t(6, 0)],
             trae_checkin_times: vec![t(7, 0)],
             trae_jwt_refresh_times: vec![t(8, 0)],
@@ -1224,7 +1213,6 @@ mod tests {
             travel_jitter_minutes: 2,
             activity_jitter_minutes: 3,
             keepalive_jitter_minutes: 4,
-            school_jitter_minutes: 5,
             cat_jitter_minutes: 6,
             trae_checkin_jitter_minutes: 7,
             trae_jwt_refresh_jitter_minutes: 8,
@@ -1234,7 +1222,6 @@ mod tests {
             travel_enabled: false,
             activity_enabled: false,
             keepalive_enabled: false,
-            school_enabled: false,
             cat_enabled: false,
             trae_checkin_enabled: false,
             trae_jwt_refresh_enabled: false,
@@ -1253,7 +1240,7 @@ mod tests {
             &str,
             u32,
             &str,
-        ); 10] = [
+        ); 9] = [
             (
                 ScheduleTask::Checkin,
                 "checkin",
@@ -1293,16 +1280,6 @@ mod tests {
                 "keepalive_hours",
                 4,
                 "keepalive_jitter_minutes",
-            ),
-            (
-                ScheduleTask::School,
-                "school",
-                off.school_times.as_slice(),
-                "school_times",
-                "school_enabled",
-                "school_hours",
-                5,
-                "school_jitter_minutes",
             ),
             (
                 ScheduleTask::Cat,
@@ -1361,7 +1338,6 @@ mod tests {
             travel_enabled: true,
             activity_enabled: true,
             keepalive_enabled: true,
-            school_enabled: true,
             cat_enabled: true,
             trae_checkin_enabled: true,
             trae_jwt_refresh_enabled: true,
@@ -1420,7 +1396,7 @@ mod tests {
 
         // (2) enabled：布尔仅两态，一份配置区分不了 10 个字段；遍历「只开一个开关」的十份配置，
         //     断言「被启用的任务集合」恰为该开关的属主。
-        let only: [(&str, ScheduleConfig); 10] = [
+        let only: [(&str, ScheduleConfig); 9] = [
             (
                 "checkin",
                 ScheduleConfig {
@@ -1446,13 +1422,6 @@ mod tests {
                 "keepalive",
                 ScheduleConfig {
                     keepalive_enabled: true,
-                    ..off.clone()
-                },
-            ),
-            (
-                "school",
-                ScheduleConfig {
-                    school_enabled: true,
                     ..off.clone()
                 },
             ),
@@ -1517,14 +1486,13 @@ mod tests {
                 "travel",
                 "activity",
                 "keepalive",
-                "school",
                 "cat",
                 "trae_checkin",
                 "trae_jwt_refresh",
                 "qoder_checkin",
                 "qoder_keepalive"
             ],
-            "all() 必须恰好包含全部十类且顺序稳定"
+            "all() 必须恰好包含全部九类且顺序稳定"
         );
     }
 

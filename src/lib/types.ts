@@ -1189,8 +1189,6 @@ export interface ScheduleConfig {
   activity_times: string[];
   /** token 保活的时点。 */
   keepalive_times: string[];
-  /** 开学季任务的时点。 */
-  school_times: string[];
   /** 夜猫子（猫猫领取）的时点。 */
   cat_times: string[];
   /** Trae 分区自动签到的时点（第二条产品线，签的是 Trae 自己的区域账号库）。 */
@@ -1212,7 +1210,6 @@ export interface ScheduleConfig {
   travel_jitter_minutes: number;
   activity_jitter_minutes: number;
   keepalive_jitter_minutes: number;
-  school_jitter_minutes: number;
   cat_jitter_minutes: number;
   trae_checkin_jitter_minutes: number;
   trae_jwt_refresh_jitter_minutes: number;
@@ -1226,8 +1223,6 @@ export interface ScheduleConfig {
   activity_enabled: boolean;
   /** token 保活开关。 */
   keepalive_enabled: boolean;
-  /** 开学季任务开关。 */
-  school_enabled: boolean;
   /** 夜猫子任务开关。 */
   cat_enabled: boolean;
   /**
@@ -1270,7 +1265,7 @@ export interface ScheduleConfig {
  * 「立即执行」某一类定时任务的结果（`POST /api/schedule/run`）。
  *
  * 形状随任务而异：签到 / 活跃上报 / 保活按 region 逐段返回；旅行返回派出与领取两段；
- * 开学季 / 夜猫子只返回单段结果。各段即业务模块自身的返回，原样透传便于定位到具体账号。
+ * 夜猫子只返回单段结果。各段即业务模块自身的返回，原样透传便于定位到具体账号。
  */
 export interface ScheduleRunResult {
   /** 被执行的任务标识（与 `SCHEDULE_TASKS` 的 key 一致）。 */
@@ -1281,7 +1276,7 @@ export interface ScheduleRunResult {
   dispatched?: Record<string, unknown>;
   /** 旅行领取一段的结果。 */
   claimed?: Record<string, unknown>;
-  /** 单段结果（开学季 / 夜猫子）。 */
+  /** 单段结果（夜猫子）。 */
   result?: Record<string, unknown>;
 }
 

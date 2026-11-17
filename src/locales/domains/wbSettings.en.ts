@@ -173,8 +173,6 @@ export const en = {
   "wbSettings.schedule.task.activity.desc": "Report to the activity map and light up the login streak",
   "wbSettings.schedule.task.keepalive.label": "token keep-alive",
   "wbSettings.schedule.task.keepalive.desc": "Refresh the login state so the token does not expire",
-  "wbSettings.schedule.task.school.label": "Back to school",
-  "wbSettings.schedule.task.school.desc": "Back-to-school event tasks",
   "wbSettings.schedule.task.cat.label": "Night owl",
   "wbSettings.schedule.task.cat.desc": "Night owl (cat claim) task",
   "wbSettings.schedule.enableAria": "Enable {label}",

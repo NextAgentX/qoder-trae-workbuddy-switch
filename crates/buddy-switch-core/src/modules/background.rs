@@ -344,11 +344,6 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         product: Product::Workbuddy,
-        kind: TaskKind::Scheduled(ScheduleTask::School),
-        interval: Duration::ZERO,
-    },
-    TaskSpec {
-        product: Product::Workbuddy,
         kind: TaskKind::Scheduled(ScheduleTask::Cat),
         interval: Duration::ZERO,
     },
