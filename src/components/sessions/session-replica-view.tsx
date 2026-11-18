@@ -66,6 +66,7 @@ export interface SessionReplicaViewProps {
    * ⚠️ 覆盖是**破坏性**的 ⇒ 真正的二次确认在 [`UnifyReplicasDialog`] 里，不在本视图。
    */
   onUnifyGroup?: (group: SessionGroupView) => void;
+  onManageGroup?: (group: SessionGroupView) => void;
 }
 
 /** 组状态 → 徽标变体（与 `sessions.replica.status.*` 文案配套，**内容级**派生）。 */
@@ -106,6 +107,7 @@ export function SessionReplicaView({
   onSyncGroup,
   busyGroupKeys,
   onUnifyGroup,
+  onManageGroup,
 }: SessionReplicaViewProps) {
   const t = useT();
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -163,6 +165,7 @@ export function SessionReplicaView({
               onSyncGroup={onSyncGroup}
               busy={busyGroupKeys?.has(open.key) === true}
               onUnifyGroup={onUnifyGroup}
+              onManageGroup={onManageGroup}
             />
           ) : null}
         </SheetContent>
@@ -176,16 +179,18 @@ interface SessionGraphSheetProps {
   onSyncGroup?: (group: SessionGroupView) => void;
   busy: boolean;
   onUnifyGroup?: (group: SessionGroupView) => void;
+  onManageGroup?: (group: SessionGroupView) => void;
 }
 
 /**
  * 会话关联图抽屉（原型 `sessionGraphHtml`，§3.15.2）：共同旧版 → 各账号副本分支。
  * 每个副本显示**相对共同旧版的差异**，而不是只给时间戳（时间新 ≠ 内容新）。
  */
-function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGraphSheetProps) {
+function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup, onManageGroup }: SessionGraphSheetProps) {
   const t = useT();
   /* ★ 只在真有可同步内容时才给出口（无项 ⇒ 不渲染按钮，§3.4 规则 1）。 */
   const items = buildSyncItems(group);
+  const isCrossRegion = new Set(group.rows.map((row) => row.region)).size > 1;
 
   return (
     <>
@@ -277,6 +282,9 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm font-medium">{row.accountLabel}</span>
+                  {isCrossRegion && row.region ? (
+                    <Badge variant="outline">{t(`sessions.links.region.${row.region}`)}</Badge>
+                  ) : null}
                   {row.hasHistory ? (
                     <Badge variant="outline" className="shrink-0 gap-1">
                       <History className="size-3" aria-hidden="true" />
@@ -320,6 +328,11 @@ function SessionGraphSheet({ group, onSyncGroup, busy, onUnifyGroup }: SessionGr
         ) : null}
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
+          {onManageGroup ? (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onManageGroup(group)}>
+              {t("sessions.links.manage")}
+            </Button>
+          ) : null}
           {/* ★ P8「安全同步」：**只在真有可同步内容时**才给出口（`behind` + 有增量）。
               文案如实写「加法」—— 用户对「同步」最大的恐惧是被覆盖（§3.15.4）。 */}
           {(() => {

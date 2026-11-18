@@ -68,7 +68,16 @@ import type {
   ScheduleConfig,
   ScheduleRunResult,
   Session,
+  SessionGroupAccountList,
+  SessionGroupActionReport,
+  SessionGroupClient,
+  SessionGroupCopyReport,
+  SessionGroupDetail,
+  SessionGroupLinkReport,
+  SessionGroupList,
+  SessionGroupPairPreview,
   SessionReplicaResponse,
+  SessionSyncMode,
   SkillCopyReport,
   SkillImportResult,
   SkillListResponse,
@@ -98,6 +107,7 @@ import type {
   TravelStatus,
   UpdateInfo,
   VscodeCodebuddyPluginStatus,
+  WbVariant,
 } from "./types";
 import { demoModeEnabled, demoUnavailableMessage } from "./demo-mode";
 import { displayText } from "./display-text";
@@ -397,7 +407,11 @@ const ROUTES: Record<string, Route> = {
   list_sessions: { method: "GET", path: "/api/sessions" },
   // P8 T02 · 只读：copy ledger 连通成「会话副本组」（两宿主同步）。
   list_session_replicas: { method: "GET", path: "/api/sessions/replicas" },
+  preview_switch_session_links: { method: "POST", path: "/api/sessions/switch-preview" },
   prune_session_replicas: { method: "POST", path: "/api/sessions/replicas/prune" },
+  recover_session_links: { method: "POST", path: "/api/sessions/recover" },
+  manage_session_links: { method: "POST", path: "/api/sessions/links" },
+  session_groups_action: { method: "POST", path: "/api/sessions/groups" },
   // P14 S4a · VS Code 插件 / CodeBuddy IDE 的会话仓（**与桌面版不是同一套存储**，
   // 所以单开路由而不是往 `/api/sessions` 塞 `client` 参数）。
   list_vscode_sessions: { method: "GET", path: "/api/vscode-sessions" },
@@ -988,8 +1002,9 @@ export function getCodebuddyCnIdeStatus(): Promise<CodeBuddyCnIdeStatus> {
 export function switchCodebuddyCnIdeAccount(
   accountId: string,
   restart = true,
+  options?: import("@/lib/switch-session-links").ExtensionSwitchOptions,
 ): Promise<CodeBuddyCnIdeSwitchResult> {
-  return call("switch_codebuddy_cn_ide_account", { accountId, restart });
+  return call("switch_codebuddy_cn_ide_account", { accountId, restart, ...options });
 }
 
 export function detectCodebuddyCnIdeAccount(): Promise<{
@@ -1018,8 +1033,9 @@ export function getVscodeCodebuddyPluginStatus(): Promise<VscodeCodebuddyPluginS
 export function switchVscodeCodebuddyPluginAccount(
   accountId: string,
   restart = true,
+  options?: import("@/lib/switch-session-links").ExtensionSwitchOptions,
 ): Promise<CodebuddyPluginSwitchResult> {
-  return call("switch_vscode_codebuddy_plugin_account", { accountId, restart });
+  return call("switch_vscode_codebuddy_plugin_account", { accountId, restart, ...options });
 }
 
 export function detectVscodeCodebuddyPluginAccount(): Promise<CodebuddyPluginDetectResult> {
@@ -1327,10 +1343,20 @@ export function switchAccount(args: {
   region?: Region;
   restart?: boolean;
   copySessionIds?: string[];
+  syncSelections?: import("@/lib/switch-session-links").LinkedSwitchSelection[];
   /** 会话复制的**来源**版本；缺省与 `region` 相同（同版本内切换）。 */
   sourceRegion?: Region;
 }): Promise<SwitchResult> {
   return call("switch_account", args as unknown as Record<string, unknown>);
+}
+
+export function previewSwitchSessionLinks(args: {
+  client: import("@/lib/switch-session-links").LinkedSwitchClient;
+  accountId: string;
+  region: Region;
+  sourceRegion?: Region;
+}): Promise<import("@/lib/switch-session-links").LinkedSwitchPreview> {
+  return call("preview_switch_session_links", args);
 }
 
 /**
@@ -1524,6 +1550,123 @@ export function pruneSessionReplicas(region?: Region): Promise<PruneSessionRepli
   return call("prune_session_replicas", region ? { region } : undefined);
 }
 
+type SessionGroupsInput = Record<string, unknown>;
+type SessionGroupContext = { client: SessionGroupClient; variantScope?: WbVariant };
+type SessionGroupArgs = SessionGroupContext & { groupId: string };
+type SessionGroupPairArgs = SessionGroupArgs & { sourceMemberId: string; targetMemberId: string };
+
+type SessionGroupsAction =
+  | "listSessionGroups" | "getSessionGroup" | "listAccountSessions"
+  | "previewSessionGroupPair" | "syncSessionGroupPair" | "syncSessionGroupUnify"
+  | "syncSessionGroupSafeBatch" | "addSessionGroupMember" | "unlinkSessionGroupMember"
+  | "deleteSessionGroup" | "copyLinkedSessions" | "copySessionsCross"
+  | "vscodeRestartPrecheck" | "getCodebuddyIdeStatus";
+
+/** Both hosts receive the upstream method name and its camelCase arguments. */
+function sessionGroupsAction<T>(
+  action: SessionGroupsAction,
+  { client, variantScope, ...input }: SessionGroupContext & SessionGroupsInput,
+): Promise<T> {
+  return call<T>("session_groups_action", {
+    action, client, ...(variantScope === undefined ? {} : { variantScope }), input,
+  });
+}
+
+export function listSessionGroups(client: SessionGroupClient, variantScope?: WbVariant): Promise<SessionGroupList> {
+  return sessionGroupsAction("listSessionGroups", { client, variantScope });
+}
+
+export function getSessionGroup(client: SessionGroupClient, groupId: string, variantScope?: WbVariant): Promise<SessionGroupDetail> {
+  return sessionGroupsAction("getSessionGroup", { client, variantScope, groupId });
+}
+
+export function listAccountSessions(accountId: string, client: SessionGroupClient = "workbuddy", variantScope?: WbVariant): Promise<SessionGroupAccountList> {
+  return sessionGroupsAction("listAccountSessions", { client, variantScope, accountId });
+}
+
+export function previewSessionGroupPair(args: SessionGroupPairArgs): Promise<SessionGroupPairPreview> {
+  return sessionGroupsAction("previewSessionGroupPair", args);
+}
+
+export function syncSessionGroupPair(args: SessionGroupPairArgs & {
+  previewToken: string;
+  mode: SessionSyncMode;
+  restart?: boolean;
+}): Promise<SessionGroupActionReport> {
+  return sessionGroupsAction("syncSessionGroupPair", args);
+}
+
+export function syncSessionGroupUnify(args: Omit<SessionGroupArgs, "client"> & {
+  client: "workbuddy" | "vscodeExt";
+  sourceMemberId: string;
+  targets: { targetMemberId: string; previewToken: string; mode: Exclude<SessionSyncMode, "statusOnly"> }[];
+  restart?: boolean;
+}): Promise<SessionGroupActionReport> {
+  return sessionGroupsAction("syncSessionGroupUnify", args);
+}
+
+export function syncSessionGroupSafeBatch(
+  client: SessionGroupClient, groupId: string, variantScope?: WbVariant, restart?: boolean,
+): Promise<SessionGroupActionReport> {
+  return sessionGroupsAction("syncSessionGroupSafeBatch", {
+    client, variantScope, groupId, ...(restart ? { restart } : {}),
+  });
+}
+
+export function addSessionGroupMember(args: SessionGroupArgs & {
+  sourceMemberId: string;
+  targetAccountId: string;
+  restart?: boolean;
+}): Promise<SessionGroupLinkReport> {
+  return sessionGroupsAction("addSessionGroupMember", args);
+}
+
+export function unlinkSessionGroupMember(args: SessionGroupArgs & { memberId: string }): Promise<{
+  status: "removed" | "groupRemoved"; client: SessionGroupClient; groupId: string; memberId: string; remaining: number;
+}> {
+  return sessionGroupsAction("unlinkSessionGroupMember", args);
+}
+
+export function deleteSessionGroup(args: SessionGroupArgs): Promise<{
+  status: "groupRemoved"; client: SessionGroupClient; groupId: string; removed: number;
+}> {
+  return sessionGroupsAction("deleteSessionGroup", args);
+}
+
+export function copyLinkedSessions(args: SessionGroupContext & {
+  sourceAccountId: string;
+  targetAccountId: string;
+  sessionIds: string[];
+  restart?: boolean;
+}): Promise<SessionGroupLinkReport> {
+  return sessionGroupsAction("copyLinkedSessions", args);
+}
+
+export function copySessionsCross(
+  sourceAccountId: string, targetAccountId: string, sessionIds: string[],
+): Promise<SessionGroupCopyReport> {
+  return sessionGroupsAction("copySessionsCross", { client: "workbuddy", sourceAccountId, targetAccountId, sessionIds });
+}
+
+export function vscodeRestartPrecheck(targetAccountIds: string[]): Promise<{ required: boolean; running: boolean }> {
+  return sessionGroupsAction("vscodeRestartPrecheck", { client: "vscodeExt", targetAccountIds });
+}
+
+export function getCodebuddyIdeStatus(): Promise<CodeBuddyCnIdeStatus> {
+  return sessionGroupsAction("getCodebuddyIdeStatus", { client: "codebuddyIde", variantScope: "ai" });
+}
+
+export function recoverSessionLinks(region: Region): Promise<import("@/lib/types").SessionLinkRecoveryResponse> {
+  return call("recover_session_links", { region });
+}
+
+export function manageSessionLinks(
+  region: Region,
+  change: { action: "add" | "unlink" | "delete"; groupKey: string; sessionId?: string; targetAccountId?: string },
+): Promise<void> {
+  return call("manage_session_links", { region, change });
+}
+
 /**
  * P8 · **安全同步（增量追加）** —— 把源副本里**目标还没有的尾部行**追加过去。
  *
@@ -1547,6 +1690,18 @@ export function syncSessionReplicas(
   region?: Region,
 ): Promise<SyncSessionReplicaResponse> {
   return call("sync_session_replicas", { items, ...(region ? { region } : {}) });
+}
+
+export function previewSessionReplicas(
+  items: SyncSessionReplicaItem[],
+  region: Region,
+  unify: boolean,
+): Promise<import("@/lib/types").SessionReplicaPreviewResponse> {
+  return call(unify ? "unify_session_replicas" : "sync_session_replicas", {
+    items,
+    region,
+    preview: true,
+  });
 }
 
 /**

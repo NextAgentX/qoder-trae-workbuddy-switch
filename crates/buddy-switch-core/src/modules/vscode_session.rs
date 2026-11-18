@@ -221,7 +221,24 @@ pub fn copy_conversations(
     target_uid: &str,
     items: &[CopyItem],
 ) -> Result<Value, String> {
+    use crate::modules::{
+        codebuddy_ide_session_sync, linked_vscode_session,
+        linked_workbuddy::{SessionPaths, WbVariant},
+        session_link, vscode_session_sync,
+    };
     let root = data_root().ok_or_else(|| "未检测到客户端数据目录，无法复制会话".to_string())?;
+    let (paths, spec) = match client {
+        ExtClient::Vscode => (
+            SessionPaths::for_vscode_ext(),
+            linked_vscode_session::VSCODE_STORE,
+        ),
+        ExtClient::CodebuddyIde => (
+            SessionPaths::for_codebuddy_ide(),
+            linked_vscode_session::CODEBUDDY_IDE_STORE,
+        ),
+    };
+    let _guard = session_link::try_acquire_client_ops_lock(&paths)?;
+    vscode_session_sync::initialize_link_store(spec, &root, &paths)?;
     let mut report = copy_conversations_in(&root, client, source_uid, target_uid, items);
 
     /* ★ 关联登记放在**生产入口**，不放进 `copy_conversations_in`。
@@ -229,28 +246,46 @@ pub fn copy_conversations(
     而账本写在**工具自己的存储根**下 —— 塞进去会让「复制客户端数据」这个动作
     **隐式写工具存储**，单测就会污染用户的真实目录
     （本仓「单测不该依赖 `BUDDY_SWITCH_HOME`」这条纪律正是防这个）。 */
-    let entries: Vec<(String, String)> = report["copied"]
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    Some((
-                        link_key(
-                            client,
-                            row.get("workspaceHash")?.as_str()?,
-                            source_uid,
-                            target_uid,
-                            row.get("sourceId")?.as_str()?,
-                        ),
-                        row.get("newId")?.as_str()?.to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let recorded = record_links(&entries);
+    let recorded = record_copy_links(
+        &crate::modules::config::store_dir(),
+        client,
+        source_uid,
+        target_uid,
+        &report,
+    );
     if let Some(object) = report.as_object_mut() {
         object.insert("linksRecorded".to_string(), json!(recorded));
+    }
+    if report["copied"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty())
+    {
+        let variant = if crate::modules::account::find_account_for(
+            crate::modules::region::Region::Cn,
+            target_uid,
+        )
+        .is_some()
+        {
+            WbVariant::Cn
+        } else if crate::modules::account::find_account_for(
+            crate::modules::region::Region::Global,
+            target_uid,
+        )
+        .is_some()
+        {
+            WbVariant::Ai
+        } else {
+            WbVariant::Cn
+        };
+        let errors = match client {
+            ExtClient::Vscode => {
+                vscode_session_sync::register_copied_sessions(&root, &paths, variant, &report)
+            }
+            ExtClient::CodebuddyIde => codebuddy_ide_session_sync::register_copied_sessions(
+                &root, &paths, variant, &report,
+            ),
+        };
+        report["linkErrors"] = json!(errors);
     }
     Ok(report)
 }
@@ -392,7 +427,7 @@ fn conversation_has_history(ws_dir: &Path, conversation_id: &str) -> bool {
 }
 
 /// 读取并解析 JSON 文件；缺失 / 不可读 / 损坏 ⇒ `None`（**不 panic**，由调用方计入 `skipped`）。
-fn read_json(path: &Path) -> Option<Value> {
+pub(crate) fn read_json(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -640,7 +675,7 @@ fn remap_message_file(text: &str, old_stem: &str, plan: &RemapPlan) -> String {
 }
 
 /// 递归复制目录（保持相对结构与文件名 —— 附件可能有中文名）。
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)?.flatten() {
         let path = entry.path();
@@ -655,7 +690,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// 尽力删除目录树（不存在 / 失败都忽略 —— 回退路径上不该再抛）。
-fn remove_dir_all_if_exists(path: &Path) {
+pub(crate) fn remove_dir_all_if_exists(path: &Path) {
     if path.exists() {
         let _ = std::fs::remove_dir_all(path);
     }
@@ -1387,8 +1422,8 @@ pub fn sync_conversation(
 const LINK_LEDGER_FILE: &str = "vscode-session-links.json";
 
 /// 关联账本路径（工具自己的存储根下，**不在客户端数据目录里**）。
-fn link_ledger_path() -> PathBuf {
-    crate::modules::config::store_dir().join(LINK_LEDGER_FILE)
+fn link_ledger_path(store_root: &Path) -> PathBuf {
+    store_root.join(LINK_LEDGER_FILE)
 }
 
 /// 关联键：`client ␟ workspaceHash ␟ sourceUid ␟ targetUid ␟ sourceCid`。
@@ -1410,14 +1445,70 @@ fn link_key(
 }
 
 /// 读关联账本（缺失 / 损坏 ⇒ 空表，**不 panic**）。
-fn load_links() -> serde_json::Map<String, Value> {
-    let Ok(text) = std::fs::read_to_string(link_ledger_path()) else {
+fn load_links(store_root: &Path) -> serde_json::Map<String, Value> {
+    let Ok(text) = std::fs::read_to_string(link_ledger_path(store_root)) else {
         return serde_json::Map::new();
     };
     match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     }
+}
+
+pub(crate) struct LegacyCopyLink {
+    pub workspace_hash: String,
+    pub source_uid: String,
+    pub target_uid: String,
+    pub source_id: String,
+    pub target_id: String,
+    pub linked_at: Value,
+}
+
+pub(crate) fn legacy_copy_links(store_root: &Path, client: ExtClient) -> Vec<LegacyCopyLink> {
+    let mut links: Vec<_> = load_links(store_root)
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let mut fields = key.split('\u{1f}');
+            if fields.next()? != client.as_str() {
+                return None;
+            }
+            let link = LegacyCopyLink {
+                workspace_hash: fields.next()?.to_owned(),
+                source_uid: fields.next()?.to_owned(),
+                target_uid: fields.next()?.to_owned(),
+                source_id: fields.next()?.to_owned(),
+                target_id: value.get("targetCid")?.as_str()?.to_owned(),
+                linked_at: value.get("at").cloned().unwrap_or(Value::Null),
+            };
+            fields.next().is_none().then_some(link)
+        })
+        .collect();
+    links.sort_by_key(|link| std::cmp::Reverse(link.linked_at.as_i64().unwrap_or(0)));
+    links
+}
+
+pub(crate) fn record_copy_links(
+    store_root: &Path,
+    client: ExtClient,
+    source_uid: &str,
+    target_uid: &str,
+    report: &Value,
+) -> bool {
+    let entries: Vec<_> = report["copied"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let source_id = row.get("oldId").or_else(|| row.get("sourceId"))?.as_str()?;
+            let workspace = row.get("workspaceHash")?.as_str()?;
+            let target_id = row.get("newId")?.as_str()?;
+            Some((
+                link_key(client, workspace, source_uid, target_uid, source_id),
+                target_id.to_owned(),
+            ))
+        })
+        .collect();
+    record_links(store_root, &entries)
 }
 
 /// 登记一批关联（**新记录覆盖旧记录** —— 指向**最新**的那份副本）。
@@ -1431,22 +1522,32 @@ fn load_links() -> serde_json::Map<String, Value> {
 ///
 /// 返回是否落盘成功。**失败不致命**（本次复制的产物仍然有效，只是「关联」这条信息丢了
 /// —— 下次对同一对账号再复制就会补上），但**必须如实回报**，不能假装登记成功。
-fn record_links(entries: &[(String, String)]) -> bool {
+fn record_links(store_root: &Path, entries: &[(String, String)]) -> bool {
     if entries.is_empty() {
         return true;
     }
-    let mut ledger = load_links();
+    if std::fs::create_dir_all(store_root).is_err() {
+        return false;
+    }
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(store_root.join("vscode-session-copy-ledger.lock"))
+    else {
+        return false;
+    };
+    if lock.lock().is_err() {
+        return false;
+    }
+    let mut ledger = load_links(store_root);
     let at = crate::modules::config::now_ms();
     for (key, target_cid) in entries {
         ledger.insert(key.clone(), json!({ "targetCid": target_cid, "at": at }));
     }
-    let path = link_ledger_path();
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return false;
-        }
-    }
-    let content = serde_json::to_string_pretty(&Value::Object(ledger.clone())).unwrap_or_default();
+    let path = link_ledger_path(store_root);
+    let content = serde_json::to_string_pretty(&Value::Object(ledger)).unwrap_or_default();
     crate::modules::config::atomic_write(&path, &content).is_ok()
 }
 
@@ -1459,39 +1560,23 @@ fn record_links(entries: &[(String, String)]) -> bool {
 /// 有了它，界面才能直接给出「这份会话在另一个账号里的对应副本」，
 /// 进而调 [`diff_conversation`] / [`sync_conversation`]。
 pub fn links_for(client: ExtClient, workspace_hash: &str, conversation_id: &str) -> Value {
-    let prefix = format!("{}{SEP}", client.as_str(), SEP = '\u{1f}');
-    let mut links: Vec<Value> = load_links()
+    let links: Vec<_> = legacy_copy_links(&crate::modules::config::store_dir(), client)
         .into_iter()
-        .filter_map(|(key, value)| {
-            let rest = key.strip_prefix(&prefix)?;
-            let parts: Vec<&str> = rest.split('\u{1f}').collect();
-            let [workspace, source_uid, target_uid, source_cid] = parts[..] else {
-                return None;
-            };
-            // ★ 工作区必须匹配；会话 id **双向**匹配（它既可能是源、也可能是目标）。
-            if workspace != workspace_hash {
-                return None;
-            }
-            let target_cid = value.get("targetCid").and_then(Value::as_str)?;
-            if source_cid != conversation_id && target_cid != conversation_id {
-                return None;
-            }
-            Some(json!({
-                "workspaceHash": workspace,
-                "sourceUid": source_uid,
-                "targetUid": target_uid,
-                "sourceCid": source_cid,
-                "targetCid": target_cid,
-                "at": value.get("at").cloned().unwrap_or(Value::Null),
-            }))
+        .filter(|link| {
+            link.workspace_hash == workspace_hash
+                && (link.source_id == conversation_id || link.target_id == conversation_id)
+        })
+        .map(|link| {
+            json!({
+                "workspaceHash": link.workspace_hash,
+                "sourceUid": link.source_uid,
+                "targetUid": link.target_uid,
+                "sourceCid": link.source_id,
+                "targetCid": link.target_id,
+                "at": link.linked_at,
+            })
         })
         .collect();
-    links.sort_by(|left, right| {
-        right["at"]
-            .as_i64()
-            .unwrap_or(0)
-            .cmp(&left["at"].as_i64().unwrap_or(0))
-    });
     json!({ "links": links })
 }
 

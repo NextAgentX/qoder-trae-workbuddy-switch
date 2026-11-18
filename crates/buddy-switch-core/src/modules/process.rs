@@ -1524,6 +1524,24 @@ pub fn is_workbuddy_running_for(region: Region) -> bool {
     }
 }
 
+/// Check before a session write. The linked-session batch invokes this for each
+/// selected pair, so use the same native process snapshot as the thread-count guard.
+pub(crate) fn is_workbuddy_running_for_session_write(region: Region) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let self_pid = std::process::id();
+        return windows_process_snapshot().is_none_or(|entries| {
+            entries.iter().any(|entry| {
+                entry.pid != self_pid
+                    && entry.threads > 0
+                    && is_workbuddy_image_name_for(region, &entry.image)
+            })
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    is_workbuddy_running_for(region)
+}
+
 /// 通用「某个**映像名**的客户端进程是否在运行」。
 ///
 /// ## 用途

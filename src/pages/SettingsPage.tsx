@@ -49,6 +49,7 @@ import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { regionDescriptor } from "@/lib/region";
 import { scopeOf } from "@/lib/scope";
+import { setArchiveSyncDefault, setSessionSidebarVisibility, useArchiveSyncDefault, useSessionSidebarVisibility } from "@/lib/switch-session-links";
 import { useScope } from "@/lib/use-scope";
 import type { TranslationKey } from "@/locales/zh";
 import type {
@@ -795,6 +796,8 @@ function useAuthFile(): string | undefined {
 function SwitchBehaviorCard() {
   const t = useT();
   const [config, setConfig] = useState<SwitchConfig | null>(null);
+  const archiveSyncDefault = useArchiveSyncDefault();
+  const showSessionSidebar = useSessionSidebarVisibility();
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -850,7 +853,6 @@ function SwitchBehaviorCard() {
         </SettingsFieldRow>
 
         <SettingsFieldRow
-          className="border-b-0"
           label={t("wbSettings.switch.pinCurrentLabel")}
           description={t("wbSettings.switch.pinCurrentDesc")}
           htmlFor="switch-pin-current"
@@ -863,6 +865,12 @@ function SwitchBehaviorCard() {
             onCheckedChange={(value) => void patch({ pin_current_account: value })}
             aria-label={t("wbSettings.switch.pinCurrentLabel")}
           />
+        </SettingsFieldRow>
+        <SettingsFieldRow label={t("sessions.switchLinks.archiveDefault")} htmlFor="switch-archive-sync">
+          <Switch id="switch-archive-sync" checked={archiveSyncDefault} onCheckedChange={setArchiveSyncDefault} />
+        </SettingsFieldRow>
+        <SettingsFieldRow className="border-b-0" label={t("sessions.workbench.showSidebar")} htmlFor="show-session-sidebar">
+          <Switch id="show-session-sidebar" checked={showSessionSidebar} onCheckedChange={setSessionSidebarVisibility} />
         </SettingsFieldRow>
       </CardContent>
     </SettingsGroup>

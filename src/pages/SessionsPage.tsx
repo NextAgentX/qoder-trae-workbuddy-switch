@@ -13,6 +13,7 @@ import {
 import { toast } from "sonner";
 
 import { ImportSessionsDialog } from "@/components/sessions/import-sessions-dialog";
+import { LinkedSessionWorkspace } from "@/components/sessions/linked-session-workspace";
 import { SessionReplicaView } from "@/components/sessions/session-replica-view";
 import { UnifyReplicasDialog } from "@/components/sessions/unify-replicas-dialog";
 import { ScopeChip, scopeLabel } from "@/components/scope-chip";
@@ -30,14 +31,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as api from "@/lib/api";
+import { displayText } from "@/lib/display-text";
 import { useT } from "@/lib/i18n";
 import { platformOfPath } from "@/lib/platforms/registry";
 import { scopeOf } from "@/lib/scope";
-import { buildSyncItems, buildUnifyItems, failedGroupKeys } from "@/lib/session-replicas";
+import { buildSyncItems, failedGroupKeys } from "@/lib/session-replicas";
 import type { SessionGroupStatus, SessionGroupView } from "@/lib/session-replicas";
 import type {
   SessionBundlePreview,
+  SessionGroupClient,
   SyncSessionReplicaItem,
   UnifySessionReplicaItem,
 } from "@/lib/types";
@@ -45,6 +49,7 @@ import { useRefreshAction } from "@/lib/use-refresh-action";
 import { useScope } from "@/lib/use-scope";
 import { useSlowLoading } from "@/lib/use-slow-loading";
 import { useSessionsStore } from "@/stores/sessions";
+import { selectRegionSlice, useAccountsStore } from "@/stores/accounts";
 
 /**
  * 「会话」工作台（WorkBuddy 侧目的地）—— 副本只读视图（P8 T01 骨架 + T02 接线）。
@@ -73,6 +78,23 @@ import { useSessionsStore } from "@/stores/sessions";
  */
 export default function SessionsPage() {
   const t = useT();
+  const [client, setClient] = useState<SessionGroupClient>("workbuddy");
+  const [localTools, setLocalTools] = useState(false);
+  if (api.isDemoMode()) return <WorkBuddySessionTools />;
+  return (
+    <>
+      <div className="mx-auto flex max-w-[1240px] justify-end px-7 pt-4">
+        <Button variant="ghost" size="sm" onClick={() => setLocalTools((open) => !open)}>
+          {t(localTools ? "sessions.workbench.directory" : "sessions.workbench.local")}
+        </Button>
+      </div>
+      {localTools ? <WorkBuddySessionTools /> : <LinkedSessionWorkspace client={client} onClientChange={setClient} />}
+    </>
+  );
+}
+
+function WorkBuddySessionTools() {
+  const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
   /* 平台从**路由**推（`/s/{scope}/sessions` 的 scope 里就带着它）——
@@ -84,9 +106,46 @@ export default function SessionsPage() {
   const groups = useSessionsStore((s) => s.groups);
   const loading = useSessionsStore((s) => s.loading);
   const error = useSessionsStore((s) => s.error);
+  const needsRecovery = useSessionsStore((s) => s.needsRecovery);
   const load = useSessionsStore((s) => s.load);
   const syncItems = useSessionsStore((s) => s.syncItems);
   const unifyItems = useSessionsStore((s) => s.unifyItems);
+  const accounts = useAccountsStore((state) => selectRegionSlice(state, region).accounts);
+  const { busy: recovering, run: runRecovery } = useRefreshAction();
+  const [manageGroup, setManageGroup] = useState<SessionGroupView | null>(null);
+  const [linkAction, setLinkAction] = useState<"add" | "unlink" | "delete">("add");
+  const [linkSource, setLinkSource] = useState("");
+  const [linkTarget, setLinkTarget] = useState("");
+  const [linkBusy, setLinkBusy] = useState(false);
+  const linkedUids = new Set(manageGroup?.rows.filter((row) => !row.region || row.region === region).map((row) => row.accountUid));
+  const linkTargets = manageGroup ? accounts.filter((account) => account.uid && !linkedUids.has(account.uid)) : [];
+
+  function openLinkManagement(group: SessionGroupView) {
+    setLinkAction("add");
+    setLinkSource(group.rows[0]?.sessionId ?? "");
+    setLinkTarget("");
+    setManageGroup(group);
+  }
+
+  async function applyLinkChange() {
+    if (!manageGroup || linkBusy) return;
+    setLinkBusy(true);
+    try {
+      await api.manageSessionLinks(region, {
+        action: linkAction,
+        groupKey: manageGroup.key,
+        sessionId: linkSource || undefined,
+        targetAccountId: linkTarget || undefined,
+      });
+      setManageGroup(null);
+      toast.success(t("sessions.links.done"));
+    } catch (error) {
+      toast.error(t("sessions.links.failed"), { description: api.asError(error) });
+    } finally {
+      await load(region);
+      setLinkBusy(false);
+    }
+  }
   /* 错误态「重试」的进行中态（按钮态，同 `syncBusy` 用 Loader2 的语言）。 */
   const { busy: retryBusy, run: runRetry } = useRefreshAction();
   /* ★ 慢加载提示（issue #188）：超过 8s 仍在骨架态 ⇒ 加一行「仍在加载 + 重试」。
@@ -97,6 +156,20 @@ export default function SessionsPage() {
   useEffect(() => {
     void load(region);
   }, [load, region]);
+
+  async function recoverSessions() {
+    try {
+      const report = await api.recoverSessionLinks(region);
+      if (report.needsRecovery.length > 0) {
+        toast.error(t("sessions.recovery.failed"), { description: report.needsRecovery[0].reason });
+      } else {
+        toast.success(t("sessions.recovery.done", { count: report.recovered.length }));
+      }
+      await load(region);
+    } catch (error) {
+      toast.error(t("sessions.recovery.failed"), { description: api.asError(error) });
+    }
+  }
 
   /**
    * ★ P8：状态筛选 —— **按需出现**。
@@ -178,6 +251,8 @@ export default function SessionsPage() {
       }
       if (response.failCount > 0) {
         parts.push(t("sessions.sync.toast.failed", { n: response.failCount }));
+        const error = response.results.find((result) => !result.ok)?.error;
+        if (error) parts.push(error);
       }
       const summary = parts.join(t("shared.punct.comma"));
 
@@ -253,6 +328,7 @@ export default function SessionsPage() {
 
   /* ★ P8 分歧处理：待处理的分歧组（非 null ⇒ 打开对话框）+ 进行中态。 */
   const [unifyTarget, setUnifyTarget] = useState<SessionGroupView | null>(null);
+  const [initialUnifyKeep, setInitialUnifyKeep] = useState<string>();
   const [unifyBusy, setUnifyBusy] = useState(false);
 
   /**
@@ -278,6 +354,8 @@ export default function SessionsPage() {
       }
       if (response.failCount > 0) {
         parts.push(t("sessions.unify.toast.failed", { n: response.failCount }));
+        const error = response.results.find((result) => !result.ok)?.error;
+        if (error) parts.push(error);
       }
       const summary = parts.join(t("shared.punct.comma"));
 
@@ -311,21 +389,21 @@ export default function SessionsPage() {
    */
   function retryUnify(groupKeys: string[], keepSessionId: string) {
     const wanted = new Set(groupKeys);
-    const items = useSessionsStore
+    const group = useSessionsStore
       .getState()
-      .groups.filter((group) => wanted.has(group.key))
-      .flatMap((group) => buildUnifyItems(group, keepSessionId));
-    if (items.length === 0) {
+      .groups.find((group) => wanted.has(group.key) && group.status === "diverge");
+    if (!group) {
       toast.info(t("sessions.unify.toast.nothingToRetry"));
       return;
     }
-    void runUnify(items, keepSessionId);
+    setInitialUnifyKeep(keepSessionId);
+    setUnifyTarget(group);
   }
 
   /** 对话框确认：把「选定保留的那一份」换算成覆盖任务（`buildUnifyItems` 会挡住非法输入）。 */
-  function confirmUnify(keepSessionId: string) {
+  function confirmUnify(keepSessionId: string, items: UnifySessionReplicaItem[]) {
     if (!unifyTarget) return;
-    void runUnify(buildUnifyItems(unifyTarget, keepSessionId), keepSessionId);
+    void runUnify(items, keepSessionId);
   }
 
   /* ── issue #87 · 会话导出 / 导入 ────────────────────────────────────────
@@ -532,6 +610,16 @@ export default function SessionsPage() {
         <ScopeChip scope={scope} />
       </header>
 
+      {needsRecovery ? (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card px-4 py-3">
+          <p className="text-sm">{t("sessions.recovery.pending")}</p>
+          <Button size="sm" variant="outline" disabled={recovering} onClick={() => void runRecovery(recoverSessions)}>
+            {recovering ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+            {t("sessions.recovery.action")}
+          </Button>
+        </div>
+      ) : null}
+
       {loading ? (
         // 区块首次加载 → 骨架（与全应用一致的状态语言，§3.6）。
         <div className="flex flex-col gap-3" aria-busy="true">
@@ -631,7 +719,11 @@ export default function SessionsPage() {
             groups={sortedGroups}
             onSyncGroup={syncGroup}
             busyGroupKeys={busyGroupKeys}
-            onUnifyGroup={setUnifyTarget}
+            onUnifyGroup={(group) => {
+              setInitialUnifyKeep(undefined);
+              setUnifyTarget(group);
+            }}
+            onManageGroup={openLinkManagement}
           />
         </>
       ) : (
@@ -656,12 +748,62 @@ export default function SessionsPage() {
           `group` 为 null ⇒ 不渲染（`UnifyReplicasDialog` 内部亦早退）。 */}
       <UnifyReplicasDialog
         group={unifyTarget}
+        region={region}
+        initialKeep={initialUnifyKeep}
         onOpenChange={(open) => {
           if (!open) setUnifyTarget(null);
         }}
         busy={unifyBusy}
         onConfirm={confirmUnify}
       />
+
+      <Dialog open={manageGroup !== null} onOpenChange={(open) => {
+        if (!open && !linkBusy) setManageGroup(null);
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("sessions.links.manage")}</DialogTitle>
+            <DialogDescription>{t(linkAction === "add" ? "sessions.links.addDetail" : "sessions.links.unlinkDetail")}</DialogDescription>
+          </DialogHeader>
+          <Select value={linkAction} onValueChange={(value: typeof linkAction) => setLinkAction(value)} disabled={linkBusy}>
+            <SelectTrigger aria-label={t("sessions.links.manage")}><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="add">{t("sessions.links.add")}</SelectItem>
+              <SelectItem value="unlink">{t("sessions.links.unlink")}</SelectItem>
+              <SelectItem value="delete">{t("sessions.links.delete")}</SelectItem>
+            </SelectContent>
+          </Select>
+          {linkAction !== "delete" ? (
+            <Select value={linkSource} onValueChange={setLinkSource} disabled={linkBusy}>
+              <SelectTrigger aria-label={t("sessions.links.replica")}><SelectValue /></SelectTrigger>
+              <SelectContent>{manageGroup?.rows.map((row) => (
+                <SelectItem key={row.sessionId} value={row.sessionId}>{row.accountLabel} · {row.title}</SelectItem>
+              ))}</SelectContent>
+            </Select>
+          ) : null}
+          {linkAction === "add" ? (
+            <Select value={linkTarget} onValueChange={setLinkTarget} disabled={linkBusy || linkTargets.length === 0}>
+              <SelectTrigger aria-label={t("sessions.links.target")}>
+                <SelectValue placeholder={t(linkTargets.length ? "sessions.links.target" : "sessions.links.noTargets")} />
+              </SelectTrigger>
+              <SelectContent>{linkTargets.map((account) => (
+                <SelectItem key={account.id} value={account.id}>{displayText(account.nickname) || displayText(account.email) || account.uid}</SelectItem>
+              ))}</SelectContent>
+            </Select>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setManageGroup(null)} disabled={linkBusy}>{t("sessions.unify.cancel")}</Button>
+            <Button
+              variant={linkAction === "add" ? "default" : "destructive"}
+              disabled={linkBusy || (linkAction !== "delete" && !linkSource) || (linkAction === "add" && !linkTarget)}
+              onClick={() => void applyLinkChange()}
+            >
+              {linkBusy ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+              {t(`sessions.links.${linkAction}`)}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* issue #87：导入确认（`preview` 为 null ⇒ 不渲染）。 */}
       <ImportSessionsDialog

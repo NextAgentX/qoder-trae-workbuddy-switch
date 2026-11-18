@@ -79,11 +79,15 @@ pub mod risk_control;
 pub mod rotate;
 // 本工具**自身**的运行日志（排查问题用）：按日纯文本 + 有界滚动 + 出站脱敏。
 // ⚠️ 与「网关请求日志」（JSON、面向统计）和「Trae 客户端日志」是三件不同的事，见模块头。
+pub mod linked_workbuddy;
 pub mod runtime_log;
 pub mod schedule;
 pub mod scheduler;
 pub mod session;
+pub mod session_backup;
 pub mod session_bundle;
+pub mod session_groups;
+pub mod session_link;
 // 追加型 jsonl 的尾部窗口读取（token_daily / client_limits 共用的唯一实现）。
 pub(crate) mod jsonl_tail;
 // Skill 管理（cc-switch 式）：清单 + 启停 + 跨区搬迁 + 本地导入 —— 目录即 SSOT。
@@ -97,7 +101,12 @@ pub mod travel;
 pub mod update;
 pub mod upstream;
 // VS Code 内 CodeBuddy 扩展（tencent-cloud.coding-copilot）账号切换。
+pub mod codebuddy_ide_session;
+pub mod codebuddy_ide_session_sync;
+pub mod linked_vscode_session;
 pub mod vscode_cn_inject;
 pub mod vscode_ext;
 /// VS Code 插件 / CodeBuddy IDE 的**会话仓**（P14 S4a · 只读半）。
 pub mod vscode_session;
+pub mod vscode_session_link;
+pub mod vscode_session_sync;

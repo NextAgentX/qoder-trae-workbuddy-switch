@@ -49,6 +49,7 @@ interface SessionsState {
    */
   source: "ledger" | "empty" | null;
   loading: boolean;
+  needsRecovery: boolean;
   error: string | null;
   /** 加载某 region 的副本组（账号显示名 / 会话行 join 一并完成）。 */
   load: (region: Region) => Promise<void>;
@@ -83,14 +84,15 @@ export const useSessionsStore = create<SessionsState>((set) => ({
   groups: [],
   source: null,
   loading: false,
+  needsRecovery: false,
   error: null,
 
   async load(region) {
-    set({ loading: true, error: null });
+    set({ loading: true, error: null, needsRecovery: false });
     try {
       const response = await api.listSessionReplicas(region);
       if (response.groups.length === 0) {
-        set({ groups: [], source: response.source, loading: false });
+        set({ groups: [], source: response.source, loading: false, needsRecovery: response.needsRecovery === true });
         return;
       }
 
@@ -125,7 +127,7 @@ export const useSessionsStore = create<SessionsState>((set) => ({
         sessionsByAccount,
         accountLabels,
       );
-      set({ groups, source: response.source, loading: false });
+      set({ groups, source: response.source, loading: false, needsRecovery: response.needsRecovery === true });
     } catch (e) {
       set({ groups: [], error: api.asError(e), loading: false });
     }
@@ -134,8 +136,19 @@ export const useSessionsStore = create<SessionsState>((set) => ({
   /* ★ P8 安全同步：只转发 + 原样回结果。**不 set 任何 state** ——
      「什么时候刷新、怎么提示」是页面的决定；store 里藏一次隐式 reload 会让
      「部分失败」的 toast 与列表状态对不上（刷了一半看着像全成功）。 */
-  syncItems(region, items) {
-    return api.syncSessionReplicas(items, region);
+  async syncItems(region, items) {
+    const preview = await api.previewSessionReplicas(items, region, false);
+    const pending: SyncSessionReplicaItem[] = [];
+    const results = preview.results.filter((item, index) => {
+      if (!item.previewToken || !item.mode) return true;
+      pending.push({ ...items[index], previewToken: item.previewToken, mode: item.mode });
+      return false;
+    });
+    if (pending.length > 0) {
+      results.push(...(await api.syncSessionReplicas(pending, region)).results);
+    }
+    const okCount = results.filter((item) => item.ok).length;
+    return { results, okCount, failCount: results.length - okCount };
   },
 
   /* ★ P8 分歧处理：同样只转发。**覆盖式**写操作 ⇒ 二次确认在页面侧，不在 store。 */

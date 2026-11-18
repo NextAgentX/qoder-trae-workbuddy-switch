@@ -32,6 +32,7 @@ import { displayText } from "@/lib/display-text";
 import { t } from "@/lib/i18n";
 import type {
   AccountMeta,
+  Region,
   Session,
   SessionReplicaContent,
   SessionReplicaGroup,
@@ -43,6 +44,7 @@ import type {
 export interface SessionReplicaRow {
   /** 副本所属账号 uid（ledger 的 source_uid / target_uid）。 */
   accountUid: string;
+  region?: Region;
   /** 账号显示名；**uid 不在账号库 ⇒ `uid 前缀 + 「未知账号」`**（✅ #3，**绝不**留空）。 */
   accountLabel: string;
   /** 该账号里的会话 id。 */
@@ -251,6 +253,7 @@ export function buildGroupViews(
       const session = findSession(sessionsByAccount, replica.accountUid, replica.sessionId);
       return {
         accountUid: replica.accountUid,
+        region: replica.region,
         accountLabel: resolveAccountLabel(replica.accountUid, accountLabels),
         sessionId: replica.sessionId,
         // ★ 过 `displayText`：标题可能是脏对象 ⇒ 直接当 React 子节点会白屏（issue #2）。

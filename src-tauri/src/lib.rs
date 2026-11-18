@@ -609,7 +609,11 @@ pub fn run() {
             commands::list_sessions,
             // P8 T02 · 只读：copy ledger 连通成「会话副本组」（两宿主同步；含内容状态 `content`）。
             commands::list_session_replicas,
+            commands::preview_switch_session_links,
             commands::prune_session_replicas,
+            commands::recover_session_links,
+            commands::manage_session_links,
+            commands::session_groups_action,
             commands::sync_session_replicas,
             // P8 · **分歧处理（覆盖式统一）**：目标分歧内容会被丢弃 ⇒ 前端二次确认（两宿主同步）。
             commands::unify_session_replicas,

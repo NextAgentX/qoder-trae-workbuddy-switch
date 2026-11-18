@@ -914,12 +914,22 @@ pub async fn get_codebuddy_cn_ide_status() -> Result<Value, String> {
 pub async fn switch_codebuddy_cn_ide_account(
     account_id: String,
     restart: Option<bool>,
+    copy_sessions: Option<Value>,
+    sync_selections: Option<Value>,
+    region: Option<String>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        programs::switch("codebuddy_cn_ide", &account_id, restart)
+        switch::switch_linked_extension(
+            "codebuddyIde",
+            parse_region(region.as_deref()),
+            &account_id,
+            restart,
+            copy_sessions,
+            sync_selections.as_ref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -959,12 +969,22 @@ pub async fn get_vscode_codebuddy_plugin_status() -> Result<Value, String> {
 pub async fn switch_vscode_codebuddy_plugin_account(
     account_id: String,
     restart: Option<bool>,
+    copy_sessions: Option<Value>,
+    sync_selections: Option<Value>,
+    region: Option<String>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        programs::switch("vscode_codebuddy_plugin", &account_id, restart)
+        switch::switch_linked_extension(
+            "vscodeExt",
+            parse_region(region.as_deref()),
+            &account_id,
+            restart,
+            copy_sessions,
+            sync_selections.as_ref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1515,6 +1535,7 @@ pub async fn switch_account(
     restart: Option<bool>,
     copy_session_ids: Option<Vec<String>>,
     source_region: Option<String>,
+    sync_selections: Option<Value>,
 ) -> Result<Value, String> {
     if account_id.trim().is_empty() {
         return Err("缺少 accountId".to_string());
@@ -1527,6 +1548,9 @@ pub async fn switch_account(
     };
     let restart = restart.unwrap_or(true);
     let copy_ids = copy_session_ids.unwrap_or_default();
+    let sync_selections = buddy_switch_core::modules::linked_workbuddy::parse_sync_selections(
+        sync_selections.as_ref(),
+    )?;
 
     // 与 webui 的 `/api/switch/progress` 同契约：同步写入进程内进度缓存，
     // 供 `switch_progress` 轮询；事件 `switch-progress` 仍照常派发。
@@ -1545,13 +1569,14 @@ pub async fn switch_account(
         let _ = app.emit("switch-progress", json!({ "message": message }));
     });
     let result = tauri::async_runtime::spawn_blocking(move || {
-        switch::switch_account_cross(
+        switch::switch_account_cross_with_sync(
             region,
             source_region,
             Some(&progress),
             &account_id,
             restart,
             &copy_ids,
+            &sync_selections,
         )
     })
     .await;
@@ -1560,6 +1585,26 @@ pub async fn switch_account(
     *SWITCH_REGION.lock().unwrap() = None;
 
     result.map_err(|e| e.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn preview_switch_session_links(
+    account_id: String,
+    region: Option<String>,
+    source_region: Option<String>,
+    client: Option<String>,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    let source_region = source_region
+        .as_deref()
+        .map(|region| parse_region(Some(region)))
+        .unwrap_or(region);
+    tauri::async_runtime::spawn_blocking(move || {
+        switch::preview_switch_session_links(client.as_deref(), source_region, region, &account_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// GET /api/switch/progress —— 轮询切换进度（与 webui 同契约）。
@@ -1619,9 +1664,9 @@ pub async fn list_sessions(region: Option<String>) -> Result<Value, String> {
 pub async fn list_session_replicas(region: Option<String>) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
-    tauri::async_runtime::spawn_blocking(move || session::list_replica_groups_for(region))
+    tauri::async_runtime::spawn_blocking(move || session::list_linked_replica_groups_for(region))
         .await
-        .map_err(|error| format!("读取会话副本失败: {error}"))
+        .map_err(|error| format!("读取会话副本失败: {error}"))?
 }
 
 /// POST /api/sessions/replicas/prune —— remove replica-ledger edges whose target
@@ -1634,9 +1679,48 @@ pub async fn list_session_replicas(region: Option<String>) -> Result<Value, Stri
 pub async fn prune_session_replicas(region: Option<String>) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
-    tauri::async_runtime::spawn_blocking(move || session::prune_deleted_replica_edges_for(region))
+    tauri::async_runtime::spawn_blocking(move || session::prune_linked_replicas_for(region))
         .await
-        .map_err(|error| format!("清理会话关联失败: {error}"))
+        .map_err(|error| format!("清理会话关联失败: {error}"))?
+}
+
+#[tauri::command]
+pub async fn recover_session_links(region: Option<String>) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || session::recover_linked_sessions_for(region))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn manage_session_links(region: Option<String>, change: Value) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let region = parse_region(region.as_deref());
+    tauri::async_runtime::spawn_blocking(move || {
+        session::manage_linked_sessions_for(region, &change)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn session_groups_action(
+    action: String,
+    client: String,
+    variant_scope: Option<String>,
+    input: Value,
+) -> Result<Value, String> {
+    require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
+    let request = buddy_switch_core::modules::session_groups::GroupActionRequest {
+        action,
+        client,
+        variant_scope,
+        input,
+    };
+    tauri::async_runtime::spawn_blocking(move || request.execute())
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// POST /api/sessions/sync —— P8 **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
@@ -1651,12 +1735,15 @@ pub async fn prune_session_replicas(region: Option<String>) -> Result<Value, Str
 pub async fn sync_session_replicas(
     items: Vec<Value>,
     region: Option<String>,
+    preview: Option<bool>,
 ) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
-    tauri::async_runtime::spawn_blocking(move || session::sync_session_replicas_for(region, &items))
-        .await
-        .map_err(|error| format!("同步会话副本失败: {error}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        session::linked_replica_batch(region, &items, false, preview.unwrap_or(false))
+    })
+    .await
+    .map_err(|error| format!("同步会话副本失败: {error}"))?
 }
 
 /// POST /api/sessions/unify —— P8 **分歧处理（覆盖式统一）**：把用户选定保留的那一份覆盖到其余副本。
@@ -1671,14 +1758,15 @@ pub async fn sync_session_replicas(
 pub async fn unify_session_replicas(
     items: Vec<Value>,
     region: Option<String>,
+    preview: Option<bool>,
 ) -> Result<Value, String> {
     require_capability(Product::Workbuddy, capability::Capability::SessionCopy)?;
     let region = parse_region(region.as_deref());
     tauri::async_runtime::spawn_blocking(move || {
-        session::unify_session_replicas_for(region, &items)
+        session::linked_replica_batch(region, &items, true, preview.unwrap_or(false))
     })
     .await
-    .map_err(|error| format!("统一会话副本失败: {error}"))
+    .map_err(|error| format!("统一会话副本失败: {error}"))?
 }
 
 /// POST /api/sessions/export —— 把会话导出成一个 JSON 包（issue #87）。
@@ -1949,15 +2037,7 @@ pub async fn copy_sessions(
     tauri::async_runtime::spawn_blocking(move || {
         let target =
             account::find_account_for(region, &target_account_id).ok_or("目标账号不存在")?;
-        // 独立复制入口没有切换进度事件通道，传 None（三段管线的耗时优化照常生效）。
-        Ok(session::copy_sessions_for_switch_cross(
-            source_region,
-            region,
-            None,
-            &target,
-            &session_ids,
-        )
-        .unwrap_or_else(|| json!({})))
+        session::copy_linked_sessions_for_switch(source_region, region, &target, &session_ids)
     })
     .await
     .map_err(|e| e.to_string())?

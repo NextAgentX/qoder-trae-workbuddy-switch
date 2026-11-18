@@ -35,28 +35,41 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { asError, previewSessionReplicas } from "@/lib/api";
 import { useT } from "@/lib/i18n";
-import { lostLinesFor } from "@/lib/session-replicas";
+import { buildUnifyItems } from "@/lib/session-replicas";
 import type { SessionGroupView } from "@/lib/session-replicas";
+import type { Region, SessionReplicaPreviewResponse, UnifySessionReplicaItem } from "@/lib/types";
 
 export interface UnifyReplicasDialogProps {
   /** 要处理的分歧组；`null` = 关闭。 */
   group: SessionGroupView | null;
+  region: Region;
+  initialKeep?: string;
   onOpenChange: (open: boolean) => void;
   /** 统一进行中（按钮进「操作进行中」态，防止重复提交）。 */
   busy: boolean;
   /** 用户确认后回调，参数是**要保留的那一份**的会话 id。 */
-  onConfirm: (keepSessionId: string) => void;
+  onConfirm: (keepSessionId: string, items: UnifySessionReplicaItem[]) => void;
 }
 
 export function UnifyReplicasDialog({
   group,
+  region,
+  initialKeep,
   onOpenChange,
   busy,
   onConfirm,
 }: UnifyReplicasDialogProps) {
   const t = useT();
   const [keep, setKeep] = useState("");
+  const [preview, setPreview] = useState<{
+    group: SessionGroupView;
+    region: Region;
+    keep: string;
+    response?: SessionReplicaPreviewResponse;
+    error?: string;
+  } | null>(null);
 
   /* 每次打开都重置选择 —— 默认选**内容最全**的那一份（delta 最大）。 */
   useEffect(() => {
@@ -66,21 +79,37 @@ export function UnifyReplicasDialog({
     }
     const deltaOf = (id: string) => group.deltas.get(id) ?? 0;
     const best = [...group.rows].sort((a, b) => deltaOf(b.sessionId) - deltaOf(a.sessionId))[0];
-    setKeep(best?.sessionId ?? "");
-  }, [group]);
+    setKeep(initialKeep && group.rows.some((row) => row.sessionId === initialKeep) ? initialKeep : best?.sessionId ?? "");
+  }, [group, initialKeep]);
+
+  useEffect(() => {
+    if (!group || !keep) return;
+    let current = true;
+    const prepare = async () => {
+      try {
+        const response = await previewSessionReplicas(buildUnifyItems(group, keep), region, true);
+        if (current) setPreview({ group, region, keep, response });
+      } catch (error) {
+        if (current) setPreview({ group, region, keep, error: asError(error) });
+      }
+    };
+    void prepare();
+    return () => { current = false; };
+  }, [group, keep, region]);
 
   if (!group) return null;
 
   const deltaOf = (id: string) => group.deltas.get(id) ?? 0;
   const maxDelta = Math.max(...group.rows.map((row) => deltaOf(row.sessionId)));
-  const targets = group.rows.filter((row) => row.sessionId !== keep);
-
-  /* ★ 会丢多少条：逐副本求和。**任一副本说不准就整体标注「未知」** ——
-     不臆造一个编出来的数字（§3.5 不许假承诺）。 */
-  const losses = targets.map((row) => lostLinesFor(group, row.sessionId));
-  const totalLost = losses.every((n) => n !== null)
-    ? losses.reduce<number>((sum, n) => sum + (n ?? 0), 0)
-    : null;
+  const currentPreview = preview?.group === group && preview.keep === keep && preview.region === region ? preview : null;
+  const results = currentPreview?.response?.results ?? [];
+  const previewError = currentPreview?.error ?? results.find((item) => !item.ok)?.error;
+  const readyItems = results.flatMap<UnifySessionReplicaItem>((item) =>
+    item.ok && item.previewToken && item.mode
+      ? [{ sourceCid: item.sourceCid, targetCid: item.targetCid, groupKey: group.key, previewToken: item.previewToken, mode: item.mode }]
+      : [],
+  );
+  const totalLost = results.reduce((total, result) => total + (result.lostLines ?? 0), 0);
 
   return (
     <Dialog open onOpenChange={onOpenChange}>
@@ -130,9 +159,11 @@ export function UnifyReplicasDialog({
         <Alert variant="destructive">
           <TriangleAlert />
           <AlertDescription>
-            {totalLost === null
-              ? t("sessions.unify.overwriteUnknown", { n: targets.length })
-              : t("sessions.unify.overwrite", { n: targets.length, lost: totalLost })}
+            {previewError ?? (currentPreview
+              ? readyItems.length > 0
+                ? t("sessions.unify.overwrite", { n: readyItems.length, lost: totalLost })
+                : t("sessions.unify.toast.nothingToRetry")
+              : t("sessions.unify.previewing"))}
           </AlertDescription>
         </Alert>
 
@@ -142,9 +173,9 @@ export function UnifyReplicasDialog({
           </Button>
           <Button
             variant="destructive"
-            disabled={busy || keep === ""}
+            disabled={busy || !currentPreview || !!previewError || readyItems.length === 0}
             data-slot="unify-confirm"
-            onClick={() => onConfirm(keep)}
+            onClick={() => onConfirm(keep, readyItems)}
           >
             {t("sessions.unify.confirm")}
           </Button>

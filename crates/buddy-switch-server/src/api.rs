@@ -252,6 +252,13 @@ fn api_routes() -> Router {
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/replicas", get(api_session_replicas))
         .route(
+            "/api/sessions/switch-preview",
+            post(api_preview_switch_session_links),
+        )
+        .route("/api/sessions/recover", post(api_recover_session_links))
+        .route("/api/sessions/links", post(api_manage_session_links))
+        .route("/api/sessions/groups", post(api_session_groups_action))
+        .route(
             "/api/sessions/replicas/prune",
             post(api_prune_session_replicas),
         )
@@ -1832,19 +1839,7 @@ async fn api_codebuddy_cn_ide_status() -> Response {
 }
 
 async fn api_codebuddy_cn_ide_switch(Json(body): Json<Value>) -> Response {
-    let account_id = body
-        .get("accountId")
-        .or_else(|| body.get("account_id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let restart = body
-        .get("restart")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    match programs::switch("codebuddy_cn_ide", account_id, Some(restart)) {
-        Ok(v) => json_ok(v),
-        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
-    }
+    api_switch_linked_extension("codebuddyIde", body).await
 }
 
 async fn api_codebuddy_cn_ide_detect() -> Response {
@@ -1862,18 +1857,30 @@ async fn api_vscode_codebuddy_plugin_status() -> Response {
 }
 
 async fn api_vscode_codebuddy_plugin_switch(Json(body): Json<Value>) -> Response {
-    let account_id = body
-        .get("accountId")
-        .or_else(|| body.get("account_id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let restart = body
-        .get("restart")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    match programs::switch("vscode_codebuddy_plugin", account_id, Some(restart)) {
-        Ok(v) => json_ok(v),
-        Err(e) => json_err(e, StatusCode::BAD_REQUEST),
+    api_switch_linked_extension("vscodeExt", body).await
+}
+
+async fn api_switch_linked_extension(client: &'static str, body: Value) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let account_id = body
+            .get("accountId")
+            .or_else(|| body.get("account_id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        switch::switch_linked_extension(
+            client,
+            parse_region(body["region"].as_str()),
+            account_id,
+            body["restart"].as_bool(),
+            body.get("copySessions").cloned(),
+            body.get("syncSelections"),
+        )
+    })
+    .await
+    {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::BAD_REQUEST),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -2425,6 +2432,12 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
         .get("restart")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let sync_selections = match buddy_switch_core::modules::linked_workbuddy::parse_sync_selections(
+        body.get("syncSelections"),
+    ) {
+        Ok(selections) => selections,
+        Err(error) => return json_err(error, StatusCode::BAD_REQUEST),
+    };
     // ★ 非法条目**整包拒绝**，不静默丢弃（对照上游 `c614e1f7`）。
     //
     // 静默丢弃的后果不是报错而是**半成品**：切换照常执行、只是少复制几条会话，
@@ -2471,13 +2484,14 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
     });
 
     let result = tokio::task::spawn_blocking(move || {
-        switch::switch_account_cross(
+        switch::switch_account_cross_with_sync(
             region,
             source_region,
             Some(&progress),
             &account_id,
             restart,
             &copy_ids,
+            &sync_selections,
         )
     })
     .await;
@@ -2489,6 +2503,32 @@ async fn api_switch(Json(body): Json<Value>) -> Response {
         Ok(Ok(v)) => json_ok(v),
         Ok(Err(e)) => json_err(e, StatusCode::BAD_REQUEST),
         Err(e) => json_err(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_preview_switch_session_links(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body["region"].as_str());
+    let source_region = body["sourceRegion"]
+        .as_str()
+        .map(|region| parse_region(Some(region)))
+        .unwrap_or(region);
+    match tokio::task::spawn_blocking(move || {
+        switch::preview_switch_session_links(
+            body["client"].as_str(),
+            source_region,
+            region,
+            body["accountId"].as_str().unwrap_or_default(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -2536,7 +2576,10 @@ async fn api_session_replicas(RawQuery(query): RawQuery) -> Response {
         return json_err(error, StatusCode::FORBIDDEN);
     }
     let region = parse_region(query_value(query.as_deref(), "region").as_deref());
-    json_ok(session::list_replica_groups_for(region))
+    match session::list_linked_replica_groups_for(region) {
+        Ok(report) => json_ok(report),
+        Err(error) => json_err(error, StatusCode::CONFLICT),
+    }
 }
 
 /// POST /api/sessions/replicas/prune —— remove ledger edges whose target
@@ -2550,7 +2593,58 @@ async fn api_prune_session_replicas(Json(body): Json<Value>) -> Response {
         return json_err(error, StatusCode::FORBIDDEN);
     }
     let region = parse_region(body.get("region").and_then(Value::as_str));
-    json_ok(session::prune_deleted_replica_edges_for(region))
+    match tokio::task::spawn_blocking(move || session::prune_linked_replicas_for(region)).await {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_recover_session_links(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body["region"].as_str());
+    match tokio::task::spawn_blocking(move || session::recover_linked_sessions_for(region)).await {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_manage_session_links(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let region = parse_region(body["region"].as_str());
+    match tokio::task::spawn_blocking(move || {
+        session::manage_linked_sessions_for(region, &body["change"])
+    })
+    .await
+    {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_session_groups_action(Json(body): Json<Value>) -> Response {
+    if let Err(error) = require_capability(Product::Workbuddy, capability::Capability::SessionCopy)
+    {
+        return json_err(error, StatusCode::FORBIDDEN);
+    }
+    let request: buddy_switch_core::modules::session_groups::GroupActionRequest =
+        match serde_json::from_value(body) {
+            Ok(request) => request,
+            Err(error) => return json_err(error.to_string(), StatusCode::BAD_REQUEST),
+        };
+    match tokio::task::spawn_blocking(move || request.execute()).await {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 /// POST /api/sessions/sync —— P8 **安全同步（增量追加）**：把源副本的新增行追加到落后副本。
@@ -2572,7 +2666,16 @@ async fn api_session_sync(Json(body): Json<Value>) -> Response {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    json_ok(session::sync_session_replicas_for(region, &items))
+    let preview = body["preview"].as_bool().unwrap_or(false);
+    match tokio::task::spawn_blocking(move || {
+        session::linked_replica_batch(region, &items, false, preview)
+    })
+    .await
+    {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 /// POST /api/sessions/unify —— P8 **分歧处理（覆盖式统一）**：把选定保留的那一份覆盖到其余副本。
@@ -2594,7 +2697,16 @@ async fn api_session_unify(Json(body): Json<Value>) -> Response {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    json_ok(session::unify_session_replicas_for(region, &items))
+    let preview = body["preview"].as_bool().unwrap_or(false);
+    match tokio::task::spawn_blocking(move || {
+        session::linked_replica_batch(region, &items, true, preview)
+    })
+    .await
+    {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 
 /// POST /api/sessions/export —— 把选中的会话导出成一个 JSON 包（issue #87）。
@@ -3134,23 +3246,14 @@ async fn api_copy_sessions(Json(body): Json<Value>) -> Response {
     let Some(target) = account::find_account_for(region, &target_account_id) else {
         return json_err("目标账号不存在".to_string(), StatusCode::BAD_REQUEST);
     };
-    // copy_sessions_for_switch_for 已返回完整报告（sourceUid / targetUid / copied /
-    // skipped? / errors?）。这里必须**原样透传**，不能再包一层 "copied" —— 否则
-    // 响应会变成 {copied:{copied:[...]}}，与 Tauri 通道及前端 CopyResult[] 契约不一致。
-    // webui 侧没有进度事件通道，逐会话进度传 None（复制本身的时间优化不受影响）。
-    match session::copy_sessions_for_switch_cross(
-        source_region,
-        region,
-        None,
-        &target,
-        &session_ids,
-    ) {
-        Some(report) => json_ok(report),
-        None => json_ok(json!({
-            "sourceUid": Value::Null,
-            "targetUid": target.get("uid"),
-            "copied": [],
-        })),
+    match tokio::task::spawn_blocking(move || {
+        session::copy_linked_sessions_for_switch(source_region, region, &target, &session_ids)
+    })
+    .await
+    {
+        Ok(Ok(report)) => json_ok(report),
+        Ok(Err(error)) => json_err(error, StatusCode::CONFLICT),
+        Err(error) => json_err(error.to_string(), StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -5838,6 +5941,7 @@ async fn static_handler(uri: Uri) -> Response {
     // 当成二进制**下载**而不是渲染应用（`App.tsx` 用的是 `BrowserRouter`，深链是常态）。
     let (data, served_path) = match Assets::get(&path) {
         Some(file) => (Some(file), path),
+        None if path.starts_with("assets/") => (None, path),
         None => match Assets::get("index.html") {
             Some(file) => (Some(file), "index.html".to_string()),
             None => (None, path),

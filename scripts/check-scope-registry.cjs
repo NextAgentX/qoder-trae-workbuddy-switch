@@ -5869,15 +5869,15 @@ check("★ P8 不用 `updatedAt` 冒充「落后 / 最新」（**仍**是红线�
   return `无状态派生 · updatedAt 仅经 formatDate 渲染 · 无 updatedAt 排序`;
 });
 
-check("★ P8 T02 后端只回 ledger 确有的字段（不臆造 title / updatedAt / hasHistory）", () => {
-  /* 变异：在 `replica_groups_from_ledger` 的副本 json! 里加 `title` / `updatedAt` 等 ⇒ 变红。
+check("★ P8 T02 后端副本行只投影账号、会话与区域", () => {
+  /* 变异：在 `replica_group_entry` 的副本 json! 里加 `title` / `updatedAt` 等 ⇒ 变红。
      （后端**只回** accountUid / sessionId / region，其余由前端 join，§3.1 注。） */
   const code = readCode(SESSION_RS);
-  const m = code.match(/fn replica_groups_from_ledger[\s\S]*?\n}/);
-  if (!m) throw new Error("找不到 `replica_groups_from_ledger`（断言失效：是否改名？）");
+  const m = code.match(/fn replica_group_entry[\s\S]*?\n}/);
+  if (!m) throw new Error("找不到 `replica_group_entry`（断言失效：是否改名？）");
   for (const bad of ["title", "updatedAt", "hasHistory", "cwd"]) {
     if (new RegExp(`"${bad}"`).test(m[0])) {
-      throw new Error(`后端副本行臆造了字段 "${bad}"（ledger 里没有，应由前端 join）`);
+      throw new Error(`后端副本行臆造了字段 "${bad}"（应由前端 join）`);
     }
   }
   for (const good of ["accountUid", "sessionId", "region"]) {
@@ -7816,7 +7816,13 @@ check("★ P8 分歧处理：覆盖前先备份（fail-closed）+ 四处接线 +
   }
   const page = readCode("src/pages/SessionsPage.tsx");
   if (!/UnifyReplicasDialog/.test(page)) throw new Error("SessionsPage 没挂载分歧处理对话框");
-  if (!/buildUnifyItems/.test(page)) throw new Error("SessionsPage 没把「保留哪一份」换算成覆盖任务");
+  const dialog = readCode("src/components/sessions/unify-replicas-dialog.tsx");
+  if (!/previewSessionReplicas\(buildUnifyItems\(/.test(dialog)) {
+    throw new Error("分歧对话框没有为选定副本请求服务端预览");
+  }
+  if (!/onConfirm\(keep, readyItems\)/.test(dialog) || !/runUnify\(items, keepSessionId\)/.test(page)) {
+    throw new Error("分歧确认没有提交预览确认的任务");
+  }
   return "覆盖前先备份（fail-closed）+ 部分失败 + 四处接线 + 只在 diverge 给出口";
 });
 

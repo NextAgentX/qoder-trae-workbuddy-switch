@@ -13,7 +13,7 @@ use crate::modules::region::{
     accounts_file_for, accounts_trash_file_for, region_of, region_spec, Region,
 };
 
-fn load_accounts_from_path(path: &Path) -> Vec<Value> {
+pub(crate) fn load_accounts_from_path(path: &Path) -> Vec<Value> {
     if let Ok(text) = std::fs::read_to_string(path) {
         if let Ok(Value::Array(accounts)) = serde_json::from_str::<Value>(&text) {
             return accounts;

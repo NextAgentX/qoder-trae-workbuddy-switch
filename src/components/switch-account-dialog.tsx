@@ -50,6 +50,7 @@ import { Switch } from "@/components/ui/switch";
 import { accountIdentity, accountDisplayName, identityDisplayName } from "@/components/account-card";
 import { RestartConfirmDialog } from "@/components/restart-confirm-dialog";
 import { MigrationSummary } from "@/components/switch-account/migration-summary";
+import { LinkedSessions } from "@/components/switch-account/linked-sessions";
 import { SessionTree } from "@/components/switch-account/session-tree";
 import {
   scopeLabel,
@@ -73,6 +74,7 @@ import {
   type SessionTypeNode,
 } from "@/lib/session-tree";
 import type { AccountMeta, MigrateResult, Region, Session } from "@/lib/types";
+import type { LinkedSwitchSelection } from "@/lib/switch-session-links";
 
 /** WorkBuddy 桌面客户端的显示名（商标，中英写法相同 ⇒ 不放进词表）。 */
 const WORKBUDDY_LABEL = "WorkBuddy";
@@ -123,6 +125,7 @@ export function SwitchAccountDialog({
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [copySessions, setCopySessions] = useState(false);
+  const [linkedSelections, setLinkedSelections] = useState<LinkedSwitchSelection[]>([]);
   /** 把来源账号的长期记忆合并进目标账号（带去重）。 */
   const [migrateMemory, setMigrateMemory] = useState(false);
   /**
@@ -224,6 +227,7 @@ export function SwitchAccountDialog({
     setError("");
     setSourceRegion(region ?? "cn");
     setSessionSource(null);
+    setLinkedSelections([]);
   }, [open, account, region]);
 
   // 加载会话：打开时取一次；此后每次改「数据来源版本」都要重取。
@@ -445,6 +449,7 @@ export function SwitchAccountDialog({
         // 少传一个字段就少一处与后端默认值漂移的机会。
         sourceRegion: sourceRegion === region ? undefined : sourceRegion,
         copySessionIds: copySessions ? [...selected] : undefined,
+        syncSelections: linkedSelections.length ? linkedSelections : undefined,
       });
       const nickname =
         accountDisplayName(account);
@@ -454,6 +459,13 @@ export function SwitchAccountDialog({
       if (res.sessionCopy?.skipped?.length) {
         parts.push(t("wbAccounts.dialog.skippedSessions", { n: res.sessionCopy.skipped.length }));
       }
+      if (res.sessionSync?.synced.length) {
+        parts.push(t("sessions.switchLinks.synced", { n: res.sessionSync.synced.length }));
+      }
+      for (const issue of res.sessionSync?.skipped ?? []) {
+        warnings.push(issue.message || t("sessions.switchLinks.skipped"));
+      }
+      for (const issue of res.sessionSync?.errors ?? []) warnings.push(issue.error);
       // 收集复制阶段每条副本的降级警告（如「索引不可写，已复制正文」）。
       const sessionWarnings = (res.sessionCopy?.copied ?? [])
         .map((c) => c.warning)
@@ -663,6 +675,17 @@ export function SwitchAccountDialog({
                   )}
                 </section>
 
+                {account ? (
+                  <LinkedSessions
+                    accountId={account.id}
+                    client="workbuddy"
+                    region={region ?? "cn"}
+                    sourceRegion={sourceRegion}
+                    disabled={busy}
+                    selected={linkedSelections}
+                    onChange={setLinkedSelections}
+                  />
+                ) : null}
                 {copySessions && (
                   <section>
                     {loadingSessions ? (
@@ -708,6 +731,7 @@ export function SwitchAccountDialog({
             )}
 
             {step === 3 && account && (
+              <>
               <MigrationSummary
                 target={account}
                 targetIdentity={accountIdentity(account)}
@@ -721,6 +745,10 @@ export function SwitchAccountDialog({
                   connectors: migrateConnectors,
                 }}
               />
+              {linkedSelections.length > 0 ? (
+                <p className="text-sm text-muted-foreground">{t("sessions.switchLinks.selected", { n: linkedSelections.length })}</p>
+              ) : null}
+              </>
             )}
 
             {error && (
@@ -805,6 +833,7 @@ export function SwitchAccountDialog({
         onOpenChange={setRestartConfirmOpen}
         clientLabel={WORKBUDDY_LABEL}
         isCli={false}
+        requireRestart={linkedSelections.length > 0}
         onConfirm={(restart) => {
           setRestartConfirmOpen(false);
           // ★ 记住这次的选择 + 重置「已自动重试」标记 ⇒ 授权恢复后可自动重试这一回。

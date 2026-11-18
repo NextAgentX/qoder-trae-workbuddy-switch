@@ -87,6 +87,8 @@ export interface RestartConfirmDialogProps {
   clientLabel: string;
   /** CLI 例外：`true` ⇒ 不渲染「自动重开」、文案如实写「当前 CLI 会话会中断」。 */
   isCli: boolean;
+  requireRestart?: boolean;
+  children?: import("react").ReactNode;
   /**
    * 用户确认。`restart` 为最终选择（**CLI 恒 `false`**）。
    *
@@ -110,6 +112,8 @@ export function RestartConfirmDialog({
   onOpenChange,
   clientLabel,
   isCli,
+  requireRestart = false,
+  children,
   onConfirm,
 }: RestartConfirmDialogProps) {
   const t = useT();
@@ -123,7 +127,7 @@ export function RestartConfirmDialog({
   }, [open]);
 
   // CLI 不重开 ⇒ restart 恒 false；非 CLI 由勾选决定。
-  const restart = copy.autoReopen ? autoReopen : false;
+  const restart = copy.autoReopen ? requireRestart || autoReopen : false;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -140,11 +144,14 @@ export function RestartConfirmDialog({
           </Alert>
         ) : null}
 
+        {children}
+
         {/* ★ CLI 分支**不渲染**勾选（`copy.autoReopen === false`）—— 出现即暗示「可自动重开」。 */}
         {copy.autoReopen ? (
           <label className="flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2.5">
             <Checkbox
-              checked={autoReopen}
+              checked={restart}
+              disabled={requireRestart}
               onCheckedChange={(value) => setAutoReopen(value === true)}
               aria-label={t("sessions.restart.autoReopen", { client: clientLabel })}
             />

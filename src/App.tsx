@@ -97,6 +97,7 @@ import { useWorkbuddyStatusRefresh } from "@/lib/use-workbuddy-status-refresh";
 import { useAccountsStore } from "@/stores/accounts";
 import { useGatewayStore } from "@/stores/gateway";
 import { useSessionsStore } from "@/stores/sessions";
+import { useSessionSidebarVisibility } from "@/lib/switch-session-links";
 
 /**
  * 产品分区。
@@ -781,6 +782,7 @@ function Layout() {
    * ⚠️ 判据是**内容级状态**（fingerprint 派生），**不是** `updatedAt`。
    */
   const sessionGroups = useSessionsStore((s) => s.groups);
+  const showSessions = useSessionSidebarVisibility();
   const pendingSyncCount = useMemo(
     () => sessionGroups.filter((g) => g.status === "behind" || g.status === "diverge").length,
     [sessionGroups],
@@ -819,6 +821,7 @@ function Layout() {
   const scopedNav = useMemo(
     () =>
       DESTINATIONS.filter((dest) => {
+        if (dest === "sessions" && !showSessions) return false;
         const capability = DESTINATION_CAPABILITY[dest];
         return capability === undefined || hasCapability(product, capability);
       }).map((dest) => ({
@@ -830,7 +833,7 @@ function Layout() {
       })),
     // `navBadge` 读到的事实都在下面这几个依赖里（含 `statuses` / 网关密钥 / 待同步数）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [product, navRegion, pendingSyncCount, statuses, gatewayKeys],
+    [product, navRegion, pendingSyncCount, statuses, gatewayKeys, showSessions],
   );
 
   const appVersion = useAccountsStore((s) => s.status?.version || s.global.status?.version);

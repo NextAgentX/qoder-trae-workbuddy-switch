@@ -12,6 +12,33 @@ initLocale();
 const stopWatchingSystemTheme = watchSystemTheme();
 if (import.meta.hot) import.meta.hot.dispose(stopWatchingSystemTheme);
 
+// A browser tab can keep an old Vite entry open across a WebUI rebuild.
+// Check the served HTML before refreshing so network failures still reach the error boundary.
+if (import.meta.env.PROD && /^https?:$/.test(window.location.protocol)) {
+  const runningEntry = import.meta.url;
+  let checkingEntry = false;
+  window.addEventListener("vite:preloadError", async () => {
+    if (checkingEntry) return;
+    checkingEntry = true;
+    try {
+      const response = await fetch(window.location.href, { cache: "no-store" });
+      if (!response.ok) return;
+      const document = new DOMParser().parseFromString(await response.text(), "text/html");
+      const liveScript = document.querySelector<HTMLScriptElement>('script[type="module"][src]');
+      const liveEntry = liveScript?.getAttribute("src");
+      if (!liveEntry || new URL(liveEntry, response.url).href === runningEntry) return;
+      const retryKey = "buddy-switch:entry-reload";
+      if (sessionStorage.getItem(retryKey) === runningEntry) return;
+      sessionStorage.setItem(retryKey, runningEntry);
+      window.location.reload();
+    } catch {
+      // Leave the original error and the manual reload button available.
+    } finally {
+      checkingEntry = false;
+    }
+  });
+}
+
 /**
  * 入口分流：桌面悬浮窗是**独立窗口**（`companion.rs` 用 `?window=companion` 打开），
  * 与主窗口共用同一份 `index.html`。这里按 URL 查询把它分流到 `CompanionApp`。

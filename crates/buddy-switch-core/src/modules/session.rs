@@ -42,6 +42,15 @@ use crate::modules::auth_file;
 use crate::modules::config::{backup_dir, home_dir, now_ms, now_secs, utc_iso};
 use crate::modules::region::Region;
 
+mod workbench;
+pub(crate) use workbench::ensure_link_store;
+pub(crate) use workbench::restore_link_pair_legacy_baseline;
+pub use workbench::{
+    copy_linked_sessions_for_switch, linked_replica_batch, list_linked_replica_groups_for,
+    manage_linked_sessions_for, preview_linked_switch, prune_linked_replicas_for,
+    recover_linked_sessions_for, sync_linked_sessions_for_switch,
+};
+
 /// 打开数据库并设置 busy_timeout（对照 Python `sqlite3.connect(timeout=5)`）。
 pub(crate) fn open_db(path: &Path, read_only: bool) -> Option<Connection> {
     let conn = if read_only {
@@ -3430,6 +3439,10 @@ fn parse_copy_ledger_key_same_region(key: &str) -> Option<(String, String, Strin
 /// ```
 pub fn list_replica_groups_for(region: Region) -> Value {
     let (entries, source) = replica_group_entries(region, None);
+    render_replica_groups(region, entries, source)
+}
+
+fn render_replica_groups(region: Region, entries: Vec<ReplicaGroupEntry>, source: &str) -> Value {
     if entries.is_empty() {
         // 无可用登记（文件缺失 / 空 / 只有跨 region 边）⇒ 前端渲染结构化空态。
         // ⚠️ **此时不动缓存**：账本损坏读到空时剪枝 / 落盘会把好端端的一份缓存毁掉。
@@ -3437,15 +3450,35 @@ pub fn list_replica_groups_for(region: Region) -> Value {
     }
     // ★ 内容状态：**在这里算完**，只把每组几个整数回给前端（见 [`derive_content_status`]）。
     //   `projects/` 索引只建一次 —— 逐副本重扫目录是「加载很久」的第二大来源。
-    let projects = build_projects_index_for(region);
+    let projects: HashMap<_, _> = entries
+        .iter()
+        .flat_map(|entry| entry.regions.iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|member_region| (member_region, build_projects_index_for(member_region)))
+        .collect();
     let mut store = fingerprint_store().lock().unwrap();
     let mut groups: Vec<Value> = Vec::with_capacity(entries.len());
     // 本次真的请求过的键 ⇒ 用来剪掉「会话已被删掉」的陈旧条目（缓存不无限长）。
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for entry in &entries {
-        let fingerprints = fingerprints_for_members(&mut store, region, &projects, &entry.members);
-        for (_uid, cid) in &entry.members {
-            seen.insert(fingerprint_key(region, cid));
+        let mut fingerprints = vec![None; entry.members.len()];
+        for member_region in Region::all() {
+            let Some(index) = projects.get(&member_region) else {
+                continue;
+            };
+            let (positions, members): (Vec<_>, Vec<_>) = entry
+                .members
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| entry.regions[*position] == member_region)
+                .map(|(position, member)| (position, member.clone()))
+                .unzip();
+            let reads = fingerprints_for_members(&mut store, member_region, index, &members);
+            for (position, fingerprint) in positions.into_iter().zip(reads) {
+                fingerprints[position] = fingerprint;
+                seen.insert(fingerprint_key(member_region, &entry.members[position].1));
+            }
         }
         let baseline = newest_baseline(&entry.baselines);
         let mut json = entry.json.clone();
@@ -3458,8 +3491,9 @@ pub fn list_replica_groups_for(region: Region) -> Value {
                 return Some(fingerprint.full_hash);
             }
             let (_uid, cid) = entry.members.get(index)?;
-            let path = projects.get(cid)?;
-            let key = fingerprint_key(region, cid);
+            let member_region = *entry.regions.get(index)?;
+            let path = projects.get(&member_region)?.get(cid)?;
+            let key = fingerprint_key(member_region, cid);
             if let Some(digest) = store.probe(&key, offset) {
                 return Some(digest);
             }
@@ -3503,6 +3537,7 @@ fn list_replica_groups_at(region: Region, override_path: Option<&Path>) -> Value
 struct ReplicaGroupEntry {
     /// 成员顶点 `(uid, cid)`，已排序、已去重。
     members: Vec<(String, String)>,
+    regions: Vec<Region>,
     /// 该组在组内命中的基线（两端成员都在组内），**已按 `createdAt` 升序**。
     baselines: Vec<GroupBaseline>,
     /// 出给前端的 JSON（`key` / `replicas` / `previewToken` / `baseline`）。
@@ -3706,52 +3741,62 @@ fn replica_groups_from_ledger(
     replica_group_members_from_ledger(ledger)
         .into_iter()
         .map(|(key, members)| {
-            let cids: BTreeSet<&str> = members.iter().map(|(_, cid)| cid.as_str()).collect();
-            let mut group_baselines: Vec<GroupBaseline> = baselines
-                .iter()
-                .filter(|baseline| {
-                    cids.contains(baseline.a.as_str()) && cids.contains(baseline.b.as_str())
-                })
-                .cloned()
-                .collect();
-            // 稳定输出：`createdAt` 升序，其次 `a` / `b` 字典序。
-            group_baselines.sort_by(|left, right| {
-                (left.created_at, &left.a, &left.b).cmp(&(right.created_at, &right.a, &right.b))
-            });
-
-            let replicas: Vec<Value> = members
-                .iter()
-                .map(|(uid, cid)| {
-                    json!({
-                        "accountUid": uid,
-                        "sessionId": cid,
-                        "region": region.as_str(),
-                    })
-                })
-                .collect();
-            let baseline_json = newest_baseline(&group_baselines)
-                .map(|baseline| {
-                    json!({
-                        "a": baseline.a,
-                        "b": baseline.b,
-                        "createdAt": baseline.created_at,
-                        "lineCount": baseline.line_count,
-                    })
-                })
-                .unwrap_or(Value::Null);
-            let json = json!({
-                "key": key,
-                "replicas": replicas,
-                "previewToken": group_fingerprint(&members),
-                "baseline": baseline_json,
-            });
-            ReplicaGroupEntry {
-                members,
-                baselines: group_baselines,
-                json,
-            }
+            let regions = vec![region; members.len()];
+            replica_group_entry(key, members, regions, baselines)
         })
         .collect()
+}
+
+fn replica_group_entry(
+    key: String,
+    members: Vec<(String, String)>,
+    regions: Vec<Region>,
+    baselines: &[GroupBaseline],
+) -> ReplicaGroupEntry {
+    let cids: BTreeSet<&str> = members.iter().map(|(_, cid)| cid.as_str()).collect();
+    let mut group_baselines: Vec<GroupBaseline> = baselines
+        .iter()
+        .filter(|baseline| cids.contains(baseline.a.as_str()) && cids.contains(baseline.b.as_str()))
+        .cloned()
+        .collect();
+    // 稳定输出：`createdAt` 升序，其次 `a` / `b` 字典序。
+    group_baselines.sort_by(|left, right| {
+        (left.created_at, &left.a, &left.b).cmp(&(right.created_at, &right.a, &right.b))
+    });
+
+    let replicas: Vec<Value> = members
+        .iter()
+        .zip(&regions)
+        .map(|((uid, cid), region)| {
+            json!({
+                "accountUid": uid,
+                "sessionId": cid,
+                "region": region.as_str(),
+            })
+        })
+        .collect();
+    let baseline_json = newest_baseline(&group_baselines)
+        .map(|baseline| {
+            json!({
+                "a": baseline.a,
+                "b": baseline.b,
+                "createdAt": baseline.created_at,
+                "lineCount": baseline.line_count,
+            })
+        })
+        .unwrap_or(Value::Null);
+    let json = json!({
+        "key": key,
+        "replicas": replicas,
+        "previewToken": group_fingerprint(&members),
+        "baseline": baseline_json,
+    });
+    ReplicaGroupEntry {
+        members,
+        regions,
+        baselines: group_baselines,
+        json,
+    }
 }
 
 // ---------------------------------------------------------------------------
