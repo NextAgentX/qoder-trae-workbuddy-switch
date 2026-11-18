@@ -2,6 +2,9 @@
 //!
 //! WorkBuddy 套餐页使用 summary/paid/free 三个资源接口；旧的
 //! `POST /v2/billing/meter/get-user-resource` 仍作为兼容回退。
+//! 企业/教育公益版席位账号三条接口与旧接口**都返回空**，其额度在
+//! `POST /billing/meter/get-enterprise-user-usage`（见 [`ENTERPRISE_USER_USAGE_PATH`]）
+//! 上，作为最后一级兜底。
 //! 这里仅返回脱敏后的资源摘要，不把 token 或完整响应交给前端。
 
 use chrono::{Local, NaiveDate, NaiveDateTime};
@@ -19,6 +22,24 @@ const WORKBUDDY_WEB_ENDPOINT: &str = "https://www.workbuddy.cn";
 const RESOURCE_SUMMARY_PATH: &str = "/billing/meter/get-user-resource-summary";
 const RESOURCE_PAID_PACKAGES_PATH: &str = "/billing/meter/get-user-resource-paid-packages";
 const RESOURCE_FREE_PACKAGES_PATH: &str = "/billing/meter/get-user-resource-free-packages";
+
+/// 企业（教育公益版等）席位账号的**月度配额**接口。
+///
+/// 为什么需要它（上游 issue #205「教师企业版读取不到积分」）：
+/// 教师企业版账号 `type = "ultimate"`、带 `enterpriseId`，其额度不走个人资源包体系 ——
+/// 实测同一个 token 打三条新接口与旧接口，返回分别是
+/// `{"Packages":[],"IsPaidUser":false}` / `{"Accounts":[],"TotalCount":0}` /
+/// `{"Accounts":null,"TotalDosage":0}`，**一个包都没有**，于是卡片恒显示 0。
+///
+/// 上游网页端（`profile/plans-usage`）对 `enterpriseId` 非空的账号改调本接口：
+/// 空 body + `X-Enterprise-Id` 头（该头已由 [`build_auth_headers`] 按账号自带），
+/// 返回 `credit`（**已用**额度，不是剩余）、`limitNum`（月度上限）、
+/// `cycleStartTime` / `cycleEndTime` / `cycleResetTime`（UTC+8 墙钟）。
+///
+/// 「credit 是已用」有硬依据：上游 `UsageIntl` 组件直接算
+/// `left = Math.max(0, limitNum - credit)` 并把它渲染成「剩余」，
+/// `percent = credit / limitNum` 渲染成进度条。
+const ENTERPRISE_USER_USAGE_PATH: &str = "/billing/meter/get-enterprise-user-usage";
 const PRODUCT_CODE: &str = "p_tcaca";
 const EXPIRING_SOON_DAYS: i64 = 7;
 
@@ -288,8 +309,69 @@ fn resource_summary(raw: &Value, now: i64) -> Value {
     })
 }
 
-fn response_error(response: &Value) -> String {
-    let nested = response.get("data").filter(|value| value.is_object());
+/// 账号所属企业 ID —— 只有企业席位（含教育公益版）账号非空。
+fn enterprise_id(account: &Value) -> Option<&str> {
+    ["enterpriseId", "enterprise_id"]
+        .iter()
+        .find_map(|key| account.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// 取出企业配额响应里的**载荷**，兼容 `data` 与 `data.data` 两种包层。
+///
+/// 上游网页端自己就写了 `m.data?.data || m.data`，说明两种形状都在线上跑。
+/// 只认带 `limitNum` 的那一层：`data` 层若存在却没有 `limitNum`，说明它是包层而非载荷。
+fn enterprise_usage_payload(response: &Value) -> Option<&Value> {
+    let data = response.get("data")?;
+    let inner = data.get("data").unwrap_or(data);
+    ["limitNum", "LimitNum"]
+        .iter()
+        .any(|key| inner.get(*key).is_some())
+        .then_some(inner)
+}
+
+/// 把企业月度配额折成一条与个人资源包同形的资源摘要，复用既有聚合 / 展示链路。
+///
+/// 口径转换是本函数唯一的实质工作：
+/// - `credit` 是**已用**额度，剩余 = `limitNum - credit`（依据见 [`ENTERPRISE_USER_USAGE_PATH`]）；
+/// - 到期时刻取 `cycleEndTime`（当月月底 23:59:59，UTC+8 墙钟）。
+///
+/// `limitNum <= 0` 返回 `None`：没有配额就没有可展示的东西，调用方应继续走失败分支。
+fn enterprise_usage_resource(response: &Value, now: i64) -> Option<Value> {
+    let payload = enterprise_usage_payload(response)?;
+    let total = first_number(payload, &["limitNum", "LimitNum"])?;
+    if total <= 0.0 {
+        return None;
+    }
+    let used = first_number(payload, &["credit", "Credit"])
+        .unwrap_or(0.0)
+        .max(0.0);
+    let remaining = (total - used).max(0.0);
+    let expire_at = earliest_timestamp_ms(payload, &["cycleEndTime", "CycleEndTime"]);
+    let expired = expire_at.map(|value| value <= now).unwrap_or(false);
+    let expiring_soon = expire_at
+        .map(|value| value > now && value - now <= EXPIRING_SOON_DAYS * 24 * 3600 * 1000)
+        .unwrap_or(false);
+    let package_name = first_value(payload, &["packageName", "PackageName"])
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("企业月度配额");
+
+    Some(json!({
+        "packageCode": "enterprise_monthly_quota",
+        "packageName": package_name,
+        "total": total,
+        "remaining": remaining,
+        "used": used.min(total),
+        "status": 0,
+        "expireAt": expire_at,
+        "expired": expired,
+        "expiringSoon": expiring_soon,
+    }))
+}
+
+fn response_error(response: &Value) -> String {    let nested = response.get("data").filter(|value| value.is_object());
     let code = response_code(response).unwrap_or(-1);
     response
         .get("message")
@@ -623,8 +705,19 @@ async fn fetch_legacy_user_resource_for(region: Region, account: &Value) -> Valu
     post_with_account(region, account, &url, body).await
 }
 
-fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {
-    let detail_codes: HashSet<String> = detail_resources
+/// 请求企业/教育公益版席位账号的月度配额。
+///
+/// 空 body + 账号自带的 `X-Enterprise-Id` 头（[`build_auth_headers`] 会按
+/// `enterpriseId` / `enterprise_id` 自动补），与上游网页端 `plans-usage` 页的调用一致。
+async fn fetch_enterprise_user_usage_for(region: Region, account: &Value) -> Value {
+    let url = format!(
+        "{}{ENTERPRISE_USER_USAGE_PATH}",
+        new_resource_endpoint_for(region, account)
+    );
+    post_with_account(region, account, &url, json!({})).await
+}
+
+fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {    let detail_codes: HashSet<String> = detail_resources
         .iter()
         .filter_map(|resource| {
             first_value(resource, &["packageCode", "PackageCode"])
@@ -844,6 +937,26 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
             .collect();
         return credit_result(account, resources, now);
     }
+
+    // ★ 企业 / 教育公益版席位账号兜底（上游 issue #205「教师企业版读取不到积分」）。
+    //
+    // 这类账号（`type = "ultimate"` + `enterpriseId`）在个人资源体系里是**真空**：
+    // summary/paid/free 三接口与旧 `get-user-resource` 都返回零包，于是卡片恒显示 0。
+    // 额度只有企业月度配额接口测得到，所以放在最后一级 —— 任何有个人资源包的账号
+    // 都在上面两个分支返回了，行为完全不变。
+    //
+    // 不在这里再做一次 401 刷新：`fallback_account` 来自 `fetch_new_resource_responses`，
+    // 若三条新接口撞过 401 已经刷新并落盘，这里携带的就是新 token；
+    // 再刷一次会重蹈「用旧 refresh token 覆盖新 token」的覆辙，而收益为零。
+    if region == Region::Cn && enterprise_id(&fallback_account).is_some() {
+        let usage = fetch_enterprise_user_usage_for(region, &fallback_account).await;
+        if is_success(&usage) {
+            if let Some(resource) = enterprise_usage_resource(&usage, now) {
+                return credit_result(account, vec![resource], now);
+            }
+        }
+    }
+
     json!({
         "ok": false,
         "accountId": account_id,
@@ -855,6 +968,100 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn approx(left: f64, right: f64) {
+        assert!(
+            (left - right).abs() < 1e-9,
+            "期望 {right}，实际 {left}"
+        );
+    }
+
+    /// 回归上游 issue #205「教师企业版读取不到积分」。
+    ///
+    /// 教师企业版（`type = "ultimate"` + `enterpriseId`）账号在个人资源三接口与旧接口上
+    /// 都返回零包，额度只存在于企业月度配额接口。本用例固定「响应 → 资源摘要」的映射：
+    /// `credit` 是**已用**，剩余必须由 `limitNum - credit` 得出。
+    ///
+    /// 样本的结构取自 2026-11-19 的真实响应（企业名 `WorkBuddy教育公益版`），数值仅作示例。
+    ///
+    /// 可证伪：把 `remaining` 写成 `credit`（误以为 credit 是剩余）⇒ 红。
+    #[test]
+    fn enterprise_quota_maps_credit_as_used() {
+        let response = json!({
+            "code": 0,
+            "msg": "OK",
+            "requestId": "00000000-0000-0000-0000-000000000000",
+            "data": {
+                "credit": 124.72,
+                "cycleStartTime": "2026-11-01 00:00:00",
+                "cycleEndTime": "2026-11-30 23:59:59",
+                "limitNum": 2000,
+                "cycleResetTime": "2026-12-01 00:00:00"
+            }
+        });
+        let now = 1_700_000_000_000; // 2023-11，早于周期结束
+        let resource = enterprise_usage_resource(&response, now).expect("应折成一条资源");
+
+        approx(resource["total"].as_f64().unwrap(), 2000.0);
+        approx(resource["used"].as_f64().unwrap(), 124.72);
+        approx(resource["remaining"].as_f64().unwrap(), 1875.28);
+        assert_eq!(resource["expired"], false);
+        assert_eq!(resource["packageCode"], "enterprise_monthly_quota");
+        // `cycleEndTime` 是 UTC+8 墙钟，必须按 +08:00 解释，不能按本机时区。
+        let expected = chrono::DateTime::parse_from_rfc3339("2026-11-30T23:59:59+08:00")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(resource["expireAt"], expected);
+    }
+
+    /// 上游网页端自己写了 `m.data?.data || m.data`，两种包层都在线上跑，解析器都要认。
+    #[test]
+    fn enterprise_quota_accepts_nested_payload() {
+        let response = json!({
+            "code": 0,
+            "data": {"data": {"credit": 0, "limitNum": 500, "cycleEndTime": "2026-12-31 23:59:59"}}
+        });
+        let resource = enterprise_usage_resource(&response, 0).expect("嵌套形状应可解析");
+        approx(resource["remaining"].as_f64().unwrap(), 500.0);
+        // now = 0（1970）远早于周期结束 ⇒ 未过期。
+        assert_eq!(resource["expired"], false);
+    }
+
+    /// 没有配额的响应不能折成资源 —— 否则会把「查不到」伪装成「额度 0」，
+    /// 调用方也就不会继续走失败分支。
+    #[test]
+    fn enterprise_quota_without_limit_yields_nothing() {
+        let zero = json!({"code": 0, "data": {"credit": 0, "limitNum": 0}});
+        assert!(enterprise_usage_resource(&zero, 0).is_none());
+        let missing = json!({"code": 0, "data": {"credit": 5}});
+        assert!(enterprise_usage_resource(&missing, 0).is_none());
+        let failure = json!({"code": 10085, "msg": "请求不合法"});
+        assert!(enterprise_usage_resource(&failure, 0).is_none());
+    }
+
+    /// 超额使用（`credit > limitNum`）时剩余归零，已用截到上限 —— 不能让界面出现负数。
+    #[test]
+    fn enterprise_quota_clamps_overuse() {
+        let response = json!({"data": {"credit": 2500, "limitNum": 2000}});
+        let resource = enterprise_usage_resource(&response, 0).expect("仍应成资源");
+        approx(resource["remaining"].as_f64().unwrap(), 0.0);
+        approx(resource["used"].as_f64().unwrap(), 2000.0);
+    }
+
+    /// 企业兜底只对带 `enterpriseId` 的账号生效：个人账号必须继续走原路径，
+    /// 不许多发一次企业接口请求。
+    #[test]
+    fn enterprise_id_only_matches_enterprise_accounts() {
+        assert_eq!(
+            enterprise_id(&json!({"enterpriseId": "fysxmvfpz6dc"})),
+            Some("fysxmvfpz6dc")
+        );
+        assert_eq!(enterprise_id(&json!({"enterprise_id": "e-2"})), Some("e-2"));
+        // 个人账号没有这个字段；空白串同样视为没有。
+        assert_eq!(enterprise_id(&json!({"uid": "x", "type": "personal"})), None);
+        assert_eq!(enterprise_id(&json!({"enterpriseId": "   "})), None);
+        assert_eq!(enterprise_id(&json!({"enterpriseId": Value::Null})), None);
+    }
 
     /// 回归上游 issue #94：信封凭据在 `authenticated_post_for` **入口**短路，
     /// 不发空 `Bearer`，也不进入刷新重试链路。
