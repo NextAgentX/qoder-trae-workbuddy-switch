@@ -1294,3 +1294,87 @@ async fn responses_stream_emits_response_events() {
         .expect("至少一个事件");
     assert_eq!(first["sequence_number"], 0, "{text}");
 }
+
+/// 业务会话聚合（默认开）：同一会话的两轮请求复用同一个 `business`
+/// `id / begin_at / name`；不同会话使用独立的 `business` 锚点。
+#[tokio::test]
+async fn business_anchor_is_reused_across_turns_of_the_same_conversation() {
+    let _guard = guard();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (state, key) = gateway_for(
+        "business",
+        &[("q1", "dt-1")],
+        Behavior::Record(seen.clone()),
+    )
+    .await;
+
+    // 同一会话的第二轮：历史前缀不变，只追加 assistant + 新 user。
+    let first = json!({
+        "model": "qwen3.8-max",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "round one"},
+        ],
+    })
+    .to_string();
+    let second = json!({
+        "model": "qwen3.8-max",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "round one"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "round two"},
+        ],
+    })
+    .to_string();
+    let other = json!({
+        "model": "qwen3.8-max",
+        "messages": [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "another conversation"},
+        ],
+    })
+    .to_string();
+
+    for body in [&first, &second, &other] {
+        let response = router(state.clone())
+            .oneshot(chat_request(Some(&key), body))
+            .await
+            .expect("请求");
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = body_text(response).await;
+    }
+
+    let bodies = seen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    assert_eq!(bodies.len(), 3, "三次请求都应到达上游");
+    let business = |index: usize| -> Value {
+        serde_json::from_str::<Value>(&bodies[index])
+            .expect("上游请求体是 JSON")
+            .get("business")
+            .cloned()
+            .expect("请求体必须带 business")
+    };
+    let first_turn = business(0);
+    let second_turn = business(1);
+    let other_conversation = business(2);
+
+    assert_eq!(
+        first_turn["id"], second_turn["id"],
+        "同一会话必须复用 business.id：{first_turn} vs {second_turn}"
+    );
+    assert_eq!(
+        first_turn["begin_at"], second_turn["begin_at"],
+        "begin_at 必须复用首次锚点"
+    );
+    assert_eq!(
+        first_turn["name"], second_turn["name"],
+        "name 必须复用首次锚点"
+    );
+    assert_ne!(
+        first_turn["id"], other_conversation["id"],
+        "不同会话不得共用 business.id"
+    );
+}

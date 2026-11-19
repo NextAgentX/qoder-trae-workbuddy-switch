@@ -686,6 +686,7 @@ pub async fn chat_for_region_once(
     // 出站请求体（每轮换号都要重建：`aliyun_user_type` 属账号上下文）。
     // `structured` 由网关显式决定（而不是在 `build_chat_body` 里再判一次）：
     // 自动降级需要「强制文本模式」重发，判定必须只有一处。
+    let business_table = state.business.clone();
     let build_encoded = |user_type: &str, structured: bool, uid: &str| -> Result<String, String> {
         let mut body_value =
             api::build_chat_body_with_structured(&openai_payload, &meta, user_type, structured)?;
@@ -698,6 +699,27 @@ pub async fn chat_for_region_once(
                 "session_id".into(),
                 Value::String(stable_upstream_session_id(uid, conversation)),
             );
+        }
+
+        /* ★ 业务会话聚合：同一 (区域, 账号, 会话键) 复用同一 business
+        `id / begin_at / name`，上游用量明细按会话聚合，形成一条会话记录。
+        `begin_at`/`name` 由进程内锚点表提供；key 含区域与 uid，换号或跨区域时
+        使用各自账号的锚点，会话账目按账号隔离。命中后刷新锚点时间。 */
+        if let (Some(conversation), Some(seed)) = (
+            sticky_key.as_deref(),
+            super::business::anchor_from_body(&body_value),
+        ) {
+            let anchor = {
+                let mut table = business_table
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                table.anchor_or_insert(
+                    &super::business::key(region.as_str(), uid, conversation),
+                    now_ms(),
+                    || seed,
+                )
+            };
+            super::business::apply_to_body(&mut body_value, &anchor);
         }
 
         // ★ issue #65 后续：客户端没传思考档时，用**按模型配置**的默认档补上。
