@@ -20,6 +20,7 @@ import { Coins, MessagesSquare, Route, Users } from "lucide-react";
 
 import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
 import { compactTokens, exactTokens, formatCredits } from "@/components/usage/format";
+import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import type { OverviewMetrics } from "@/lib/overview-metrics";
 
@@ -82,6 +83,9 @@ export function OverviewStats({ metrics, accountCount, attentionCount, accountsL
       hint: credits
         ? t("wbOverview.stat.creditsRemaining", { n: formatCredits(credits.remaining) })
         : t("wbOverview.stat.unavailable"),
+      title: credits?.collectedAt
+        ? t("wbOverview.stat.creditsCollectedAt", { time: formatDate(credits.collectedAt) })
+        : undefined,
     },
     {
       icon: Route,
