@@ -760,9 +760,15 @@ fn rollback_and_report(target: &Path, backup: Option<&Path>, reason: &str) -> St
 /// 前端据此把 `currentUid == account.uid` 的那张卡标成「当前登录」——
 /// **判断放在前端**（同一个 `currentUid` 要跟列表里每条账号比），后端只给事实。
 ///
-/// ⚠️ `running` 单独给：客户端在跑时**不能**切换（退出时会用内存态覆盖我们写的），
-/// 界面要据此把「切换」按钮置灰并说明原因 —— 而不是让用户点了才失败。
+/// `running` 只在确认有匹配进程时为 `true`。写回前由进程守卫重新检查，无法确认时拒绝写入。
 pub fn program_status_for(region: QoderRegion) -> Value {
+    program_status_for_with(region, crate::modules::process::probe_image_running)
+}
+
+fn program_status_for_with(
+    region: QoderRegion,
+    probe_running: impl Fn(&str) -> Option<bool>,
+) -> Value {
     let probes = super::profile::probe_local_sources(region);
     let programs: Vec<Value> = QoderProgram::all()
         .into_iter()
@@ -774,7 +780,7 @@ pub fn program_status_for(region: QoderRegion) -> Value {
                 "label": program.label(),
                 "state": probe.map(|p| p.state.as_str()).unwrap_or("missing"),
                 "detail": probe.and_then(|p| p.state.detail()),
-                "running": program_running(region, program),
+                "running": probe_running(program_image(region, program)).unwrap_or(false),
                 "currentUid": super::profile::current_uid_for(region, kind),
             })
         })
@@ -974,6 +980,22 @@ mod tests {
         });
         assert!(!running, "注入 false ⇒ 视为未运行");
         assert_eq!(seen, "Qoder.exe", "国际版桌面版映像名");
+    }
+
+    #[test]
+    fn program_status_does_not_report_unconfirmed_processes_as_running() {
+        let _env = TestEnv::new();
+
+        let unavailable = program_status_for_with(QoderRegion::Cn, |_| None);
+        assert_eq!(unavailable["programs"][0]["state"], "missing");
+        assert_eq!(unavailable["programs"][0]["running"], false);
+        assert_eq!(unavailable["programs"][1]["state"], "missing");
+        assert_eq!(unavailable["programs"][1]["running"], false);
+
+        let detected =
+            program_status_for_with(QoderRegion::Cn, |image| Some(image == "Qoder CN.exe"));
+        assert_eq!(detected["programs"][0]["running"], true);
+        assert_eq!(detected["programs"][1]["running"], false);
     }
 
     /// 客户端在跑 ⇒ **拒绝写**，且错误文案要说清「请先退出 X 客户端」。
