@@ -9,7 +9,7 @@
  * | 指标 | WorkBuddy | Trae |
  * | --- | --- | --- |
  * | 逐日 Token | `get_token_statistics` + `mergeSources` | `get_trae_token_statistics` |
- * | 积分 | `get_credit_statistics`（`summary.usageToday`） | `get_trae_credits`（当日快照 `consumed`） |
+ * | 积分 | `get_credit_statistics`（官方当日用量 + 本地余额） | `get_trae_credits`（当日快照 `consumed`） |
  * | 网关请求 | `get_gateway_logs` | `get_trae_gateway_logs` |
  *
  * 这些差异是**「数据从哪来」**，不是「能力有没有」⇒ 用 `Record<Product, …>` 表声明，
@@ -29,7 +29,7 @@ import * as api from "@/lib/api";
 import { normalizeGatewayConfig } from "@/lib/gateway";
 import type { Product } from "@/lib/platforms/registry";
 import { normalizeTraeGatewayConfig, normalizeTraeGatewayLogs } from "@/lib/trae-gateway";
-import type { Region } from "@/lib/types";
+import type { CreditStatistics, Region } from "@/lib/types";
 import { mergeSources } from "@/lib/usage-charts";
 
 /** 逐日 Token 点（两平台归一后的**最小**形状：只有柱状图真正要用的三个字段）。 */
@@ -42,14 +42,20 @@ export interface OverviewDay {
   records: number;
 }
 
+interface OverviewCredits {
+  today: number | null;
+  remaining: number;
+  collectedAt?: number;
+}
+
 /** 概览统计行与趋势卡共用的指标（每项 `null` = 读不到，**不编数**）。 */
 export interface OverviewMetrics {
   /** 首次加载中（尚无任何结果）。 */
   loading: boolean;
   /** 近 14 天逐日 Token（升序，恒 14 项、缺日补 0）。 */
   token: { days: OverviewDay[]; today: number; yesterday: number } | null;
-  /** 今日积分消耗 + 剩余合计（无缓存时 `null`）。 */
-  credits: { today: number; remaining: number } | null;
+  /** 今日积分消耗和剩余合计。官方用量缺失时，余额仍可独立显示。 */
+  credits: OverviewCredits | null;
   /** 今日网关请求数（**仅本机请求日志**）；`truncated` ⇒ 该数是下界。 */
   gateway: { today: number; truncated: boolean } | null;
 }
@@ -103,14 +109,33 @@ const TOKEN_SERIES: Record<Product, (region: Region) => Promise<OverviewDay[]>> 
   qoder: async () => [],
 };
 
+export function workbuddyOverviewCredits(stats: CreditStatistics, today: string): OverviewCredits {
+  const remaining = stats.summary.currentRemaining;
+  const unavailable = { today: null, remaining };
+  const official = stats.officialUsage;
+  if (official?.status !== "complete" || official.rangeEnd !== today) return unavailable;
+
+  // 缓存可能来自账号变更前。只有覆盖当前整套账号时才能显示消耗合计。
+  const reportedIds = new Set(
+    official.accounts.filter((account) => account.ok).map((account) => account.accountId),
+  );
+  if (
+    official.accounts.length !== stats.accounts.length ||
+    stats.accounts.some((account) => !reportedIds.has(account.accountId))
+  ) {
+    return unavailable;
+  }
+
+  const usage = official.summary?.usageToday;
+  if (typeof usage !== "number" || !Number.isFinite(usage) || usage < 0) return unavailable;
+  return { today: usage, remaining, collectedAt: official.collectedAt };
+}
+
 /** 今日积分消耗 + 剩余合计；**无数据源可读时返回 `null`**（不回落 0）。 */
-const CREDIT_SNAPSHOT: Record<
-  Product,
-  (region: Region) => Promise<{ today: number; remaining: number } | null>
-> = {
+const CREDIT_SNAPSHOT: Record<Product, (region: Region) => Promise<OverviewCredits | null>> = {
   workbuddy: async (region) => {
     const stats = await api.getCreditStatistics(false, region);
-    return { today: stats.summary.usageToday, remaining: stats.summary.currentRemaining };
+    return workbuddyOverviewCredits(stats, dateKey(new Date()));
   },
   trae: async (region) => {
     const credits = await api.getTraeCredits(region);

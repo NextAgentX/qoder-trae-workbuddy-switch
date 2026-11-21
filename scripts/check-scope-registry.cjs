@@ -6772,6 +6772,7 @@ check("★ P3(独立) 概览「对比昨日」不编造（跑真组件：昨日=
       "lucide-react": new Proxy({}, { get: () => stubComponent("Icon") }),
       "@/components/usage/stat-tiles": { StatTiles: stubComponent("StatTiles") },
       "@/components/usage/format": { exactTokens: (v) => String(v), compactTokens: (v) => String(v), formatCredits: (v) => String(v) },
+      "@/lib/format": loadTs(path.join(ROOT, "src/lib/format.ts")),
       "@/lib/i18n": { useT: () => t },
     };
     const mod = loadUsageComponent("src/components/overview/overview-stats.tsx", stubs);

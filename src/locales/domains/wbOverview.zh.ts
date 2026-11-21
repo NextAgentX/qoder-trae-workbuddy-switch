@@ -60,6 +60,7 @@ export const zh = {
   "wbOverview.stat.tokensHintClientOnly": "仅客户端自身用量，不含经本网关的请求",
   "wbOverview.stat.credits": "今日积分消耗",
   "wbOverview.stat.creditsRemaining": "剩余合计 {n}",
+  "wbOverview.stat.creditsCollectedAt": "官方用量截至 {time}",
   "wbOverview.stat.gateway": "网关请求（今日）",
   "wbOverview.stat.gatewayHint": "统计自本机请求日志",
   "wbOverview.stat.gatewayTruncated": "日志已裁剪，实际更多",
