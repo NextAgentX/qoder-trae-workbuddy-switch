@@ -481,6 +481,18 @@ pub async fn authenticated_post_for(
 }
 
 async fn post_with_account(region: Region, account: &Value, url: &str, body: Value) -> Value {
+    post_with_account_tenant_policy(region, account, url, body, true).await
+}
+
+/// Enterprise usage is scoped by the bearer token on the server. Keep client-supplied tenant
+/// identifiers out of this request so account metadata cannot select another tenant's usage.
+async fn post_with_account_tenant_policy(
+    region: Region,
+    account: &Value,
+    url: &str,
+    body: Value,
+    include_tenant_headers: bool,
+) -> Value {
     let uid = account.get("uid").and_then(Value::as_str).unwrap_or("");
     let _risk_permit = match crate::modules::risk_control::admit_platform_request(
         "workbuddy",
@@ -492,7 +504,7 @@ async fn post_with_account(region: Region, account: &Value, url: &str, body: Val
         Ok(permit) => permit,
         Err(error) => return json!({"code": -3, "message": format!("风控准入拦截：{error}")}),
     };
-    let headers = resource_auth_headers(account, request_origin(url));
+    let headers = resource_auth_headers(account, request_origin(url), include_tenant_headers);
     // POST 结果不确定时不自动重放；账号共用网关出口，不读取旧账号代理映射。
     let response = http_request(url, "POST", Some(body), Some(&headers)).await;
     let code = response.get("code").and_then(Value::as_i64).unwrap_or(-1);
@@ -523,8 +535,13 @@ fn request_origin(url: &str) -> &'static str {
 fn resource_auth_headers(
     account: &Value,
     origin: &str,
+    include_tenant_headers: bool,
 ) -> std::collections::HashMap<String, String> {
     let mut headers = build_auth_headers(account);
+    if !include_tenant_headers {
+        headers.remove("X-Enterprise-Id");
+        headers.remove("X-Tenant-Id");
+    }
     // WorkBuddy 用户中心的 Axios 拦截器始终携带该头。桌面端使用同一组
     // billing 接口时也保持一致，避免网关把请求当成未知客户端。
     headers.insert("X-Client-Platform".to_string(), "web".to_string());
@@ -707,14 +724,13 @@ async fn fetch_legacy_user_resource_for(region: Region, account: &Value) -> Valu
 
 /// 请求企业/教育公益版席位账号的月度配额。
 ///
-/// 空 body + 账号自带的 `X-Enterprise-Id` 头（[`build_auth_headers`] 会按
-/// `enterpriseId` / `enterprise_id` 自动补），与上游网页端 `plans-usage` 页的调用一致。
+/// 空 body；服务端按 Bearer 凭证推导所属企业，故意不发送账号资料中的企业 / tenant ID。
 async fn fetch_enterprise_user_usage_for(region: Region, account: &Value) -> Value {
     let url = format!(
         "{}{ENTERPRISE_USER_USAGE_PATH}",
         new_resource_endpoint_for(region, account)
     );
-    post_with_account(region, account, &url, json!({})).await
+    post_with_account_tenant_policy(region, account, &url, json!({}), false).await
 }
 
 fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {
@@ -1069,6 +1085,22 @@ mod tests {
         );
         assert_eq!(enterprise_id(&json!({"enterpriseId": "   "})), None);
         assert_eq!(enterprise_id(&json!({"enterpriseId": Value::Null})), None);
+    }
+
+    /// 企业额度接口按 Bearer 身份推导企业，不应把账号资料里的 tenant ID 当授权参数发送。
+    #[test]
+    fn enterprise_usage_headers_omit_client_supplied_tenant_ids() {
+        let account = json!({
+            "access_token": "access-token",
+            "uid": "user-1",
+            "enterpriseId": "enterprise-from-account"
+        });
+        let headers = resource_auth_headers(&account, WORKBUDDY_WEB_ENDPOINT, false);
+
+        assert_eq!(headers.get("Authorization").unwrap(), "Bearer access-token");
+        assert_eq!(headers.get("X-User-Id").unwrap(), "user-1");
+        assert!(!headers.contains_key("X-Enterprise-Id"));
+        assert!(!headers.contains_key("X-Tenant-Id"));
     }
 
     /// 回归上游 issue #94：信封凭据在 `authenticated_post_for` **入口**短路，
@@ -1536,7 +1568,7 @@ mod tests {
             "https://www.codebuddy.cn/billing/meter/get-user-resource-summary"
         );
 
-        let headers = resource_auth_headers(&codebuddy, new_resource_endpoint(&codebuddy));
+        let headers = resource_auth_headers(&codebuddy, new_resource_endpoint(&codebuddy), true);
         assert_eq!(
             headers.get("X-Client-Platform").map(String::as_str),
             Some("web")
@@ -1564,7 +1596,7 @@ mod tests {
         );
 
         let workbuddy_headers =
-            resource_auth_headers(&workbuddy, new_resource_endpoint(&workbuddy));
+            resource_auth_headers(&workbuddy, new_resource_endpoint(&workbuddy), true);
         assert_eq!(
             workbuddy_headers.get("Origin").map(String::as_str),
             Some("https://www.workbuddy.cn")
@@ -1578,7 +1610,8 @@ mod tests {
             Some("www.workbuddy.cn")
         );
 
-        let unknown_headers = resource_auth_headers(&unknown, new_resource_endpoint(&unknown));
+        let unknown_headers =
+            resource_auth_headers(&unknown, new_resource_endpoint(&unknown), true);
         assert_eq!(
             unknown_headers.get("Origin").map(String::as_str),
             Some("https://www.codebuddy.cn")
@@ -1591,7 +1624,7 @@ mod tests {
         // 官方用量 URL 固定 workbuddy.cn，Origin 必须跟请求 host，X-Domain 仍用账号域。
         let usage_url = "https://www.workbuddy.cn/billing/meter/get-user-request-usage";
         assert_eq!(request_origin(usage_url), WORKBUDDY_WEB_ENDPOINT);
-        let usage_headers = resource_auth_headers(&codebuddy, request_origin(usage_url));
+        let usage_headers = resource_auth_headers(&codebuddy, request_origin(usage_url), true);
         assert_eq!(
             usage_headers.get("Origin").map(String::as_str),
             Some("https://www.workbuddy.cn")
