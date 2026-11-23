@@ -1553,32 +1553,34 @@ pub(crate) fn is_workbuddy_running_for_session_write(region: Region) -> bool {
 ///
 /// ## ★ 语义：**查询失败视为「在运行」**
 ///
-/// 与 [`alive_pids_from`] 同一条纪律：本函数唯一的调用方是**写入前的守卫**，
-/// 把一次 `tasklist` 抖动当成「已退出」会让我们去改客户端可能正在写的文件；
-/// 误判成「在运行」的代价只是用户重试一次。
+/// 与 [`alive_pids_from`] 同一条纪律：守卫在无法确认进程已经退出时拒绝写入，
+/// 避免修改客户端可能还在写的文件。界面展示用 [`probe_image_running`] 的探测结果。
 ///
 /// `image` 是**完整映像名**（如 `claude.exe`）；Windows 上映像名大小写不敏感。
 /// 空映像名 ⇒ 判不出来 ⇒ 保守返回 `true`（守卫拒绝写入）。
 pub fn is_image_running(image: &str) -> bool {
+    probe_image_running(image).unwrap_or(true)
+}
+
+/// 按映像名探测进程。已确认存在或不存在时返回 `Some`，无法确认时返回 `None`。
+pub(super) fn probe_image_running(image: &str) -> Option<bool> {
     let image = image.trim();
     if image.is_empty() {
-        return true;
+        return None;
     }
     #[cfg(target_os = "windows")]
     {
-        match windows_image_live_rows(image) {
-            Some(rows) => windows_rows_match_image(&rows, image),
-            // 查询失败 ⇒ 保守视为在运行（见文档）。
-            None => true,
-        }
+        windows_image_live_rows(image).map(|rows| windows_rows_match_image(&rows, image))
     }
     #[cfg(not(target_os = "windows"))]
     {
         // macOS / Linux：`pgrep -x` 按**完整进程名**匹配（那里不带 `.exe`）。
         let stem = image.strip_suffix(".exe").unwrap_or(image);
-        match cmd_builder("pgrep").args(["-x", stem]).output() {
-            Ok(out) => out.status.success(),
-            Err(_) => true,
+        let output = cmd_builder("pgrep").args(["-x", stem]).output().ok()?;
+        match output.status.code() {
+            Some(0) => Some(true),
+            Some(1) => Some(false),
+            _ => None,
         }
     }
 }
@@ -2286,6 +2288,7 @@ INFO: No tasks are running which match the specified criteria.
     /// 会**绕过进程守卫**）。
     #[test]
     fn blank_image_name_is_treated_as_running() {
+        assert_eq!(probe_image_running(""), None);
         assert!(is_image_running(""));
         assert!(is_image_running("   "));
     }

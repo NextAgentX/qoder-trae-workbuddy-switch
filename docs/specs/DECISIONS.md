@@ -931,6 +931,8 @@ webview 里属 HTTPS 页面发起的回环 HTTP 请求 —— 依赖平台把 lo
 **结论**：两处判据从 `state === "ready" && !running` 改成只看 `state === "ready"`。
 点「切换」时**现查一次** `qoder_program_status`：查到在跑就**不写、不报错**，把同一个确认框
 正文换成「正在运行（关窗 ≠ 退出，通常还在托盘）」，主按钮换成「关闭 `{program}` 并继续」。
+程序状态只在确认有匹配进程时报告「正在运行」，避免 Docker 缺少 `pgrep` 时把客户端标成已安装。
+写回前仍会重新探测，无法确认客户端已退出时拒绝写入。
 
 **顺序不可调换**：`qoder::switch::switch_account_for_closing` 先
 `process::close_image`（`taskkill /PID … /T` → 8s → `/F`，等 PID 全部消失）、
