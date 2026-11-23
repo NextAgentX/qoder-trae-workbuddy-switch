@@ -29,6 +29,7 @@
 //! 首次真机跑通前，不要把「网关可用」当作已有事实。
 
 pub mod apikey;
+pub mod business;
 pub mod degrade;
 pub mod payload;
 pub mod pool;
@@ -279,6 +280,8 @@ pub struct QoderGatewayState {
     pub disabled: Arc<RwLock<crate::disabled_models::DisabledModels>>,
     /// 会话粘性绑定表。
     pub sticky: Arc<Mutex<crate::StickyTable>>,
+    /// 业务会话锚点表（同一会话复用 `business` 三元组）。
+    pub business: business::SharedBusinessTable,
     /// 请求日志。
     pub log: Arc<RequestLog>,
     /// 多 API Key 存储。
@@ -313,6 +316,9 @@ impl QoderGatewayState {
             pools: Arc::new(Mutex::new(HashMap::new())),
             disabled: crate::disabled_models::shared(),
             sticky: Arc::new(Mutex::new(crate::StickyTable::new(config.sticky_ttl_ms))),
+            business: Arc::new(std::sync::Mutex::new(business::BusinessTable::new(
+                config.sticky_ttl_ms,
+            ))),
             log,
             key_store: Arc::new(apikey::QoderApiKeyStore::new(paths::gateway_keys_file())),
             key_usage: Arc::new(crate::key_usage::KeyUsageStore::new(
