@@ -341,12 +341,11 @@ fn enterprise_usage_payload(response: &Value) -> Option<&Value> {
 fn enterprise_usage_resource(response: &Value, now: i64) -> Option<Value> {
     let payload = enterprise_usage_payload(response)?;
     let total = first_number(payload, &["limitNum", "LimitNum"])?;
-    if total <= 0.0 {
+    let used = first_number(payload, &["credit", "Credit"])?;
+    if !total.is_finite() || !used.is_finite() || total <= 0.0 {
         return None;
     }
-    let used = first_number(payload, &["credit", "Credit"])
-        .unwrap_or(0.0)
-        .max(0.0);
+    let used = used.max(0.0);
     let remaining = (total - used).max(0.0);
     let expire_at = earliest_timestamp_ms(payload, &["cycleEndTime", "CycleEndTime"]);
     let expired = expire_at.map(|value| value <= now).unwrap_or(false);
@@ -371,7 +370,8 @@ fn enterprise_usage_resource(response: &Value, now: i64) -> Option<Value> {
     }))
 }
 
-fn response_error(response: &Value) -> String {    let nested = response.get("data").filter(|value| value.is_object());
+fn response_error(response: &Value) -> String {
+    let nested = response.get("data").filter(|value| value.is_object());
     let code = response_code(response).unwrap_or(-1);
     response
         .get("message")
@@ -717,7 +717,8 @@ async fn fetch_enterprise_user_usage_for(region: Region, account: &Value) -> Val
     post_with_account(region, account, &url, json!({})).await
 }
 
-fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {    let detail_codes: HashSet<String> = detail_resources
+fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {
+    let detail_codes: HashSet<String> = detail_resources
         .iter()
         .filter_map(|resource| {
             first_value(resource, &["packageCode", "PackageCode"])
@@ -970,10 +971,7 @@ mod tests {
     use super::*;
 
     fn approx(left: f64, right: f64) {
-        assert!(
-            (left - right).abs() < 1e-9,
-            "期望 {right}，实际 {left}"
-        );
+        assert!((left - right).abs() < 1e-9, "期望 {right}，实际 {left}");
     }
 
     /// 回归上游 issue #205「教师企业版读取不到积分」。
@@ -1039,6 +1037,13 @@ mod tests {
         assert!(enterprise_usage_resource(&failure, 0).is_none());
     }
 
+    /// 缺少已用额度时余额未知，不能把它当成 0 已用并显示满额。
+    #[test]
+    fn enterprise_quota_missing_credit_is_unknown() {
+        let response = json!({"code": 0, "data": {"limitNum": 500}});
+        assert!(enterprise_usage_resource(&response, 0).is_none());
+    }
+
     /// 超额使用（`credit > limitNum`）时剩余归零，已用截到上限 —— 不能让界面出现负数。
     #[test]
     fn enterprise_quota_clamps_overuse() {
@@ -1058,7 +1063,10 @@ mod tests {
         );
         assert_eq!(enterprise_id(&json!({"enterprise_id": "e-2"})), Some("e-2"));
         // 个人账号没有这个字段；空白串同样视为没有。
-        assert_eq!(enterprise_id(&json!({"uid": "x", "type": "personal"})), None);
+        assert_eq!(
+            enterprise_id(&json!({"uid": "x", "type": "personal"})),
+            None
+        );
         assert_eq!(enterprise_id(&json!({"enterpriseId": "   "})), None);
         assert_eq!(enterprise_id(&json!({"enterpriseId": Value::Null})), None);
     }
