@@ -292,6 +292,73 @@ pub fn prefix_stream(
     futures_util::stream::iter(head).chain(response.bytes_stream())
 }
 
+/// WorkBuddy CN 流式请求的上游字节 idle 超时环境变量。
+pub const STREAM_IDLE_TIMEOUT_SECS_ENV: &str = "BUDDY_SWITCH_STREAM_IDLE_TIMEOUT_SECS";
+/// 缺省的上游字节 idle 超时（秒）。
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 60;
+
+/// 读取上游字节 idle 超时；未设置或非法值回退到 60 秒，`0` 表示禁用。
+pub fn stream_idle_timeout() -> std::time::Duration {
+    match std::env::var(STREAM_IDLE_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(seconds) => std::time::Duration::from_secs(seconds),
+        None => std::time::Duration::from_secs(DEFAULT_STREAM_IDLE_TIMEOUT_SECS),
+    }
+}
+
+/// 在上游字节流上按「相邻 chunk」增加 idle 闸门。
+///
+/// reqwest 传输错误转成 `Other`，idle 超时转成 `TimedOut`；后者由 `UsageTap`
+/// 作为明确的 `UpstreamEvent::Timeout` 记录。`forwarded_bytes` 由最终 SSE 输出层更新，
+/// 因此超时详情只统计已经交给下游的字节，不含后续生成的错误帧和 `[DONE]`。
+pub fn stream_with_idle_timeout<S>(
+    stream: S,
+    timeout: std::time::Duration,
+    forwarded_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> futures_util::stream::BoxStream<'static, Result<axum::body::Bytes, std::io::Error>>
+where
+    S: futures_util::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
+{
+    use futures_util::StreamExt;
+
+    let stream = stream
+        .map(|item| {
+            item.map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))
+        })
+        .boxed();
+    if timeout.is_zero() {
+        return stream;
+    }
+
+    futures_util::stream::unfold(
+        (stream, forwarded_bytes, false),
+        move |(mut stream, forwarded_bytes, finished)| async move {
+            if finished {
+                return None;
+            }
+            match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(Some(Ok(chunk))) => Some((Ok(chunk), (stream, forwarded_bytes, false))),
+                Ok(Some(Err(error))) => Some((Err(error), (stream, forwarded_bytes, true))),
+                Ok(None) => None,
+                Err(_) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        crate::protocol::usage_tap::StreamIdleTimeoutError {
+                            idle_ms: timeout.as_millis(),
+                            forwarded_bytes: forwarded_bytes
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                        },
+                    );
+                    Some((Err(error), (stream, forwarded_bytes, true)))
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
 /// 非流式：把 peek 取走的首块拼回正文，再读出剩余全部字节。
 pub async fn body_text_with_prefix(
     prefix: Option<axum::body::Bytes>,

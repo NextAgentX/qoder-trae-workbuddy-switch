@@ -610,6 +610,9 @@ WB 侧再抽 `messages_for_region` / `responses_for_region`，Trae 侧再抽 `me
 ★ src-tauri 两处**在沙箱内编译不了**（本仓纪律：`-p` 排除它）⇒ 必须由能跑完整构建的环境验证。
 - 抽 `pub(crate) relay_*`；新 `unified/dispatch.rs`：`namespace → variant → 对应 relay`。
 - 流式：WB 侧 SSE 透传、Trae 侧转私有 SSE —— **都复用既有实现**。
+- WorkBuddy CN 的 `/v1/chat/completions` 流在相邻上游字节间默认等待 60 秒；网关进程可用
+  `BUDDY_SWITCH_STREAM_IDLE_TIMEOUT_SECS` 设定秒数，`0` 关闭。超时写入 502 等价失败并发 SSE 错误帧 + `[DONE]`；
+  响应头已提交，实际 HTTP 状态仍为 200。该闸门不影响非流式、WorkBuddy Global、Responses 或 Anthropic 路径。
 
 ### P4 · 契约收尾
 - `/v1/models` 聚合（§4.1）；§4.3 五条错误；日志 `namespace`/`resolved_model`/`program`；禁用经 `region_of_variant`；`/status` 统一视图。

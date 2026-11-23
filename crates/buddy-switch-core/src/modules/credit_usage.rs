@@ -7,7 +7,7 @@
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use serde_json::{json, Value};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use crate::modules::account::{account_display_name, load_accounts_for};
@@ -199,6 +199,13 @@ fn local_date_string(ts: i64) -> Option<String> {
     local_date(ts).map(|date| date.format("%Y-%m-%d").to_string())
 }
 
+fn local_date_hour_string(ts: i64) -> Option<String> {
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .map(|date| date.format("%Y-%m-%d-%H").to_string())
+}
+
 /// 生成逐日观察序列（daily_start..=today，无数据的天补 0）；无快照起点时返回空数组。
 fn local_daily_series(
     daily: &HashMap<String, f64>,
@@ -352,6 +359,7 @@ fn build_statistics(
     let mut usage_events = Vec::new();
     let mut usage_totals: HashMap<String, (f64, f64, f64)> = HashMap::new();
     let mut daily_usage: HashMap<String, HashMap<String, f64>> = HashMap::new();
+    let mut hourly_usage: BTreeMap<String, f64> = BTreeMap::new();
     let mut latest_snapshots = HashMap::new();
     for (account_id, mut snapshots) in by_account {
         snapshots.sort_by_key(|snapshot: &Snapshot| snapshot.ts);
@@ -390,6 +398,11 @@ fn build_statistics(
                 account_id: account_id.clone(),
                 amount,
             });
+            if local_date(current.ts) == Some(today) {
+                if let Some(key) = local_date_hour_string(current.ts) {
+                    *hourly_usage.entry(key).or_default() += amount;
+                }
+            }
         }
     }
 
@@ -500,6 +513,10 @@ fn build_statistics(
         }
     }
     let daily = local_daily_series(&aggregate_daily, daily_start, today);
+    let daily_hours: Vec<Value> = hourly_usage
+        .iter()
+        .map(|(key, usage)| json!({ "key": key, "usage": usage }))
+        .collect();
 
     let mut events: Vec<(i64, Value)> = usage_events
         .iter()
@@ -555,6 +572,7 @@ fn build_statistics(
             "todayFailed": today_failed,
         },
         "daily": daily,
+        "dailyHours": daily_hours,
         "accounts": account_summaries,
         "events": recent_events,
     })
@@ -830,12 +848,30 @@ pub fn merge_credit_statistics(cn: &Value, global: &Value) -> Value {
         .or_else(|| global.get("generatedAt").and_then(Value::as_i64))
         .unwrap_or_else(now_ms);
 
+    let mut hourly: BTreeMap<String, f64> = BTreeMap::new();
+    for source in [cn, global] {
+        if let Some(points) = source.get("dailyHours").and_then(Value::as_array) {
+            for point in points {
+                let Some(key) = point.get("key").and_then(Value::as_str) else {
+                    continue;
+                };
+                let usage = point.get("usage").and_then(Value::as_f64).unwrap_or(0.0);
+                *hourly.entry(key.to_string()).or_default() += usage;
+            }
+        }
+    }
+    let daily_hours: Vec<Value> = hourly
+        .into_iter()
+        .map(|(key, usage)| json!({ "key": key, "usage": usage }))
+        .collect();
+
     json!({
         "generatedAt": generated_at,
         "retentionDays": retention_days,
         "coverageStartAt": coverage_start_at,
         "summary": summary,
         "daily": merge_daily_series(cn, global),
+        "dailyHours": daily_hours,
         "accounts": accounts,
         "events": events,
         "officialUsage": merge_official_usage(

@@ -81,6 +81,8 @@ pub struct UsageDay {
 pub struct UsageEvent {
     /// 本地日期 `YYYY-MM-DD`（由 `timestamp` + 本地时区派生）。
     pub date: String,
+    /// 本地日期小时 `YYYY-MM-DD-HH`，供今日趋势按小时显示。
+    pub date_hour: String,
     /// 该行的 credits（已确认是有限数值）。
     pub credits: f64,
     /// 模型名；行里缺失时回落为 [`UNKNOWN_MODEL`]。
@@ -127,6 +129,7 @@ pub fn parse_line(line: &str) -> Option<UsageEvent> {
     // 只认能解析出 timestamp 的行 —— 否则无法分桶。
     let timestamp = value.get("timestamp").and_then(Value::as_str)?;
     let date = local_date_of(timestamp)?;
+    let date_hour = local_date_hour_of(timestamp)?;
 
     // 只认带数值 credits 的行 —— 这是「计费请求」的唯一判据。
     let credits = find_credits(&value)?;
@@ -155,6 +158,7 @@ pub fn parse_line(line: &str) -> Option<UsageEvent> {
 
     Some(UsageEvent {
         date,
+        date_hour,
         credits,
         model,
         session_id,
@@ -209,6 +213,16 @@ fn truncate_chars(text: &str, max: usize) -> String {
 fn local_date_of(timestamp: &str) -> Option<String> {
     let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
     Some(parsed.with_timezone(&Local).format("%Y-%m-%d").to_string())
+}
+
+fn local_date_hour_of(timestamp: &str) -> Option<String> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp).ok()?;
+    Some(
+        parsed
+            .with_timezone(&Local)
+            .format("%Y-%m-%d-%H")
+            .to_string(),
+    )
 }
 
 /// 从一行事件里取 credits。
@@ -527,10 +541,31 @@ pub fn usage_view_for(region: QoderRegion, days: Option<u32>) -> Value {
         })
         .collect();
 
+    let mut hourly: BTreeMap<String, (f64, u64, BTreeMap<String, f64>)> = BTreeMap::new();
+    for event in scan
+        .events
+        .iter()
+        .filter(|event| event.date == today.format("%Y-%m-%d").to_string())
+    {
+        let bucket = hourly
+            .entry(event.date_hour.clone())
+            .or_insert_with(|| (0.0, 0, BTreeMap::new()));
+        bucket.0 += event.credits;
+        bucket.1 += 1;
+        *bucket.2.entry(event.model.clone()).or_insert(0.0) += event.credits;
+    }
+    let hourly_rows: Vec<Value> = hourly.into_iter().map(|(key, (credits, requests, models))| json!({
+        "key": key,
+        "credits": credits,
+        "requests": requests,
+        "byModel": sort_models_desc(models).into_iter().map(|(model, credits)| json!({"model": model, "credits": credits})).collect::<Vec<Value>>(),
+    })).collect();
+
     json!({
         "region": region.as_str(),
         "unit": "credits",
         "days": day_rows,
+        "dailyHours": hourly_rows,
         "totals": {
             "credits": credits_sum,
             "requests": requests,
@@ -588,6 +623,7 @@ mod tests {
     fn event(date: &str, credits: f64, model: &str) -> UsageEvent {
         UsageEvent {
             date: date.to_string(),
+            date_hour: format!("{date}-00"),
             credits,
             model: model.to_string(),
             session_id: "s".to_string(),
@@ -1016,6 +1052,7 @@ mod tests {
     fn session_event(date: &str, credits: f64, model: &str, session: &str) -> UsageEvent {
         UsageEvent {
             date: date.to_string(),
+            date_hour: format!("{date}-00"),
             credits,
             model: model.to_string(),
             session_id: session.to_string(),

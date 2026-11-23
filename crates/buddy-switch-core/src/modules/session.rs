@@ -2322,6 +2322,77 @@ impl CopyBatch {
         self.baselines_dirty = true;
     }
 
+    /// 账本已命中时，只有能证明「源正文在共同基线之后变化、目标正文未变」才自动更新目标。
+    ///
+    /// 没有基线时两份当前指纹不同并不能证明谁更新，必须留给用户处理；旧基线超过
+    /// 512 行时若前缀不足以证明两端状态，也同样保守跳过。
+    fn sync_ledger_replica(&mut self, source_cid: &str, target_cid: &str) -> Value {
+        let Some(source_path) = self.find_jsonl(source_cid) else {
+            return json!({ "status": "unavailable", "message": "找不到来源会话正文，未同步已有副本" });
+        };
+        let target_path = target_jsonl_path_for(
+            self.source_region,
+            self.target_region,
+            &source_path,
+            target_cid,
+        );
+        if !target_path.is_file() {
+            return json!({ "status": "unavailable", "message": "找不到目标副本正文，未同步" });
+        }
+        let (Some(source_fp), Some(target_fp)) = (
+            fingerprint_of_file(&source_path, source_cid),
+            fingerprint_of_file(&target_path, target_cid),
+        ) else {
+            return json!({ "status": "unavailable", "message": "无法稳定读取会话正文，未同步" });
+        };
+        if source_fp.line_count == target_fp.line_count
+            && source_fp.prefix_hashes == target_fp.prefix_hashes
+            && source_fp.full_hash == target_fp.full_hash
+        {
+            return json!({ "status": "unchanged", "message": "来源与目标副本内容一致" });
+        }
+
+        let baseline = self.baselines.get(&baseline_key(source_cid, target_cid));
+        let Some(baseline) = baseline else {
+            return json!({ "status": "needs_review", "message": "副本缺少共同基线，无法判断哪份更新；未覆盖" });
+        };
+        let (Some(source_unchanged), Some(target_unchanged)) = (
+            fingerprint_matches_baseline(&source_fp, baseline),
+            fingerprint_matches_baseline(&target_fp, baseline),
+        ) else {
+            return json!({ "status": "needs_review", "message": "共同基线不足以确认更新方向；未覆盖" });
+        };
+        if source_unchanged && target_unchanged {
+            return json!({ "status": "needs_review", "message": "会话指纹不同但未能证明更新方向；未覆盖" });
+        }
+        if !source_unchanged && !target_unchanged {
+            return json!({ "status": "diverged", "message": "来源与目标副本都在共同基线后发生变化；未覆盖" });
+        }
+        if source_unchanged {
+            return json!({ "status": "target_ahead", "message": "目标副本在共同基线后发生变化；保留目标内容" });
+        }
+
+        let backup_root = backup_dir().join("sessions-sync").join(utc_iso());
+        match unify_replica_between_files(
+            &source_path,
+            &target_path,
+            source_cid,
+            target_cid,
+            &backup_root,
+        ) {
+            Ok(report) => {
+                self.record_baseline(source_cid, target_cid, &target_path);
+                json!({
+                    "status": "updated",
+                    "message": "来源会话有新内容，已安全同步到已有副本",
+                    "backup": report.backup,
+                    "lostLines": report.lost_lines,
+                })
+            }
+            Err(error) => json!({ "status": "failed", "message": error }),
+        }
+    }
+
     /// 基线表整批一次落盘；无新基线时视为成功（不写文件）。
     fn flush_baselines(&mut self) -> bool {
         if !self.baselines_dirty {
@@ -2449,7 +2520,12 @@ fn run_copy_batch(
         }
         // ① 账本去重（内存账本 + 副本存活判定）
         if let Some(existing) = batch.ledger_hit(cid) {
-            skipped.push(dedup_report(cid, &existing));
+            let sync = batch.sync_ledger_replica(cid, &existing);
+            let mut report = dedup_report(cid, &existing);
+            if let Some(object) = report.as_object_mut() {
+                object.insert("sync".into(), sync);
+            }
+            skipped.push(report);
             continue;
         }
         // ② 批内去重：同一 id 重复勾选 / 重复传入时，只复制第一个
@@ -3146,6 +3222,28 @@ fn baseline_value(fingerprint: &SessionFingerprint) -> Value {
     })
 }
 
+/// 当前指纹是否仍与持久化基线一致。`None` 表示基线前缀太短，无法证明正文未变。
+fn fingerprint_matches_baseline(current: &SessionFingerprint, baseline: &Value) -> Option<bool> {
+    let line_count = baseline.get("lineCount")?.as_u64()? as usize;
+    let hashes: Vec<u64> = baseline
+        .get("prefixHashes")?
+        .as_array()?
+        .iter()
+        .map(Value::as_u64)
+        .collect::<Option<Vec<_>>>()?;
+    if current.line_count != line_count {
+        return Some(false);
+    }
+    let comparable = line_count.min(PREFIX_HASH_LIMIT);
+    if hashes.len() < comparable || current.prefix_hashes.len() < comparable {
+        return None;
+    }
+    if current.prefix_hashes[..comparable] != hashes[..comparable] {
+        return Some(false);
+    }
+    (line_count <= hashes.len()).then_some(true)
+}
+
 /// ★ P14 S2：**分歧统一**成功（真的覆盖了）⇒ 记一条基线。
 ///
 /// 与 [`CopyBatch::record_baseline`] **同口径**（都走 [`baseline_value`]）：
@@ -3229,6 +3327,66 @@ fn ledger_origin_of(value: &Value) -> Option<(String, String)> {
     let uid = map.get(LEDGER_ORIGIN_UID)?.as_str()?.trim();
     let cid = map.get(LEDGER_ORIGIN_CID)?.as_str()?.trim();
     (!uid.is_empty() && !cid.is_empty()).then(|| (uid.to_string(), cid.to_string()))
+}
+
+/// 读取「副本会话 → 来源账号/会话/目标账号」索引，供今日用量按复制时刻切分归属。
+///
+/// 旧格式账本没有 lineage；调用方仍能识别副本与目标账号，但复制前的用量只能进 unknown。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CopyLedgerLineage {
+    pub(crate) origin_uid: Option<String>,
+    pub(crate) origin_cid: Option<String>,
+    pub(crate) target_uid: String,
+}
+
+pub(crate) fn copy_ledger_lineage_for(region: Region) -> HashMap<String, CopyLedgerLineage> {
+    let ledger = load_copy_ledger_at(&copy_ledger_path_for(region));
+    let mut lineage = HashMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for (key, value) in ledger {
+        let parts: Vec<&str> = key.split(LEDGER_SEP).collect();
+        let target_uid = match parts.as_slice() {
+            [source_uid, target_uid, source_cid]
+                if !source_uid.is_empty() && !target_uid.is_empty() && !source_cid.is_empty() =>
+            {
+                *target_uid
+            }
+            [source_region, source_uid, target_uid, source_cid]
+                if matches!(*source_region, "cn" | "global")
+                    && !source_uid.is_empty()
+                    && !target_uid.is_empty()
+                    && !source_cid.is_empty() =>
+            {
+                *target_uid
+            }
+            _ => continue,
+        };
+        let Some(new_cid) = ledger_new_of(&value) else {
+            continue;
+        };
+        if ambiguous.contains(&new_cid) {
+            continue;
+        }
+        let (origin_uid, origin_cid) = ledger_origin_of(&value)
+            .map(|(uid, cid)| (Some(uid), Some(cid)))
+            .unwrap_or((None, None));
+        let mapped = CopyLedgerLineage {
+            origin_uid,
+            origin_cid,
+            target_uid: target_uid.to_string(),
+        };
+        match lineage.get(&new_cid) {
+            Some(previous) if previous != &mapped => {
+                lineage.remove(&new_cid);
+                ambiguous.insert(new_cid);
+            }
+            Some(_) => {}
+            None => {
+                lineage.insert(new_cid, mapped);
+            }
+        }
+    }
+    lineage
 }
 
 /// 从账本键里取 `target_uid`（键形如 `[region␟]source␟target␟cid`）。

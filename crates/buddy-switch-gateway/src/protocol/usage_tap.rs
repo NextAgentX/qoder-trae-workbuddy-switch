@@ -157,6 +157,25 @@ pub trait StreamErrorSink: Send + Sync {
     fn on_error(&self, error: crate::protocol::error_sniffer::SniffedError);
 }
 
+/// 可由 `UsageTap` 稳定识别的上游流 idle 超时及诊断数据。
+#[derive(Debug)]
+pub struct StreamIdleTimeoutError {
+    pub idle_ms: u128,
+    pub forwarded_bytes: u64,
+}
+
+impl std::fmt::Display for StreamIdleTimeoutError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "stream idle timeout: idleMs={} forwardedBytes={}",
+            self.idle_ms, self.forwarded_bytes
+        )
+    }
+}
+
+impl std::error::Error for StreamIdleTimeoutError {}
+
 /// `usage` 探针流包装。**不改变字节流**，只在流结束（或出错、或被丢弃）时回报一次用量。
 pub struct UsageTap<S> {
     inner: Pin<Box<S>>,
@@ -164,7 +183,7 @@ pub struct UsageTap<S> {
     sinks: Vec<Arc<dyn UsageSink>>,
     /// 流内错误接收方（可选）：某一帧是错误信封时回调一次。
     error_sink: Option<Arc<dyn StreamErrorSink>>,
-    /// ★ issue #129：流中途失败信号（可选）。命中错误帧 / 上游断流时写一次，
+    /// ★ issue #129：流中途失败信号（可选）。命中错误帧 / 上游断流 / idle 超时时写一次，
     /// 供协议出口（要不要补成功标记）与请求日志（写真实状态码）读取。
     ///
     /// 嗅探**只在这一处做**：三个消费者各自判一次必然漂移。
@@ -269,24 +288,50 @@ impl<S> UsageTap<S> {
     /// 改造前这里只 `report()`：连接被 reset 这种最常见的断流既不给客户端报错、
     /// 也不给账号写冷却 ⇒ 下一次选号那个号仍然「可用」，客户端即便重试也会再撞同一堵墙。
     ///
-    /// 归为 `Server`（走熔断域）而不是 `SessionDead`：网络抖动不该被升级成
-    /// 「禁用账号」；只有开关开启时才上报，关闭态保持原行为。
-    fn note_upstream_break<E: std::fmt::Debug>(&mut self, error: &E) {
+    /// 普通断流归为 `Server`（走熔断域）而不是 `SessionDead`：网络抖动不该被升级成
+    /// 「禁用账号」；只有开关开启时才上报。idle timeout 独立归为 `Timeout`，无论开关都记录。
+    fn note_upstream_break<E: std::fmt::Debug + std::error::Error + 'static>(&mut self, error: &E) {
         // 错误帧已经报过（帧在前、断流在后）：不要再把同一次事故记两遍。
         if self.error_reported {
             return;
         }
-        let Some(failure) = self.failure.as_ref().filter(|signal| signal.is_enabled()) else {
+        let Some(failure) = self.failure.as_ref() else {
             return;
         };
-        let detail = format!("上游连接中断：{error:?}");
-        failure.record(crate::pool::UpstreamEvent::Server, detail.clone());
+        let idle_timeout = (error as &dyn std::error::Error)
+            .downcast_ref::<std::io::Error>()
+            .filter(|error| error.kind() == std::io::ErrorKind::TimedOut)
+            .and_then(std::io::Error::get_ref)
+            .and_then(|source| source.downcast_ref::<StreamIdleTimeoutError>());
+        let is_idle_timeout = idle_timeout.is_some();
+        if !is_idle_timeout && !failure.is_enabled() {
+            return;
+        }
+        let detail = if let Some(idle_timeout) = idle_timeout {
+            format!(
+                "上游流中 idle 超时：idleMs={} forwardedBytes={}",
+                idle_timeout.idle_ms, idle_timeout.forwarded_bytes
+            )
+        } else {
+            format!("上游连接中断：{error:?}")
+        };
+        let event = if is_idle_timeout {
+            crate::pool::UpstreamEvent::Timeout
+        } else {
+            crate::pool::UpstreamEvent::Server
+        };
+        let status = crate::failover::client_error(&event, "", "").status;
+        if is_idle_timeout {
+            failure.record_idle_timeout(detail.clone());
+        } else {
+            failure.record(event.clone(), detail.clone());
+        }
         self.error_reported = true;
         if let Some(sink) = self.error_sink.as_ref() {
             sink.on_error(crate::protocol::error_sniffer::SniffedError {
-                event: crate::pool::UpstreamEvent::Server,
+                event,
                 message: detail,
-                status: 502,
+                status,
             });
         }
     }
@@ -347,7 +392,7 @@ impl<S> Drop for UsageTap<S> {
 impl<S, E> Stream for UsageTap<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Send,
-    E: std::fmt::Debug,
+    E: std::fmt::Debug + std::error::Error + 'static,
 {
     type Item = Result<Bytes, E>;
 

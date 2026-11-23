@@ -60,6 +60,9 @@ export interface TraeCreditsDaily {
   total: number;
   earned: number;
   consumed: number;
+  hourly: Array<{ hour: number; earned: number; consumed: number }>;
+  hourlyFromHour: number | null;
+  hourlyPartial: boolean;
 }
 
 /**
@@ -145,10 +148,27 @@ export function mergeTraeCredits(slices: TraeRegionSlice[]): TraeCreditsMerged {
         total: 0,
         earned: 0,
         consumed: 0,
+        hourly: [],
+        hourlyFromHour: snapshot.hourlyFromHour ?? null,
+        hourlyPartial: snapshot.hourlyPartial ?? true,
       };
       entry.total += snapshot.total ?? 0;
       entry.earned += snapshot.earned ?? 0;
       entry.consumed += snapshot.consumed ?? 0;
+      if (snapshot.hourlyFromHour == null || entry.hourlyFromHour == null) {
+        entry.hourlyFromHour = null;
+      } else {
+        entry.hourlyFromHour = Math.max(entry.hourlyFromHour, snapshot.hourlyFromHour);
+      }
+      entry.hourlyPartial = entry.hourlyPartial || snapshot.hourlyPartial === true;
+      const hourly = new Map(entry.hourly.map((point) => [point.hour, point]));
+      for (const point of snapshot.hourly ?? []) {
+        const hour = hourly.get(point.hour) ?? { hour: point.hour, earned: 0, consumed: 0 };
+        hour.earned += point.earned ?? 0;
+        hour.consumed += point.consumed ?? 0;
+        hourly.set(point.hour, hour);
+      }
+      entry.hourly = [...hourly.values()].sort((left, right) => left.hour - right.hour);
       dailyByDate.set(snapshot.date, entry);
     }
 

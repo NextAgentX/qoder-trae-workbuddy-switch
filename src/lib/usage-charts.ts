@@ -33,7 +33,7 @@ import { displayText } from "@/lib/display-text";
 /* ★ 窗口的**定义处**在 `usage-window.ts`（含 `dateKey`）：本模块只是它的一个消费方。
    改造前 `UsageRange = 7 | 14 | 30` 与 `dateKey` 都住在这里 —— 加「今天 / 自定义时间」后
    天数不再能表达用户选的东西（见该文件头），窗口换成联合类型，故下沉。 */
-import { usageWindowKeys, type UsageWindow } from "@/lib/usage-window";
+import { dateKey, usageWindowKeys, type UsageWindow } from "@/lib/usage-window";
 import type {
   CreditExpiry,
   CreditStatistics,
@@ -48,7 +48,7 @@ export type UsageView = "trend" | "models" | "sessions" | "credits";
 
 /** 趋势 · 堆叠柱：一天一列，`segments` 之和 === `total`（契约 1）。 */
 export interface DailyModelColumn {
-  /** ISO 日期。 */
+  /** 日期键或小时键（`YYYY-MM-DD-HH`）。 */
   day: string;
   /** 轴短标签（MM/DD）。 */
   label: string;
@@ -97,7 +97,7 @@ export interface SessionPoint {
 export interface CreditDailyBar {
   /** 轴短标签（`MM/DD`）。 */
   label: string;
-  /** 本地日期键 `YYYY-MM-DD` —— 窗口切片要靠它，**不能**靠 `label`。 */
+  /** 本地日期键或小时键 `YYYY-MM-DD-HH` —— 窗口切片要靠它，**不能**靠 `label`。 */
   date: string;
   inAmt: number;
   outAmt: number;
@@ -227,6 +227,8 @@ function emptySource(): TokenStatsSource {
     sessions: [],
     daily: [],
     dailyByModel: {},
+    dailyHours: [],
+    dailyHoursByModel: {},
     hours: [],
     filesScanned: 0,
     parseErrors: 0,
@@ -270,6 +272,24 @@ export function mergeSources(sources: TokenStatsSource[]): TokenStatsSource {
       left.key.localeCompare(right.key),
     );
   }
+  const hourlyModelMap = new Map<string, Map<string, TokenStatsGroup>>();
+  for (const source of sources) {
+    for (const [model, points] of Object.entries(source.dailyHoursByModel ?? {})) {
+      let hourMap = hourlyModelMap.get(model);
+      if (!hourMap) {
+        hourMap = new Map<string, TokenStatsGroup>();
+        hourlyModelMap.set(model, hourMap);
+      }
+      for (const point of points) {
+        const current = hourMap.get(point.key);
+        hourMap.set(point.key, current ? addGroup(current, point) : { ...point });
+      }
+    }
+  }
+  const dailyHoursByModel: Record<string, TokenStatsGroup[]> = {};
+  for (const [model, hourMap] of hourlyModelMap) {
+    dailyHoursByModel[model] = [...hourMap.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
 
   return {
     source: sources[0].source,
@@ -281,6 +301,8 @@ export function mergeSources(sources: TokenStatsSource[]): TokenStatsSource {
       left.key.localeCompare(right.key),
     ),
     dailyByModel,
+    dailyHours: mergeGroups(sources.flatMap((source) => source.dailyHours ?? [])).sort((left, right) => left.key.localeCompare(right.key)),
+    dailyHoursByModel,
     hours: mergeGroups(sources.flatMap((source) => source.hours)),
     filesScanned: sources.reduce((sum, source) => sum + source.filesScanned, 0),
     parseErrors: sources.reduce((sum, source) => sum + source.parseErrors, 0),
@@ -365,10 +387,13 @@ export function dateAxisLabel(date: string): string {
  * （旧后端 / 无 `dailyByModel`），退化为单段（哨兵 `TOTAL_SEGMENT`）。
  */
 export function dailyModelSeries(source: TokenStatsSource, window: UsageWindow): DailyModelColumn[] {
-  const days = lastDays(source.daily, window);
+  const hourly = window.kind === "today" && Array.isArray(source.dailyHours);
+  const days = hourly
+    ? elapsedHourPoints(source.dailyHours ?? [])
+    : lastDays(source.daily, window);
   if (days.length === 0) return [];
 
-  const dailyByModel = source.dailyByModel ?? {};
+  const dailyByModel = hourly ? source.dailyHoursByModel ?? {} : source.dailyByModel ?? {};
   const lookup = new Map<string, Map<string, number>>();
   const modelTotals = new Map<string, number>();
   for (const [model, points] of Object.entries(dailyByModel)) {
@@ -392,7 +417,7 @@ export function dailyModelSeries(source: TokenStatsSource, window: UsageWindow):
     if (segments.length === 0) {
       return {
         day: day.key,
-        label: dateAxisLabel(day.key),
+        label: hourly ? hourAxisLabel(day.key) : dateAxisLabel(day.key),
         total: day.total,
         segments: day.total > 0 ? [{ name: TOTAL_SEGMENT, value: day.total }] : [],
       };
@@ -404,8 +429,23 @@ export function dailyModelSeries(source: TokenStatsSource, window: UsageWindow):
       const last = segments[segments.length - 1];
       last.value = Math.max(0, last.value + remainder);
     }
-    return { day: day.key, label: dateAxisLabel(day.key), total: day.total, segments };
+    return { day: day.key, label: hourly ? hourAxisLabel(day.key) : dateAxisLabel(day.key), total: day.total, segments };
   });
+}
+
+/** 只生成今天已开始的小时，未来时段不伪装成零用量。 */
+function elapsedHourPoints(points: TokenStatsGroup[], now: number = Date.now()): TokenStatsGroup[] {
+  const date = dateKey(new Date(now));
+  const currentHour = new Date(now).getHours();
+  const byKey = new Map(points.map((point) => [point.key, point]));
+  return Array.from({ length: currentHour + 1 }, (_, hour) => {
+    const key = `${date}-${String(hour).padStart(2, "0")}`;
+    return byKey.get(key) ?? emptyDay(key);
+  });
+}
+
+function hourAxisLabel(key: string): string {
+  return `${key.slice(-2)}:00`;
 }
 
 /**
@@ -430,6 +470,23 @@ export function gatewayDailyColumns(
   window: UsageWindow,
 ): DailyModelColumn[] {
   if (!trend) return [];
+  if (window.kind === "today" && Array.isArray(trend.hourly)) {
+    const date = dateKey(new Date());
+    const nowHour = new Date().getHours();
+    const byKey = new Map(trend.hourly.map((point) => [point.key, point]));
+    const fromHour = Math.max(0, Math.min(trend.hourlyFromHour ?? 0, nowHour));
+    return Array.from({ length: nowHour - fromHour + 1 }, (_, index) => {
+      const hour = fromHour + index;
+      const key = `${date}-${String(hour).padStart(2, "0")}`;
+      const point = byKey.get(key);
+      return {
+        day: key,
+        label: hourAxisLabel(key),
+        total: point?.total ?? 0,
+        segments: point && point.total > 0 ? [{ name: GATEWAY_SEGMENT, value: point.total }] : [],
+      };
+    });
+  }
   const byDate = new Map(trend.days.map((point) => [point.key, point]));
   return usageWindowKeys(window).map((key) => {
     const point = byDate.get(key);
@@ -494,10 +551,28 @@ export function mergeGatewayTrends(
     }
   }
   const days = [...byDate.values()].sort((left, right) => left.key.localeCompare(right.key));
+  const byHour = new Map<string, GatewayTokenTrend["days"][number]>();
+  const hourlyComplete = present.every((trend) => Array.isArray(trend.hourly) && trend.hourlyFromHour != null);
+  for (const trend of present) {
+    for (const point of trend.hourly ?? []) {
+      const current = byHour.get(point.key);
+      if (!current) byHour.set(point.key, { ...point });
+      else {
+        current.input += point.input;
+        current.output += point.output;
+        current.total += point.total;
+        current.truncated = current.truncated || point.truncated;
+      }
+    }
+  }
   return {
     date: present[0].date,
     retentionDays: present[0].retentionDays,
     days,
+    hourly: hourlyComplete && byHour.size
+      ? [...byHour.values()].sort((left, right) => left.key.localeCompare(right.key))
+      : undefined,
+    hourlyFromHour: hourlyComplete ? Math.max(...present.map((trend) => trend.hourlyFromHour ?? 0)) : undefined,
     total: days.reduce((sum, point) => sum + point.total, 0),
   };
 }
@@ -651,6 +726,15 @@ export function sessionPoints(source: TokenStatsSource, window: UsageWindow): Se
  */
 export function creditDailyBars(stats: CreditStatistics, window: UsageWindow): CreditDailyBar[] {
   /* WB 的入账**不可得**（`events` 无金额字段）⇒ `inAmt` 恒 0，渲染层据此只画消耗侧。 */
+  if (window.kind === "today" && Array.isArray(stats.dailyHours)) {
+    const date = dateKey(new Date());
+    const nowHour = new Date().getHours();
+    const byHour = new Map(stats.dailyHours.map((point) => [point.key, point.usage]));
+    return Array.from({ length: nowHour + 1 }, (_, hour) => {
+      const key = `${date}-${String(hour).padStart(2, "0")}`;
+      return { date: key, label: `${String(hour).padStart(2, "0")}:00`, inAmt: 0, outAmt: byHour.get(key) ?? 0 };
+    });
+  }
   const byDate = new Map(stats.daily.map((point) => [point.date, point.usage]));
   return creditBars(
     usageWindowKeys(window).map((key) => ({ date: key, outAmt: byDate.get(key) ?? 0 })),

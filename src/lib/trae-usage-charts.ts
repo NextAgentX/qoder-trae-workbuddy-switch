@@ -77,6 +77,12 @@ export function toTokenStatsSource(
     const list = dailyByModel[point.model] ?? (dailyByModel[point.model] = []);
     list.push(bucketToGroup(point.date, point));
   }
+  const dailyHours = (stats.dailyHours ?? []).map((point) => bucketToGroup(point.key ?? "", point));
+  const dailyHoursByModel: Record<string, TokenStatsGroup[]> = {};
+  for (const point of stats.modelHourly ?? []) {
+    const list = dailyHoursByModel[point.model] ?? (dailyHoursByModel[point.model] = []);
+    list.push(bucketToGroup(point.dateHour, point));
+  }
 
   return {
     source,
@@ -86,6 +92,8 @@ export function toTokenStatsSource(
     sessions: [],
     daily,
     dailyByModel,
+    dailyHours,
+    dailyHoursByModel,
     hours,
     filesScanned: stats.filesScanned ?? 0,
     parseErrors: stats.parseErrors ?? 0,
@@ -105,6 +113,25 @@ export function traeCreditBars(
   window: UsageWindow,
 ): CreditDailyBar[] {
   const byDate = new Map(daily.map((point) => [point.date, point]));
+  if (window.kind === "today") {
+    const today = calendarWindowKeys(window)[0];
+    const snapshot = byDate.get(today);
+    if (snapshot?.hourlyFromHour != null && Array.isArray(snapshot.hourly)) {
+      const nowHour = new Date().getHours();
+      const fromHour = Math.min(snapshot.hourlyFromHour, nowHour);
+      const byHour = new Map(snapshot.hourly.map((point) => [point.hour, point]));
+      return Array.from({ length: nowHour - fromHour + 1 }, (_, offset) => {
+        const hour = fromHour + offset;
+        const point = byHour.get(hour);
+        return {
+          date: `${today}-${String(hour).padStart(2, "0")}`,
+          label: `${String(hour).padStart(2, "0")}:00`,
+          inAmt: point?.earned ?? 0,
+          outAmt: point?.consumed ?? 0,
+        };
+      });
+    }
+  }
   return creditBars(
     calendarWindowKeys(window).map((key) => {
       const point = byDate.get(key);

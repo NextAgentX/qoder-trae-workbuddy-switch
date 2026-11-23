@@ -321,6 +321,16 @@ fn local_slot(ts_ms: i64) -> String {
     format!("{}-{}", local_weekday(ts_ms), local_hour(ts_ms))
 }
 
+fn local_date_hour(ts_ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ts_ms)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d-%H")
+                .to_string()
+        })
+        .unwrap_or_else(|| "未知".to_string())
+}
+
 /// Trae Token 统计（`days` 为统计窗口天数，`None` 表示全部历史；`scope` 为变体范围）。
 ///
 /// 返回体形状与 WorkBuddy 的 `get_statistics` **刻意不同**：那边是「多源 + 会话/项目维度」，
@@ -345,6 +355,8 @@ pub fn get_statistics(days: Option<i64>, scope: TraeTokenScope) -> Value {
     let mut by_hour: BTreeMap<String, Bucket> = BTreeMap::new();
     let mut by_status: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_model_daily: BTreeMap<(String, String), Bucket> = BTreeMap::new();
+    let mut by_hour_of_day: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut by_model_hourly: BTreeMap<(String, String), Bucket> = BTreeMap::new();
     let mut variant_counts = VariantCounts::default();
     let mut coverage_start: Option<i64> = None;
     let mut coverage_end: Option<i64> = None;
@@ -372,6 +384,22 @@ pub fn get_statistics(days: Option<i64>, scope: TraeTokenScope) -> Value {
         by_model.entry(model_key.clone()).or_default().add(entry);
         by_model_daily
             .entry((local_date(entry.ts), model_key))
+            .or_default()
+            .add(entry);
+        let hour_key = local_date_hour(entry.ts);
+        by_hour_of_day
+            .entry(hour_key.clone())
+            .or_default()
+            .add(entry);
+        by_model_hourly
+            .entry((
+                hour_key,
+                if entry.model.is_empty() {
+                    "（未指定）".to_string()
+                } else {
+                    entry.model.clone()
+                },
+            ))
             .or_default()
             .add(entry);
         by_account
@@ -429,6 +457,22 @@ pub fn get_statistics(days: Option<i64>, scope: TraeTokenScope) -> Value {
             })
         })
         .collect();
+    let daily_hours = ascending(by_hour_of_day, |key, bucket| {
+        bucket.group_value(key, json!(null))
+    });
+    let model_hourly: Vec<Value> = by_model_hourly
+        .iter()
+        .map(|((date_hour, model), bucket)| {
+            json!({
+                "dateHour": date_hour,
+                "model": model,
+                "total": bucket.total(),
+                "input": bucket.input,
+                "output": bucket.output,
+                "records": bucket.records,
+            })
+        })
+        .collect();
 
     json!({
         "source": "trae-gateway",
@@ -443,6 +487,8 @@ pub fn get_statistics(days: Option<i64>, scope: TraeTokenScope) -> Value {
         "hours": hours,
         "statuses": statuses,
         "modelDaily": model_daily,
+        "dailyHours": daily_hours,
+        "modelHourly": model_hourly,
         "variantCounts": {
             // 按**区域**分档（国内 / 国际）：国内两条程序位合计一档，
             // 因为账号库与用量来源在区域层面才分开（见 `TraeTokenScope` 的说明）。

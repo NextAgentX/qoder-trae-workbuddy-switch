@@ -4302,6 +4302,34 @@ const TRAE_SWITCH_PROGRESS_EVENT: &str = "trae-switch-progress";
 #[tauri::command]
 pub async fn trae_switch_account(app: tauri::AppHandle, options: Value) -> Result<Value, String> {
     let options = trae::handlers::parse_switch_options(&options)?;
+    if let Some(account) = trae::account::find_for(options.variant, &options.user_id) {
+        let db_exp = trae::jwt::parse(&account.jwt).exp_timestamp.unwrap_or(0);
+        let snapshot_exp = trae::paths::profile_dir_for(options.variant, &options.user_id)
+            .filter(|path| path.is_dir())
+            .and_then(|path| trae::icube::cloudide_auth_info_from_dir(&path, options.variant).ok())
+            .and_then(|info| {
+                info.expired_at
+                    .or_else(|| trae::jwt::parse(&info.token).exp_timestamp)
+            })
+            .unwrap_or(0);
+        let active_user = trae::profile::extract_local_jwt_for(options.variant)
+            .ok()
+            .map(|(user_id, _)| user_id);
+        if db_exp > 0
+            && db_exp < chrono::Utc::now().timestamp()
+            && db_exp > snapshot_exp
+            && active_user.as_deref() != Some(options.user_id.as_str())
+        {
+            trae::account::refresh_jwt_for(options.variant, &options.user_id)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "目标账号登录凭据已过期，切换尚未开始。自动续期失败：{error}。\
+                         请在 Trae 客户端重新登录并保存登录态后重试。"
+                    )
+                })?;
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let outcome = trae::profile::switch_account(&options, |step| {
             let _ = app.emit(TRAE_SWITCH_PROGRESS_EVENT, step.to_json());

@@ -174,6 +174,13 @@ pub fn credits_overview_for(variant: TraeVariant) -> Value {
             "total": snapshot.total,
             "earned": snapshot.earned,
             "consumed": snapshot.consumed,
+            "hourly": snapshot.hourly.iter().map(|(hour, bucket)| json!({
+                "hour": hour,
+                "earned": bucket.earned,
+                "consumed": bucket.consumed,
+            })).collect::<Vec<_>>(),
+            "hourlyFromHour": snapshot.hourly_from_hour,
+            "hourlyPartial": snapshot.hourly_partial,
         })).collect::<Vec<_>>(),
         "todayEarned": today_earned,
         "historyDays": crate::modules::trae::TRAE_HISTORY_KEEP_DAYS,
@@ -592,6 +599,9 @@ pub async fn run_jwt_refresh_cycle() -> Value {
     for spec in variant::all_specs() {
         let target = spec.variant;
         let accounts = account::load_accounts_for(target);
+        let active_client_user = crate::modules::trae::profile::extract_local_jwt_for(target)
+            .ok()
+            .map(|(user_id, _)| user_id);
         let mut results: Vec<Value> = Vec::new();
         let (mut refreshed, mut skipped, mut failed) = (0usize, 0usize, 0usize);
 
@@ -601,6 +611,11 @@ pub async fn run_jwt_refresh_cycle() -> Value {
             // 没有 uid 就连写回都无从下手（这类脏记录由账号页自己提示重新登录）。
             if user_id.is_empty() {
                 skipped += 1;
+                continue;
+            }
+            if active_client_user.as_deref() == Some(user_id.as_str()) {
+                skipped += 1;
+                results.push(json!({ "userId": user_id, "result": "active_client" }));
                 continue;
             }
             if !account::needs_jwt_refresh(raw) {

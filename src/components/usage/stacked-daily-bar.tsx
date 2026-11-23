@@ -253,7 +253,14 @@ export function StackedDailyBar({
           barCategoryGap={BAR_CATEGORY_GAP_PX}
         >
           <CartesianGrid vertical={false} strokeDasharray="3 3" />
-          <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} />
+          <XAxis
+            dataKey="label"
+            tickLine={false}
+            axisLine={false}
+            tickMargin={8}
+            minTickGap={columns.length > 12 ? 0 : 24}
+            interval={columns.length > 12 ? 2 : 0}
+          />
           <YAxis tickLine={false} axisLine={false} width={48} tickFormatter={(value) => (valueFormat ?? compactTokens)(Number(value))} />
           <ChartTooltip
             cursor={{ fill: "var(--muted)", opacity: 0.4 }}

@@ -121,7 +121,7 @@ import {
   overlapInWindow,
   type UsageLedger,
 } from "@/lib/usage-ledger";
-import { usageWindowDays, type UsageWindow } from "@/lib/usage-window";
+import { todayKey, usageWindowDays, type UsageWindow } from "@/lib/usage-window";
 
 /** 本页承载的视图（积分视图在 `CreditStatsPage`）。 */
 export type TokenUsageView = "trend" | "models" | "sessions" | "keys";
@@ -207,16 +207,39 @@ function TrendView({
     () => new Map(gatewayDailyInWindow(gatewayTrend, viewWindow).map((day) => [day.key, day.total])),
     [gatewayTrend, viewWindow],
   );
+  const clientHours = useMemo(() => new Map((source.dailyHours ?? []).map((point) => [point.key, point.total])), [source.dailyHours]);
+  const gatewayHours = useMemo(() => new Map((gatewayTrend?.hourly ?? []).map((point) => [point.key, point.total])), [gatewayTrend]);
+  const hourlyAvailable = viewWindow.kind === "today" && (
+    ledger === "client" ? Array.isArray(source.dailyHours)
+      : ledger === "gateway" ? Array.isArray(gatewayTrend?.hourly)
+        : Array.isArray(source.dailyHours) && Array.isArray(gatewayTrend?.hourly)
+  );
   const columns = useMemo(
-    () =>
-      ledgerDailySeries({
+    () => {
+      if (hourlyAvailable) {
+        const date = todayKey();
+        const lastHour = new Date().getHours();
+        const hours = Array.from({ length: lastHour + 1 }, (_, hour) => {
+          const key = `${date}-${String(hour).padStart(2, "0")}`;
+          return { key, total: 0 };
+        });
+        return ledgerDailySeries({
+          days: hours,
+          clientTotals: clientHours,
+          gatewayTotals: gatewayHours,
+          ledger,
+          labelOf: (key) => `${key.slice(-2)}:00`,
+        });
+      }
+      return ledgerDailySeries({
         days: keys.map((key) => ({ key, total: 0 })),
         clientTotals: clientDaily,
         gatewayTotals: gatewayDaily,
         ledger,
         labelOf: (key) => key.slice(5).replace("-", "/"),
-      }),
-    [keys, clientDaily, gatewayDaily, ledger],
+      });
+    },
+    [keys, clientDaily, gatewayDaily, clientHours, gatewayHours, ledger, hourlyAvailable],
   );
 
   const sumOf = (map: Map<string, number>) => keys.reduce((sum, key) => sum + (map.get(key) ?? 0), 0);
@@ -249,7 +272,8 @@ function TrendView({
   const peak = Math.max(0, ...dailyTotals);
   /* ★ A1-3：日均的分母是**窗口天数**，不是「有数据的天数」——
      后者在稀疏数据下会把 5 天用量显示成「日均 300」，而真实 30 天日均是 50。 */
-  const average = Math.round(total / usageWindowDays(viewWindow));
+  const averageDivisor = viewWindow.kind === "today" ? Math.max(columns.length, 1) : usageWindowDays(viewWindow);
+  const average = Math.round(total / averageDivisor);
 
   const rangeRecords = useMemo(() => {
     const inWindow = new Set(keys);
@@ -350,7 +374,7 @@ function TrendView({
       : null;  const tiles: StatTile[] = [
     totalTile,
     ...(cacheTile ? [cacheTile] : []),
-    { icon: TrendingUp, label: t("wbStats.usage.trend.avg"), value: compactTokens(average), hint: t("wbStats.usage.trend.avgHint") },
+    { icon: TrendingUp, label: t(viewWindow.kind === "today" ? "wbStats.usage.trend.hourAvg" : "wbStats.usage.trend.avg"), value: compactTokens(average), hint: t(viewWindow.kind === "today" ? "wbStats.usage.trend.hourAvgHint" : "wbStats.usage.trend.avgHint") },
     { icon: Gauge, label: t("wbStats.usage.trend.peak"), value: compactTokens(peak) },
     /* 决策 #4：WB 的第四张卡是「模型数」，不是「活跃账号」—— 账号维度在账号页，
        这里放模型数才能回答「这段时间动了几个模型」。 */
@@ -384,7 +408,7 @@ function TrendView({
       />
       {columns.some((column) => column.total > 0) ? (
         <ChartFrame
-          title={t("wbStats.usage.trend.stackedTitle")}
+          title={t(hourlyAvailable ? "wbStats.usage.trend.hourStackedTitle" : "wbStats.usage.trend.stackedTitle")}
           caption={t("wbStats.usage.trend.ledgerCaption")}
           ariaLabel={t("wbStats.usage.trend.stackedAria")}
         >

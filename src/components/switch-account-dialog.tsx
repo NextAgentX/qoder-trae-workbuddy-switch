@@ -458,6 +458,9 @@ export function SwitchAccountDialog({
       }
       if (res.sessionCopy?.skipped?.length) {
         parts.push(t("wbAccounts.dialog.skippedSessions", { n: res.sessionCopy.skipped.length }));
+        for (const item of res.sessionCopy.skipped) {
+          if (item.sync?.message) warnings.push(item.sync.message);
+        }
       }
       if (res.sessionSync?.synced.length) {
         parts.push(t("sessions.switchLinks.synced", { n: res.sessionSync.synced.length }));

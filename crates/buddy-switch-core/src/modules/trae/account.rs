@@ -561,9 +561,9 @@ pub fn add_manual_for(
 /// 与 [`add_manual`] 的差别只在凭据来源：这里不要求用户粘贴 JWT，
 /// 而是从 Trae 客户端 userData 的持久化登录态里提取（见 `profile::extract_local_jwt`）。
 ///
-/// **重复时是覆盖而不是报错**：WorkBuddy 的「导入本机账号」语义是「把本机现在登录的
-/// 账号同步进来」，用户点它的意图就是「让库里的记录跟上当前登录态」，
-/// 因此同 uid 存在时更新 JWT、保留既有 name / refresh_token / added_at。
+/// **重复时是覆盖而不是报错**：同 uid 存在时更新 JWT，并从同一份客户端登录态同步
+/// refresh token；若来源不含 refresh token，则清除旧 token，避免把新 JWT 与旧 token 配对。
+/// `name` / `added_at` 等用户维护字段仍保留。
 pub fn import_local() -> Result<RawAccount, String> {
     import_local_for(TraeVariant::default())
 }
@@ -588,6 +588,7 @@ pub fn import_local_for(variant: TraeVariant) -> Result<RawAccount, String> {
     let uid = login.user_id;
     let jwt_value = login.authorization;
     let device_id = login.device_id;
+    let refresh_token = login.refresh_token;
 
     let mut accounts = load_accounts_for(variant);
     let now = store::now_iso();
@@ -599,6 +600,7 @@ pub fn import_local_for(variant: TraeVariant) -> Result<RawAccount, String> {
     {
         Some(existing) => {
             existing.jwt = jwt_value;
+            existing.refresh_token = refresh_token.clone();
             existing.user_id = Some(uid.clone());
             existing.updated_at = Some(now);
             existing.clone()
@@ -608,7 +610,7 @@ pub fn import_local_for(variant: TraeVariant) -> Result<RawAccount, String> {
                 name: format!("账号{}", &uid[uid.len().saturating_sub(6)..]),
                 user_id: Some(uid.clone()),
                 jwt: jwt_value,
-                refresh_token: None,
+                refresh_token: refresh_token.clone(),
                 added_at: Some(now.clone()),
                 updated_at: Some(now),
                 remark: None,
@@ -623,6 +625,27 @@ pub fn import_local_for(variant: TraeVariant) -> Result<RawAccount, String> {
     // 「本来正确的绑定」清掉 —— 后者会让续期退回「猜活跃目录」，且用户无从察觉。
     bind_device(&mut accounts, &uid, device_id.as_deref());
     save_accounts_for(variant, &accounts)?;
+    if let Some(snapshot) = paths::profile_dir_for(variant, &uid).filter(|path| path.is_dir()) {
+        let sync_result =
+            crate::modules::trae::profile::backup_storage_before_write(&snapshot, variant)
+                .and_then(|_| {
+                    crate::modules::trae::icube::patch_cloudide_credentials_in_dir(
+                        &snapshot,
+                        variant,
+                        &record.jwt,
+                        refresh_token.as_deref(),
+                    )
+                });
+        if let Err(error) = sync_result {
+            store::append_log(
+                &paths::checkin_log_file_for(variant),
+                &format!(
+                    "账号导入完成，但快照凭据同步失败: user={uid} 原因={}",
+                    error.chars().take(300).collect::<String>()
+                ),
+            );
+        }
+    }
     Ok(record)
 }
 
@@ -1969,7 +1992,36 @@ fn apply_refreshed_tokens_for(
         target.refresh_token = Some(refresh_token);
     }
     target.updated_at = Some(store::now_iso());
-    save_accounts_for(variant, &accounts)
+    let refresh_token = target.refresh_token.clone();
+    save_accounts_for(variant, &accounts)?;
+
+    // 账号库刷新成功后，同步快照内同一 uid 的凭据副本，避免下次切换恢复旧 refresh token。
+    // 不写正在运行的客户端目录：其 refresh token 由客户端自身持有并轮换。
+    if let (Some(refresh_token), Some(snapshot)) = (
+        refresh_token,
+        paths::profile_dir_for(variant, user_id).filter(|path| path.is_dir()),
+    ) {
+        let sync_result =
+            crate::modules::trae::profile::backup_storage_before_write(&snapshot, variant)
+                .and_then(|_| {
+                    crate::modules::trae::icube::patch_cloudide_credentials_in_dir(
+                        &snapshot,
+                        variant,
+                        new_jwt,
+                        Some(&refresh_token),
+                    )
+                });
+        if let Err(error) = sync_result {
+            store::append_log(
+                &paths::checkin_log_file_for(variant),
+                &format!(
+                    "JWT 已刷新，但账号快照凭据同步失败: user={user_id} 原因={}",
+                    error.chars().take(300).collect::<String>()
+                ),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 上游签到/积分接口的完整 URL 构造（集中一处，便于测试与替换上游）。

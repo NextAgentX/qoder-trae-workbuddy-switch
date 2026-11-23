@@ -86,6 +86,8 @@
 
 > 命名空间**派生自作用域注册表**（`Scope::all()`）：共 6 条，全部默认启用。Trae 的两条老程序线（`traework-*` / `traecode-*`）已随「客户端合并」清空扩展层，不再出现在表里。
 
+**如果统一网关请求总是走 WorkBuddy**：统一入口不会按账号积分自动猜产品线。检查客户端请求的 `model` 是否带了精确命名空间前缀（例如 `trae-cn/模型名` 或 `qoder-cn/模型名`），并确认这把 `sk-uni-…` Key 已授权对应命名空间。`wb-cn/…` 明确走 WorkBuddy；裸模型名会返回 400，不会自动回落。可在统一网关请求日志核对命中的 `namespace` 与 `resolved_model`。
+
 **三条硬边界**：
 
 1. **解析只做整段精确匹配，禁止前缀匹配** —— `trae` / `traework` / `traecode` 互为前缀，任何 `starts_with` 式推断都会把请求发给另一套账号池。
@@ -161,6 +163,10 @@ Anthropic 系客户端**自己会拼 `/v1/messages`**；给它带 `/v1` 的地�
 ### 2.5 流式
 
 两个协议都支持 SSE。网关对上游**强制 `stream: true`**，客户端要非流式时由网关聚合后再返回。
+
+WorkBuddy CN 的 `/v1/chat/completions` 流在上游字节静默 60 秒后会显式结束并发送 SSE 错误帧与 `[DONE]`，
+避免客户端等到 reqwest 默认读超时。可在网关进程启动环境中设置 `BUDDY_SWITCH_STREAM_IDLE_TIMEOUT_SECS` 覆盖秒数；
+设为 `0` 可关闭。该设置只作用于 WorkBuddy CN 流式 Chat Completions，不影响 WorkBuddy Global、非流式或其它 SSE 端点。
 
 ### 2.6 60 秒自检（先跑这个，再配客户端）
 

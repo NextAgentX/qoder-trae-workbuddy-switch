@@ -56,6 +56,7 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use sha2::Digest as _;
 
+use crate::modules::trae::jwt;
 use crate::modules::trae::platform;
 use crate::modules::trae::store;
 use crate::modules::trae::variant::TraeVariant;
@@ -352,6 +353,29 @@ pub fn tc_decrypt(b64: &str, mode: TcMode) -> Result<String, IcubeError> {
         .map_err(|e| IcubeError::DecryptFailed(format!("明文非 UTF-8: {e}")))
 }
 
+/// 用 Trae 的 `tc` 信封格式加密 JSON 明文。
+///
+/// 每次写入都生成新的 OS 随机盐；账号库刷新后只更新已有登录态信封，保留
+/// `storage.json` 中客户端下发的其它账号字段和 `iCubeServerData`。
+pub(crate) fn tc_encrypt(plain: &str, mode: TcMode) -> Result<String, IcubeError> {
+    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+
+    let random = *uuid::Uuid::new_v4().as_bytes();
+    let (key, iv) = derive_keys(&random, &mode.pepper());
+    let body = plain.as_bytes();
+    let mut tagged = Vec::with_capacity(SHA512_LEN + body.len());
+    tagged.extend_from_slice(&sha512(body));
+    tagged.extend_from_slice(body);
+    let cipher =
+        Aes128CbcEnc::new((&key).into(), (&iv).into()).encrypt_padded_vec_mut::<Pkcs7>(&tagged);
+    let mut raw = Vec::with_capacity(HEADER_LEN + RANDOM_LEN + cipher.len());
+    raw.extend_from_slice(&TC_HEADER);
+    raw.extend_from_slice(&random);
+    raw.extend_from_slice(&cipher);
+    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
+}
+
 /// `#[cfg(test)]` 调用计数：证明两个键走的是**同一条** [`tc_decrypt`]。
 #[cfg(test)]
 static TC_DECRYPT_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -457,8 +481,8 @@ impl std::fmt::Debug for DeviceSecret {
 
 /// `icube.cloudide` 键解出的用户级凭据。
 ///
-/// **本轮仅用于诊断 / 导入兜底，不承担登录职责**（架构 N-3）：
-/// 它是客户端自己的登录态副本，不是「从客户端文件提取 JWT 作为登录替代」那条被否掉的路径。
+/// 用于导入、诊断和更新已有快照里的凭据字段，不承担登录职责：
+/// 它只能读取/补丁已有客户端登录态，不会从零合成缺少 `iCubeServerData` 的登录信封。
 #[derive(Clone, PartialEq, Eq)]
 pub struct CloudideAuthInfo {
     /// 所属产品线变体。
@@ -791,6 +815,50 @@ pub(crate) fn cloudide_auth_info_from_dir(
     let snapshot = load_storage_from_dir(dir, variant)?;
     let plain = decrypt_storage_key(&snapshot.object, CLOUDIDE_KEY, TcMode::Aes)?;
     cloudide_from_plain(&plain, variant)
+}
+
+/// 只更新已有 cloudide 信封中的令牌字段，保留客户端构造的其它 JSON 字段。
+pub(crate) fn patch_cloudide_credentials_in_dir(
+    dir: &std::path::Path,
+    variant: TraeVariant,
+    authorization: &str,
+    refresh_token: Option<&str>,
+) -> Result<(), String> {
+    let mut snapshot = load_storage_from_dir(dir, variant).map_err(|e| e.user_message(variant))?;
+    let plain = decrypt_storage_key(&snapshot.object, CLOUDIDE_KEY, TcMode::Aes)
+        .map_err(|e| e.user_message(variant))?;
+    let mut value: Value =
+        serde_json::from_str(&plain).map_err(|e| format!("Trae 登录态 JSON 无法解析: {e}"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Trae 登录态内容不是 JSON 对象".to_string())?;
+    object.insert(
+        "token".into(),
+        Value::String(jwt::normalize(authorization).to_string()),
+    );
+    if let Some(refresh_token) = refresh_token.filter(|token| !token.is_empty()) {
+        object.insert(
+            "refreshToken".into(),
+            Value::String(refresh_token.to_string()),
+        );
+    } else {
+        object.remove("refreshToken");
+    }
+    if let Some(exp) = jwt::parse(authorization).exp_timestamp {
+        object.insert("expiredAt".into(), Value::Number(exp.into()));
+    }
+    let sealed = tc_encrypt(
+        &serde_json::to_string(&value).map_err(|e| format!("Trae 登录态 JSON 无法编码: {e}"))?,
+        TcMode::Aes,
+    )
+    .map_err(|e| e.user_message(variant))?;
+    snapshot
+        .object
+        .insert(CLOUDIDE_KEY.to_string(), Value::String(sealed));
+    let path = storage_path_in_dir(dir);
+    let serialized = serde_json::to_string_pretty(&Value::Object(snapshot.object))
+        .map_err(|e| format!("storage.json 无法编码: {e}"))?;
+    store::atomic_write_text(&path, &serialized)
 }
 
 /// 按**指定 `deviceId`** 取设备凭证（refresh 路径）。

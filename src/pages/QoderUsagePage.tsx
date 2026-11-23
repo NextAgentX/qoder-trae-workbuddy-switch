@@ -82,7 +82,7 @@ import {
   UNKNOWN_MODEL,
   type UsageLedger,
 } from "@/lib/usage-ledger";
-import { usageWindowKeys, usageWindowSpanDays } from "@/lib/usage-window";
+import { todayKey, usageWindowKeys, usageWindowSpanDays } from "@/lib/usage-window";
 
 /**
  * 模型堆叠柱最多几个独立系列（其余并进「其他」）。
@@ -215,10 +215,48 @@ export default function QoderUsagePage({ viewWindow, view = "trend", ledger = "a
     () => new Map(gatewayCreditSeries.map((day) => [day.key, day.credit])),
     [gatewayCreditSeries],
   );
+  const gatewayCreditsByHour = useMemo(
+    () => new Map((dim?.dailyHours ?? []).map((hour) => [hour.key, hour.credit])),
+    [dim?.dailyHours],
+  );
+  const gatewayHourlyAvailable = Boolean(
+    Array.isArray(dim?.dailyHours) && dim.hourlyFromHour != null && !dim.hourlyPartial,
+  );
+  const hourlyAvailable = viewWindow.kind === "today" && (
+    ledger === "client" ? Array.isArray(data?.dailyHours)
+      : ledger === "gateway" ? gatewayHourlyAvailable
+        : Array.isArray(data?.dailyHours) && gatewayHourlyAvailable
+  );
   /** 两本账的**并集日轴**（某一本单独有量的日子也要出现在图上）。 */
   const ledgerColumns = useMemo(
-    () =>
-      ledgerDailySeries({
+    () => {
+      if (hourlyAvailable) {
+        const now = new Date();
+        const date = todayKey();
+        const clientByHour = new Map((data?.dailyHours ?? []).map((point) => [point.key, point.credits]));
+        const fromHour = ledger === "client"
+          ? 0
+          : ledger === "gateway"
+            ? dim?.hourlyFromHour ?? 0
+            : Math.max(0, dim?.hourlyFromHour ?? 0);
+        const hours = Array.from({ length: now.getHours() - fromHour + 1 }, (_, offset) => {
+          const hour = fromHour + offset;
+          const key = `${date}-${String(hour).padStart(2, "0")}`;
+          return {
+            key,
+            total: (showsClient(ledger) ? clientByHour.get(key) ?? 0 : 0) +
+              (showsGateway(ledger) ? gatewayCreditsByHour.get(key) ?? 0 : 0),
+          };
+        });
+        return ledgerDailySeries({
+          days: hours,
+          clientTotals: clientByHour,
+          gatewayTotals: gatewayCreditsByHour,
+          ledger,
+          labelOf: (key) => `${key.slice(-2)}:00`,
+        });
+      }
+      return ledgerDailySeries({
         days: [...new Set([...clientCreditsByDay.keys(), ...gatewayCreditsByDay.keys()])]
           .sort()
           .map((key) => ({ key, total: 0 })),
@@ -226,8 +264,9 @@ export default function QoderUsagePage({ viewWindow, view = "trend", ledger = "a
         gatewayTotals: gatewayCreditsByDay,
         ledger,
         labelOf: (key) => key.slice(5),
-      }),
-    [clientCreditsByDay, gatewayCreditsByDay, ledger],
+      });
+    },
+    [clientCreditsByDay, gatewayCreditsByDay, data?.dailyHours, gatewayCreditsByHour, dim?.hourlyFromHour, ledger, hourlyAvailable, viewWindow],
   );
   /** 当前账本口径下的窗口总消耗（统计卡与各视图共用这一个数）。 */
   const totalCredits = useMemo(
@@ -776,7 +815,7 @@ export default function QoderUsagePage({ viewWindow, view = "trend", ledger = "a
         )
       ) : (
         <ChartFrame
-          title={t("qoder.page.usage.trend")}
+          title={t(hourlyAvailable ? "qoder.page.usage.hourlyTrend" : "qoder.page.usage.trend")}
           caption={creditTrendCaption(t, totalCredits, peak)}
           ariaLabel={t("qoder.page.usage.trend")}
           exportable={false}

@@ -51,7 +51,7 @@
 //! 驱动生产函数 `read_day_window`，逐条比对「尾部窗口 vs 整份读」；实测同语料下
 //! 两者**逐字段一致**（`clientIn` / `clientOut` 完全相同）。
 
-use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1262,7 +1262,13 @@ fn nonempty(value: Option<String>) -> Option<String> {
 /// 读 `sessions` 表构造 `sessionId → user_id` 映射（**只读**）。
 ///
 /// 空串 / `NULL` 的 `user_id` **不入表**（无法归属 ⇒ 走 unknown 桶，绝不猜）。
-fn load_session_user_map(region: Region) -> HashMap<String, String> {
+#[derive(Clone, Debug)]
+struct SessionOwner {
+    uid: String,
+    created_at_ms: Option<i64>,
+}
+
+fn load_session_user_map(region: Region) -> HashMap<String, SessionOwner> {
     let mut map = HashMap::new();
     let db = workbuddy_db_path_for(region);
     if !db.is_file() {
@@ -1279,22 +1285,29 @@ fn load_session_user_map(region: Region) -> HashMap<String, String> {
     {
         return map;
     }
-    let Ok(mut stmt) = conn.prepare("SELECT id, user_id FROM sessions") else {
+    let created_at = columns.iter().any(|column| column == "created_at");
+    let query = if created_at {
+        "SELECT id, user_id, created_at FROM sessions"
+    } else {
+        "SELECT id, user_id, NULL FROM sessions"
+    };
+    let Ok(mut stmt) = conn.prepare(query) else {
         return map;
     };
     let Ok(rows) = stmt.query_map([], |row| {
         Ok((
             row.get::<_, Option<String>>(0)?,
             row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
         ))
     }) else {
         return map;
     };
-    for (id, uid) in rows.flatten() {
+    for (id, uid, created_at_ms) in rows.flatten() {
         let (Some(id), Some(uid)) = (nonempty(id), nonempty(uid)) else {
             continue;
         };
-        map.insert(id, uid);
+        map.insert(id, SessionOwner { uid, created_at_ms });
     }
     map
 }
@@ -1302,33 +1315,58 @@ fn load_session_user_map(region: Region) -> HashMap<String, String> {
 /// 先按 `sessionId` 合并，再映射到账号；映射失败落 `unknown`。
 fn bucket_client(
     rows: &[ClientUsageRow],
-    meta: &HashMap<String, String>,
+    meta: &HashMap<String, SessionOwner>,
+    lineage: &HashMap<String, crate::modules::session::CopyLedgerLineage>,
     day: &str,
 ) -> (BTreeMap<String, Bucket>, Bucket) {
-    let mut by_session: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut per_account: BTreeMap<String, Bucket> = BTreeMap::new();
+    let mut unknown = Bucket::default();
     for row in rows {
         if local_date_string(row.ts).as_deref() != Some(day) {
             continue;
         }
-        let bucket = by_session.entry(row.session_id.clone()).or_default();
+        let uid = match meta.get(&row.session_id) {
+            Some(owner) => match lineage.get(&row.session_id) {
+                Some(origin) => {
+                    let Some(created_at_ms) = owner.created_at_ms.filter(|value| *value > 0) else {
+                        unknown.input = unknown.input.saturating_add(row.input);
+                        unknown.output = unknown.output.saturating_add(row.output);
+                        continue;
+                    };
+                    if owner.uid != origin.target_uid {
+                        unknown.input = unknown.input.saturating_add(row.input);
+                        unknown.output = unknown.output.saturating_add(row.output);
+                        continue;
+                    }
+                    if row.ts <= created_at_ms {
+                        let verified_origin = origin
+                            .origin_uid
+                            .as_ref()
+                            .zip(origin.origin_cid.as_ref())
+                            .filter(|(uid, cid)| {
+                                meta.get(*cid).is_some_and(|session| session.uid == **uid)
+                            });
+                        let Some((origin_uid, _)) = verified_origin else {
+                            unknown.input = unknown.input.saturating_add(row.input);
+                            unknown.output = unknown.output.saturating_add(row.output);
+                            continue;
+                        };
+                        origin_uid
+                    } else {
+                        &origin.target_uid
+                    }
+                }
+                None => &owner.uid,
+            },
+            None => {
+                unknown.input = unknown.input.saturating_add(row.input);
+                unknown.output = unknown.output.saturating_add(row.output);
+                continue;
+            }
+        };
+        let bucket = per_account.entry(uid.clone()).or_default();
         bucket.input = bucket.input.saturating_add(row.input);
         bucket.output = bucket.output.saturating_add(row.output);
-    }
-
-    let mut per_account: BTreeMap<String, Bucket> = BTreeMap::new();
-    let mut unknown = Bucket::default();
-    for (session_id, bucket) in by_session {
-        match meta.get(&session_id) {
-            Some(uid) => {
-                let account = per_account.entry(uid.clone()).or_default();
-                account.input = account.input.saturating_add(bucket.input);
-                account.output = account.output.saturating_add(bucket.output);
-            }
-            None => {
-                unknown.input = unknown.input.saturating_add(bucket.input);
-                unknown.output = unknown.output.saturating_add(bucket.output);
-            }
-        }
     }
     (per_account, unknown)
 }
@@ -1632,8 +1670,9 @@ pub fn record_client_today(region: Region, force: bool) -> Value {
     }
 
     let meta = load_session_user_map(region);
+    let lineage = crate::modules::session::copy_ledger_lineage_for(region);
     let rows = scan_client_rows(&session_data_dir(region).join("projects"), &day);
-    let (per_account, unknown) = bucket_client(&rows, &meta, &day);
+    let (per_account, unknown) = bucket_client(&rows, &meta, &lineage, &day);
 
     let _guard = TOKEN_DAILY_WRITE_LOCK.lock().unwrap();
     // 锁内重读：扫描期间 gateway 可能刚写过，避免丢更新。
@@ -1714,12 +1753,43 @@ pub fn gateway_token_trend(region: Region) -> Value {
         .iter()
         .map(|point| point.get("total").and_then(Value::as_u64).unwrap_or(0))
         .sum();
-    json!({
-        "date": local_date_string(now_ms()).unwrap_or_default(),
+    let date = local_date_string(now_ms()).unwrap_or_default();
+    let hourly = load_gateway_usage_day(&date).and_then(|rows| {
+        let mut buckets: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        for row in parse_gateway_rows(&rows)
+            .into_iter()
+            .filter(|row| row.region == region.as_str() && row.day == date)
+        {
+            let Some(local) = Local.timestamp_millis_opt(row.ts).single() else {
+                continue;
+            };
+            let key = format!("{}-{:02}", date, local.hour());
+            let bucket = buckets.entry(key).or_default();
+            bucket.0 = bucket.0.saturating_add(row.input);
+            bucket.1 = bucket.1.saturating_add(row.output);
+        }
+        if buckets.is_empty() {
+            return None;
+        }
+        let from_hour = buckets.keys().next()
+            .and_then(|key| key.rsplit('-').next())
+            .and_then(|hour| hour.parse::<u8>().ok());
+        let points = buckets.into_iter().map(|(key, (input, output))| json!({
+            "key": key, "input": input, "output": output, "total": input.saturating_add(output), "truncated": false
+        })).collect::<Vec<Value>>();
+        Some((points, from_hour))
+    });
+    let mut result = json!({
+        "date": date,
         "retentionDays": TOKEN_DAILY_RETENTION_DAYS,
         "days": days,
         "total": total,
-    })
+    });
+    if let Some((hourly, from_hour)) = hourly {
+        result["hourly"] = json!(hourly);
+        result["hourlyFromHour"] = json!(from_hour);
+    }
+    result
 }
 
 /// 今日的**客户端 ↔ 网关对账**（只读：扫一遍今日 jsonl + 读网关日志，不写任何文件）。
@@ -1954,6 +2024,13 @@ mod tests {
         }
     }
 
+    fn session_owner(uid: &str) -> SessionOwner {
+        SessionOwner {
+            uid: uid.to_string(),
+            created_at_ms: None,
+        }
+    }
+
     /// 造一份「昨天 + 今天」的 jsonl 文本：昨天 `old_rows` 行、今天 `new_rows` 行。
     ///
     /// `pad` 是每行塞进去的填充长度 —— 用来把「今天的记录」推到**一个 chunk 之外**，
@@ -2060,13 +2137,13 @@ mod tests {
         let yesterday = at_local_date(1, 12);
         let day = local_date_string(today).unwrap();
         let mut meta = HashMap::new();
-        meta.insert("s1".to_string(), "uid-a".to_string());
+        meta.insert("s1".to_string(), session_owner("uid-a"));
 
         let rows = vec![
             client_row("s1", yesterday, 500, 100),
             client_row("s1", today, 10, 2),
         ];
-        let (per_account, unknown) = bucket_client(&rows, &meta, &day);
+        let (per_account, unknown) = bucket_client(&rows, &meta, &HashMap::new(), &day);
 
         assert_eq!(per_account.get("uid-a").unwrap().input, 10, "只累计今日");
         assert_eq!(per_account.get("uid-a").unwrap().output, 2);
@@ -2079,14 +2156,14 @@ mod tests {
         let today = at_local_date(0, 12);
         let day = local_date_string(today).unwrap();
         let mut meta = HashMap::new();
-        meta.insert("s1".to_string(), "uid-a".to_string());
-        meta.insert("s2".to_string(), "uid-a".to_string());
+        meta.insert("s1".to_string(), session_owner("uid-a"));
+        meta.insert("s2".to_string(), session_owner("uid-a"));
 
         let rows = vec![
             client_row("s1", today, 10, 2),
             client_row("s2", today, 30, 4),
         ];
-        let (per_account, unknown) = bucket_client(&rows, &meta, &day);
+        let (per_account, unknown) = bucket_client(&rows, &meta, &HashMap::new(), &day);
 
         assert_eq!(per_account.len(), 1);
         assert_eq!(per_account.get("uid-a").unwrap().input, 40);
@@ -2100,14 +2177,14 @@ mod tests {
         let today = at_local_date(0, 12);
         let day = local_date_string(today).unwrap();
         let mut meta = HashMap::new();
-        meta.insert("s1".to_string(), "uid-a".to_string());
+        meta.insert("s1".to_string(), session_owner("uid-a"));
 
         // "ghost" 不在 meta（库缺行 / user_id 为空）。
         let rows = vec![
             client_row("s1", today, 10, 2),
             client_row("ghost", today, 7, 3),
         ];
-        let (per_account, unknown) = bucket_client(&rows, &meta, &day);
+        let (per_account, unknown) = bucket_client(&rows, &meta, &HashMap::new(), &day);
 
         assert_eq!(per_account.len(), 1);
         assert_eq!(per_account.get("uid-a").unwrap().input, 10);

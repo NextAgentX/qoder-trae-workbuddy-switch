@@ -135,6 +135,9 @@ export const en = {
   // ---- Daily credits flow (Trae has both sides ⇒ two-way bars; WB only has spend) ----
   "trae.stats.credits.dailyTitle": "Daily credits flow",
   "trae.stats.credits.dailyNote": "Up = check-in rewards　Down = chat spend",
+  "trae.stats.credits.hourlyTitle": "Hourly credit changes today",
+  "trae.stats.credits.hourlyNote": "Changes are grouped when the balance snapshot is recorded; up = earned, down = spent",
+  "trae.stats.credits.hourlyPartialNote": "Only changes observed after monitoring began are shown; earlier activity today has no hourly record",
   "trae.stats.credits.dailyAria": "Two-way bar chart of daily credits flow (rewards up, spend down)",
   "trae.stats.credits.expiryEmpty": "Nothing expires within the next 30 days.",
 

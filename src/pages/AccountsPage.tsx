@@ -1278,7 +1278,7 @@ function RegionPanel({ region }: { region: Region }) {
     });
     try {
       const result = await api.switchCodebuddyCnIdeAccount(account.id, restart, options);
-      await refreshCodebuddyCnIdeStatus();
+      void refreshCodebuddyCnIdeStatus();
       /* ★ issue #86 方案 B：**不自动复制**（写数据必须用户显式点），只在切换成功的提示里
          给一个入口。来源是切换前的账号，目标预选刚切到的这个 —— 用户点开就能直接确认。 */
       const canCopySessions = Boolean(!result.sessionCopy && previousAccount && previousAccount.id !== account.id);
@@ -2800,6 +2800,7 @@ function RegionPanel({ region }: { region: Region }) {
         }}
         clientLabel={switchClientLabel(restartConfirm?.client ?? "ide")}
         isCli={(restartConfirm?.client ?? "ide") === "cli"}
+        requireRestart={extensionSelections.length > 0}
         onConfirm={(restart) => {
           const target = restartConfirm;
           setRestartConfirm(null);

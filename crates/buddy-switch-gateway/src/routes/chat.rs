@@ -346,14 +346,29 @@ pub async fn chat_for_region(
                     // ★ issue #129：日志据此写真实状态码（不是恒 200）。
                     Some(failure.clone()),
                 );
+                let forwarded_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                let upstream = relay::prefix_stream(prefix, response);
+                let stream = if region == Region::Cn {
+                    relay::stream_with_idle_timeout(
+                        upstream,
+                        relay::stream_idle_timeout(),
+                        forwarded_bytes.clone(),
+                    )
+                } else {
+                    use futures_util::StreamExt;
+                    upstream
+                        .map(|item| {
+                            item.map_err(|error| {
+                                std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
+                            })
+                        })
+                        .boxed()
+                };
                 // 组合顺序：上游字节流 -> UsageTap (旁观原始字节 + 结束回报) -> ReasoningDelta
                 // (快照差分) -> SsePassthrough (补发 [DONE])
-                sse_response(
-                    SsePassthrough::new(crate::protocol::reasoning::ReasoningDelta::new(
-                        crate::protocol::usage_tap::UsageTap::new(
-                            relay::prefix_stream(prefix, response),
-                            sinks,
-                        )
+                use futures_util::StreamExt;
+                let output = SsePassthrough::new(crate::protocol::reasoning::ReasoningDelta::new(
+                    crate::protocol::usage_tap::UsageTap::new(stream, sinks)
                         // ★ 流内信封错误（P0-3 流式半边）：逐帧旁听，命中就记冷却 +
                         //   计模型闸门。**不改字节**，客户端看到的内容与改造前完全一致。
                         .with_error_sink(relay::envelope_error_sink(
@@ -365,10 +380,17 @@ pub async fn chat_for_region(
                         ))
                         // ★ issue #129：同一份嗅探结果也写进失败槽（出口/日志读它）。
                         .with_failure(Some(failure.clone())),
-                    ))
-                    // ★ issue #129：开关开启时，收尾先发可重试错误帧再补 [DONE]。
-                    .with_failover(Some(failure), &account, &model),
-                )
+                ))
+                // ★ issue #129：开关开启时，收尾先发可重试错误帧再补 [DONE]。
+                .with_failover(Some(failure), &account, &model);
+                let output = output.map(move |item| {
+                    if let Ok(chunk) = &item {
+                        forwarded_bytes
+                            .fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    item
+                });
+                sse_response(output)
             } else {
                 let text = relay::body_text_with_prefix(prefix, response).await;
                 // ★★ **200 信封错误**（P0-3）：上游常把限流/封禁/会话失效装在 2xx 响应体里

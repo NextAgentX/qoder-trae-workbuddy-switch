@@ -50,7 +50,8 @@ pub fn sse_event(event: &str, data: &Value) -> Bytes {
 /// 用户只会看到半句话，且客户端连重试的机会都没有。工具调用场景下更糟：
 /// 参数残缺的 tool-call 会被当成正常结果**真的执行**。
 ///
-/// 开关关闭（默认）时本结构的行为与改造前**逐字一致**。
+/// 普通流失败的开关关闭（默认）行为与改造前**逐字一致**。idle timeout 会强制写入失败槽，
+/// 因此即使关闭开关也发送错误帧，避免把明确的静默超时伪装成正常完成。
 pub struct SsePassthrough<S> {
     inner: Pin<Box<S>>,
     saw_done: bool,
@@ -88,9 +89,8 @@ impl<S> SsePassthrough<S> {
 
     /// ★ issue #129：接入失败信号（`None` = 保持原行为）。
     ///
-    /// 传 `Some` 时**是否真的改变收尾**仍由信号自己的 `is_enabled()` 决定 ——
-    /// 关闭态由 [`crate::failover::StreamFailure::record`] 丢弃记录，这里读到 `None`
-    /// 就照旧补 `[DONE]`。
+    /// 普通失败是否改变收尾由 `StreamFailure::record` 的开关决定；强制记录的 idle timeout
+    /// 即使开关关闭也会生成错误帧。`None` 表示未接入失败信号，保持原有收尾行为。
     pub fn with_failover(
         mut self,
         signal: Option<std::sync::Arc<crate::failover::StreamFailure>>,

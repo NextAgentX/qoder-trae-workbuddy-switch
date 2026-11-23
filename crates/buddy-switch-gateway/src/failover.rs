@@ -75,7 +75,8 @@ pub fn client_error(event: &UpstreamEvent, account: &str, model: &str) -> Client
         | UpstreamEvent::HardCredit
         | UpstreamEvent::SessionDead
         | UpstreamEvent::AuthRejected => (429u16, "rate_limit_error", "账号不可用"),
-        UpstreamEvent::Server | UpstreamEvent::Timeout => (502u16, "api_error", "上游连接中断"),
+        UpstreamEvent::Server => (502u16, "api_error", "上游连接中断"),
+        UpstreamEvent::Timeout => (502u16, "api_error", "上游响应超时"),
         UpstreamEvent::ModelBlocked => (400u16, "invalid_request_error", "模型被上游拒绝"),
         UpstreamEvent::NotFound => (400u16, "invalid_request_error", "上游未找到该模型"),
         UpstreamEvent::Client => (400u16, "invalid_request_error", "上游拒绝了本次请求"),
@@ -88,7 +89,16 @@ pub fn client_error(event: &UpstreamEvent, account: &str, model: &str) -> Client
     } else {
         format!("账号「{account}」")
     };
-    let message = if model.is_empty() {
+    let message = if matches!(event, UpstreamEvent::Timeout) {
+        let context = if model.is_empty() {
+            who
+        } else if who.is_empty() {
+            format!("模型 {model} 上的响应")
+        } else {
+            format!("{who}在模型 {model} 上的响应")
+        };
+        format!("{what}（HTTP {status}）：{context}超时，请重试本次请求")
+    } else if model.is_empty() {
         format!("{what}（HTTP {status}）：{who}本次请求失败，网关已尝试其它账号")
     } else {
         format!("{what}（HTTP {status}）：{who}在模型 {model} 上失败，网关已尝试其它账号")
@@ -125,10 +135,11 @@ pub struct Failure {
 /// 用一个极小的共享槽把三者接起来，比给每个组件都塞一份嗅探逻辑可靠：
 /// 嗅探只有一处（`UsageTap`），判定就不会漂移。
 ///
-/// ## 只在开关开启时生效
+/// ## 普通流失败服从开关
 ///
 /// `enabled = false` 时 [`Self::record`] 直接丢弃 —— 关闭状态下连一次写锁都不做，
-/// 行为与改造前逐字一致。
+/// 行为与改造前逐字一致。WorkBuddy CN 的流中 idle 超时是例外：它由
+/// [`Self::record_idle_timeout`] 强制记录，避免客户端收到看似正常的截断流。
 #[derive(Debug)]
 pub struct StreamFailure {
     enabled: bool,
@@ -154,7 +165,17 @@ impl StreamFailure {
     ///
     /// 开关关闭时恒返回 `false` 且不写槽 —— 关闭态不留任何额外状态。
     pub fn record(&self, event: UpstreamEvent, detail: impl Into<String>) -> bool {
-        if !self.enabled {
+        self.record_inner(event, detail.into(), false)
+    }
+
+    /// 记录 idle 超时；即使 auto-failover 关闭也保留失败，避免日志记成 200 成功，
+    /// 并让 SSE 出口发送明确错误帧而不是只补 `[DONE]`。
+    pub fn record_idle_timeout(&self, detail: impl Into<String>) -> bool {
+        self.record_inner(UpstreamEvent::Timeout, detail.into(), true)
+    }
+
+    fn record_inner(&self, event: UpstreamEvent, detail: String, force: bool) -> bool {
+        if !force && !self.enabled {
             return false;
         }
         let mut slot = match self.slot.lock() {
@@ -165,7 +186,6 @@ impl StreamFailure {
         if slot.is_some() {
             return false;
         }
-        let detail = detail.into();
         let status = client_error(&event, "", "").status;
         *slot = Some(Failure {
             event,

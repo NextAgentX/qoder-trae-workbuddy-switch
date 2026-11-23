@@ -4610,6 +4610,8 @@ export interface QoderUsageView {
   region: string;
   unit: string;
   days: QoderUsageDay[];
+  /** Today-only date/hour buckets from timestamped client events. */
+  dailyHours?: Array<{ key: string; credits: number; requests: number; byModel: Array<{ model: string; credits: number }> }>;
   totals: { credits: number; requests: number; sessions: number; models: number };
   byModel: Array<{ model: string; credits: number }>;
   /**

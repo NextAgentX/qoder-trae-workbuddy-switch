@@ -143,6 +143,10 @@ export interface GatewayTokenTrend {
   retentionDays: number;
   /** 逐日点，**日期升序**、只含落库日。 */
   days: GatewayTrendPoint[];
+  /** Today-only timestamped usage by local hour; absent when raw logs are unavailable. */
+  hourly?: GatewayTrendPoint[];
+  /** Earlier hours are unobserved; don't fill them as zero. */
+  hourlyFromHour?: number;
   /** `days` 的合计。 */
   total: number;
 }
@@ -221,6 +225,10 @@ export interface GatewayUsageDim {
   date: string;
   retentionDays: number;
   days: GatewayUsageDimDay[];
+  /** Current-day request usage split by local hour when the retained gateway log is complete. */
+  dailyHours?: Array<{ key: string; input: number; output: number; total: number; requests: number; credit: number }>;
+  hourlyFromHour?: number | null;
+  hourlyPartial?: boolean;
 }
 
 /** 对账的拓扑结论。 */
@@ -1352,6 +1360,8 @@ export interface CopyResult {
   backup: string | null;
   /** 命中去重账本：该会话此前已复制到目标账号且副本仍存活，本次跳过。 */
   deduplicated?: boolean;
+  /** 账本命中后对既有副本的安全同步结果；缺少基线时后端会保守保留两边内容。 */
+  sync?: { status: string; message: string; backup?: string | null; lostLines?: number };
   /** 本次是否成功写入去重账本（仅未去重时出现）。 */
   ledgerWritten?: boolean;
   /** 降级警告（如「目标索引不可写，已复制正文，请重启 WorkBuddy 重建索引」）。 */
@@ -1786,6 +1796,8 @@ export interface CreditStatistics {
   coverageStartAt: number | null;
   summary: CreditStatsSummary;
   daily: CreditStatsDailyPoint[];
+  /** Today's snapshot-delta consumption, bucketed by local hour. */
+  dailyHours?: Array<{ key: string; usage: number }>;
   accounts: CreditStatsAccount[];
   events: CreditStatsEvent[];
   /** 官方接口不可用时仍使用上述本地观察字段；缺省兼容旧后端。 */
@@ -1800,7 +1812,7 @@ export interface TokenStatsTotals { total: number; input: number; output: number
  * 而不是 0（0 = 真的没消耗，`—` = 不知道，两者不能混）。
  */ credit?: number | null; }
 export interface TokenStatsGroup extends TokenStatsTotals { key: string; title?: string | null; project?: string; sessionId?: string; /** ★ 仅 `sessions[]` 携带：会话**逐日拆分**（窗口切片的素材，键 `YYYY-MM-DD`）。旧后端缺省 ⇒ 前端按全时口径回落（见 `sessionPoints`）。 */ daily?: TokenStatsGroup[]; }
-export interface TokenStatsSource { source: "workbuddy" | "codebuddy-cli" | "codebuddy-ide" | "workbuddy-ai" | "trae-gateway" | "trae-client"; summary: TokenStatsTotals; models: TokenStatsGroup[]; projects: TokenStatsGroup[]; sessions: TokenStatsGroup[]; daily: TokenStatsGroup[]; /** Optional model-specific daily series for trend filtering. */ dailyByModel?: Record<string, TokenStatsGroup[]>; hours: TokenStatsGroup[]; filesScanned: number; parseErrors: number; coverageStartAt?: number | null; coverageEndAt?: number | null; }
+export interface TokenStatsSource { source: "workbuddy" | "codebuddy-cli" | "codebuddy-ide" | "workbuddy-ai" | "trae-gateway" | "trae-client"; summary: TokenStatsTotals; models: TokenStatsGroup[]; projects: TokenStatsGroup[]; sessions: TokenStatsGroup[]; daily: TokenStatsGroup[]; /** Optional model-specific daily series for trend filtering. */ dailyByModel?: Record<string, TokenStatsGroup[]>; /** Date plus local hour buckets (`YYYY-MM-DD-HH`), available on newer backends. */ dailyHours?: TokenStatsGroup[]; /** Per-model date plus local hour buckets. */ dailyHoursByModel?: Record<string, TokenStatsGroup[]>; hours: TokenStatsGroup[]; filesScanned: number; parseErrors: number; coverageStartAt?: number | null; coverageEndAt?: number | null; }
 export interface TokenStatistics { /** 查询范围（后端返回：cn / global / all）；缺省兼容旧后端。 */ region?: RegionFilter; generatedAt: number; rangeDays?: number | null; sources: TokenStatsSource[]; }
 
 export interface CodeBuddyCliStatus {

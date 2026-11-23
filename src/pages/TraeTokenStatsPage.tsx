@@ -668,7 +668,8 @@ function TrendView({
 
   const total = bookColumns.reduce((sum, column) => sum + column.total, 0);
   /* 日均的分母是**窗口天数**（不是「有数据的天数」）—— 与 WB 的 A1-3 同一口径。 */
-  const average = Math.round(total / usageWindowDays(viewWindow));
+  const averageDivisor = viewWindow.kind === "today" ? Math.max(bookColumns.length, 1) : usageWindowDays(viewWindow);
+  const average = Math.round(total / averageDivisor);
   const peak = bookColumns.reduce(
     (best, column) => (column.total > best.total ? column : best),
     bookColumns[0] ?? { day: "", label: "", total: 0, segments: [] },
@@ -697,9 +698,9 @@ function TrendView({
     },
     {
       icon: TrendingUp,
-      label: t("wbStats.usage.trend.avg"),
+      label: t(viewWindow.kind === "today" ? "wbStats.usage.trend.hourAvg" : "wbStats.usage.trend.avg"),
       value: compactTokens(average),
-      hint: t("wbStats.usage.trend.avgHint"),
+      hint: t(viewWindow.kind === "today" ? "wbStats.usage.trend.hourAvgHint" : "wbStats.usage.trend.avgHint"),
     },
     {
       icon: Gauge,
@@ -738,7 +739,7 @@ function TrendView({
         <ChartFrame
           title={
             stackedByLedger
-              ? t("trae.stats.token.ledgerStackedTitle")
+              ? t(viewWindow.kind === "today" && Array.isArray(bookSource?.dailyHours) ? "wbStats.usage.trend.hourStackedTitle" : "trae.stats.token.ledgerStackedTitle")
               : t("wbStats.usage.trend.stackedTitle")
           }
           caption={

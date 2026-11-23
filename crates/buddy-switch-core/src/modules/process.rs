@@ -761,6 +761,38 @@ pub(crate) fn wait_windows_pids_gone(pids: &[u32], timeout: Duration) -> Vec<u32
     }
 }
 
+/// Wait using the native ToolHelp snapshot instead of spawning `tasklist` every
+/// poll. Missing PIDs are only considered gone after a complete snapshot; a
+/// failed snapshot stays fail-closed just like `wait_windows_pids_gone`.
+#[cfg(target_os = "windows")]
+pub(crate) fn wait_windows_pids_gone_native(pids: &[u32], timeout: Duration) -> Vec<u32> {
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let deadline = Instant::now() + timeout;
+    loop {
+        let snapshot = windows_process_snapshot();
+        let alive = match snapshot {
+            Some(entries) => {
+                let live: std::collections::HashSet<u32> = entries
+                    .into_iter()
+                    .filter(|entry| entry.threads > 0)
+                    .map(|entry| entry.pid)
+                    .collect();
+                pids.iter()
+                    .copied()
+                    .filter(|pid| live.contains(pid))
+                    .collect()
+            }
+            None => pids.to_vec(),
+        };
+        if alive.is_empty() || Instant::now() >= deadline {
+            return alive;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn existing_windows_drives() -> Vec<char> {
     ('A'..='Z')

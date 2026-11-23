@@ -170,6 +170,7 @@ export const en = {
   "qoder.page.usage.creditsView.partial": "{n} accounts failed (others shown as usual)",
   "qoder.page.usage.creditsView.reload": "Query again",
   "qoder.page.usage.trend": "Daily credits",
+  "qoder.page.usage.hourlyTrend": "Hourly credits today",
   "qoder.page.usage.empty.title": "No usage in this window",
   "qoder.page.usage.empty.description": "No request in the local client session records falls inside this window.",
   "qoder.page.usage.missing.title": "No client session records found",

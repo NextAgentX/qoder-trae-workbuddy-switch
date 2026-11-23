@@ -277,6 +277,8 @@ pub struct LocalLogin {
     pub user_id: String,
     /// **完整**请求头值，**恒含** `Cloud-IDE-JWT ` 前缀。
     pub authorization: String,
+    /// 与该 JWT 同一封 iCube 信封内的 refresh token（明文来源不存在时为 `None`）。
+    pub refresh_token: Option<String>,
     /// 同一 `source_dir` 里的设备身份（`icube-dc` 键内嵌）；取不到为 `None`。
     pub device_id: Option<String>,
     /// 实际读取的那个 userData 目录（给用户自证「读的是哪个目录」）。
@@ -290,6 +292,10 @@ impl std::fmt::Debug for LocalLogin {
         f.debug_struct("LocalLogin")
             .field("user_id", &self.user_id)
             .field("authorization", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
             .field("device_id", &self.device_id)
             .field("source_dir", &self.source_dir)
             .field("source", &self.source)
@@ -452,10 +458,13 @@ fn local_login_from_dir(data_dir: &Path, variant: TraeVariant) -> Result<LocalLo
     let source_dir = data_dir.to_path_buf();
 
     // ── 主来源：iCube 登录态副本（tc 信封；Trae Work 唯一可用的来源） ──────────
-    if let Some((user_id, authorization)) = icube_login_candidate_from_dir(data_dir, variant)? {
+    if let Some((user_id, authorization, refresh_token)) =
+        icube_login_candidate_from_dir(data_dir, variant)?
+    {
         return Ok(LocalLogin {
             user_id,
             authorization,
+            refresh_token: Some(refresh_token),
             device_id,
             source_dir,
             source: "iCube 登录态副本",
@@ -549,6 +558,7 @@ fn local_login_from_dir(data_dir: &Path, variant: TraeVariant) -> Result<LocalLo
     Ok(LocalLogin {
         user_id: uid,
         authorization: crate::modules::trae::jwt::authorization_header(&token),
+        refresh_token: None,
         device_id,
         source_dir,
         source,
@@ -593,7 +603,7 @@ fn extract_local_jwt_from_dir(
 fn icube_login_candidate_from_dir(
     data_dir: &Path,
     variant: TraeVariant,
-) -> Result<Option<(String, String)>, String> {
+) -> Result<Option<(String, String, String)>, String> {
     let Ok(info) = icube::cloudide_auth_info_from_dir(data_dir, variant) else {
         return Ok(None);
     };
@@ -616,7 +626,7 @@ fn icube_login_candidate_from_dir(
         .filter(|value| !value.is_empty())
         .or_else(|| jwt::user_id_of(&header_value))
         .ok_or_else(|| "在 iCube 登录态副本中找到凭据，但无法确定账号归属".to_string())?;
-    Ok(Some((uid, header_value)))
+    Ok(Some((uid, header_value, info.refresh_token)))
 }
 
 /// 找不到凭据时，产出**可操作**的诊断信息（而不是一句笼统的"没找到"）。
@@ -1773,6 +1783,34 @@ where
         outcome.error = Some(message);
         return outcome;
     };
+    if let Err(error) = prepare_target_snapshot_credentials(variant, &target, &target_slot) {
+        emit(
+            &mut outcome,
+            SwitchStep::new("precheck", "fail", error.clone()),
+        );
+        emit(
+            &mut outcome,
+            SwitchStep::new("fatal", "fail", error.clone()),
+        );
+        outcome.error = Some(error);
+        return outcome;
+    }
+    if snapshot_has_expired_login(&target_slot, variant) {
+        let message = format!(
+            "切换未开始：账号 {target} 的登录凭据已过期，且没有可用的新凭据。\
+             请在 Trae 客户端里重新登录并保存该账号的登录态后重试。"
+        );
+        emit(
+            &mut outcome,
+            SwitchStep::new("precheck", "fail", message.clone()),
+        );
+        emit(
+            &mut outcome,
+            SwitchStep::new("fatal", "fail", message.clone()),
+        );
+        outcome.error = Some(message);
+        return outcome;
+    }
     let _ = target_slot;
     emit(
         &mut outcome,
@@ -2077,6 +2115,32 @@ where
             outcome.error = Some(message);
             return outcome;
         }
+        RestoreCheck::Expired => {
+            emit(
+                &mut outcome,
+                SwitchStep::new("verify", "fail", "目标快照中的 Trae 登录凭据已过期"),
+            );
+            let (steps, rollback_error) = rollback_after_failed_switch(&restore_dir, variant, true);
+            for step in steps {
+                emit(&mut outcome, step);
+            }
+            let message = match rollback_error {
+                None => format!(
+                    "切换未完成：账号 {target} 的快照登录凭据已过期，已回滚到切换前状态。\
+                     请在 Trae 中重新登录该账号并保存登录态后重试。"
+                ),
+                Some(reason) => format!(
+                    "切换未完成：账号 {target} 的快照登录凭据已过期，且{reason}。\
+                     请在 Trae 中重新确认当前登录状态。"
+                ),
+            };
+            emit(
+                &mut outcome,
+                SwitchStep::new("fatal", "fail", message.clone()),
+            );
+            outcome.error = Some(message);
+            return outcome;
+        }
         RestoreCheck::Unverifiable => emit(
             &mut outcome,
             SwitchStep::new(
@@ -2137,6 +2201,8 @@ enum RestoreCheck {
     Confirmed,
     /// 实际登录的是另一个账号 —— 切换没有生效。
     Mismatch { actual: String },
+    /// 凭据可读且能确定用户，但 access token 明确过期；不得降级为跳过复核。
+    Expired,
     /// 读不到（客户端没装 / 快照内没有可解凭据）⇒ fail-open。
     Unverifiable,
 }
@@ -2162,11 +2228,81 @@ enum RestoreCheck {
 /// 客户端没装、快照里没有信封、或该产品线本就没有可解凭据，都可能读不到
 /// （目录不存在时同样读不到）；把「读不到」当成失败会让正常切换被误挡。
 fn verify_restored_login_in(root: &Path, variant: TraeVariant, target: &str) -> RestoreCheck {
+    if let Ok(info) = icube::cloudide_auth_info_from_dir(root, variant) {
+        let authorization = jwt::authorization_header(&info.token);
+        let parsed = jwt::parse(&authorization);
+        let exp = info.expired_at.or(parsed.exp_timestamp).unwrap_or(0);
+        if exp > 0 && exp < chrono::Utc::now().timestamp() {
+            return RestoreCheck::Expired;
+        }
+        if let Some(actual) = info
+            .user_id
+            .filter(|value| !value.is_empty())
+            .or(parsed.user_id)
+        {
+            return if actual == target {
+                RestoreCheck::Confirmed
+            } else {
+                RestoreCheck::Mismatch { actual }
+            };
+        }
+    }
     match extract_local_jwt_from_dir(root, variant) {
         Ok((actual, _)) if actual == target => RestoreCheck::Confirmed,
         Ok((actual, _)) => RestoreCheck::Mismatch { actual },
         Err(_) => RestoreCheck::Unverifiable,
     }
+}
+
+/// 在关闭客户端前把账号库中更新的令牌补到目标快照，并拒绝已知过期快照。
+///
+/// 账号库和快照都可能含有完整的真实 cloudide 信封；只取 JWT 到期较晚的一对
+/// token/refreshToken，不合成缺少 `iCubeServerData` 的新登录态。
+fn prepare_target_snapshot_credentials(
+    variant: TraeVariant,
+    user_id: &str,
+    snapshot_dir: &Path,
+) -> Result<(), String> {
+    let Some(account) = account::find_for(variant, user_id) else {
+        return Ok(());
+    };
+    let db_exp = jwt::parse(&account.jwt).exp_timestamp.unwrap_or(0);
+    let Ok(snapshot) = icube::cloudide_auth_info_from_dir(snapshot_dir, variant) else {
+        return Ok(());
+    };
+    let snapshot_exp = snapshot
+        .expired_at
+        .or_else(|| jwt::parse(&snapshot.token).exp_timestamp)
+        .unwrap_or(0);
+    if db_exp <= snapshot_exp {
+        return Ok(());
+    }
+    let db_uid = jwt::user_id_of(&account.jwt);
+    if db_uid.as_deref() != Some(user_id) {
+        return Err(
+            "账号库中的更新凭据无法确认属于目标账号；为保护当前登录态，已取消切换。".into(),
+        );
+    }
+    backup_storage_before_write(snapshot_dir, variant)
+        .map_err(|error| format!("更新目标快照前留档失败，切换已取消：{error}"))?;
+    icube::patch_cloudide_credentials_in_dir(
+        snapshot_dir,
+        variant,
+        &account.jwt,
+        account.refresh_token.as_deref(),
+    )
+    .map_err(|error| format!("账号库凭据较新，但更新目标快照失败，切换已取消：{error}"))
+}
+
+fn snapshot_has_expired_login(snapshot_dir: &Path, variant: TraeVariant) -> bool {
+    let Ok(info) = icube::cloudide_auth_info_from_dir(snapshot_dir, variant) else {
+        return false;
+    };
+    let exp = info
+        .expired_at
+        .or_else(|| jwt::parse(&info.token).exp_timestamp)
+        .unwrap_or(0);
+    exp > 0 && exp < chrono::Utc::now().timestamp()
 }
 
 /// 保存前的守卫：客户端**此刻实际登录**的账号必须与目标槽位一致。

@@ -26,6 +26,7 @@
 //! - 用局域网 IP / 域名远程访问 ⇒ 默认 **403**，必须在启动前设置
 //!   `BUDDY_SWITCH_ALLOWED_HOSTS=192.168.1.5:57890,my-nas.local:57890`。
 //!   这是**刻意**的行为变更：暴露管理面应当是一次显式决定，而不是默认后果。
+//!   需要动态子域时，可显式列出受限的 `*.example.com[:port]`；裸 `*` 仍会被忽略。
 
 use std::sync::OnceLock;
 
@@ -41,7 +42,7 @@ pub const ALLOWED_HOSTS_ENV: &str = "BUDDY_SWITCH_ALLOWED_HOSTS";
 /// 运行时策略。启动时定一次，之后只读。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
-    /// 小写化的允许项：可以是 `host:port`（精确）或纯主机名（任意端口）。
+    /// 小写化的允许项：精确 `host:port`、纯主机名（任意端口）或 `*.example.com[:port]`。
     allowed_hosts: Vec<String>,
 }
 
@@ -55,13 +56,14 @@ impl Policy {
         let hostname = host_name_of(&host);
         self.allowed_hosts
             .iter()
-            .any(|entry| entry == &host || entry == hostname)
+            .any(|entry| entry == &host || entry == hostname || wildcard_host_matches(entry, &host))
     }
 }
 
 /// 解析 `BUDDY_SWITCH_ALLOWED_HOSTS`。
 ///
-/// 容错：空项 / 首尾空白 / 大小写都吃掉；`*` **不支持**（一个通配符就把这道防线变成装饰）。
+/// 容错：空项 / 首尾空白 / 大小写都吃掉。只支持受限的 `*.example.com[:port]` 子域通配符；
+/// 裸 `*`、内部通配符及 IP 通配符都忽略，以保留 Host 对 DNS rebinding 的防线。
 pub fn parse_allowed_hosts(raw: Option<&str>) -> Policy {
     let mut allowed_hosts = Vec::new();
     for entry in raw.unwrap_or_default().split(',') {
@@ -69,11 +71,62 @@ pub fn parse_allowed_hosts(raw: Option<&str>) -> Policy {
         if entry.is_empty() || entry == "*" {
             continue;
         }
+        if entry.contains('*') && !valid_subdomain_wildcard(&entry) {
+            continue;
+        }
         if !allowed_hosts.contains(&entry) {
             allowed_hosts.push(entry);
         }
     }
     Policy { allowed_hosts }
+}
+
+fn valid_subdomain_wildcard(entry: &str) -> bool {
+    let Some(suffix) = entry.strip_prefix("*.") else {
+        return false;
+    };
+    if suffix.contains('*') {
+        return false;
+    }
+    let (domain, port) = match suffix.rsplit_once(':') {
+        Some((domain, port)) => (domain, Some(port)),
+        None => (suffix, None),
+    };
+    if port.is_some_and(|port| {
+        port.is_empty()
+            || !port.bytes().all(|byte| byte.is_ascii_digit())
+            || port.parse::<u16>().is_err()
+            || port == "0"
+    }) {
+        return false;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
+fn wildcard_host_matches(pattern: &str, host: &str) -> bool {
+    let Some(suffix) = pattern.strip_prefix("*.") else {
+        return false;
+    };
+    let (domain, wanted_port) = match suffix.rsplit_once(':') {
+        Some((domain, port)) => (domain, Some(port)),
+        None => (suffix, None),
+    };
+    let (hostname, actual_port) = match host.rsplit_once(':') {
+        Some((hostname, port)) if !hostname.contains(':') => (hostname, Some(port)),
+        _ => (host, None),
+    };
+    hostname.ends_with(&format!(".{domain}"))
+        && wanted_port.is_none_or(|port| actual_port == Some(port))
 }
 
 /// 取 `Host` 的主机名部分（去掉 `:port`，正确处理 IPv6 字面量）。
@@ -128,7 +181,8 @@ impl Deny {
             Deny::MissingHost => "请求缺少 Host 头，管理面拒绝处理。",
             Deny::HostNotAllowed => {
                 "管理面只接受本机访问。若确实要远程访问，请用环境变量 \
-                 BUDDY_SWITCH_ALLOWED_HOSTS 显式列出允许的主机（逗号分隔，可带端口），\
+                 BUDDY_SWITCH_ALLOWED_HOSTS 显式列出允许的主机（逗号分隔，可带端口；\
+                 可信域名可用 *.example.com 子域通配符），\
                  并确保只有可信网络能连到该端口。"
             }
             Deny::CrossOrigin => "跨站请求被拒绝（Origin 与 Host 不同源）。",

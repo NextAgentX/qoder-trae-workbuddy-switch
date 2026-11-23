@@ -440,7 +440,7 @@ export default function CreditStatsPage({
 
           {bars.length > 0 ? (
             <ChartFrame
-              title={t("wbStats.usage.credits.dailyTitle")}
+              title={t(viewWindow.kind === "today" && Array.isArray(stats?.dailyHours) ? "wbStats.usage.credits.hourlyTitle" : "wbStats.usage.credits.dailyTitle")}
               caption={singleSideCaption(t)}
               ariaLabel={t("wbStats.usage.credits.dailyAria")}
             >

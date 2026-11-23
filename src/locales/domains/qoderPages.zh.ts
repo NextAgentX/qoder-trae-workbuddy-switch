@@ -146,6 +146,7 @@ export const zh = {
   "qoder.page.usage.ledger.bothNote":
     "「全部」把两本账按日相加 —— 同一笔调用若既在客户端记录里又经网关转发，会被两边各记一次；要看准确消耗请切到单一账本。",
   "qoder.page.usage.trend": "每日积分",
+  "qoder.page.usage.hourlyTrend": "今日每小时积分",
   "qoder.page.usage.empty.title": "这段时间没有用量记录",
   "qoder.page.usage.empty.description": "本机客户端的会话记录里没有落在该窗口内的请求。",
   "qoder.page.usage.missing.title": "没有找到客户端会话记录",

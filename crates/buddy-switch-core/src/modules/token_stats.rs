@@ -281,6 +281,15 @@ fn hour(value: &Value) -> Option<String> {
     })
 }
 
+/// 本地日期与小时组成的时间轴桶（`YYYY-MM-DD-HH`），用于「今天」趋势。
+fn daily_hour(value: &Value) -> Option<String> {
+    let timestamp = timestamp(value)?;
+    chrono::DateTime::from_timestamp_millis(timestamp).map(|date| {
+        let local = date.with_timezone(&Local);
+        format!("{}-{:02}", local.format("%Y-%m-%d"), local.hour())
+    })
+}
+
 fn model(value: &Value) -> String {
     value
         .get("providerData")
@@ -401,6 +410,8 @@ struct SourceCollector {
     sessions: Vec<SessionTotals>,
     daily: HashMap<String, Totals>,
     daily_by_model: HashMap<String, HashMap<String, Totals>>,
+    daily_hours: HashMap<String, Totals>,
+    daily_hours_by_model: HashMap<String, HashMap<String, Totals>>,
     hours: HashMap<String, Totals>,
     parse_errors: u64,
     coverage_start_at: Option<i64>,
@@ -427,7 +438,7 @@ impl SourceCollector {
         if let Some(day) = date(value) {
             self.daily.entry(day.clone()).or_default().add(usage);
             self.daily_by_model
-                .entry(model_name)
+                .entry(model_name.clone())
                 .or_default()
                 .entry(day)
                 .or_default()
@@ -435,6 +446,18 @@ impl SourceCollector {
         }
         if let Some(hour) = hour(value) {
             self.hours.entry(hour).or_default().add(usage);
+        }
+        if let Some(hour_key) = daily_hour(value) {
+            self.daily_hours
+                .entry(hour_key.clone())
+                .or_default()
+                .add(usage);
+            self.daily_hours_by_model
+                .entry(model_name)
+                .or_default()
+                .entry(hour_key)
+                .or_default()
+                .add(usage);
         }
         if let Some(timestamp) = timestamp(value) {
             self.coverage_start_at = Some(
@@ -508,6 +531,18 @@ impl SourceCollector {
         for (key, totals) in &other.hours {
             self.hours.entry(key.clone()).or_default().merge(totals);
         }
+        for (key, totals) in &other.daily_hours {
+            self.daily_hours
+                .entry(key.clone())
+                .or_default()
+                .merge(totals);
+        }
+        for (model, points) in &other.daily_hours_by_model {
+            let target = self.daily_hours_by_model.entry(model.clone()).or_default();
+            for (key, totals) in points {
+                target.entry(key.clone()).or_default().merge(totals);
+            }
+        }
         self.parse_errors = self.parse_errors.saturating_add(other.parse_errors);
         self.coverage_start_at = min_option(self.coverage_start_at, other.coverage_start_at);
         self.coverage_end_at = max_option(self.coverage_end_at, other.coverage_end_at);
@@ -528,6 +563,11 @@ impl SourceCollector {
             .into_iter()
             .map(|(model, points)| (model, Value::Array(groups(points))))
             .collect::<Map<String, Value>>();
+        let daily_hours_by_model = self
+            .daily_hours_by_model
+            .into_iter()
+            .map(|(model, points)| (model, Value::Array(groups(points))))
+            .collect::<Map<String, Value>>();
         json!({
             "source": name,
             "summary": self.total.value(),
@@ -537,6 +577,8 @@ impl SourceCollector {
             "daily": groups(self.daily),
             "dailyByModel": daily_by_model,
             "hours": groups(self.hours),
+            "dailyHours": groups(self.daily_hours),
+            "dailyHoursByModel": daily_hours_by_model,
             "filesScanned": files_scanned,
             "parseErrors": self.parse_errors,
             "coverageStartAt": self.coverage_start_at,
@@ -708,8 +750,8 @@ fn clear_scan_cache_entry(path: &Path) {
 /// v2（2026-10-15）：`PersistedSession` 新增 `daily`（会话逐日拆分，供「会话」视图
 /// 按时间窗口切片）。旧 v1 缓存整体丢弃 ⇒ 首次全量重扫一次；这正是版本机制的目的。
 ///
-/// v3（2026-10-21，issue #63）：`PersistedTotals` 新增第 6 格 `credit`（微积分，见下）。
-const SCAN_CACHE_VERSION: u32 = 3;
+/// v4（issue #223）：缓存逐日小时桶，旧缓存需要重建。
+const SCAN_CACHE_VERSION: u32 = 4;
 
 /// `Totals` 的紧凑表示：`[input, output, read, write, records, creditMicros]`。
 ///
@@ -827,6 +869,10 @@ struct PersistedFileEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     daily_by_model: Vec<(String, Vec<(String, PersistedTotals)>)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    daily_hours: Vec<(String, PersistedTotals)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    daily_hours_by_model: Vec<(String, Vec<(String, PersistedTotals)>)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     hours: Vec<(String, PersistedTotals)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coverage_start: Option<i64>,
@@ -866,6 +912,8 @@ impl ScanCacheEntry {
             projects: totals_map_to_persisted(&scan.projects),
             daily: totals_map_to_persisted(&scan.daily),
             daily_by_model: daily_by_model_to_persisted(&scan.daily_by_model),
+            daily_hours: totals_map_to_persisted(&scan.daily_hours),
+            daily_hours_by_model: daily_by_model_to_persisted(&scan.daily_hours_by_model),
             hours: totals_map_to_persisted(&scan.hours),
             coverage_start: scan.coverage_start_at,
             coverage_end: scan.coverage_end_at,
@@ -880,6 +928,8 @@ impl ScanCacheEntry {
             projects: totals_map_from_persisted(entry.projects),
             daily: totals_map_from_persisted(entry.daily),
             daily_by_model: daily_by_model_from_persisted(entry.daily_by_model),
+            daily_hours: totals_map_from_persisted(entry.daily_hours),
+            daily_hours_by_model: daily_by_model_from_persisted(entry.daily_hours_by_model),
             hours: totals_map_from_persisted(entry.hours),
             coverage_start_at: entry.coverage_start,
             coverage_end_at: entry.coverage_end,
@@ -1541,12 +1591,12 @@ fn merge_grouped_list(field: &str, key_field: &str, values: &[Value]) -> Vec<Val
 }
 
 /// 合并 `dailyByModel`：按 `model → date` 两维分组、同名 key 求和合并为一条。
-fn merge_daily_by_model(values: &[Value]) -> Value {
+fn merge_daily_by_model_field(values: &[Value], field: &str) -> Value {
     let mut models: Map<String, Value> = Map::new();
     let mut seen_models: Vec<String> = Vec::new();
     let mut collected: HashMap<String, Vec<Value>> = HashMap::new();
     for value in values {
-        let Some(map) = value.get("dailyByModel").and_then(Value::as_object) else {
+        let Some(map) = value.get(field).and_then(Value::as_object) else {
             continue;
         };
         for (model_name, points) in map {
@@ -1641,7 +1691,9 @@ pub fn merge_source_values(values: &[Value]) -> Value {
     let sessions = merge_grouped_list("sessions", "sessionId", values);
     let daily = merge_grouped_list("daily", "key", values);
     let hours = merge_grouped_list("hours", "key", values);
-    let daily_by_model = merge_daily_by_model(values);
+    let daily_by_model = merge_daily_by_model_field(values, "dailyByModel");
+    let daily_hours = merge_grouped_list("dailyHours", "key", values);
+    let daily_hours_by_model = merge_daily_by_model_field(values, "dailyHoursByModel");
 
     let files_scanned: u64 = values
         .iter()
@@ -1660,6 +1712,8 @@ pub fn merge_source_values(values: &[Value]) -> Value {
         "sessions": sessions,
         "daily": daily,
         "dailyByModel": daily_by_model,
+        "dailyHours": daily_hours,
+        "dailyHoursByModel": daily_hours_by_model,
         "hours": hours,
         "filesScanned": files_scanned,
         "parseErrors": parse_errors,

@@ -34,7 +34,7 @@
 //! 单列一档而不是丢掉或塞进 cn：丢掉会让「全部」小于两边之和，塞进 cn 会把国际流量
 //! 记到国内账上。两条都是**伪造**。
 
-use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone};
+use chrono::{Duration as ChronoDuration, Local, NaiveDate, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -59,7 +59,7 @@ pub const LEDGER_MAX_DAYS: usize = 400;
 /// v2（2026-10-28）：`DayRecord` 新增 `keys` 维度 + `keysPartial`（用量页「按密钥看用量」
 /// 的正确数据源）。旧文件缺这两个字段 ⇒ `serde(default)` 读成空，由 `record` 的
 /// **播种轮**（`seed_keys`）把当天已有用量整窗补一次，其余日期由前端披露「无该维度」。
-pub const LEDGER_VERSION: u32 = 2;
+pub const LEDGER_VERSION: u32 = 3;
 
 /// 缺省日志保留条数（与两条网关 `log_keep` 的缺省值一致）。
 const DEFAULT_LOG_KEEP: usize = 200;
@@ -234,6 +234,19 @@ struct DayRecord {
     /// 增量水位线（毫秒）：只有 `ts > watermark` 的条目才累加。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     watermark_ms: Option<i64>,
+    /// Hourly watermark is separate so hourly buckets can be seeded from a legacy day's
+    /// retained raw log without double-counting the already persisted daily totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hourly_watermark_ms: Option<i64>,
+    /// Local-hour buckets are retained only to render the current day at hourly granularity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    hourly: BTreeMap<u8, DimBucket>,
+    /// Earliest hour with reliable observations; earlier hours must not be shown as zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hourly_from_hour: Option<u8>,
+    /// Some previously counted requests may be absent from the hourly breakdown.
+    #[serde(default)]
+    hourly_partial: bool,
     /// 当日日志「可能已被裁」（条数到上限且最旧存活条目就在今天）⇒ 当日总量是**下界**。
     #[serde(default)]
     truncated: bool,
@@ -286,6 +299,13 @@ fn local_date_string(ts: i64) -> Option<String> {
         .timestamp_millis_opt(ts)
         .single()
         .map(|dt| dt.format("%Y-%m-%d").to_string())
+}
+
+fn local_hour(ts: i64) -> Option<u8> {
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .map(|dt| dt.hour() as u8)
 }
 
 fn prune_store(store: &mut Store, at_ms: i64) {
@@ -527,7 +547,9 @@ struct Round {
     endpoints: BTreeMap<String, DimBucket>,
     /// 密钥维度（键见 `token_daily::key_bucket_of`）。
     keys: BTreeMap<String, DimBucket>,
+    hourly: BTreeMap<u8, DimBucket>,
     next_watermark: Option<i64>,
+    next_hourly_watermark: Option<i64>,
 }
 
 /// 只保留「本 scope + 本日 + `ts > since`」的行，并按 `key_of` 分桶。
@@ -562,7 +584,46 @@ fn bucket_rows(
     out
 }
 
-fn round(rows: &[Row], scope: LedgerScope, day: &str, watermark: Option<i64>) -> Round {
+fn bucket_hour_rows(
+    rows: &[Row],
+    scope: LedgerScope,
+    day: &str,
+    since: Option<i64>,
+) -> BTreeMap<u8, DimBucket> {
+    let mut out: BTreeMap<u8, DimBucket> = BTreeMap::new();
+    for row in rows {
+        if row.scope != scope
+            || row.day != day
+            || since.is_some_and(|watermark| row.ts <= watermark)
+        {
+            continue;
+        }
+        let Some(hour) = local_hour(row.ts) else {
+            continue;
+        };
+        let bucket = out.entry(hour).or_default();
+        bucket.input = bucket.input.saturating_add(row.input);
+        bucket.output = bucket.output.saturating_add(row.output);
+        if let Some(cached) = row.cached {
+            bucket.cached = bucket.cached.saturating_add(cached);
+            bucket.cache_observed = true;
+        }
+        bucket.requests = bucket.requests.saturating_add(1);
+        if row.status >= 400 {
+            bucket.failed = bucket.failed.saturating_add(1);
+        }
+        bucket.credit += row.credit;
+    }
+    out
+}
+
+fn round(
+    rows: &[Row],
+    scope: LedgerScope,
+    day: &str,
+    watermark: Option<i64>,
+    hourly_watermark: Option<i64>,
+) -> Round {
     let write = match watermark {
         Some(_) => Write::Add,
         None => Write::Correct,
@@ -571,6 +632,11 @@ fn round(rows: &[Row], scope: LedgerScope, day: &str, watermark: Option<i64>) ->
     let total = bucket_rows(rows, scope, day, since, |_| String::new())
         .remove("")
         .unwrap_or_default();
+    let max_ts = rows
+        .iter()
+        .filter(|row| row.scope == scope && row.day == day)
+        .map(|row| row.ts)
+        .max();
     Round {
         write,
         total,
@@ -578,13 +644,13 @@ fn round(rows: &[Row], scope: LedgerScope, day: &str, watermark: Option<i64>) ->
         accounts: bucket_rows(rows, scope, day, since, |row| row.account.clone()),
         endpoints: bucket_rows(rows, scope, day, since, |row| row.endpoint.clone()),
         keys: bucket_rows(rows, scope, day, since, |row| row.key.clone()),
-        next_watermark: match (
-            watermark,
-            rows.iter()
-                .filter(|row| row.scope == scope && row.day == day)
-                .map(|row| row.ts)
-                .max(),
-        ) {
+        hourly: bucket_hour_rows(rows, scope, day, hourly_watermark),
+        next_watermark: match (watermark, max_ts) {
+            (Some(current), Some(max)) => Some(current.max(max)),
+            (Some(current), None) => Some(current),
+            (None, max) => max,
+        },
+        next_hourly_watermark: match (hourly_watermark, max_ts) {
             (Some(current), Some(max)) => Some(current.max(max)),
             (Some(current), None) => Some(current),
             (None, max) => max,
@@ -637,9 +703,14 @@ pub fn record(product: LedgerProduct, scope: LedgerScope) -> Value {
 
     let _guard = LEDGER_WRITE_LOCK.lock().unwrap();
     let mut store = load_store(product, scope);
+    store.version = LEDGER_VERSION;
     {
         let prior_watermark = store.days.get(&day).and_then(|record| record.watermark_ms);
-        let completed = round(&rows, scope, &day, prior_watermark);
+        let prior_hourly_watermark = store
+            .days
+            .get(&day)
+            .and_then(|record| record.hourly_watermark_ms);
+        let completed = round(&rows, scope, &day, prior_watermark, prior_hourly_watermark);
         let record = store.days.entry(day.clone()).or_default();
         /* ★ 密钥维度是后加的：老账本当天已经有量（`total.requests > 0`）而密钥桶是空的
         ⇒ 必须**整窗播种**（取大）并标 `keys_partial`。走增量会让当天此前的请求全部
@@ -649,6 +720,7 @@ pub fn record(product: LedgerProduct, scope: LedgerScope) -> Value {
             record.keys_partial = true;
         }
         record.watermark_ms = completed.next_watermark.or(prior_watermark);
+        record.hourly_watermark_ms = completed.next_hourly_watermark.or(prior_hourly_watermark);
         record.truncated = truncated;
         match completed.write {
             Write::Add => record.total.add(&completed.total),
@@ -666,6 +738,25 @@ pub fn record(product: LedgerProduct, scope: LedgerScope) -> Value {
                 &completed.write
             },
         );
+        for (hour, bucket) in completed.hourly {
+            let entry = record.hourly.entry(hour).or_default();
+            match prior_hourly_watermark {
+                Some(_) => entry.add(&bucket),
+                None => entry.merge_max(&bucket),
+            }
+        }
+        if record.hourly_from_hour.is_none() {
+            record.hourly_from_hour = rows
+                .iter()
+                .filter(|row| row.scope == scope && row.day == day)
+                .filter_map(|row| local_hour(row.ts))
+                .min()
+                .or_else(|| local_hour(at));
+        }
+        let hourly_requests: u64 = record.hourly.values().map(|bucket| bucket.requests).sum();
+        if truncated || hourly_requests < record.total.requests {
+            record.hourly_partial = true;
+        }
     }
     prune_store(&mut store, at);
     save_store(product, scope, &store);
@@ -677,6 +768,8 @@ pub fn record(product: LedgerProduct, scope: LedgerScope) -> Value {
         "total": today.total.total(),
         "requests": today.total.requests,
         "credit": round3(today.total.credit),
+        "hourlyFromHour": today.hourly_from_hour,
+        "hourlyPartial": today.hourly_partial,
     })
 }
 
@@ -701,12 +794,21 @@ pub fn usage_dim(product: LedgerProduct, scope: &str) -> Value {
         keys: BTreeMap<String, DimBucket>,
         truncated: bool,
         keys_partial: bool,
+        hourly: BTreeMap<u8, DimBucket>,
+        hourly_from_hour: Option<u8>,
+        hourly_partial: bool,
     }
     let scopes = LedgerScope::parse_query(scope);
+    let expected_hourly_scopes = scopes.len();
+    let today = local_date_string(now_ms()).unwrap_or_default();
+    let mut hourly_observed_scopes = 0usize;
     let mut days: BTreeMap<String, MergeDay> = BTreeMap::new();
     for scope in scopes {
         let store = load_store(product, scope);
         for (day, record) in store.days {
+            if day == today && record.hourly_from_hour.is_some() {
+                hourly_observed_scopes += 1;
+            }
             let slot = days.entry(day).or_default();
             // 跨档是**相加**（同一天的不同 scope 互不重叠，是不同批请求），
             // 不是取大 —— 取大会让「全部」小于两档之和。
@@ -725,8 +827,40 @@ pub fn usage_dim(product: LedgerProduct, scope: &str) -> Value {
             slot.truncated = slot.truncated || record.truncated;
             // 「至少有一档是从中间开始记的」⇒ 那天就是下界（披露取**或**）。
             slot.keys_partial = slot.keys_partial || record.keys_partial;
+            for (hour, bucket) in record.hourly {
+                slot.hourly.entry(hour).or_default().add(&bucket);
+            }
+            slot.hourly_from_hour = match (slot.hourly_from_hour, record.hourly_from_hour) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (Some(left), None) | (None, Some(left)) => Some(left),
+                (None, None) => None,
+            };
+            slot.hourly_partial = slot.hourly_partial || record.hourly_partial;
         }
     }
+    let today_hourly = days.get(&today);
+    let daily_hours: Vec<Value> = today_hourly
+        .map(|slot| {
+            slot.hourly
+                .iter()
+                .map(|(hour, bucket)| {
+                    json!({
+                        "key": format!("{today}-{hour:02}"),
+                        "input": bucket.input,
+                        "output": bucket.output,
+                        "total": bucket.total(),
+                        "requests": bucket.requests,
+                        "credit": round3(bucket.credit),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let hourly_from_hour = today_hourly
+        .filter(|_| hourly_observed_scopes == expected_hourly_scopes)
+        .and_then(|slot| slot.hourly_from_hour);
+    let hourly_partial = today_hourly.is_some_and(|slot| slot.hourly_partial)
+        || hourly_observed_scopes != expected_hourly_scopes;
     let days: Vec<Value> = days
         .iter()
         .map(|(day, slot)| {
@@ -750,6 +884,9 @@ pub fn usage_dim(product: LedgerProduct, scope: &str) -> Value {
         "scope": scope,
         "retentionDays": LEDGER_RETENTION_DAYS,
         "days": days,
+        "dailyHours": daily_hours,
+        "hourlyFromHour": hourly_from_hour,
+        "hourlyPartial": hourly_partial,
     })
 }
 
@@ -905,7 +1042,7 @@ mod tests {
             },
         ];
         let day = local_date_string(at_today(9)).unwrap();
-        let completed = round(&rows, LedgerScope::Cn, &day, None);
+        let completed = round(&rows, LedgerScope::Cn, &day, None, None);
         assert_eq!(
             completed.total,
             DimBucket {
@@ -958,10 +1095,16 @@ mod tests {
             cached: Some(0),
             credit: 0.0,
         }];
-        let first = round(&rows, LedgerScope::Cn, &day, None);
+        let first = round(&rows, LedgerScope::Cn, &day, None, None);
         assert_eq!(first.total.total(), 12);
         // 第二轮：水位线 = 上一轮最大 ts ⇒ 同一条不再计入。
-        let second = round(&rows, LedgerScope::Cn, &day, first.next_watermark);
+        let second = round(
+            &rows,
+            LedgerScope::Cn,
+            &day,
+            first.next_watermark,
+            first.next_hourly_watermark,
+        );
         assert_eq!(second.total.total(), 0, "已记账的条目不许重复加");
     }
 
@@ -985,7 +1128,7 @@ mod tests {
             cached: Some(0),
             credit: 0.0,
         };
-        let first = round(&[row(ts_early, 100)], LedgerScope::Cn, &day, None);
+        let first = round(&[row(ts_early, 100)], LedgerScope::Cn, &day, None, None);
         let mut record = DayRecord::default();
         record.total.merge_max(&first.total);
         record.watermark_ms = first.next_watermark;
@@ -995,6 +1138,7 @@ mod tests {
             LedgerScope::Cn,
             &day,
             record.watermark_ms,
+            record.hourly_watermark_ms,
         );
         record.total.add(&second.total);
         record.watermark_ms = second.next_watermark;

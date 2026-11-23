@@ -139,6 +139,9 @@ export const zh = {
   // ---- 每日积分收支（Trae **两侧都有** ⇒ 双向柱；WB 只有消耗侧）----
   "trae.stats.credits.dailyTitle": "每日积分收支",
   "trae.stats.credits.dailyNote": "上 = 签到入账　下 = 对话消耗",
+  "trae.stats.credits.hourlyTitle": "今日每小时积分变化",
+  "trae.stats.credits.hourlyNote": "按后台积分快照记录时段变化；上 = 入账　下 = 消耗",
+  "trae.stats.credits.hourlyPartialNote": "仅展示首次观测后的时段变化；此前的今日用量未按小时记录",
   "trae.stats.credits.dailyAria": "每日积分收支双向柱状图（上为入账、下为消耗）",
   "trae.stats.credits.expiryEmpty": "未来 30 天内没有积分到期。",
 

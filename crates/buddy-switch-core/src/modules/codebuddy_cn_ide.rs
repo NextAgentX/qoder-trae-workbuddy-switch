@@ -528,15 +528,15 @@ $out | ForEach-Object { $_ }
 
 #[cfg(target_os = "windows")]
 fn windows_cn_exe_path_resolved() -> Option<PathBuf> {
-    if let Some(p) = windows_cn_running_exe() {
-        persist_cn_app_cache(&p);
-        return Some(p);
-    }
     if let Some(cached) = load_codebuddy_cn_app_cache() {
         if is_existing_cn_exe(&cached) {
             return Some(cached);
         }
         clear_codebuddy_cn_app_cache();
+    }
+    if let Some(p) = windows_cn_running_exe() {
+        persist_cn_app_cache(&p);
+        return Some(p);
     }
     for p in windows_cn_registry_exe_candidates() {
         if is_existing_cn_exe(&p) {
@@ -769,7 +769,14 @@ fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String> {
         return Ok(());
     }
     let pids: Vec<u32> = rows.iter().map(|r| r.pid).collect();
-    for pid in &pids {
+    // 该精确映像名只属于 CN 版；用一次批量 taskkill 关闭主进程树，避免
+    // 每个 PID 启动一个 taskkill 子进程。共享映像名 CodeBuddy.exe 仍按已核验 PID 处理。
+    let _ = run_cmd("taskkill", &["/IM", "CodeBuddy CN.exe", "/T"], 10);
+    for row in rows
+        .iter()
+        .filter(|row| row.name.eq_ignore_ascii_case("CodeBuddy.exe"))
+    {
+        let pid = row.pid;
         let pid_s = pid.to_string();
         let _ = run_cmd("taskkill", &["/PID", &pid_s, "/T"], 10);
     }
@@ -777,19 +784,24 @@ fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String> {
     let started = Instant::now();
     let timeout = Duration::from_secs(timeout_secs.max(1) as u64);
     let graceful_budget = Duration::from_secs(8).min(timeout);
-    let remaining = process::wait_windows_pids_gone(&pids, graceful_budget);
+    let remaining = process::wait_windows_pids_gone_native(&pids, graceful_budget);
     if remaining.is_empty() {
         return Ok(());
     }
 
-    for pid in &remaining {
+    // 强制阶段同样按映像名批量处理 CN 主程序，保留对共享映像的 PID 精确处理。
+    let _ = run_cmd("taskkill", &["/IM", "CodeBuddy CN.exe", "/T", "/F"], 10);
+    for pid in remaining.iter().filter(|pid| {
+        rows.iter()
+            .any(|row| row.pid == **pid && row.name.eq_ignore_ascii_case("CodeBuddy.exe"))
+    }) {
         let pid_s = pid.to_string();
         let _ = run_cmd("taskkill", &["/PID", &pid_s, "/T", "/F"], 10);
     }
     let rest = timeout
         .saturating_sub(started.elapsed())
         .max(Duration::from_secs(1));
-    let leftover = process::wait_windows_pids_gone(&remaining, rest);
+    let leftover = process::wait_windows_pids_gone_native(&remaining, rest);
     if leftover.is_empty() {
         return Ok(());
     }
@@ -976,7 +988,8 @@ pub fn status() -> Value {
     // ⇒ 下次 `status()` 看到目录存在就报 `installed = true` ⇒ 界面显示「已接入」
     // 并放开 IDE 切换，而客户端根本没装。上游 issue #91 修的就是这个形状
     // （「installed 收敛为客户端存在性」）。
-    let installed = codebuddy_cn_app_path().is_some();
+    let app_path = codebuddy_cn_app_path();
+    let installed = app_path.is_some();
     let db_exists = db_path.as_ref().map(|p| p.exists()).unwrap_or(false);
     let running = is_codebuddy_cn_running();
 
@@ -998,7 +1011,7 @@ pub fn status() -> Value {
         "dataDir": data_dir.map(|p| p.to_string_lossy().to_string()),
         "dbPath": db_path.map(|p| p.to_string_lossy().to_string()),
         "dbExists": db_exists,
-        "appPath": codebuddy_cn_app_path().map(|p| p.to_string_lossy().to_string()),
+        "appPath": app_path.map(|p| p.to_string_lossy().to_string()),
         "activeAccountId": active_account_id,
         "activeAccountName": active_account_name,
         "detectedFrom": "state",
