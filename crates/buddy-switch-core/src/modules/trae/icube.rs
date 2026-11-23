@@ -808,7 +808,7 @@ pub fn cloudide_auth_info_for(variant: TraeVariant) -> Result<CloudideAuthInfo, 
 /// （实测 Trae Work：`TRAE SOLO CN` 有登录态、`TRAE SOLO` 没有，且后者更活跃）。
 /// 调用方若用「最近活跃」去**校验**、却用「首位候选」去**操作**，就会
 /// 校验通过而操作作用在另一个目录上。此函数让两件事能锁定同一个目录。
-pub(crate) fn cloudide_auth_info_from_dir(
+pub fn cloudide_auth_info_from_dir(
     dir: &std::path::Path,
     variant: TraeVariant,
 ) -> Result<CloudideAuthInfo, IcubeError> {

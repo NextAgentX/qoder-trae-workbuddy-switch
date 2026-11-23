@@ -4315,8 +4315,12 @@ pub async fn trae_switch_account(app: tauri::AppHandle, options: Value) -> Resul
         let active_user = trae::profile::extract_local_jwt_for(options.variant)
             .ok()
             .map(|(user_id, _)| user_id);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
         if db_exp > 0
-            && db_exp < chrono::Utc::now().timestamp()
+            && db_exp < now
             && db_exp > snapshot_exp
             && active_user.as_deref() != Some(options.user_id.as_str())
         {

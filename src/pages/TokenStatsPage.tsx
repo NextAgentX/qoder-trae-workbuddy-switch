@@ -272,8 +272,10 @@ function TrendView({
   const peak = Math.max(0, ...dailyTotals);
   /* ★ A1-3：日均的分母是**窗口天数**，不是「有数据的天数」——
      后者在稀疏数据下会把 5 天用量显示成「日均 300」，而真实 30 天日均是 50。 */
-  const averageDivisor = viewWindow.kind === "today" ? Math.max(columns.length, 1) : usageWindowDays(viewWindow);
-  const average = Math.round(total / averageDivisor);
+  const average =
+    viewWindow.kind === "today"
+      ? Math.round(total / Math.max(columns.length, 1))
+      : Math.round(total / usageWindowDays(viewWindow));
 
   const rangeRecords = useMemo(() => {
     const inWindow = new Set(keys);
