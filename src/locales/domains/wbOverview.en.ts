@@ -57,6 +57,7 @@ export const en = {
   "wbOverview.stat.tokensHintClientOnly": "Client's own usage only; excludes requests via this gateway",
   "wbOverview.stat.credits": "Credits spent today",
   "wbOverview.stat.creditsRemaining": "{n} remaining",
+  "wbOverview.stat.creditsCollectedAt": "Official usage as of {time}",
   "wbOverview.stat.gateway": "Gateway requests (today)",
   "wbOverview.stat.gatewayHint": "Counted from local request logs",
   "wbOverview.stat.gatewayTruncated": "Logs were trimmed; the real count is higher",
