@@ -739,7 +739,7 @@ function TrendView({
         <ChartFrame
           title={
             stackedByLedger
-              ? t(viewWindow.kind === "today" && Array.isArray(bookSource?.dailyHours) ? "wbStats.usage.trend.hourStackedTitle" : "trae.stats.token.ledgerStackedTitle")
+              ? t(viewWindow.kind === "today" && bookColumns.some((column) => column.day.length > 10) ? "wbStats.usage.trend.hourStackedTitle" : "trae.stats.token.ledgerStackedTitle")
               : t("wbStats.usage.trend.stackedTitle")
           }
           caption={

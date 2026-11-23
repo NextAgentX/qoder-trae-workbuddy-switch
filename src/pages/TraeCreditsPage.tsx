@@ -74,7 +74,7 @@ import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
 import { CREDITS_LOCAL_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import { balanceCurve, expiryBuckets } from "@/lib/usage-charts";
-import { calendarWindowKeys, usageWindowSpanDays } from "@/lib/usage-window";
+import { todayKey, usageWindowSpanDays } from "@/lib/usage-window";
 
 /** 原型的两个环形只展示**前 6 名**账号（`accountShare.slice(0, 6)`）。 */
 const ACCOUNT_SHARE_LIMIT = 6;
@@ -161,7 +161,7 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
   /** 单区也走同一个聚合函数 ⇒ 只有一条渲染路径（见 `lib/trae-credits-merge.ts`）。 */
   const merged = useMemo(() => mergeTraeCredits(snapshot ?? []), [snapshot]);
   const credits = snapshot?.[0]?.credits ?? null;
-  const todayCreditSnapshot = merged.daily.find((point) => point.date === calendarWindowKeys({ kind: "today" })[0]);
+  const todayCreditSnapshot = merged.daily.find((point) => point.date === todayKey());
   const hourlyCreditView = viewWindow.kind === "today" && todayCreditSnapshot?.hourlyFromHour != null;
 
   const bars = useMemo(
