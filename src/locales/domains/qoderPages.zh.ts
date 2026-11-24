@@ -30,7 +30,7 @@ export const zh = {
 
   "qoder.page.accounts.source.missing": "未检测到",
   "qoder.page.accounts.source.unreadable": "读不出来",
-  "qoder.page.accounts.source.empty": "里面没有账号",
+  "qoder.page.accounts.source.empty": "已安装 · 未登录",
   "qoder.page.accounts.source.ready": "可导入",
 
   "qoder.page.accounts.pat.title": "粘贴 PAT",
@@ -346,7 +346,7 @@ export const zh = {
   "qoder.page.settings.account.description":
     "导入、切换和程序位登录态都在账号页管理；这里只提供入口，不重复同一份表单。",
   "qoder.page.settings.account.action": "前往账号页",
-  "qoder.page.settings.client.description": "本机两处官方凭据存储的探测结果（只读，不落库）。",
+  "qoder.page.settings.client.description": "查看本机 Qoder 客户端和登录状态。",
   "qoder.page.settings.client.error": "探测失败：{error}",
   // ★ 计划任务（Qoder 的两类排程；排程是全局单份 `schedule_config.json`）
   "qoder.page.settings.schedule.checkinGroup": "自动签到",

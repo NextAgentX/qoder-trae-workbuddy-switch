@@ -79,6 +79,8 @@ L5 门禁同步 + 全量验证   check-scope-registry.cjs / check-api-contract.c
 | 桌面 App `auth.v1.dat` | Chromium `v10` + **AES-256-GCM** | 密钥 = `Local State` 的 `os_crypt.encrypted_key` 剥 `DPAPI` 前缀后经 **DPAPI** 解出。★ 本仓已有同款实现（`modules/vscode_cn_inject.rs` 的 `dpapi_decrypt` + v10 布局），**复用同一模式**，不另起一套 |
 | CLI `~/.qoder[.cn]/.auth/user` | **AES-128-CBC**，`key = iv = machine_id[:16]` | 需自带 AES-128-CBC（本仓已有 AES 原语可复用）；兼容以 `{` 开头的明文 |
 
+Qoder 国际版 CLI 尚未生成凭据文件时，程序位通过 `PATH` 上可执行的 `qodercli` 判断安装状态，登录状态仍由凭据文件判断。
+
 ### L2 · gateway 产品线（`crates/buddy-switch-gateway/src/`）
 
 | 文件 | 改动 | 备注 |

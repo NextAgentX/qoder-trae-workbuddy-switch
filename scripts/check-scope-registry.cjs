@@ -7984,8 +7984,7 @@ check("★ Q1 诊断包必须过凭据闸门（与备份共用同一判据）", 
 });
 
 check("★ Q3 概览与账号卡的 Token 口径必须显式区分（不得同名）", () => {
-  /* 两个来源**互斥**（MEMORY-10：客户端直连上游，不流经网关）⇒ 两个数字各自都对，
-     但同名会让人默认它们该相等。故概览改名 + tooltip 说明口径。 */
+  /* WorkBuddy 概览卡片显示客户端用量，并通过标题和 tooltip 说明来源。 */
   const ovZh = fs.readFileSync(
     path.join(ROOT, "src/locales/domains/wbOverview.zh.ts"),
     "utf8",
@@ -8001,7 +8000,7 @@ check("★ Q3 概览与账号卡的 Token 口径必须显式区分（不得同�
     path.join(ROOT, "src/components/overview/overview-stats.tsx"),
     "utf8",
   );
-  if (!/title:\s*t\("wbOverview\.stat\.tokensHintClientOnly"\)/.test(stats)) {
+  if (!/title:[^\n]*t\("wbOverview\.stat\.tokensHintClientOnly"\)/.test(stats)) {
     throw new Error("口径说明没有挂到概览 Token tile 的 title 上");
   }
   return "概览改名「客户端 Token」+ tooltip 说明口径";
@@ -9948,14 +9947,22 @@ check("★★ Qoder / Trae 账号页的限流卡必须 `ledger={false}`（否则
     if (!tag.includes("ledger={false}")) {
       throw new Error(`${page} 账号页的限流卡缺 \`ledger={false}\` ⇒ 会显示 WorkBuddy 的客户端限流台账`);
     }
-    if (!tag.includes("probePath=")) {
-      throw new Error(`${page} 账号页的限流卡缺 \`probePath\` ⇒ 「去网关探测」会跳到 WB 的网关页`);
-    }
   }
   if (/ledger=\{false\}/.test(readCode("src/pages/AccountsPage.tsx"))) {
     throw new Error("WorkBuddy 账号页必须走台账模式（`ledger` 默认 true），不能关掉");
   }
-  return "Qoder/Trae ledger=false + 各自 probePath · WB 保持台账模式";
+  return "Qoder/Trae ledger=false · WB 保持台账模式";
+});
+
+check("★ 查看探测矩阵沿用账号页的作用域", () => {
+  const card = readCode("src/components/client-limits-card.tsx");
+  if (!card.includes('const probePath = `/s/${scope}/gateway?type=independent&sub=models`')) {
+    throw new Error("查看探测矩阵必须使用当前作用域的网关模型页");
+  }
+  if ((card.match(/\bto=\{probePath\}/g) ?? []).length !== 2) {
+    throw new Error("限流卡标题区和空态的探测矩阵入口必须共用作用域深链");
+  }
+  return "标题区和空态均打开同作用域的独立网关模型页";
 });
 
 console.log(`\n${passed} passed / ${failures.length} failed\n`);

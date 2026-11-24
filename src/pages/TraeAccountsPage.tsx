@@ -2368,11 +2368,7 @@ export default function TraeAccountsPage() {
            ⚠️ `ledger={false}`：Trae 没有可反推的客户端限流台账，不传会把 **WB 的**记录画到本页。 */
         footer={
           <section className="mt-7 min-w-0">
-            <ClientLimitsCard
-              region={variant}
-              ledger={false}
-              probePath="/trae/api-service?sub=models"
-            />
+            <ClientLimitsCard region={variant} ledger={false} />
           </section>
         }
       />

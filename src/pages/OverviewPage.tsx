@@ -115,7 +115,7 @@ export default function OverviewPage() {
   const usageHref = `/s/${scope}/usage`;
 
   /* 概览统计行与「近 14 天」趋势卡共用的一份指标（平台差异在数据层内消化）。 */
-  const metrics = useOverviewMetrics(product, region);
+  const { metrics, refresh: refreshMetrics } = useOverviewMetrics(product, region);
 
   /* ---- ★ 新原型 `viewOverview`（`buddy-switch-prototype.html:2058-2069`）带来的两个数据源 ---- */
 
@@ -405,7 +405,7 @@ export default function OverviewPage() {
         <Button
           variant="outline"
           size="default"
-          onClick={() => void run(() => fetchAllRegions())}
+          onClick={() => void run(() => Promise.all([fetchAllRegions(), refreshMetrics()]))}
           disabled={busy || loading}
           aria-label={t("wbOverview.refresh")}
         >
@@ -477,6 +477,7 @@ export default function OverviewPage() {
       {/* ② 统计行（原型 `.grid.g4`）：一排四块只读快照（要你动手的事已在上方）。 */}
       <OverviewStats
         metrics={metrics}
+        product={product}
         accountCount={scopeStatus.accountCount}
         attentionCount={attentionCount}
         accountsLoading={loading}
@@ -485,8 +486,7 @@ export default function OverviewPage() {
       {/* ③ 工作台主体 + 侧栏（原型 `.split`：主区 | 290px 侧栏）。 */}
       <div className="flex flex-col gap-[22px] lg:flex-row lg:items-start">
         <div className="flex min-w-0 flex-1 flex-col gap-4">
-          {/* 近 14 天 Token 用量（与统计行「今日 Token」同源，同一份 `metrics.token`）。 */}
-          <TokenTrendCard token={metrics.token} usageHref={usageHref} />
+          <TokenTrendCard days={metrics.days} usageHref={usageHref} />
         </div>
 
         <aside className="flex w-full flex-col gap-4 lg:w-[290px] lg:shrink-0">

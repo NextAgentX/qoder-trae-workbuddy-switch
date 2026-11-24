@@ -916,6 +916,8 @@ export interface TraeGatewayStatus {
 /** 网关请求日志（仅元数据；默认不记录正文）。 */
 export interface TraeGatewayLogEntry {
   ts: number;
+  /** 上游账号所属区域（若该条日志包含此字段）。 */
+  region?: string;
   endpoint: string;
   method: string;
   account: string | null;

@@ -23,9 +23,11 @@ import { compactTokens, exactTokens, formatCredits } from "@/components/usage/fo
 import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import type { OverviewMetrics } from "@/lib/overview-metrics";
+import type { Product } from "@/lib/platforms/registry";
 
 interface Props {
   metrics: OverviewMetrics;
+  product: Product;
   /** 当前作用域的账号数（来自账号 store —— 与「待处理」同一份数据）。 */
   accountCount: number;
   /** 需要处理的账号数（重新登录 + 即将过期）。 */
@@ -34,14 +36,16 @@ interface Props {
   accountsLoading: boolean;
 }
 
-export function OverviewStats({ metrics, accountCount, attentionCount, accountsLoading }: Props) {
+export function OverviewStats({ metrics, product, accountCount, attentionCount, accountsLoading }: Props) {
   const t = useT();
-  const { token, credits, gateway } = metrics;
+  const { token, credits, gateway, gatewayCreditsToday } = metrics;
+  const gatewayCreditFallback = credits?.today == null ? gatewayCreditsToday : null;
+  const gatewayTokens = product !== "workbuddy";
 
   /* 对比昨日：`(今日 - 昨日) / 昨日`；昨日为 0 时**不编百分比**。 */
   let delta: { value: string; tone: StatTile["tone"] } | null = null;
-  if (token) {
-    if (token.yesterday <= 0) {
+  if (token && !token.partial) {
+    if (token.yesterday == null || token.yesterday <= 0) {
       delta = { value: t("wbOverview.today.noBaseline"), tone: "default" };
     } else {
       const pct = ((token.today - token.yesterday) / token.yesterday) * 100;
@@ -68,24 +72,32 @@ export function OverviewStats({ metrics, accountCount, attentionCount, accountsL
     },
     {
       icon: MessagesSquare,
-      label: t("wbOverview.stat.tokens"),
-      value: token ? compactTokens(token.today) : "—",
-      hint: delta?.value,
-      // ★ Q3：本格只算**客户端**（不含网关）⇒ 用 tooltip 说清口径，避免与账号卡的
-      //   「今日 Token」（含网关）同名而被当成同一个数。
-      title: t("wbOverview.stat.tokensHintClientOnly"),
+      label: gatewayTokens ? t("wbOverview.stat.gatewayTokens") : t("wbOverview.stat.tokens"),
+      value: token ? `${token.partial ? "≥ " : ""}${compactTokens(token.today)}` : "—",
+      hint: token?.partial
+        ? t("wbOverview.stat.gatewayTokensPartial")
+        : delta?.value ?? t("wbOverview.stat.unavailable"),
+      title: gatewayTokens ? undefined : t("wbOverview.stat.tokensHintClientOnly"),
       tone: delta?.tone ?? "default",
     },
     {
       icon: Coins,
-      label: t("wbOverview.stat.credits"),
-      value: credits ? formatCredits(credits.today) : "—",
+      label: gatewayCreditFallback != null
+        ? t("wbOverview.stat.creditsGateway")
+        : t("wbOverview.stat.credits"),
+      value: gatewayCreditFallback != null
+        ? exactTokens(gatewayCreditFallback)
+        : formatCredits(credits?.today),
       hint: credits
         ? t("wbOverview.stat.creditsRemaining", { n: formatCredits(credits.remaining) })
-        : t("wbOverview.stat.unavailable"),
-      title: credits?.collectedAt
-        ? t("wbOverview.stat.creditsCollectedAt", { time: formatDate(credits.collectedAt) })
-        : undefined,
+        : gatewayCreditFallback == null ? t("wbOverview.stat.unavailable") : undefined,
+      title: gatewayCreditFallback != null
+        ? t("wbOverview.stat.creditsGatewayHint")
+        : credits?.collectedAt
+          ? t("wbOverview.stat.creditsCollectedAt", { time: formatDate(credits.collectedAt) })
+          : credits?.today == null
+            ? t("wbOverview.stat.creditsUnavailable")
+            : undefined,
     },
     {
       icon: Route,

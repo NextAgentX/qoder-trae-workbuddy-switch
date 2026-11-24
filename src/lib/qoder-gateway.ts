@@ -255,11 +255,10 @@ export interface QoderApiKeyRecord {
  * 见 Rust 侧三处 `record_request` 的注释）⇒ 直接复用 Trae 侧的类型与归一化，
  * 不另立第二份（第二份必然漂移）。
  *
- * ⚠️ Qoder 的日志条目**多两个字段**（都用交叉类型附加，不放进共用形状：
- * Trae / WB 的归一化不产出它们）：
- * - `region`：一个监听记两个区域的请求；
+ * ⚠️ Qoder 的日志条目**多一个字段**（用交叉类型附加，不放进 Trae 共用形状）：
  * - `credits`：上游 `usage.credits`（复数，Rust 侧 `record_request` 写的就是这个键）。
  *   `0` = 上游没上报（**不是免费**）；键不存在 = 升级前的老条目 ⇒ `undefined`。
+ * `region` 由共用的 Trae 归一化器保留；WorkBuddy 日志直接沿用后端响应形状。
  */
 export type QoderGatewayLogEntry = TraeGatewayLogEntry & {
   region?: string;
