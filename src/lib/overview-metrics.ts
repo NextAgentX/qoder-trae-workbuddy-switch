@@ -118,7 +118,7 @@ export async function loadOverviewCredits(
 }
 
 interface OverviewGatewayLogs {
-  logs: { ts: number }[];
+  logs: { ts: number; region?: string }[];
   keep: number;
   workbuddyLogs?: GatewayLogEntry[];
 }
@@ -153,11 +153,11 @@ const GATEWAY_LOGS: Record<Product, () => Promise<OverviewGatewayLogs>> = {
   },
 };
 
-function summarizeGatewayLogs({ logs, keep }: OverviewGatewayLogs, today: string) {
+function summarizeGatewayLogs({ logs, keep }: OverviewGatewayLogs, today: string, region: Region) {
   let count = 0;
   let oldest = Number.POSITIVE_INFINITY;
   for (const entry of logs) {
-    if (dateKey(new Date(entry.ts)) === today) count += 1;
+    if (entry.region === region && dateKey(new Date(entry.ts)) === today) count += 1;
     oldest = Math.min(oldest, entry.ts);
   }
   return {
@@ -223,14 +223,14 @@ export async function loadOverviewUsage(product: Product, region: Region): Promi
   const now = Date.now();
   const keys = usageWindowKeys({ kind: "preset", days: TREND_DAYS }, now);
   const today = todayKey(now);
-  const gateway = logs ? summarizeGatewayLogs(logs, today) : null;
+  const gatewayLogSummary = logs ? summarizeGatewayLogs(logs, today, region) : null;
   const clientDays = new Map(client?.map((day) => [day.key, day]));
   const gatewayDays = gatewayLedgerDays(dim);
 
   if (logs?.workbuddyLogs) {
     const recent = recentWorkbuddyUsage(logs.workbuddyLogs, region, today);
     if (recent.records > 0) {
-      mergeRecentDay(gatewayDays, today, { ...recent, partial: gateway?.truncated });
+      mergeRecentDay(gatewayDays, today, { ...recent, partial: gatewayLogSummary?.truncated });
     }
   }
 
@@ -256,6 +256,17 @@ export async function loadOverviewUsage(product: Product, region: Region): Promi
   const todayPoint = days?.[keys.length - 1]?.[source];
   const yesterdayPoint = days?.[keys.length - 2]?.[source];
   const gatewayCredit = gatewayDays.get(today)?.credit ?? 0;
+  const gatewayDay = gatewayDays.get(today);
+  const gateway = gatewayLogSummary
+    ? {
+      today: Math.max(gatewayLogSummary.today, gatewayDay?.records ?? 0),
+      truncated: Boolean(gatewayDay?.partial) || (
+        gatewayLogSummary.truncated && gatewayLogSummary.today > (gatewayDay?.records ?? 0)
+      ),
+    }
+    : dim?.days.some((day) => day.key === today) || gatewayDay
+      ? { today: gatewayDay?.records ?? 0, truncated: Boolean(gatewayDay?.partial) }
+      : null;
   return {
     days,
     token: todayPoint ? {

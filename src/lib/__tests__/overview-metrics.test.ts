@@ -8,6 +8,7 @@ import { TokenTrendCard } from "@/components/overview/token-trend-card";
 import * as api from "@/lib/api";
 import { DEFAULT_GATEWAY_CONFIG } from "@/lib/gateway";
 import { loadOverviewCredits, loadOverviewUsage, workbuddyOverviewCredits } from "@/lib/overview-metrics";
+import type { TraeTokenStatistics } from "@/lib/trae-types";
 import type { CreditOfficialUsage, CreditStatistics, GatewayLogEntry, GatewayUsageDim } from "@/lib/types";
 
 vi.mock("@/lib/api", () => ({
@@ -15,9 +16,14 @@ vi.mock("@/lib/api", () => ({
   getGatewayConfig: vi.fn(),
   getGatewayLogs: vi.fn(),
   getGatewayUsageDim: vi.fn(),
+  getQoderGatewayConfig: vi.fn(),
+  getQoderGatewayLogs: vi.fn(),
   getQoderGatewayUsageDim: vi.fn(),
   getTokenStatistics: vi.fn(),
+  getTraeGatewayConfig: vi.fn(),
+  getTraeGatewayLogs: vi.fn(),
   getTraeGatewayUsageDim: vi.fn(),
+  getTraeTokenStatistics: vi.fn(),
 }));
 
 const today = "2026-11-21";
@@ -174,7 +180,65 @@ describe("概览网关用量和刷新", () => {
       client: null,
       gateway: { total: 100, records: 1 },
     });
+    expect(usage.gateway).toEqual({ today: 1, truncated: false });
     expect(usage.gatewayCreditsToday).toBe(0.25);
+  });
+
+  it.each(["trae", "qoder"] as const)("%s 概览的网关请求数按区域过滤", async (product) => {
+    const entries = [
+      { ...log, region: "cn" },
+      { ...log, region: "global" },
+    ];
+    if (product === "trae") {
+      vi.mocked(api.getTraeGatewayLogs).mockResolvedValue({ logs: entries });
+      vi.mocked(api.getTraeGatewayConfig).mockResolvedValue({});
+      vi.mocked(api.getTraeGatewayUsageDim).mockResolvedValue({
+        date: today,
+        retentionDays: 90,
+        days: [],
+      });
+      vi.mocked(api.getTraeTokenStatistics).mockResolvedValue({ daily: [] } as unknown as TraeTokenStatistics);
+    } else {
+      vi.mocked(api.getQoderGatewayLogs).mockResolvedValue({ logs: entries });
+      vi.mocked(api.getQoderGatewayConfig).mockResolvedValue({});
+      vi.mocked(api.getQoderGatewayUsageDim).mockResolvedValue({
+        date: today,
+        retentionDays: 90,
+        days: [],
+      });
+    }
+
+    const usage = await loadOverviewUsage(product, "cn");
+    expect(usage.gateway).toEqual({ today: 1, truncated: false });
+  });
+
+  it("区域逐日账本可补上环形日志中已裁掉的请求，且不会与日志相加", async () => {
+    const day = ledgerDay(today);
+    day.models[0].requests = 4;
+    vi.mocked(api.getGatewayUsageDim).mockResolvedValue({
+      date: today,
+      retentionDays: 90,
+      days: [day],
+    });
+    vi.mocked(api.getGatewayLogs).mockResolvedValue({ logs: [log] });
+
+    const usage = await loadOverviewUsage("workbuddy", "cn");
+    expect(usage.gateway).toEqual({ today: 4, truncated: false });
+  });
+
+  it("完整逐日账本覆盖已裁剪的日志，不把精确值标为下界", async () => {
+    const day = ledgerDay(today);
+    day.models[0].requests = 4;
+    vi.mocked(api.getGatewayConfig).mockResolvedValue({ ...DEFAULT_GATEWAY_CONFIG, log_keep: 1 });
+    vi.mocked(api.getGatewayUsageDim).mockResolvedValue({
+      date: today,
+      retentionDays: 90,
+      days: [day],
+    });
+    vi.mocked(api.getGatewayLogs).mockResolvedValue({ logs: [log] });
+
+    const usage = await loadOverviewUsage("workbuddy", "cn");
+    expect(usage.gateway).toEqual({ today: 4, truncated: false });
   });
 
   it("展示尚未入账的网关调用及其 Token 和上报积分", async () => {

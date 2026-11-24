@@ -228,6 +228,7 @@ export function normalizeTraeGatewayLogs(raw: unknown): TraeGatewayLogEntry[] {
       const entry = item as Record<string, unknown>;
       return {
         ts: asNumber(entry.ts) ?? 0,
+        region: asString(entry.region),
         endpoint: asString(entry.endpoint) ?? "",
         method: asString(entry.method) ?? "POST",
         account: asString(entry.account) ?? null,
