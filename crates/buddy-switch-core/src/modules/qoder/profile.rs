@@ -29,11 +29,11 @@ use crate::modules::qoder::token::{kind_of, TokenKind};
 /// 一处本机凭据来源的探测结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalState {
-    /// 文件不存在 ⇒ 该客户端可能没装 / 没登录过。
+    /// 未找到凭据，也没有检测到对应的客户端。
     Missing,
     /// 文件在，但解不开（加密形态不认识 / 密钥取不到）。
     Unreadable(String),
-    /// 读到了，但里面没有可用账号（例如只有空 token）。
+    /// 客户端可检测到，但没有可用登录态。
     Empty,
     /// 读到了可用账号。
     Ready,
@@ -68,7 +68,7 @@ pub struct LocalProbe {
     pub label: &'static str,
     /// 该来源的**路径**（展示用；脱敏由调用方决定，路径本身不是凭据）。
     pub path: String,
-    /// 三态。
+    /// 安装与登录状态。
     pub state: LocalState,
 }
 
@@ -99,12 +99,26 @@ pub fn probe_desktop(region: QoderRegion) -> LocalProbe {
     }
 }
 
-/// 探测 CLI 凭据。
+/// 探测 CLI 凭据。全新安装时凭据文件还不存在，补查 CLI 命令。
 pub fn probe_cli(region: QoderRegion) -> LocalProbe {
+    probe_cli_with_search_path(region, std::env::var_os("PATH").as_deref())
+}
+
+fn probe_cli_with_search_path(
+    region: QoderRegion,
+    search_path: Option<&std::ffi::OsStr>,
+) -> LocalProbe {
     let path = paths::cli_auth_file(region);
     let state = match read_cli_credential(region) {
         Ok(Some(_)) => LocalState::Ready,
         Ok(None) => LocalState::Empty,
+        Err(error)
+            if error.kind == ReadErrorKind::Missing
+                && region == QoderRegion::Global
+                && search_path.is_some_and(global_cli_on_path) =>
+        {
+            LocalState::Empty
+        }
         Err(error) if error.kind == ReadErrorKind::Missing => LocalState::Missing,
         Err(error) => LocalState::Unreadable(error.message),
     };
@@ -114,6 +128,30 @@ pub fn probe_cli(region: QoderRegion) -> LocalProbe {
         path: path.display().to_string(),
         state,
     }
+}
+
+fn global_cli_on_path(search_path: &std::ffi::OsStr) -> bool {
+    // npm 同时提供 qoder 和 qodercli。只查 CLI 专用命令，避免把同名桌面启动器算进去。
+    #[cfg(windows)]
+    let names = ["qodercli.exe", "qodercli.cmd"];
+    #[cfg(not(windows))]
+    let names = ["qodercli"];
+    std::env::split_paths(search_path)
+        .filter(|dir| dir.is_absolute())
+        .any(|dir| {
+            names.iter().any(|name| {
+                let Ok(metadata) = dir.join(name).metadata() else {
+                    return false;
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                metadata.is_file()
+            })
+        })
 }
 
 /// 某个程序位**当前登录的账号 uid**（只读；读不到 / 没登录 ⇒ `None`）。
@@ -327,11 +365,13 @@ const LINUX_SECRET_TOOL_NAMES: &[&str] = &["qoder", "Qoder"];
 ///   `machine_id` 文件。
 fn read_cli_credential(region: QoderRegion) -> Result<Option<RawAccount>, ReadError> {
     let path = paths::cli_auth_file(region);
-    if !path.exists() {
-        return Err(missing(&path));
-    }
-    let bytes = std::fs::read(&path)
-        .map_err(|error| unreadable(format!("读取 {} 失败：{error}", path.display())))?;
+    let bytes = std::fs::read(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            missing(&path)
+        } else {
+            unreadable(format!("读取 {} 失败：{error}", path.display()))
+        }
+    })?;
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -588,6 +628,36 @@ mod tests {
         assert_eq!(missing.detail(), None);
         assert!(unreadable_state.detail().is_some(), "读不懂必须带原因");
         assert_eq!(empty.detail(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_global_cli_without_credentials_is_detected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(home.path());
+        let global = QoderRegion::Global;
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let cli = bin.join("qodercli");
+        let search_path = std::env::join_paths([&bin]).unwrap();
+        let probe = |region| probe_cli_with_search_path(region, Some(&search_path)).state;
+
+        std::fs::write(&cli, b"").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(probe(global), LocalState::Missing);
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(probe(global), LocalState::Empty);
+        assert_eq!(probe(QoderRegion::Cn), LocalState::Missing);
+
+        let auth = paths::cli_auth_file(global);
+        assert!(!auth.exists());
+        std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+        std::fs::write(&auth, b"{invalid json").unwrap();
+        assert!(matches!(probe(global), LocalState::Unreadable(_)));
+        std::fs::write(&auth, record("dt-a", "u1").to_string()).unwrap();
+        assert_eq!(probe(global), LocalState::Ready);
     }
 
     /// 探测结果的**下发形态**：四个来源字段齐全，且 state 是稳定字面量。
