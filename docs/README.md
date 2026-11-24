@@ -70,6 +70,8 @@
 | [`2026-11-16-unified-gateway-slash-model-ids.md`](superpowers/plans/2026-11-16-unified-gateway-slash-model-ids.md) | 统一网关斜杠模型 ID 实施计划 | 已完成 · 2026-11-16 |
 | [`2026-11-23-workbuddy-stream-idle-timeout-design.md`](superpowers/specs/2026-11-23-workbuddy-stream-idle-timeout-design.md) | WorkBuddy CN 流式转发 idle 超时（issue #208） | 已实现 · 2026-11-23 |
 | [`2026-11-23-workbuddy-stream-idle-timeout.md`](superpowers/plans/2026-11-23-workbuddy-stream-idle-timeout.md) | WorkBuddy CN 流式转发 idle 超时实施计划（issue #208） | 已完成 · 2026-11-23 |
+| [`2026-11-24-hourly-axis-interval-labels-design.md`](superpowers/specs/2026-11-24-hourly-axis-interval-labels-design.md) | 今天用量图小时轴区间标签（issue #223 评论） | 已实现 · 2026-11-24 |
+| [`2026-11-24-hourly-axis-interval-labels.md`](superpowers/plans/2026-11-24-hourly-axis-interval-labels.md) | 今天用量图小时轴区间标签实施计划 | 已完成 · 2026-11-24 |
 | [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |
 
 ### 分期架构（P3–P15）

@@ -444,8 +444,11 @@ function elapsedHourPoints(points: TokenStatsGroup[], now: number = Date.now()):
   });
 }
 
-function hourAxisLabel(key: string): string {
-  return `${key.slice(-2)}:00`;
+export function hourAxisLabel(key: string): string {
+  const hour = Number(key.slice(-2));
+  const start = String(hour).padStart(2, "0");
+  const end = String(hour + 1).padStart(2, "0");
+  return `${start}:00–${end}:00`;
 }
 
 /**
@@ -732,7 +735,7 @@ export function creditDailyBars(stats: CreditStatistics, window: UsageWindow): C
     const byHour = new Map(stats.dailyHours.map((point) => [point.key, point.usage]));
     return Array.from({ length: nowHour + 1 }, (_, hour) => {
       const key = `${date}-${String(hour).padStart(2, "0")}`;
-      return { date: key, label: `${String(hour).padStart(2, "0")}:00`, inAmt: 0, outAmt: byHour.get(key) ?? 0 };
+      return { date: key, label: hourAxisLabel(key), inAmt: 0, outAmt: byHour.get(key) ?? 0 };
     });
   }
   const byDate = new Map(stats.daily.map((point) => [point.date, point.usage]));

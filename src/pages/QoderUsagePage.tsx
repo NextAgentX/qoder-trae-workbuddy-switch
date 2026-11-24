@@ -82,6 +82,7 @@ import {
   UNKNOWN_MODEL,
   type UsageLedger,
 } from "@/lib/usage-ledger";
+import { hourAxisLabel } from "@/lib/usage-charts";
 import { todayKey, usageWindowKeys, usageWindowSpanDays } from "@/lib/usage-window";
 
 /**
@@ -253,7 +254,7 @@ export default function QoderUsagePage({ viewWindow, view = "trend", ledger = "a
           clientTotals: clientByHour,
           gatewayTotals: gatewayCreditsByHour,
           ledger,
-          labelOf: (key) => `${key.slice(-2)}:00`,
+          labelOf: hourAxisLabel,
         });
       }
       return ledgerDailySeries({

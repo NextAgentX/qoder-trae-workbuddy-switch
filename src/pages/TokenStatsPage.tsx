@@ -98,6 +98,7 @@ import {
   SESSION_RENDER_LIMIT,
   calendarWindowKeys,
   heatmapMatrix,
+  hourAxisLabel,
   mergeGatewayTrends,
   mergeSources,
   modelSlices,
@@ -228,7 +229,7 @@ function TrendView({
           clientTotals: clientHours,
           gatewayTotals: gatewayHours,
           ledger,
-          labelOf: (key) => `${key.slice(-2)}:00`,
+          labelOf: hourAxisLabel,
         });
       }
       return ledgerDailySeries({

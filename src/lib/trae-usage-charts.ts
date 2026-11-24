@@ -28,7 +28,13 @@ import type {
   TraeTokenBucket,
   TraeTokenStatistics,
 } from "@/lib/trae-types";
-import { calendarWindowKeys, creditBars, type CreditDailyBar, type ModelSlice } from "@/lib/usage-charts";
+import {
+  calendarWindowKeys,
+  creditBars,
+  hourAxisLabel,
+  type CreditDailyBar,
+  type ModelSlice,
+} from "@/lib/usage-charts";
 import type { UsageWindow } from "@/lib/usage-window";
 
 /** Trae 的桶缺 WorkBuddy 的缓存三件套 ⇒ 补 0 / `null`，字段**严格同形**。 */
@@ -125,7 +131,7 @@ export function traeCreditBars(
         const point = byHour.get(hour);
         return {
           date: `${today}-${String(hour).padStart(2, "0")}`,
-          label: `${String(hour).padStart(2, "0")}:00`,
+          label: hourAxisLabel(`${today}-${String(hour).padStart(2, "0")}`),
           inAmt: point?.earned ?? 0,
           outAmt: point?.consumed ?? 0,
         };
