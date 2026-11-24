@@ -1,8 +1,8 @@
 //! 本地积分观察快照与统计投影。
 //!
 //! WorkBuddy 只返回当前资源余额，没有可复用的历史账单序列。因此这里把
-//! 成功查询到的余额保存为本地观察值，再用相邻快照的正向下降量推导“观察到
-//! 的消耗”。首次快照和余额增加只建立新的基线，不产生负数消耗。
+//! 成功查询到的余额和总额度保存为本地观察值，按已用量的增量推导观察消耗。
+//! 快照不能精确还原历史账单。
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, TimeZone};
 use serde_json::{json, Value};
@@ -366,10 +366,28 @@ fn build_statistics(
         if let Some(latest) = snapshots.last() {
             latest_snapshots.insert(account_id.clone(), latest.clone());
         }
-        for pair in snapshots.windows(2) {
-            let previous = &pair[0];
-            let current = &pair[1];
-            let amount = previous.remaining - current.remaining;
+        // 总额度为零时看不到资源包的已用量，不用这条快照重置消费基线。
+        let mut observations = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.total > 0.0)
+            .peekable();
+        let mut previous = observations.next();
+        while let (Some(baseline), Some(current)) = (previous, observations.next()) {
+            if current.total < baseline.total {
+                // 下一次又看到同等或更多额度：这次少报资源包，沿用原基线。
+                // 额度持续下降时换基线，无法确认下降前后的已用量是否可比。
+                if !observations
+                    .peek()
+                    .is_some_and(|next| next.total >= baseline.total)
+                {
+                    previous = Some(current);
+                }
+                continue;
+            }
+            previous = Some(current);
+            let previously_used = (baseline.total - baseline.remaining).max(0.0);
+            let currently_used = (current.total - current.remaining).max(0.0);
+            let amount = currently_used - previously_used;
             if amount <= f64::EPSILON {
                 continue;
             }
@@ -1061,11 +1079,7 @@ mod tests {
         let earlier = at_local_date(2, 12);
         let yesterday = at_local_date(1, 12);
         let stats = build_statistics(
-            &[
-                snap(earlier, 100.0),
-                snap(yesterday, 125.0),
-                snap(now, 115.0),
-            ],
+            &[snap(earlier, 70.0), snap(yesterday, 95.0), snap(now, 85.0)],
             &[],
             &[],
             now,
@@ -1074,6 +1088,59 @@ mod tests {
         assert_eq!(stats["summary"]["usageToday"], 10.0);
         assert_eq!(stats["summary"]["usage7Days"], 10.0);
         assert_eq!(stats["events"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn transient_missing_packs_do_not_turn_into_usage_or_duplicate_usage() {
+        let now = at_local_date(0, 12);
+        let snapshots = [
+            (350.0, 350.0),
+            (0.0, 0.0),
+            (380.0, 380.0),
+            (30.0, 30.0),
+            (380.0, 379.63),
+            (380.0, 379.56),
+            (30.0, 30.0),
+            (0.0, 0.0),
+            (380.0, 379.56),
+        ];
+        let values: Vec<_> = snapshots
+            .iter()
+            .enumerate()
+            .map(|(index, &(total, remaining))| {
+                snapshot_value(
+                    now - (snapshots.len() - index) as i64 * 60_000,
+                    "account-1",
+                    "test",
+                    total,
+                    remaining,
+                )
+            })
+            .collect();
+        let stats = build_statistics(&values, &[], &[json!({"id": "account-1"})], now);
+        assert_eq!(stats["summary"]["currentRemaining"], 379.56);
+        let usage = stats["summary"]["usageToday"].as_f64().unwrap();
+        assert!((usage - 0.44).abs() < 1e-9, "usage: {usage}");
+        assert_eq!(stats["events"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn lasting_capacity_reduction_establishes_a_new_baseline() {
+        let now = at_local_date(0, 12);
+        let sample = |offset, total, remaining| {
+            snapshot_value(now - offset, "account-1", "test", total, remaining)
+        };
+        let stats = build_statistics(
+            &[
+                sample(120_000, 350.0, 320.0),
+                sample(60_000, 30.0, 30.0),
+                sample(0, 30.0, 27.0),
+            ],
+            &[],
+            &[],
+            now,
+        );
+        assert_eq!(stats["summary"]["usageToday"], 3.0);
     }
 
     #[test]

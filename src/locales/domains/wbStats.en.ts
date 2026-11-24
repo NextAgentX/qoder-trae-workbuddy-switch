@@ -327,7 +327,7 @@ export const en = {
   "wbStats.usage.sessions.accountHint": "Accounts are attributed by the exact uid in the log; display names are for reading only",
   "wbStats.usage.sessions.endpointHint": "The same data is listed row by row under Gateway → request log",
   "wbStats.usage.credits.requestCaliber": "Request caliber",
-  "wbStats.usage.credits.caliberNote": "The four tiles above are the balance caliber: differences of account balance snapshots — never duplicated, but not attributable to a source. Below is the request caliber: summed per request, attributable, and it does duplicate.",
+  "wbStats.usage.credits.caliberNote": "The usage total above is estimated from changes in each account’s used credits. The charts below sum requests by source, and both sources may record the same request.",
   "wbStats.usage.credits.gap": "Gap between the two calibers",
   "wbStats.usage.credits.gapBody": "Balance {billed} − request {request} (client {client} + gateway {gateway} − overlap {overlap}) = gap {gap}",
   "wbStats.usage.credits.gapHint": "The gap is unattributed usage: other devices, or requests that never reached a local log. It is never spread across sources — doing so would be inventing data.",
