@@ -4029,19 +4029,10 @@ async fn api_gateway_models(RawQuery(query): RawQuery) -> Response {
 async fn api_gateway_refresh_models(Json(body): Json<Value>) -> Response {
     let region = parse_region(body.get("region").and_then(Value::as_str));
     let state = crate::gateway_host::shared_state();
-    let strategy = state.strategy_for(region).await;
-    let account = match buddy_switch_gateway::AccountSelector
-        .select(region, &strategy)
-        .await
-    {
-        Ok(account) => account,
-        Err(error) => return json_err(error.message(), StatusCode::BAD_REQUEST),
-    };
-    let snapshot = state
-        .catalogs
-        .refresh(region, &state.upstream, &account)
-        .await;
-    json_ok(serde_json::to_value(snapshot).unwrap_or(Value::Null))
+    match buddy_switch_gateway::catalog_probe::probe_region(&state, region).await {
+        Ok(snapshot) => json_ok(serde_json::to_value(snapshot).unwrap_or(Value::Null)),
+        Err(error) => json_err(error.message(), StatusCode::BAD_REQUEST),
+    }
 }
 
 async fn api_gateway_strategy() -> Response {
