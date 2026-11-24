@@ -141,6 +141,14 @@
 | [`CLEANUP-2026-10-13.md`](history/CLEANUP-2026-10-13.md) | 上一轮工作区清理报告（含当时的引用扫描证据） |
 | [openrouter-docs-2026-11-16/](history/openrouter-docs-2026-11-16/) | 2026-11-16 抓取的 OpenRouter 官方文档快照（外部资料，非本仓设计依据） |
 | [`deepseek-codex-cache-research-2026-11-17.md`](history/deepseek-codex-cache-research-2026-11-17.md) | Codex 经 Buddy/Trae 使用 DeepSeek 时缓存 0% 的官方语义、统计口径与源码边界调研 |
+| [`issue-152-2026-11-02.md`](history/issue-152-2026-11-02.md) | macOS 切换账号问题现场摘要（后续已合并 #153）（只读历史） |
+| [`issue-171-2026-11-06.md`](history/issue-171-2026-11-06.md) | 刷新暂时失败误标与账号列表轮询问题现场分析（只读历史） |
+| [`issue-198-2026-11-10.md`](history/issue-198-2026-11-10.md) | CodeBuddy 长期记忆迁移缺口现场分析（只读历史） |
+| [`issue-202-2026-11-13.md`](history/issue-202-2026-11-13.md) | JetBrains CodeBuddy Token 展示问题用户报告（只读历史） |
+| [`issue-203-2026-11-13.md`](history/issue-203-2026-11-13.md) | 关联会话残留与 Qoder 签到误报问题用户报告（只读历史） |
+| [`issue-204-2026-11-13.md`](history/issue-204-2026-11-13.md) | WorkBuddy/Qoder 网关请求错误复现记录（只读历史） |
+| [`issue-205-2026-11-14.md`](history/issue-205-2026-11-14.md) | 教师企业版积分问题用户报告（只读历史） |
+| [`issues-snapshot-2026-11-15.json`](history/issues-snapshot-2026-11-15.json) | GitHub issue 列表快照（截至 2026-11-15）（只读历史） |
 
 ---
 
