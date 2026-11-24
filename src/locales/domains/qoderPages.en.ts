@@ -21,7 +21,7 @@ export const en = {
 
   "qoder.page.accounts.source.missing": "Not found",
   "qoder.page.accounts.source.unreadable": "Unreadable",
-  "qoder.page.accounts.source.empty": "No account inside",
+  "qoder.page.accounts.source.empty": "Installed · Not signed in",
   "qoder.page.accounts.source.ready": "Importable",
 
   "qoder.page.accounts.pat.title": "Paste a PAT",
@@ -336,7 +336,7 @@ export const en = {
   "qoder.page.settings.account.description":
     "Importing, switching and program-slot sign-in are managed on the Accounts page; this is a direct entry, not a duplicate form.",
   "qoder.page.settings.account.action": "Open accounts",
-  "qoder.page.settings.client.description": "Probe result for the two official credential stores (read-only).",
+  "qoder.page.settings.client.description": "Check local Qoder clients and their sign-in status.",
   "qoder.page.settings.client.error": "Probe failed: {error}",
   // ★ Scheduled tasks (Qoder has two; the schedule config is a single global file)
   "qoder.page.settings.schedule.checkinGroup": "Auto check-in",
