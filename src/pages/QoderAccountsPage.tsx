@@ -1557,11 +1557,7 @@ export default function QoderAccountsPage() {
            不传它会把 **WB 的**限流记录画到本页上 —— 串台比空表坏得多。 */
         footer={
           <section className="mt-7 min-w-0">
-            <ClientLimitsCard
-              region={region}
-              ledger={false}
-              probePath="/qoder/api-service?sub=models"
-            />
+            <ClientLimitsCard region={region} ledger={false} />
           </section>
         }
       />

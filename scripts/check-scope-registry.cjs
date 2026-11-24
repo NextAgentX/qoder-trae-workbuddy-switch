@@ -9948,14 +9948,22 @@ check("★★ Qoder / Trae 账号页的限流卡必须 `ledger={false}`（否则
     if (!tag.includes("ledger={false}")) {
       throw new Error(`${page} 账号页的限流卡缺 \`ledger={false}\` ⇒ 会显示 WorkBuddy 的客户端限流台账`);
     }
-    if (!tag.includes("probePath=")) {
-      throw new Error(`${page} 账号页的限流卡缺 \`probePath\` ⇒ 「去网关探测」会跳到 WB 的网关页`);
-    }
   }
   if (/ledger=\{false\}/.test(readCode("src/pages/AccountsPage.tsx"))) {
     throw new Error("WorkBuddy 账号页必须走台账模式（`ledger` 默认 true），不能关掉");
   }
-  return "Qoder/Trae ledger=false + 各自 probePath · WB 保持台账模式";
+  return "Qoder/Trae ledger=false · WB 保持台账模式";
+});
+
+check("★ 查看探测矩阵沿用账号页的作用域", () => {
+  const card = readCode("src/components/client-limits-card.tsx");
+  if (!card.includes('const probePath = `/s/${scope}/gateway?type=independent&sub=models`')) {
+    throw new Error("查看探测矩阵必须使用当前作用域的网关模型页");
+  }
+  if ((card.match(/\bto=\{probePath\}/g) ?? []).length !== 2) {
+    throw new Error("限流卡标题区和空态的探测矩阵入口必须共用作用域深链");
+  }
+  return "标题区和空态均打开同作用域的独立网关模型页";
 });
 
 console.log(`\n${passed} passed / ${failures.length} failed\n`);

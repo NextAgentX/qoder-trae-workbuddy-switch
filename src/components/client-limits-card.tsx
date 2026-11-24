@@ -101,7 +101,6 @@ const TONE_VARIANTS = {
 export function ClientLimitsCard({
   region,
   ledger = true,
-  probePath = "/api-service?type=independent&sub=models",
 }: {
   region: Region;
   /**
@@ -119,8 +118,6 @@ export function ClientLimitsCard({
    * 其余（行结构、恢复/实测时刻、入口、汇总）与 WB **完全同一套**。
    */
   ledger?: boolean;
-  /** 该平台网关「限流探测」的深链（副标题出口 + 无台账时的空态按钮）。 */
-  probePath?: string;
 }) {
   const t = useT();
   const location = useLocation();
@@ -129,6 +126,7 @@ export function ClientLimitsCard({
     () => scopeFromLegacy(location.pathname, region),
     [location.pathname, region],
   );
+  const probePath = `/s/${scope}/gateway?type=independent&sub=models`;
 
   const [windowKey, setWindowKey] = useState<WindowKey>("7");
   const [data, setData] = useState<ClientLimitsResponse | null>(null);
