@@ -245,14 +245,15 @@ function TrendView({
   const sumOf = (map: Map<string, number>) => keys.reduce((sum, key) => sum + (map.get(key) ?? 0), 0);
   const clientTokens = sumOf(clientDaily);
   const gatewayTokens = sumOf(gatewayDaily);
-  const overlap = useMemo(() => overlapInWindow(recon, clientTokens), [recon, clientTokens]);
+  const windowRecon = recon && keys.includes(recon.window.date) ? recon : null;
+  const overlap = useMemo(() => overlapInWindow(windowRecon, clientTokens), [windowRecon, clientTokens]);
   const combined = combinedTotal(clientTokens, gatewayTokens, overlap);
   const formula = useMemo(() => {
     const parts = combinedFormula({
       clientTokens,
       gatewayTokens,
       overlapTokens: overlap,
-      verdict: recon?.verdict ?? null,
+      verdict: windowRecon?.verdict ?? null,
     });
     return parts.kind === "subset"
       ? t("wbStats.usage.trend.formulaSubset", {
@@ -264,7 +265,7 @@ function TrendView({
           gateway: compactTokens(gatewayTokens),
           overlap: compactTokens(parts.overlapTokens),
         });
-  }, [clientTokens, gatewayTokens, overlap, recon?.verdict, t]);
+  }, [clientTokens, gatewayTokens, overlap, windowRecon?.verdict, t]);
 
   const visibleTotal = ledger === "client" ? clientTokens : ledger === "gateway" ? gatewayTokens : combined;
   const total = visibleTotal;
@@ -281,7 +282,15 @@ function TrendView({
     const inWindow = new Set(keys);
     return source.daily.reduce((sum, point) => (inWindow.has(point.key) ? sum + point.records : sum), 0);
   }, [source.daily, keys]);
-  const filtered = source.summary.records > 0 && rangeRecords === 0 && gatewayTokens === 0;
+  const gatewayEndpoints = useMemo(() => dimTotals(dim, viewWindow, endpointKey), [dim, viewWindow]);
+  const gatewayRequests = dim
+    ? gatewayEndpoints.reduce((sum, row) => sum + row.requests, 0)
+    : windowRecon?.gatewayRows ?? 0;
+  const overlapRequests = Math.min(windowRecon?.matched ?? 0, rangeRecords, gatewayRequests);
+  const requests = ledger === "client"
+    ? rangeRecords
+    : ledger === "gateway" ? gatewayRequests : rangeRecords + gatewayRequests - overlapRequests;
+  const filtered = source.summary.records > 0 && rangeRecords === 0 && gatewayTokens === 0 && gatewayRequests === 0;
 
   /* 模型占比：**按单本账各画一个环**（跨账本合并占比的分母含重复计数，是假的）。 */
   const clientSlices = useMemo(
@@ -384,12 +393,10 @@ function TrendView({
     {
       icon: MessagesSquare,
       label: t("wbStats.usage.trend.requests"),
-      value: exactTokens(
-        ledger === "gateway"
-          ? dimTotals(dim, viewWindow, endpointKey).reduce((sum, row) => sum + row.requests, 0)
-          : rangeRecords,
-      ),
-      hint: t("wbStats.usage.trend.requestsHint"),
+      value: exactTokens(requests),
+      hint: ledger === "all"
+        ? t("wbStats.usage.trend.requestsCombinedHint")
+        : t("wbStats.usage.trend.requestsHint"),
     },
   ];
 
@@ -398,15 +405,15 @@ function TrendView({
       <StatTiles tiles={tiles} ariaLabel={t("wbStats.usage.view.trend")} />
       <CoverageStrip
         clientTokens={clientTokens}
-        clientRequests={recon?.clientRows ?? rangeRecords}
+        clientRequests={rangeRecords}
         gatewayTokens={gatewayTokens}
-        gatewayRequests={recon?.gatewayRows ?? 0}
-        gatewayFailed={dimTotals(dim, viewWindow, endpointKey).reduce((sum, row) => sum + row.failed, 0)}
+        gatewayRequests={gatewayRequests}
+        gatewayFailed={gatewayEndpoints.reduce((sum, row) => sum + row.failed, 0)}
         recorded={coverage.recorded}
         windowDays={coverage.total}
-        overlapRows={recon?.matched ?? 0}
+        overlapRows={overlapRequests}
         overlapTokens={overlap}
-        onReconcile={recon ? onReconcile : undefined}
+        onReconcile={windowRecon ? onReconcile : undefined}
       />
       {columns.some((column) => column.total > 0) ? (
         <ChartFrame
@@ -783,13 +790,15 @@ export default function TokenStatsPage({
   const hasSource = (stats?.sources.length ?? 0) > 0;
   /* 网关用量（`gatewayTrend`，扫 `gateway_logs`）是客户端（扫 `projects/*.jsonl`）
      之外的另一条记录源，按窗口取。 */
-  const gatewayInWindow = useMemo(() => {
+  const hasGatewayActivity = useMemo(() => {
     const keys = new Set(calendarWindowKeys(viewWindow));
-    return (gatewayTrend?.days ?? []).reduce(
-      (sum, day) => (keys.has(day.key) ? sum + day.total : sum),
-      0,
+    const hasRequests = dim?.days.some((day) =>
+      keys.has(day.key) && day.endpoints.some((entry) => entry.requests > 0),
     );
-  }, [gatewayTrend, viewWindow]);
+    const reconHasRequests = !dim && recon && keys.has(recon.window.date) && recon.gatewayRows > 0;
+    return hasRequests || reconHasRequests
+      || (gatewayTrend?.days ?? []).some((day) => keys.has(day.key) && day.total > 0);
+  }, [dim, gatewayTrend, recon, viewWindow]);
   /**
    * 有来源但**两个数据源都翻不出用量** ⇒ 整页空态（区分于「被视图参数筛没」，后者在视图内处理）。
    *
@@ -800,7 +809,7 @@ export default function TokenStatsPage({
    *   不加 cutoff），窗口内被筛没的由各视图自行展示 ⇒ 这里只需「有没有任何来源
    *   记录」来决定是否渲染页面，避免空态把可能有值的视图整片吞掉。 */
   const clientHasRecords = (source?.summary.records ?? 0) > 0;
-  const trulyEmpty = Boolean(source) && !clientHasRecords && gatewayInWindow === 0;
+  const trulyEmpty = Boolean(source) && !clientHasRecords && !hasGatewayActivity;
 
   return (
     /* ⚠️ 页头 / 子 Tab / **视图参数条**都由**上层** `UsagePage` 统一渲染

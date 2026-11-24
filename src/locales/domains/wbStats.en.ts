@@ -266,6 +266,7 @@ export const en = {
   "wbStats.usage.models.unknown": "Unlabelled model",
   "wbStats.usage.trend.requests": "Requests",
   "wbStats.usage.trend.requestsHint": "Client counts log rows; gateway counts request log entries",
+  "wbStats.usage.trend.requestsCombinedHint": "Client + gateway, minus matched duplicates. Historical counts may overlap.",
   "wbStats.usage.trend.gatewayNoHours": "The gateway log keeps only timestamps and durations: it can be aggregated per day, not per hour of week. Switch to the client ledger for the heatmap.",
   "wbStats.usage.trend.cacheHit": "Cache hits",
   "wbStats.usage.trend.cacheHitHint": "{rate} hit · {input} input",

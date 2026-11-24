@@ -295,6 +295,7 @@ export const zh = {
   "wbStats.usage.models.unknown": "未标注模型",
   "wbStats.usage.trend.requests": "请求数",
   "wbStats.usage.trend.requestsHint": "客户端按会话日志条目；网关按日志条数",
+  "wbStats.usage.trend.requestsCombinedHint": "客户端 + 网关，扣除已对账的重复条目；历史可能重复",
   "wbStats.usage.trend.gatewayNoHours": "网关日志只记时间戳与耗时：能算逐日，不能算「一周七天 × 24 小时」。要按小时看，请切到客户端账本。",
   "wbStats.usage.trend.cacheHit": "缓存命中",
   "wbStats.usage.trend.cacheHitHint": "命中率 {rate} · 输入 {input}",
