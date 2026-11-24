@@ -1,15 +1,3 @@
-/**
- * 概览 · **近 14 天 Token 用量**卡（原型 `viewOverview` 的 `.split-main`）。
- *
- * 与 `OverviewStats` 的「今日 Token」**同源**（同一个 `useOverviewMetrics` 结果里的
- * `days` 轴）——同一件事的数字只有一个来源，两处不会各说各话。
- *
- * ## 空态与「读不到」是两件事
- *
- * - **读不到**（`token === null`）：显示「读不到数据」——不知道 ≠ 0；
- * - **读到了但没有量**（14 天合计为 0）：`EmptyState`「近 14 天没有用量记录」+ 出口。
- */
-
 import { CalendarDays } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -18,24 +6,30 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { exactTokens } from "@/components/usage/format";
 import { useT } from "@/lib/i18n";
-import type { OverviewMetrics } from "@/lib/overview-metrics";
+import type { OverviewDay } from "@/lib/overview-metrics";
+import { cn } from "@/lib/utils";
 
-/** 柱高（% of 峰值）；有量但极小的日子给 2% 底线，否则会被画成「没有」。 */
-function barHeight(total: number, peak: number): string {
-  if (total <= 0 || peak <= 0) return "0%";
-  return `${Math.max(2, Math.round((total / peak) * 100))}%`;
-}
+const SERIES = {
+  client: { label: "wbStats.usage.ledger.client", color: "bg-[var(--data-series-emerald)]" },
+  gateway: { label: "wbStats.usage.ledger.gateway", color: "bg-[var(--data-series-indigo)]" },
+} as const;
+
+type Series = keyof typeof SERIES;
 
 interface Props {
-  token: OverviewMetrics["token"];
-  /** 「查看详情」的去处（该作用域的用量页）。 */
+  days: OverviewDay[] | null;
   usageHref: string;
 }
 
-export function TokenTrendCard({ token, usageHref }: Props) {
+export function TokenTrendCard({ days, usageHref }: Props) {
   const t = useT();
-  const total = token ? token.days.reduce((sum, day) => sum + day.total, 0) : 0;
-  const peak = token ? token.days.reduce((max, day) => Math.max(max, day.total), 0) : 0;
+  const sourceKeys: Series[] = ["client", "gateway"];
+  const series = sourceKeys.filter((key) =>
+    days?.some((day) => (day[key]?.total ?? 0) > 0 || (day[key]?.records ?? 0) > 0),
+  );
+  const peak = days?.reduce(
+    (max, day) => Math.max(max, day.client?.total ?? 0, day.gateway?.total ?? 0), 0,
+  ) ?? 0;
 
   return (
     <Card className="gap-0 py-0">
@@ -47,11 +41,11 @@ export function TokenTrendCard({ token, usageHref }: Props) {
         </Button>
       </div>
 
-      {!token ? (
+      {!days ? (
         <p className="px-5 py-8 text-center text-xs text-muted-foreground">
           {t("wbOverview.stat.unavailable")}
         </p>
-      ) : total <= 0 ? (
+      ) : series.length === 0 ? (
         <EmptyState
           icon={CalendarDays}
           title={t("wbOverview.trend.empty")}
@@ -64,31 +58,52 @@ export function TokenTrendCard({ token, usageHref }: Props) {
         />
       ) : (
         <div className="p-4">
-          {/* 纯 DOM 柱状图（14 根柱不足以动用 recharts）；标题即逐日真值，鼠标悬停可核。 */}
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {series.map((key) => (
+              <span key={key} className="flex items-center gap-1.5">
+                <span aria-hidden="true" className={cn("size-2 rounded-sm", SERIES[key].color)} />
+                {t(SERIES[key].label)}
+              </span>
+            ))}
+          </div>
+          {peak === 0 && (
+            <p className="mt-3 text-xs text-muted-foreground">{t("wbOverview.trend.noTokens")}</p>
+          )}
           <div
-            className="flex h-[120px] items-end gap-[5px] pt-2"
+            className={cn("flex items-end gap-[5px] pt-2", peak > 0 ? "h-[120px]" : "h-7")}
             role="img"
             aria-label={t("wbOverview.trend.aria")}
           >
-            {token.days.map((day) => (
-              <div
-                key={day.key}
-                className="flex h-full min-w-0 flex-1 items-end"
-                title={t("wbOverview.trend.barTitle", {
-                  date: day.key.slice(5),
-                  tokens: exactTokens(day.total),
-                  records: exactTokens(day.records),
+            {days.map((day) => (
+              <div key={day.key} className="flex h-full min-w-0 flex-1 items-end gap-px">
+                {series.map((key) => {
+                  const point = day[key];
+                  const bound = point?.partial ? "≥ " : "";
+                  const title = point
+                    ? t("wbOverview.trend.barTitle", {
+                      date: day.key,
+                      source: t(SERIES[key].label),
+                      tokens: `${bound}${exactTokens(point.total)}`,
+                      records: `${bound}${exactTokens(point.records)}`,
+                    })
+                    : undefined;
+                  const height = point && peak > 0 && point.total > 0
+                    ? `${Math.max(2, (point.total / peak) * 100)}%`
+                    : 0;
+                  return (
+                    <div key={key} className="flex h-full min-w-0 flex-1 items-end" title={title}>
+                      <div
+                        className={cn("w-full rounded-t-[3px]", SERIES[key].color)}
+                        style={{ height }}
+                      />
+                    </div>
+                  );
                 })}
-              >
-                <div
-                  className="w-full rounded-t-[3px] bg-primary"
-                  style={{ height: barHeight(day.total, peak) }}
-                />
               </div>
             ))}
           </div>
           <div className="mt-1.5 flex gap-[5px]">
-            {token.days.map((day) => (
+            {days.map((day) => (
               <span
                 key={day.key}
                 className="min-w-0 flex-1 truncate text-center text-[9.5px] tabular-nums text-muted-foreground"

@@ -7984,8 +7984,7 @@ check("★ Q1 诊断包必须过凭据闸门（与备份共用同一判据）", 
 });
 
 check("★ Q3 概览与账号卡的 Token 口径必须显式区分（不得同名）", () => {
-  /* 两个来源**互斥**（MEMORY-10：客户端直连上游，不流经网关）⇒ 两个数字各自都对，
-     但同名会让人默认它们该相等。故概览改名 + tooltip 说明口径。 */
+  /* WorkBuddy 概览卡片显示客户端用量，并通过标题和 tooltip 说明来源。 */
   const ovZh = fs.readFileSync(
     path.join(ROOT, "src/locales/domains/wbOverview.zh.ts"),
     "utf8",
@@ -8001,7 +8000,7 @@ check("★ Q3 概览与账号卡的 Token 口径必须显式区分（不得同�
     path.join(ROOT, "src/components/overview/overview-stats.tsx"),
     "utf8",
   );
-  if (!/title:\s*t\("wbOverview\.stat\.tokensHintClientOnly"\)/.test(stats)) {
+  if (!/title:[^\n]*t\("wbOverview\.stat\.tokensHintClientOnly"\)/.test(stats)) {
     throw new Error("口径说明没有挂到概览 Token tile 的 title 上");
   }
   return "概览改名「客户端 Token」+ tooltip 说明口径";

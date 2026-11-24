@@ -1,45 +1,28 @@
-/**
- * 概览 · **工作台指标**（数据层，P3）。
- *
- * ## 为什么单独一层
- *
- * 概览要回答的四个数字（今日 Token / 今日积分消耗 / 今日网关请求 / 账号总数）里，
- * **前三个在两平台来自不同的命令**：
- *
- * | 指标 | WorkBuddy | Trae |
- * | --- | --- | --- |
- * | 逐日 Token | `get_token_statistics` + `mergeSources` | `get_trae_token_statistics` |
- * | 积分 | `get_credit_statistics`（官方当日用量 + 本地余额） | `get_trae_credits`（当日快照 `consumed`） |
- * | 网关请求 | `get_gateway_logs` | `get_trae_gateway_logs` |
- *
- * 这些差异是**「数据从哪来」**，不是「能力有没有」⇒ 用 `Record<Product, …>` 表声明，
- * 与 `UsagePage` 的 `PLATFORM_TABS` / `USAGE_PAGES` 同一口径（**不写 `product === "trae"`**）。
- *
- * ## ★ 数据诚实性（本项目红线）
- *
- * 1. **每项指标独立可失败**：某项读不到就是 `null`，界面显示「—」——
- *    **不回落 0**。0 是「确实是 0」，读不到是「不知道」，两者不能混（§6 #5）。
- * 2. **今日网关请求来自本机请求日志**，而后端日志是**环形裁剪**的（保留最近 `log_keep` 条）
- *    ⇒ 被裁过时它只是**下界**，`truncated` 如实标出，界面显示「≥ N」。
- */
-
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import * as api from "@/lib/api";
 import { normalizeGatewayConfig } from "@/lib/gateway";
 import type { Product } from "@/lib/platforms/registry";
+import { normalizeQoderGatewayConfig, normalizeQoderGatewayLogs } from "@/lib/qoder-gateway";
 import { normalizeTraeGatewayConfig, normalizeTraeGatewayLogs } from "@/lib/trae-gateway";
-import type { CreditStatistics, Region } from "@/lib/types";
+import type { CreditStatistics, GatewayLogEntry, GatewayUsageDim, Region } from "@/lib/types";
 import { mergeSources } from "@/lib/usage-charts";
+import { dateKey, todayKey, usageWindowKeys } from "@/lib/usage-window";
 
-/** 逐日 Token 点（两平台归一后的**最小**形状：只有柱状图真正要用的三个字段）。 */
-export interface OverviewDay {
-  /** `YYYY-MM-DD`（本地日期，与后端逐日桶同口径）。 */
-  key: string;
-  /** 当日 Token（输入 + 输出）。 */
+interface TokenPoint {
   total: number;
-  /** 当日调用记录数。 */
   records: number;
+  partial?: boolean;
+}
+
+interface GatewayPoint extends TokenPoint {
+  credit: number;
+}
+
+export interface OverviewDay {
+  key: string;
+  client: TokenPoint | null;
+  gateway: TokenPoint | null;
 }
 
 interface OverviewCredits {
@@ -48,66 +31,44 @@ interface OverviewCredits {
   collectedAt?: number;
 }
 
-/** 概览统计行与趋势卡共用的指标（每项 `null` = 读不到，**不编数**）。 */
-export interface OverviewMetrics {
-  /** 首次加载中（尚无任何结果）。 */
-  loading: boolean;
-  /** 近 14 天逐日 Token（升序，恒 14 项、缺日补 0）。 */
-  token: { days: OverviewDay[]; today: number; yesterday: number } | null;
-  /** 今日积分消耗和剩余合计。官方用量缺失时，余额仍可独立显示。 */
-  credits: OverviewCredits | null;
-  /** 今日网关请求数（**仅本机请求日志**）；`truncated` ⇒ 该数是下界。 */
+interface OverviewUsage {
+  days: OverviewDay[] | null;
+  /** 统计卡和趋势图使用同一组逐日数据。 */
+  token: {
+    today: number;
+    partial: boolean;
+    yesterday: number | null;
+  } | null;
+  /** 网关上报的已知消耗，缺少正值时无法确认消耗。 */
+  gatewayCreditsToday: number | null;
+  /** 今日网关请求数来自环形日志，达到保留上限时可能是下界。 */
   gateway: { today: number; truncated: boolean } | null;
 }
 
+export interface OverviewMetrics extends OverviewUsage {
+  credits: OverviewCredits | null;
+}
+
 const TREND_DAYS = 14;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
-function dateKey(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
-
-/** 今天零点（本地时区）——「今日」的判据只有这一处。 */
-function startOfToday(): number {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date.getTime();
-}
-
-/**
- * 逐日 Token 序列（**平台口径各自的**）。
- *
- * 两个平台都取 `TREND_DAYS` 天：窗口一致，「近 14 天」才是同一件事。
- */
-const TOKEN_SERIES: Record<Product, (region: Region) => Promise<OverviewDay[]>> = {
-  workbuddy: async (region) => {
-    const stats = await api.getTokenStatistics(TREND_DAYS, region);
-    /* 与用量页**同源**：多个来源（workbuddy / codebuddy-cli / …）经同一个 `mergeSources`
-       聚合，任何口径变化两处会一起变（PLAN §3.10 第 1 条）。 */
-    return mergeSources(stats.sources ?? []).daily.map((point) => ({
-      key: point.key,
-      total: point.total,
-      records: point.records,
-    }));
-  },
-  trae: async (region) => {
-    // Trae 的 `scope` 档位与区域同名（`cn` / `global`），直接传区域。
-    const stats = await api.getTraeTokenStatistics(TREND_DAYS, region);
-    return (stats.daily ?? [])
-      .filter((point) => Boolean(point.key))
-      .map((point) => ({
-        key: point.key as string,
-        total: point.total ?? 0,
-        records: point.records ?? 0,
-      }));
-  },
-  /* ⚠️ Qoder 侧**尚无本机 Token 台账**：逐日序列来自本地 jsonl 记录，而 Qoder 的
-     用量要等网关把请求日志落盘之后才有数据源。
-     这里返回**空序列**（不是一串 0）—— 0 会被读成「今天确实没用量」，
-     而事实是「还没有这个数据源」。 */
-  qoder: async () => [],
+const GATEWAY_LEDGER: Record<Product, (region: Region) => Promise<GatewayUsageDim>> = {
+  workbuddy: api.getGatewayUsageDim,
+  trae: api.getTraeGatewayUsageDim,
+  qoder: api.getQoderGatewayUsageDim,
 };
+
+async function loadClientSeries(product: Product, region: Region) {
+  // Trae 和 Qoder 的用量来自网关。Trae 的旧 Token 统计也是网关日志。
+  if (product !== "workbuddy") return null;
+  const stats = await api.getTokenStatistics(30, region);
+  return mergeSources(stats.sources ?? []).daily;
+}
+
+async function loadTraeRecentDays(product: Product, region: Region) {
+  if (product !== "trae") return [];
+  const stats = await api.getTraeTokenStatistics(TREND_DAYS, region);
+  return stats.daily ?? [];
+}
 
 export function workbuddyOverviewCredits(stats: CreditStatistics, today: string): OverviewCredits {
   const remaining = stats.summary.currentRemaining;
@@ -131,131 +92,231 @@ export function workbuddyOverviewCredits(stats: CreditStatistics, today: string)
   return { today: usage, remaining, collectedAt: official.collectedAt };
 }
 
-/** 今日积分消耗 + 剩余合计；**无数据源可读时返回 `null`**（不回落 0）。 */
-const CREDIT_SNAPSHOT: Record<Product, (region: Region) => Promise<OverviewCredits | null>> = {
-  workbuddy: async (region) => {
-    const stats = await api.getCreditStatistics(false, region);
-    return workbuddyOverviewCredits(stats, dateKey(new Date()));
-  },
-  trae: async (region) => {
-    const credits = await api.getTraeCredits(region);
-    // 积分缓存只存 uid ⇒ 空表表示「还没采集过」，此时**不给 0**（0 是「确实没积分」）。
-    const cached = Object.values(credits.remaining ?? {});
-    if (cached.length === 0) return null;
-    const remaining = cached.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
-    const today = dateKey(new Date());
-    const snapshot = (credits.daily ?? []).find((point) => point.date === today);
-    return { today: snapshot?.consumed ?? 0, remaining };
-  },
-  /* ⚠️ Qoder 的额度要调上游才拿得到，而「概览」是**纯本地**视图（不联网）。
-     没有本地缓存时返回 `null`（= 「无数据源」），**不回落 0** —— 0 是「确实没积分」。 */
-  qoder: async () => null,
-};
+export async function loadOverviewCredits(
+  product: Product,
+  region: Region,
+  refresh = false,
+): Promise<OverviewCredits | null> {
+  switch (product) {
+    case "workbuddy": {
+      const stats = await api.getCreditStatistics(refresh, region).catch(() =>
+        refresh ? api.getCreditStatistics(false, region) : null,
+      );
+      return stats ? workbuddyOverviewCredits(stats, todayKey()) : null;
+    }
+    case "trae": {
+      const credits = await api.getTraeCredits(region);
+      const cached = Object.values(credits.remaining ?? {});
+      if (cached.length === 0) return null;
+      const remaining = cached.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+      const today = (credits.daily ?? []).find((point) => point.date === todayKey());
+      return { today: today?.consumed ?? 0, remaining };
+    }
+    case "qoder":
+      return null;
+  }
+}
 
-/** 今日网关请求数（**仅本机请求日志**）。 */
-const GATEWAY_TODAY: Record<Product, () => Promise<{ today: number; truncated: boolean }>> = {
+interface OverviewGatewayLogs {
+  logs: { ts: number }[];
+  keep: number;
+  workbuddyLogs?: GatewayLogEntry[];
+}
+
+const GATEWAY_LOGS: Record<Product, () => Promise<OverviewGatewayLogs>> = {
   workbuddy: async () => {
-    const [{ logs }, rawConfig] = await Promise.all([
+    const [{ logs }, config] = await Promise.all([
       api.getGatewayLogs(),
       api.getGatewayConfig(),
     ]);
-    return summarizeGatewayLogs(logs ?? [], normalizeGatewayConfig(rawConfig).log_keep);
+    return { logs: logs ?? [], keep: normalizeGatewayConfig(config).log_keep, workbuddyLogs: logs };
   },
   trae: async () => {
-    const [rawLogs, rawConfig] = await Promise.all([
+    const [logs, config] = await Promise.all([
       api.getTraeGatewayLogs(),
       api.getTraeGatewayConfig(),
     ]);
-    return summarizeGatewayLogs(
-      normalizeTraeGatewayLogs(rawLogs),
-      normalizeTraeGatewayConfig(rawConfig).logKeep,
-    );
+    return {
+      logs: normalizeTraeGatewayLogs(logs),
+      keep: normalizeTraeGatewayConfig(config).logKeep,
+    };
   },
-  /* ⚠️ Qoder 网关尚未落地 ⇒ 没有请求日志可读。
-     `today: 0` 在这里是**真话**（确实一次请求都没有），不是「无数据源」的伪装 ——
-     与上面两个表的处理不同，因为「请求数」的零值语义本就明确。 */
-  qoder: async () => ({ today: 0, truncated: false }),
+  qoder: async () => {
+    const [logs, config] = await Promise.all([
+      api.getQoderGatewayLogs(),
+      api.getQoderGatewayConfig(),
+    ]);
+    return {
+      logs: normalizeQoderGatewayLogs(logs),
+      keep: normalizeQoderGatewayConfig(config).logKeep,
+    };
+  },
 };
 
-/**
- * 按请求日志求「今日请求数」。
- *
- * ⚠️ **后端日志是环形裁剪的**（`RequestLog::trim_and_save` 保留最近 `keep` 条）⇒
- * 当「仍在册的最旧一条」已经是今天的，说明今天的更早记录被裁掉了，本数只是**下界**。
- * 这个判别必须做：把下界当成精确值显示，就是对一个真实数字的**谎报**。
- */
-function summarizeGatewayLogs(
-  logs: readonly { ts: number }[],
-  keep: number,
-): { today: number; truncated: boolean } {
-  const start = startOfToday();
-  const today = logs.filter((entry) => entry.ts >= start).length;
-  const oldest = logs.reduce(
-    (min, entry) => (entry.ts < min ? entry.ts : min),
-    Number.POSITIVE_INFINITY,
-  );
-  const truncated =
-    Number.isFinite(oldest) && oldest >= start && logs.length >= Math.max(1, keep);
-  return { today, truncated };
-}
-
-/** 把逐日序列铺到「最近 14 天」的固定轴上（缺日补 0，不跳格）。 */
-function buildTrendAxis(series: readonly OverviewDay[]): OverviewDay[] {
-  const byKey = new Map(series.map((point) => [point.key, point]));
-  const axis: OverviewDay[] = [];
-  for (let offset = TREND_DAYS - 1; offset >= 0; offset -= 1) {
-    const key = dateKey(new Date(Date.now() - offset * DAY_MS));
-    const point = byKey.get(key);
-    axis.push({ key, total: point?.total ?? 0, records: point?.records ?? 0 });
+function summarizeGatewayLogs({ logs, keep }: OverviewGatewayLogs, today: string) {
+  let count = 0;
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const entry of logs) {
+    if (dateKey(new Date(entry.ts)) === today) count += 1;
+    oldest = Math.min(oldest, entry.ts);
   }
-  return axis;
+  return {
+    today: count,
+    truncated: logs.length >= Math.max(1, keep) && dateKey(new Date(oldest)) === today,
+  };
 }
 
-async function loadOverviewMetrics(
-  product: Product,
-  region: Region,
-): Promise<Omit<OverviewMetrics, "loading">> {
-  /* 三项**各自**兜错：某一项失败不该把另外两项也变成「—」。 */
-  const [series, credits, gateway] = await Promise.all([
-    TOKEN_SERIES[product](region).catch(() => null),
-    CREDIT_SNAPSHOT[product](region).catch(() => null),
-    GATEWAY_TODAY[product]().catch(() => null),
+function gatewayLedgerDays(dim: GatewayUsageDim | null) {
+  return new Map<string, GatewayPoint>((dim?.days ?? []).map((day) => [
+    day.key,
+    {
+      total: day.models.reduce((sum, row) => sum + row.total, 0),
+      records: day.models.reduce((sum, row) => sum + row.requests, 0),
+      credit: day.models.reduce((sum, row) => sum + row.credit, 0),
+      partial: day.truncated || day.partial,
+    },
+  ]));
+}
+
+/** 环形日志和账本可能覆盖同一请求。逐项取较大的已记录值。 */
+function mergeRecentDay(
+  days: Map<string, GatewayPoint>,
+  key: string,
+  recent: GatewayPoint,
+) {
+  const stored = days.get(key);
+  const usesRecent = !stored || recent.records > stored.records || recent.total > stored.total;
+  days.set(key, {
+    total: Math.max(recent.total, stored?.total ?? 0),
+    records: Math.max(recent.records, stored?.records ?? 0),
+    credit: Math.max(recent.credit, stored?.credit ?? 0),
+    partial: Boolean(stored?.partial || (usesRecent && recent.partial)),
+  });
+}
+
+/** 环形日志可先显示 WorkBuddy 尚未入账的当日用量。 */
+function recentWorkbuddyUsage(logs: GatewayLogEntry[], region: Region, today: string) {
+  let total = 0;
+  let records = 0;
+  let credit = 0;
+  for (const entry of logs) {
+    if (entry.region !== region || !entry.account?.trim() || dateKey(new Date(entry.ts)) !== today) {
+      continue;
+    }
+    records += 1;
+    total += (entry.promptTokens ?? 0) + (entry.completionTokens ?? 0);
+    if (typeof entry.credit === "number" && Number.isFinite(entry.credit) && entry.credit > 0) {
+      credit += entry.credit;
+    }
+  }
+  return { total, records, credit };
+}
+
+export async function loadOverviewUsage(product: Product, region: Region): Promise<OverviewUsage> {
+  const [client, dim, logs, traeRecentDays] = await Promise.all([
+    loadClientSeries(product, region).catch(() => null),
+    GATEWAY_LEDGER[product](region).catch(() => null),
+    GATEWAY_LOGS[product]().catch(() => null),
+    loadTraeRecentDays(product, region).catch(() => []),
   ]);
 
-  let token: OverviewMetrics["token"] = null;
-  if (series) {
-    const days = buildTrendAxis(series);
-    const totalOf = (offset: number) =>
-      days.find((day) => day.key === dateKey(new Date(Date.now() - offset * DAY_MS)))?.total ?? 0;
-    token = { days, today: totalOf(0), yesterday: totalOf(1) };
+  const now = Date.now();
+  const keys = usageWindowKeys({ kind: "preset", days: TREND_DAYS }, now);
+  const today = todayKey(now);
+  const gateway = logs ? summarizeGatewayLogs(logs, today) : null;
+  const clientDays = new Map(client?.map((day) => [day.key, day]));
+  const gatewayDays = gatewayLedgerDays(dim);
+
+  if (logs?.workbuddyLogs) {
+    const recent = recentWorkbuddyUsage(logs.workbuddyLogs, region, today);
+    if (recent.records > 0) {
+      mergeRecentDay(gatewayDays, today, { ...recent, partial: gateway?.truncated });
+    }
   }
 
-  return { token, credits, gateway };
+  for (const day of traeRecentDays) {
+    if (!day.key) continue;
+    mergeRecentDay(gatewayDays, day.key, {
+      total: day.total ?? 0,
+      records: day.records ?? 0,
+      credit: 0,
+      partial: !logs || logs.logs.length >= Math.max(1, logs.keep),
+    });
+  }
+
+  const emptyClientDay = client ? { total: 0, records: 0 } : null;
+  const days: OverviewDay[] | null = client || dim || gatewayDays.size > 0
+    ? keys.map((key) => ({
+      key,
+      client: clientDays.get(key) ?? emptyClientDay,
+      gateway: gatewayDays.get(key) ?? null,
+    }))
+    : null;
+  const source = product === "workbuddy" ? "client" : "gateway";
+  const todayPoint = days?.[keys.length - 1]?.[source];
+  const yesterdayPoint = days?.[keys.length - 2]?.[source];
+  const gatewayCredit = gatewayDays.get(today)?.credit ?? 0;
+  return {
+    days,
+    token: todayPoint ? {
+      today: todayPoint.total,
+      partial: todayPoint.partial === true,
+      yesterday: yesterdayPoint?.partial ? null : yesterdayPoint?.total ?? null,
+    } : null,
+    gatewayCreditsToday: product === "workbuddy" && Number.isFinite(gatewayCredit) && gatewayCredit > 0
+      ? gatewayCredit
+      : null,
+    gateway,
+  };
 }
 
-/** 概览统计行 / 趋势卡的数据钩子（作用域变化即重取）。 */
-export function useOverviewMetrics(product: Product, region: Region): OverviewMetrics {
-  const [state, setState] = useState<OverviewMetrics>({
-    loading: true,
-    token: null,
-    credits: null,
-    gateway: null,
-  });
+const EMPTY_METRICS: OverviewMetrics = {
+  days: null,
+  token: null,
+  credits: null,
+  gatewayCreditsToday: null,
+  gateway: null,
+};
+
+/** 切换作用域或再次刷新时，丢弃先前请求的结果。 */
+export function useOverviewMetrics(product: Product, region: Region) {
+  const scope = `${product}:${region}`;
+  const [state, setState] = useState({ scope, metrics: EMPTY_METRICS });
+  const active = useRef<AbortController | null>(null);
+
+  const load = useCallback(async (refresh: boolean) => {
+    active.current?.abort();
+    const request = new AbortController();
+    active.current = request;
+
+    const apply = (patch: Partial<OverviewMetrics>) => {
+      if (!request.signal.aborted) {
+        setState((previous) => ({
+          scope,
+          metrics: { ...(previous.scope === scope ? previous.metrics : EMPTY_METRICS), ...patch },
+        }));
+      }
+    };
+
+    await Promise.all([
+      loadOverviewUsage(product, region)
+        .then(apply)
+        .catch(() => apply({
+          days: null, token: null, gateway: null, gatewayCreditsToday: null,
+        })),
+      loadOverviewCredits(product, region, refresh)
+        .catch(() => null)
+        .then((credits) => apply({ credits })),
+    ]);
+  }, [product, region, scope]);
 
   useEffect(() => {
-    let disposed = false;
-    setState((prev) => ({ ...prev, loading: true }));
-    loadOverviewMetrics(product, region)
-      .then((next) => {
-        if (!disposed) setState({ ...next, loading: false });
-      })
-      .catch(() => {
-        if (!disposed) setState({ loading: false, token: null, credits: null, gateway: null });
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [product, region]);
+    void load(false);
+    return () => active.current?.abort();
+  }, [load]);
 
-  return state;
+  return {
+    metrics: state.scope === scope ? state.metrics : EMPTY_METRICS,
+    refresh: () => load(true),
+  };
 }
