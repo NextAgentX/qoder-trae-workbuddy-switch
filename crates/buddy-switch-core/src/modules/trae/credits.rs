@@ -679,7 +679,18 @@ pub fn load_daily() -> CreditsDailyFile {
 
 /// 读取每日快照（按变体分家）。
 pub fn load_daily_for(variant: TraeVariant) -> CreditsDailyFile {
-    store::read_json(&paths::credits_daily_file_for(variant))
+    let mut file: CreditsDailyFile = store::read_json(&paths::credits_daily_file_for(variant));
+    file.snapshots
+        .sort_by(|left, right| left.date.cmp(&right.date));
+
+    // 旧版取绝对值，把余额净增加也记成了消耗。用存下来的余额和入账修正旧记录。
+    let mut previous_total = None;
+    for snapshot in &mut file.snapshots {
+        snapshot.consumed =
+            inferred_daily_consumption(previous_total, snapshot.total, snapshot.earned);
+        previous_total = Some(snapshot.total);
+    }
+    file
 }
 
 /// 读取冷却状态（默认变体，兼容壳）。
@@ -805,7 +816,7 @@ pub fn append_history_for(
 ///
 /// - `total` = 所有账号剩余积分之和
 /// - `earned` = 今日签到获得（明细里的 `delta` 之和）+ 购买获得（`non_checkin_earned`）
-/// - `consumed` = `|total - earned - 昨日 total|`
+/// - `consumed` = 上次记录的余额加已知入账后，相比当前余额的减少量
 ///
 /// 当日快照已存在时**整条更新**而不是跳过：首次记录往往发生在「签到后但积分尚未
 /// 刷新」的时刻，若只写一次，`earned` / `consumed` 会永久停留在错误值。
@@ -831,13 +842,12 @@ pub fn record_daily_snapshot_for(variant: TraeVariant, non_checkin_earned: f64) 
     let earned = round2(today_checkin_earned + non_checkin_earned);
 
     let mut file = load_daily_for(variant);
-    let yesterday_total = file
+    let previous_total = file
         .snapshots
         .iter()
         .rfind(|snapshot| snapshot.date < today)
-        .map(|snapshot| snapshot.total)
-        .unwrap_or(0.0);
-    let consumed = round2((total - earned - yesterday_total).abs());
+        .map(|snapshot| snapshot.total);
+    let consumed = inferred_daily_consumption(previous_total, total, earned);
 
     let hour = chrono::Local::now().hour() as u8;
     match file
@@ -879,6 +889,11 @@ pub fn record_daily_snapshot_for(variant: TraeVariant, non_checkin_earned: f64) 
     file.snapshots.retain(|snapshot| snapshot.date >= cutoff);
 
     let _ = store::write_json(&paths::credits_daily_file_for(variant), &file);
+}
+
+fn inferred_daily_consumption(previous_total: Option<f64>, total: f64, earned: f64) -> f64 {
+    // 首次观测只有期末余额，无法反推消耗。新增额度导致的净增加也不计为消耗。
+    previous_total.map_or(0.0, |previous| round2((previous + earned - total).max(0.0)))
 }
 
 /// 四舍五入到 2 位小数（与参考实现一致，避免浮点尾差在 UI 上显示成 12.340000001）。
@@ -1789,6 +1804,40 @@ mod tests {
         assert_eq!(round2(0.0), 0.0);
         // 浮点尾差不应外泄到 UI
         assert_eq!(round2(0.1 + 0.2), 0.3);
+    }
+
+    #[test]
+    fn opening_balance_and_new_credit_grants_are_not_usage() {
+        assert_eq!(inferred_daily_consumption(None, 2_100.0, 100.0), 0.0);
+        assert_eq!(inferred_daily_consumption(Some(0.0), 2_100.0, 100.0), 0.0);
+        assert_eq!(
+            inferred_daily_consumption(Some(2_000.0), 2_050.0, 100.0),
+            50.0
+        );
+        assert_eq!(
+            inferred_daily_consumption(Some(2_100.0), 2_080.0, 0.0),
+            20.0
+        );
+    }
+
+    #[test]
+    fn reading_daily_history_corrects_legacy_false_consumption() {
+        let home = tempfile::tempdir().unwrap();
+        let _guard = crate::modules::config::HomeOverrideGuard::set(home.path());
+        let variant = TraeVariant::default();
+        let path = paths::credits_daily_file_for(variant);
+        let data = serde_json::json!({ "snapshots": [
+            {"date": "2026-11-21", "total": 0, "earned": 0, "consumed": 0},
+            {"date": "2026-11-22", "total": 2100, "earned": 100, "consumed": 2000},
+            {"date": "2026-11-23", "total": 2080, "earned": 0, "consumed": 20}
+        ] });
+        store::write_json(&path, &data).unwrap();
+        let snapshots = load_daily_for(variant).snapshots;
+        assert_eq!(snapshots[1].earned, 100.0);
+        assert_eq!(snapshots[1].total, 2100.0);
+        assert_eq!(snapshots[1].consumed, 0.0);
+        assert_eq!(snapshots[2].consumed, 20.0);
+        assert_eq!(store::read_json::<Value>(&path), data);
     }
 
     #[test]

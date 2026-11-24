@@ -98,7 +98,7 @@
 > - 会话散点的 x 轴：原型用 `s.msgs`（**消息数**，原型演示字段）；真实 `TokenStatsGroup` **没有 `msgs`**，
 >   只有 `records`（**调用/记录次数**）。⇒ **x 轴语义是「记录数」，图注必须如实写「记录数 × Token」，不许写成「消息数」**。
 > - 目录名从 `Session.cwd` **末段推导**（复用 `switch-account-dialog.tsx` 的 `sessionFolderLabel`），**不是**独立字段。
-> - 余额曲线**不是**后端字段：后端无逐日余额快照，必须**以 `summary.currentRemaining` 为终值、按净额回推**（同原型 `mergeExt`），并在图注注明「回推」。
+> - WorkBuddy 余额曲线以 `summary.currentRemaining` 为终值按净额回推，图注注明「回推」。Trae 余额曲线使用已记录的逐日总余额，跨区合并时沿用各区最近的已知余额。Trae 消耗是扣除已知入账后的余额减少量估算，首笔余额和净增额度不计为消耗。
 
 **适配层职责**（纯函数，可单测）——见 `src/lib/usage-charts.ts`：
 

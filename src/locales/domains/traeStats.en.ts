@@ -127,14 +127,15 @@ export const en = {
   // ---- Stat-tile captions (prototype: check-in reward / net ±Y / earliest in D+N days) ----
   /* issue #186: `total` is a partial sum (unparseable balances are excluded). */
   "trae.stats.credits.accountsHintPartial": "{count} accounts · {unknown} with unknown balance (excluded)",
-  "trae.stats.credits.inHint": "Check-in rewards",
+  "trae.stats.credits.inHint": "Recorded credits earned",
   "trae.stats.credits.netHint": "Net {net}",
   "trae.stats.credits.soonestHint": "Earliest in {days} days",
   "trae.stats.credits.noExpiryHint": "Nothing expires within 30 days",
 
   // ---- Daily credits flow (Trae has both sides ⇒ two-way bars; WB only has spend) ----
   "trae.stats.credits.dailyTitle": "Daily credits flow",
-  "trae.stats.credits.dailyNote": "Up = check-in rewards　Down = chat spend",
+  "trae.stats.credits.dailyNote": "Up = recorded credits earned　Down = estimated usage from balances",
+  "trae.stats.credits.balanceNote": "{{first}} → {{last}} (recorded balances)",
   "trae.stats.credits.hourlyTitle": "Hourly credit changes today",
   "trae.stats.credits.hourlyNote": "Changes are grouped when the balance snapshot is recorded; up = earned, down = spent",
   "trae.stats.credits.hourlyPartialNote": "Only changes observed after monitoring began are shown; earlier activity today has no hourly record",

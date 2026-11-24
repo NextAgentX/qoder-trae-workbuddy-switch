@@ -57,13 +57,13 @@ import { ModelDonut } from "@/components/usage/model-donut";
 import { StatTiles, type StatTile } from "@/components/usage/stat-tiles";
 import type { UsageViewProps } from "@/components/usage/view-param-bar";
 import * as api from "@/lib/api";
-import { balanceCaption } from "@/lib/chart-caption";
 import { displayText } from "@/lib/display-text";
 import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { mergeTraeCredits, type TraeRegionSlice } from "@/lib/trae-credits-merge";
 import {
   traeAccountSlices,
+  traeCreditBalance,
   traeCreditBars,
   traeCreditExpiry,
   traeStatusSlices,
@@ -73,7 +73,7 @@ import { useCachedResource } from "@/lib/use-cached-resource";
 import { useAutoRefreshWhenVisible } from "@/lib/use-auto-refresh";
 import { CREDITS_LOCAL_REFRESH_INTERVAL_MS } from "@/lib/use-credit-auto-refresh";
 import { useTraeVariant } from "@/lib/use-trae-variant";
-import { balanceCurve, expiryBuckets } from "@/lib/usage-charts";
+import { expiryBuckets } from "@/lib/usage-charts";
 import { todayKey, usageWindowSpanDays } from "@/lib/usage-window";
 
 /** 原型的两个环形只展示**前 6 名**账号（`accountShare.slice(0, 6)`）。 */
@@ -168,7 +168,10 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
     () => traeCreditBars(merged.daily, viewWindow),
     [merged.daily, viewWindow],
   );
-  const balancePoints = useMemo(() => balanceCurve(bars, merged.total), [bars, merged.total]);
+  const balancePoints = useMemo(
+    () => traeCreditBalance((snapshot ?? []).map((slice) => slice.credits.daily ?? []), viewWindow),
+    [snapshot, viewWindow],
+  );
   const buckets = useMemo(() => expiryBuckets(traeCreditExpiry(merged.rows)), [merged.rows]);
   const hasExpiry = buckets.some((bucket) => bucket.value > 0);
   const expiringTotal = buckets.reduce((sum, bucket) => sum + bucket.value, 0);
@@ -195,12 +198,10 @@ export default function TraeCreditsPage({ viewWindow, combineAll }: UsageViewPro
 
   const balanceCaptionText =
     balancePoints.length > 0
-      ? balanceCaption(
-          t,
-          balancePoints[0].value,
-          balancePoints[balancePoints.length - 1].value,
-          balancePoints[0].baseline,
-        )
+      ? t("trae.stats.credits.balanceNote", {
+          first: formatCredits(balancePoints[0].value),
+          last: formatCredits(balancePoints[balancePoints.length - 1].value),
+        })
       : "";
 
   const tiles: StatTile[] = [
