@@ -356,7 +356,7 @@ export const zh = {
   "wbStats.usage.sessions.accountHint": "账号按日志里的精确 uid 归属，展示名仅作显示",
   "wbStats.usage.sessions.endpointHint": "同一份数据在「网关 → 请求日志」里逐条可查",
   "wbStats.usage.credits.requestCaliber": "请求口径",
-  "wbStats.usage.credits.caliberNote": "上面四张是余额口径：账号余额快照的差值，天然不重复，但拆不到来源。下面按请求累加，能拆来源，会重复。",
+  "wbStats.usage.credits.caliberNote": "上方消耗按账号快照的已用量变化估算。下方按请求来源累加，同一请求可能被两边记录。",
   "wbStats.usage.credits.gap": "两个口径的差额",
   "wbStats.usage.credits.gapBody": "余额口径 {billed} − 请求口径 {request}（客户端 {client} + 网关 {gateway} − 重叠 {overlap}）＝ 差额 {gap}",
   "wbStats.usage.credits.gapHint": "差额 = 未归因消耗：别的设备 / 没落本地日志的请求。它不会被摊到任何来源上 —— 摊了就是编数据。",
