@@ -3354,15 +3354,9 @@ pub async fn get_gateway_models(region: Option<String>) -> Value {
 pub async fn refresh_gateway_models(region: Option<String>) -> Result<Value, String> {
     let region = parse_region(region.as_deref());
     let state = gateway::shared_state();
-    let strategy = state.strategy_for(region).await;
-    let account = buddy_switch_gateway::AccountSelector
-        .select(region, &strategy)
+    let snapshot = buddy_switch_gateway::catalog_probe::probe_region(&state, region)
         .await
         .map_err(|error| error.message())?;
-    let snapshot = state
-        .catalogs
-        .refresh(region, &state.upstream, &account)
-        .await;
     Ok(serde_json::to_value(snapshot).unwrap_or(Value::Null))
 }
 

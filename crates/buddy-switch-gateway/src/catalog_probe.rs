@@ -18,15 +18,18 @@
 //! - **不新造探测逻辑**：一律复用 [`CatalogStore::refresh`]，失败时由它按
 //!   cached → builtin 降级并写入**具体原因**（[`buddy_switch_core::modules::catalog::failure_reason`]）。
 //! - **失败不阻断接入**（§3.17.1 规则 3）：调用方 fire-and-forget，探测失败**静默**。
-//! - **安全边界（§3.17.5 / §2.5）**：探测**只用该 region 自己的凭据**
-//!   （`state.strategy_for(region)` + [`AccountSelector::select`]，后者已按 region 校验）；
+//! - **安全边界（§3.17.5 / §2.5）**：探测**只用该 region 自己的凭据**。
+//!   桌面登录态缺失时，从同区域账号池取凭据；
 //!   `CatalogStore` 已按 region 隔离落盘 ⇒ **不可能**跨 region 读缓存。
 
+use buddy_switch_core::modules::account;
 use buddy_switch_core::modules::catalog::{is_stale, CatalogSnapshot, CatalogStore};
 use buddy_switch_core::modules::region::Region;
+use serde_json::Value;
 
-use crate::account_strategy::AccountSelector;
-use crate::error::GatewayError;
+use crate::account_strategy::{ensure_region, AccountSelector};
+use crate::error::{GatewayError, NoCredentialCause};
+use crate::pool::{Pool, RealmTag};
 use crate::state::GatewayState;
 use crate::timeutil;
 
@@ -37,19 +40,85 @@ use crate::timeutil;
 /// - 账号选择失败（池空 / 策略无命中 / 区域不符）⇒ 返回 [`GatewayError`]，
 ///   **不写脏数据**（调用方决定是静默忽略还是回传错误）。
 ///
-/// ⚠️ 调用方负责 **fire-and-forget**（探测失败不得阻断接入）。
+/// 后台调用方负责 fire-and-forget。手动刷新可直接等待结果。
 pub async fn probe_region(
     state: &GatewayState,
     region: Region,
 ) -> Result<CatalogSnapshot, GatewayError> {
-    let strategy = state.strategy_for(region).await;
-    // 安全边界 F：`AccountSelector::select` 已按 region 校验凭据（区域不符直接拒），
-    // 因此本探测**不可能**用别的 region 的凭据去写本 region 的清单。
-    let account = AccountSelector.select(region, &strategy).await?;
+    let account = select_catalog_account(state, region).await?;
     Ok(state
         .catalogs
         .refresh(region, &state.upstream, &account)
         .await)
+}
+
+async fn select_catalog_account(
+    state: &GatewayState,
+    region: Region,
+) -> Result<Value, GatewayError> {
+    let strategy = state.strategy_for(region).await;
+    let error = match AccountSelector.select(region, &strategy).await {
+        Err(
+            error @ GatewayError::NoCredential {
+                cause: NoCredentialCause::AuthFileMissing,
+                ..
+            },
+        ) => error,
+        selection => return selection,
+    };
+
+    let accounts = account::load_accounts_for(region);
+    if accounts.is_empty() {
+        return Err(error);
+    }
+    let realm = match region {
+        Region::Cn => RealmTag::Cn,
+        Region::Global => RealmTag::Global,
+    };
+    let scope = crate::routes::relay::scope_key(region);
+    let exclusions = crate::pool::exclusions::load_for(scope);
+    let mut pool = state.pool.write().await;
+    pool.sync_accounts(&accounts, Some(realm));
+    pool.sync_exclusions(scope, &exclusions);
+    let now = timeutil::now_ms();
+    pick_catalog_account(accounts, region, &pool, now, |uid| {
+        crate::risk_controls::account_blocked(
+            &state.risk_store,
+            "workbuddy",
+            region.as_str(),
+            uid,
+            now.max(0) as u64,
+        )
+    })
+    .ok_or_else(|| {
+        GatewayError::BadRequest(
+            "当前区域的账号池没有可用于刷新模型的凭据，请在「网关 → 账号池」检查账号状态或重新扫码授权"
+                .into(),
+        )
+    })
+}
+
+fn pick_catalog_account(
+    accounts: Vec<Value>,
+    region: Region,
+    pool: &Pool,
+    now: i64,
+    blocked: impl Fn(&str) -> bool,
+) -> Option<Value> {
+    accounts.into_iter().find(|account| {
+        let Some(uid) = account::get_str(account, "uid") else {
+            return false;
+        };
+        ensure_region(account, region).is_ok()
+            && account::get_str(account, "access_token").is_some()
+            && account
+                .get("expiresAt")
+                .and_then(Value::as_i64)
+                .is_none_or(|expiry| expiry > now)
+            && !pool.is_excluded(&uid)
+            && pool.get(&uid).is_some_and(|entry| entry.healthy(now))
+            && !blocked(&uid)
+    })
 }
 
 /// 需要「启动补识别」的 region（**纯函数**，只读 store，便于单测）。
@@ -108,6 +177,33 @@ mod tests {
             free: false,
             reasoning: None,
         }
+    }
+
+    #[test]
+    fn catalog_fallback_skips_unusable_and_cross_region_credentials() {
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        let accounts = vec![
+            json!({"uid": "cross-region", "domain": "workbuddy.cn", "access_token": "unused"}),
+            json!({"uid": "excluded", "domain": "workbuddy.ai", "access_token": "unused"}),
+            json!({"uid": "paused", "domain": "workbuddy.ai", "access_token": "unused"}),
+            json!({"uid": "expired", "domain": "workbuddy.ai", "access_token": "unused", "expiresAt": 500}),
+            json!({"uid": "encrypted", "domain": "workbuddy.ai", "access_token": {}}),
+            json!({"uid": "available", "domain": "workbuddy.ai", "access_token": "test-token"}),
+        ];
+        let mut pool = Pool::new(Default::default());
+        pool.sync_accounts(&accounts, Some(RealmTag::Global));
+        pool.sync_exclusions(
+            "wb:global",
+            &BTreeMap::from([("excluded".into(), String::new())]),
+        );
+
+        let account = pick_catalog_account(accounts, Region::Global, &pool, 1_000, |uid| {
+            uid == "paused"
+        })
+        .expect("a usable stored account can refresh the Docker catalog");
+        assert_eq!(account["uid"], "available");
     }
 
     /// ★ 启动补识别的判据：全新 store（两 region 均内置）⇒ 都要探测；

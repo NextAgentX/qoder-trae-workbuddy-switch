@@ -113,7 +113,7 @@
 - 探测复用既有 `catalogs.refresh(region, &upstream, &account)`（`commands.rs:1368-1371`）—— **不新造探测逻辑**。
 - **原因传播（✅ #5：映射为具体原因）**：`catalog.rs` 的 `refresh()` 把 `UpstreamFailure`（`upstream.rs` 的 `kind`）映射为**具体原因**写进 `note`（「上游未响应 / 超时 / 网络错误 / 鉴权失败」），**取代**当前笼统的 `DEGRADE_NOTE`。理由：用户要能理解「**为什么不是实时**」；笼统一句话回答不了。
   > ⚠️ 前端 `describeCatalogSource` **仍保留兜底原因**（后端给不出具体原因时用 i18n 兜底）—— 映射是**增强**，不是契约的替代。
-- **安全边界（§3.17.5 / §2.5）**：探测**必须用该 region 自己的凭据**（`state.strategy_for(region).select(...)` 已按 region 选号）；**禁止**跨 region 读缓存（`CatalogStore` 已按 region 隔离）。
+- **凭据选择（§3.17.5 / §2.5）**：手动刷新与后台探测共用 `catalog_probe::probe_region`。跟随桌面登录态的策略在登录文件缺失时使用同区域账号池中有有效明文凭据的可用账号。账号池排除、冷却和风险暂停仍生效，目录缓存按区域隔离。
 - **`BackgroundTask` 登记（✅ #7：要登记）**：`create_api_key` 后的探测**写清单 = 写状态** ⇒ 按 P5 §2.2 在**两侧 `BackgroundTask` 注册表**登记。
   > ⚠️ **若最终判定不登记**：**必须在代码注释里写明「为什么不登记」**（否则后来人会以为漏了）。
 
