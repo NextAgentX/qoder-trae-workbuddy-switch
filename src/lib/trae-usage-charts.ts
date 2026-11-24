@@ -28,7 +28,7 @@ import type {
   TraeTokenBucket,
   TraeTokenStatistics,
 } from "@/lib/trae-types";
-import { calendarWindowKeys, creditBars, type CreditDailyBar, type ModelSlice } from "@/lib/usage-charts";
+import { balanceSeries, calendarWindowKeys, creditBars, dateAxisLabel, type BalancePoint, type CreditDailyBar, type ModelSlice } from "@/lib/usage-charts";
 import type { UsageWindow } from "@/lib/usage-window";
 
 /** Trae 的桶缺 WorkBuddy 的缓存三件套 ⇒ 补 0 / `null`，字段**严格同形**。 */
@@ -138,6 +138,27 @@ export function traeCreditBars(
       return { date: key, inAmt: point?.earned ?? 0, outAmt: point?.consumed ?? 0 };
     }),
   );
+}
+
+/** 按实际快照绘制；合并时沿用各区最后一次观测，不补造全区余额。 */
+export function traeCreditBalance(
+  histories: readonly (readonly TraeDailySnapshot[])[],
+  window: UsageWindow,
+  now: number = Date.now(),
+): BalancePoint[] {
+  const observations = histories.flatMap((history, region) =>
+    history.map(({ date, total }) => ({ date, total, region })),
+  ).sort((left, right) => left.date.localeCompare(right.date));
+  const windowDates = new Set(calendarWindowKeys(window, now));
+  const balances = new Map<number, number>();
+  const points = new Map<string, number>();
+  for (const { date, total, region } of observations) {
+    balances.set(region, total);
+    if (windowDates.has(date)) {
+      points.set(date, [...balances.values()].reduce((sum, value) => sum + value, 0));
+    }
+  }
+  return balanceSeries([...points].map(([date, value]) => ({ label: dateAxisLabel(date), value })));
 }
 
 /**

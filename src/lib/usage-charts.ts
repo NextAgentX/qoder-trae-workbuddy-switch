@@ -777,11 +777,18 @@ export function balanceCurve(bars: CreditDailyBar[], currentRemaining: number): 
     balance += value;
     return Math.max(0, balance);
   });
+  return balanceSeries(bars.map((bar, index) => ({ label: bar.label, value: values[index] })));
+}
+
+/** 给余额点补上统一的 Y 轴基线。 */
+export function balanceSeries(points: Omit<BalancePoint, "baseline">[]): BalancePoint[] {
+  if (points.length === 0) return [];
+  const values = points.map((point) => point.value);
   const max = Math.max(...values);
   const min = Math.min(...values);
   if (max === min && max === 0) return [];
   const baseline = Math.max(0, min - (max - min) * 0.35);
-  return bars.map((bar, index) => ({ label: bar.label, value: values[index], baseline }));
+  return points.map((point) => ({ ...point, baseline }));
 }
 
 /**

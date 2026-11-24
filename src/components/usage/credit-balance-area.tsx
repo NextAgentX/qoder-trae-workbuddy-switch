@@ -8,7 +8,7 @@
  * 故 Y 轴下限取 `baseline`（= `min - (max-min)*0.35`，由适配层算好），
  * 并在图注写明「基线非 0」（`balanceCaption`）。
  *
- * ⚠️ 曲线值是**回推**的（后端无逐日余额快照）—— 图注一并注明。
+ * WorkBuddy 传入回推值，Trae 传入记录的余额快照。
  */
 
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
@@ -52,6 +52,7 @@ export function CreditBalanceArea({ points }: { points: BalancePoint[] }) {
           stroke="var(--data-series-teal)"
           strokeWidth={2}
           fill="url(#balance-fill)"
+          dot={points.length === 1}
           isAnimationActive={false}
         />
       </AreaChart>
