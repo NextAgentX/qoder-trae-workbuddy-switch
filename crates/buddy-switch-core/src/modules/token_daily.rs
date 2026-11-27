@@ -1933,6 +1933,96 @@ fn gateway_trend_points(store: &Store) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
+    /// ★ 回归 #215：复制过去的会话正文**不得**重复计入目标账号的「今日 Token」。
+    ///
+    /// 现场：切换时勾选「复制对话」，副本的 jsonl 每一行都被重写成带**新** sessionId，
+    /// 而 Token 扫描按 `sessionId → user_id` 归属 ⇒ 同一段对话在源账号和目标账号各算一次，
+    /// 实测单日双计 20.4M、历史切换日 3~5 个账号同值。
+    ///
+    /// 修法是「复制血缘」：`bucket_client` 查 `copy_ledger_lineage`，把副本里
+    /// **早于副本创建时刻**的行归回源账号（或落 unknown），绝不计给目标账号。
+    /// 这条用例把三条判据都钉住 —— 该逻辑此前**零覆盖**。
+    #[test]
+    fn copied_session_rows_are_not_double_counted_to_the_target() {
+        let day = "2026-11-24";
+        let day_start = local_day_start_ms(day).expect("本地日期必须能换算成时刻");
+
+        let mut meta: HashMap<String, SessionOwner> = HashMap::new();
+        meta.insert(
+            "origin-cid".to_string(),
+            SessionOwner {
+                uid: "src-uid".to_string(),
+                created_at_ms: Some(1_000i64),
+            },
+        );
+        // 副本创建时刻 = 当天起点 + 5 秒：旧行（+1s）早于它，新行（+9s）晚于它。
+        meta.insert(
+            "copied-cid".to_string(),
+            SessionOwner {
+                uid: "dst-uid".to_string(),
+                created_at_ms: Some(day_start + 5_000),
+            },
+        );
+
+        let mut lineage: HashMap<String, crate::modules::session::CopyLedgerLineage> =
+            HashMap::new();
+        lineage.insert(
+            "copied-cid".to_string(),
+            crate::modules::session::CopyLedgerLineage {
+                origin_uid: Some("src-uid".to_string()),
+                origin_cid: Some("origin-cid".to_string()),
+                target_uid: "dst-uid".to_string(),
+            },
+        );
+
+        // ① 副本里**早于**复制时刻的旧行 ⇒ 归源账号（这是原对话，不是目标账号的用量）。
+        // ② 副本里**晚于**复制时刻的新行 ⇒ 归目标账号（目标账号确实接着用了）。
+        // ③ 没有血缘的普通会话 ⇒ 归它自己的账号。
+        let rows = vec![
+            ClientUsageRow {
+                session_id: "copied-cid".to_string(),
+                ts: day_start + 1_000,
+                input: 100,
+                output: 200,
+                model: String::new(),
+                credit: 0.0,
+            },
+            ClientUsageRow {
+                session_id: "copied-cid".to_string(),
+                ts: day_start + 9_000,
+                input: 7,
+                output: 3,
+                model: String::new(),
+                credit: 0.0,
+            },
+            ClientUsageRow {
+                session_id: "origin-cid".to_string(),
+                ts: day_start + 2_000,
+                input: 11,
+                output: 22,
+                model: String::new(),
+                credit: 0.0,
+            },
+        ];
+
+        let (per_account, unknown) = bucket_client(&rows, &meta, &lineage, day);
+
+        // 源账号：旧行 100/200（来自副本回算）+ 自己的 11/22。
+        let src = per_account
+            .get("src-uid")
+            .unwrap_or_else(|| panic!("源账号必须收到回算的旧行: {per_account:?}"));
+        assert_eq!(src.input, 111, "源账号 input");
+        assert_eq!(src.output, 222, "源账号 output");
+
+        // 目标账号：**只有**复制之后的新行 7/3，绝不能把 100/200 也算进来。
+        let dst = per_account
+            .get("dst-uid")
+            .unwrap_or_else(|| panic!("目标账号必须收到复制后的新行: {per_account:?}"));
+        assert_eq!(dst.input, 7, "目标账号 input 不得包含副本的旧行");
+        assert_eq!(dst.output, 3, "目标账号 output 不得包含副本的旧行");
+        assert_eq!(unknown.input, 0, "本例所有行都能归属");
+    }
+
     use super::*;
     use chrono::Datelike;
     use std::fs;
