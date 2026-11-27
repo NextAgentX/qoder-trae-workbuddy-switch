@@ -928,6 +928,15 @@ function normalizeAccountMeta(account: AccountMeta): AccountMeta {
  */
 export const ENCRYPTED_CREDENTIAL_REASON = "encrypted_credential";
 
+/**
+ * 后端 `credits::SESSION_REVOKED_REASON` 的前端镜像（issue #246）。
+ *
+ * 表示**登录会话已被服务端吊销**：本地 `expiresAt` 还早、刷新却必然失败，
+ * 只能「从本机导入」或重新登录。与 `encrypted_credential` 同守一条契约 ——
+ * 判据用这个字段，**不要**匹配 `credit.error` 的中文文案。
+ */
+export const SESSION_REVOKED_REASON = "session_revoked";
+
 /** 同 {@link normalizeAccountMeta}，作用于 `status.current`（区域 Tab 与徽标 tooltip 都读它）。 */
 function normalizeAppStatus(status: AppStatus): AppStatus {
   if (!status?.current) return status;

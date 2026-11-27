@@ -1653,6 +1653,9 @@ export interface CreditExpiry {
   /**
    * **机器可读**的失败原因（后端 `credits::ENCRYPTED_CREDENTIAL_REASON`）。
    *
+   * `"session_revoked"` = 登录会话已被服务端吊销（issue #246）：本地到期时间还早，
+   * 但刷新必然失败，只能「从本机导入」或重新登录（后端 `credits::SESSION_REVOKED_REASON`）。
+   *
    * `"encrypted_credential"` = 该账号的凭据是客户端 5.6 的加密信封，我方解不开
    * ⇒ 签到 / 积分 / Token 统计都做不了，只能用「切换账号」。
    *

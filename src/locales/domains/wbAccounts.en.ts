@@ -142,6 +142,7 @@ export const en = {
   "wbAccounts.card.waitingCredits": "Waiting for credit data…",
   "wbAccounts.card.creditFailed": "Failed to load credits",
   "wbAccounts.card.addPlaintextAccount": "Add via OAuth QR scan",
+  "wbAccounts.card.importLocal": "Re-import from this device",
   "wbAccounts.card.creditPackFallback": "credit pack",
   "wbAccounts.card.setCurrent": "Set as current",
   "wbAccounts.card.switching": "Switching…",

@@ -285,8 +285,19 @@ pub async fn checkin_account_for(region: Region, account: &Value) -> Value {
     let acc = ensure_fresh_token_for(region, account.clone(), &cfg).await;
     let status = get_checkin_status_for(region, &acc).await;
     match decide_from_status(&status) {
-        StatusDecision::Already => return json!({"result": "already"}),
+        // ★ 回归 #246：`already` 也必须落一行日志。
+        //
+        // 旧实现直接 `return`，于是一个「上游早已签过」的账号在日志里**完全没有痕迹**
+        // ——「批量签到里只有它没有记录」这个现象，一半来自这里、一半来自下面的 error 分支。
+        // 日志是审计面：签过、跳过、失败都要留下可对账的一行。
+        StatusDecision::Already => {
+            record_account_outcome(&acc, "already", None, None);
+            return json!({"result": "already"});
+        }
         StatusDecision::Error(error) => {
+            // ★ 同上：失败必须留痕（`auto_checkin_logs.json` 原本只记 success 的金额，
+            // 失败账号既不在日志里、界面上也看不出「有一个签不了」）。
+            record_account_outcome(&acc, "error", Some(error.clone()), None);
             return json!({"result": "error", "error": error});
         }
         StatusDecision::Submit => {}
@@ -296,13 +307,6 @@ pub async fn checkin_account_for(region: Region, account: &Value) -> Value {
     //   状态接口算差值。只认上游**实测**字段，取不到就不写金额（前端显示「—」，不摆「+0」）。
     let reward = checkin_reward_from_status(&status);
 
-    // Only this branch submits daily-checkin, so only its outcome is eligible
-    // for the sign-in log.
-    let entry = json!({
-        "ts": now_ms(),
-        "accountId": acc.get("id").cloned().unwrap_or(Value::Null),
-        "email": account_display_name(&acc),
-    });
     let res = perform_checkin_for(region, &acc).await;
     let result = if res.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         if res.get("already").and_then(|v| v.as_bool()) == Some(true) {
@@ -320,23 +324,40 @@ pub async fn checkin_account_for(region: Region, account: &Value) -> Value {
     } else {
         None
     };
-    let mut entry_map = json!({
-        "result": result,
-        "ts": entry["ts"],
-        "accountId": entry["accountId"],
-        "email": entry["email"],
-    });
-    if let Some(e) = error.clone() {
-        entry_map["error"] = json!(e);
-    }
     // 只有「真的签到成功」才落金额；`already` / `error` 不写（拿不到就是拿不到）。
-    if result == "success" {
-        if let Some(amount) = reward {
-            entry_map["amount"] = json!(amount);
-        }
-    }
-    add_checkin_log(&entry_map);
+    let amount = if result == "success" { reward } else { None };
+    record_account_outcome(&acc, result, error.clone(), amount);
     json!({"result": result, "error": error})
+}
+
+/// 把一个账号的签到结果写进签到日志（`auto_checkin_logs.json`）。
+///
+/// ★ 回归 #246：这条路径必须**覆盖全部四种结果**（success / already / error / 轮空跳过）。
+///
+/// 旧实现只有「提交过 claim 且成功」才落日志：上游早已签过的账号直接 `return`，
+/// 状态查询失败的账号也直接 `return`。于是「批量签到 10 个账号全部成功，日志里 9 行」
+/// 这种账对不上——用户在签到页看不出少的是哪个、为什么少。
+///
+/// 金额只在真到账时写；`already` / `error` 一律不写（拿不到就是拿不到，不摆 +0）。
+fn record_account_outcome(
+    account: &Value,
+    result: &str,
+    error: Option<String>,
+    amount: Option<f64>,
+) {
+    let mut entry = json!({
+        "result": result,
+        "ts": now_ms(),
+        "accountId": account.get("id").cloned().unwrap_or(Value::Null),
+        "email": account_display_name(account),
+    });
+    if let Some(error) = error {
+        entry["error"] = json!(error);
+    }
+    if let Some(amount) = amount {
+        entry["amount"] = json!(amount);
+    }
+    add_checkin_log(&entry);
 }
 
 pub fn date_str(ts_ms: Option<i64>) -> String {
@@ -538,6 +559,53 @@ mod tests {
     /// 可证伪：把 `find(|amount| *amount > 0.0)` 换成 `.next()`（不筛正数）⇒ 第 3 条
     /// 断言会拿到 `0.0` 而红；把字段顺序调换 ⇒ 第 1 条断言拿到 `30.0` 而红。
     #[test]
+    /// ★ 回归 #246：签到结果**四种都要落日志**，不能只有 success 才写。
+    ///
+    /// 现场：批量签到 10 个账号全部成功，`auto_checkin_logs.json` 里只有 9 行 ——
+    /// 少的那一个是「上游早已签过 ⇒ `already` 直接 return」，日志里毫无痕迹。
+    /// 用户从签到页看不出少的是谁、为什么少。
+    #[test]
+    fn every_checkin_outcome_is_written_to_the_log() {
+        let home = std::env::temp_dir().join(format!(
+            "trae-checkin-outcome-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("创建隔离目录");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+
+        let account = json!({"id": "acc-1", "uid": "u1", "email": "a@b.c"});
+
+        record_account_outcome(&account, "success", None, Some(100.0));
+        record_account_outcome(&account, "already", None, None);
+        record_account_outcome(&account, "error", Some("boom".into()), None);
+
+        let logs = crate::modules::config::load_checkin_logs();
+        assert_eq!(logs.len(), 3, "三种结果都必须各留一行，实际: {logs:?}");
+
+        let by_result = |result: &str| {
+            logs.iter()
+                .find(|entry| entry["result"] == result)
+                .unwrap_or_else(|| panic!("缺少 {result} 那一行: {logs:?}"))
+        };
+
+        let success = by_result("success");
+        assert_eq!(success["amount"], json!(100.0), "成功必须带金额");
+
+        let already = by_result("already");
+        assert!(
+            already.get("amount").is_none(),
+            "already 不得摆金额（拿不到就是拿不到）"
+        );
+
+        let error = by_result("error");
+        assert_eq!(error["error"], json!("boom"), "失败必须带原因");
+        assert!(error.get("amount").is_none(), "失败不得摆金额");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn checkin_reward_prefers_daily_then_today_and_ignores_non_positive() {
         assert_eq!(
             checkin_reward_from_status(&json!({"dailyCredit": 100.0, "todayCredit": 30.0})),

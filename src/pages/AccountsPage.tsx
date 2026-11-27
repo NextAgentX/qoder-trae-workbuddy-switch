@@ -2575,6 +2575,9 @@ function RegionPanel({ region }: { region: Region }) {
                               onSwitchJetbrainsPlugin={onSwitchJetbrainsPlugin}
                               onGuidePlugin={onGuidePlugin}
                               onAddPlaintextAccount={() => setOauthOpen(true)}
+                              /* ★ issue #246：会话被吊销时，客户端里那份往往还是活的 ——
+                                 就地「从本机导入」覆盖是最省事的出路，不必重新扫码。 */
+                              onImportLocal={onImport}
                               onGuideToSetting={onGuideToSetting}
                               selected={selectedKeys.has(selectionKey(a.id))}
                               onToggleSelect={toggleSelect}

@@ -370,18 +370,64 @@ fn enterprise_usage_resource(response: &Value, now: i64) -> Option<Value> {
     }))
 }
 
-fn response_error(response: &Value) -> String {
+/// 上游把「会话已被吊销」与「token 过期」报成同一个 401，但用户的下一步完全不同：
+///
+/// - **过期**：等下一次自动刷新即可（`ensure_fresh_token_for` 会处理）；
+/// - **吊销**（refresh token 被服务端作废，例如本机客户端登录了别的会话）：
+///   刷新**永远**不会成功，只能从本机导入或重新登录。
+///
+/// 判据取上游业务码 12153 与 `invalid_grant: refresh token revoked` 文案 —— #246 的现场
+/// 就是「本地 expiresAt 还有 27 天，服务端已吊销」，光看到期时间永远发现不了。
+fn is_session_revoked(response: &Value) -> bool {
+    if response_code(response) == Some(12153) {
+        return true;
+    }
+    let text = response_error_text(response).to_lowercase();
+    text.contains("invalid_grant") || text.contains("refresh token revoked")
+}
+
+/// 上游响应里的可读文案（message / msg / data.message / data.msg 四选一）。
+fn response_error_text(response: &Value) -> String {
     let nested = response.get("data").filter(|value| value.is_object());
-    let code = response_code(response).unwrap_or(-1);
     response
         .get("message")
         .or_else(|| response.get("msg"))
         .or_else(|| nested.and_then(|value| value.get("message")))
         .or_else(|| nested.and_then(|value| value.get("msg")))
         .and_then(|value| value.as_str())
-        .filter(|message| !message.trim().is_empty())
-        .map(|message| message.chars().take(160).collect::<String>())
-        .unwrap_or_else(|| format!("积分查询失败（code={code}）"))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// 凭据被拒时给用户**能照做**的中文文案，不再回显 openresty / APISIX 的整页标题。
+///
+/// issue #246：卡片原本直接显示「服务端返回 HTML 错误页：401 Authorization Required」，
+/// 用户既不知道发生了什么，也不知道该点哪里。这里按「能不能自愈」分两档：
+///
+/// - 吊销 ⇒ 只能导入 / 重新登录（刷新无效）；
+/// - 其余 401/403 ⇒ 提示重新登录或从本机导入。
+fn unauthorized_user_message(revoked: bool) -> String {
+    if revoked {
+        "该账号的登录会话已被服务端吊销（本地显示的到期时间不再可信）。下一步：在 WorkBuddy 客户端里确认登录同一账号后，用「从本机导入」覆盖该条目；或直接重新扫码登录。自动刷新无法恢复这种状态。"
+            .to_string()
+    } else {
+        "该账号的登录凭据被服务端拒绝。下一步：重新登录该账号，或用「从本机导入」覆盖成本机客户端当前的登录态。"
+            .to_string()
+    }
+}
+
+fn response_error(response: &Value) -> String {
+    let code = response_code(response).unwrap_or(-1);
+    let revoked = is_session_revoked(response);
+    if code == 401 || code == 403 || revoked {
+        return unauthorized_user_message(revoked);
+    }
+    let message = response_error_text(response);
+    if message.trim().is_empty() {
+        format!("积分查询失败（code={code}）")
+    } else {
+        message.chars().take(160).collect::<String>()
+    }
 }
 
 fn response_code(response: &Value) -> Option<i64> {
@@ -912,6 +958,21 @@ pub async fn get_credit_expiry(account: &Value) -> Value {
     get_credit_expiry_for(Region::Cn, account).await
 }
 
+/// 失败结果的**机器可读**原因：登录会话已被服务端吊销（refresh token 失效）。
+///
+/// issue #246 的现场：本地 `expiresAt` 还有 27 天，服务端却 401 —— 「过期时间」
+/// 这条线索永远发现不了吊销，只能靠业务码 12153 / `invalid_grant` 判。
+///
+/// 前端拿它决定要不要把「从本机导入 / 重新登录」这个出口摆在卡片上。
+/// ⚠️ 与 [`ENCRYPTED_CREDENTIAL_REASON`] 同守一条契约：判据是**这个字段**，不是中文文案。
+pub const SESSION_REVOKED_REASON: &str = "session_revoked";
+
+/// 失败结果的**机器可读**原因：凭据被服务端拒绝，但**不是**吊销（普通 401/403）。
+///
+/// 与 [`SESSION_REVOKED_REASON`] 分开是因为下一步不同：这一类刷新有可能自愈，
+/// 界面不必催着用户重新登录。
+pub const UNAUTHORIZED_REASON: &str = "unauthorized";
+
 /// 失败结果的**机器可读**原因：凭据是客户端 5.6 的加密信封（我方解不开）。
 ///
 /// 前端拿它决定要不要在错误旁边挂「用 OAuth 扫码添加」按钮。
@@ -1007,16 +1068,79 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
         return credit_result(account, vec![resource], now);
     }
 
-    json!({
+    let revoked = is_session_revoked(&response);
+    let mut failure = json!({
         "ok": false,
         "accountId": account_id,
         "accountName": account_display_name(account),
         "error": response_error(&response),
-    })
+    });
+    // ★ 机器可读原因（issue #246）：前端据此在错误旁边挂「从本机导入 / 重新登录」出口。
+    //   与 `encrypted_credential` 同一个契约字段，判据**不得**退化成匹配中文文案。
+    if revoked {
+        failure["reason"] = json!(SESSION_REVOKED_REASON);
+    } else if response_code(&response).is_some_and(|code| code == 401 || code == 403) {
+        failure["reason"] = json!(UNAUTHORIZED_REASON);
+    }
+    failure
 }
 
 #[cfg(test)]
 mod tests {
+    /// ★ 回归 #246：401 不得再回显 openresty / APISIX 的整页标题，必须给可操作的话。
+    ///
+    /// 现场（用户截图原话）：卡片上一行「服务端返回 HTML 错误页：401 Authorization Required」，
+    /// 用户既不知道发生了什么，也不知道该点哪里 —— 这类文案等于没有文案。
+    #[test]
+    fn unauthorized_response_yields_actionable_chinese_message() {
+        // 上游把 HTML 页折成了 code=401 + message，就是现场的形态。
+        let response = json!({
+            "code": 401,
+            "message": "服务端返回 HTML 错误页：401 Authorization Required"
+        });
+        let error = response_error(&response);
+        assert!(!error.contains("HTML"), "不得回显 HTML 字面量: {error}");
+        assert!(
+            !error.contains("Authorization Required"),
+            "不得回显上游英文标题: {error}"
+        );
+        assert!(
+            error.contains("重新登录") || error.contains("从本机导入"),
+            "必须给出下一步动作: {error}"
+        );
+    }
+
+    /// ★ 回归 #246：12153 / invalid_grant 是「被吊销」，不是「过期」。
+    ///
+    /// 两种状态的下一步完全不同：过期可以等自动刷新，吊销刷一百次也不会成功。
+    /// 本地 expiresAt 还有 27 天这条线索也永远发现不了吊销，所以必须看业务码。
+    #[test]
+    fn revoked_session_is_distinguished_from_plain_expiry() {
+        let revoked = json!({
+            "code": 12153,
+            "message": "refresh token failed: idsvc token: invalid_grant: refresh token revoked"
+        });
+        assert!(is_session_revoked(&revoked));
+        let error = response_error(&revoked);
+        assert!(error.contains("吊销"), "必须点明是被吊销: {error}");
+        assert!(
+            error.contains("自动刷新无法恢复"),
+            "必须说清刷新救不回来，否则用户会一直点刷新: {error}"
+        );
+
+        // 反向：普通业务失败不得被误判成吊销。
+        let plain = json!({"code": 500, "message": "服务端开小差了"});
+        assert!(!is_session_revoked(&plain), "非 12153 不得判成吊销");
+        assert_eq!(response_error(&plain), "服务端开小差了");
+    }
+
+    /// 既不是凭据问题、也没有文案 ⇒ 保留原来的「带 code」兜底，不要退化成空串。
+    #[test]
+    fn error_without_message_keeps_the_code_hint() {
+        let error = response_error(&json!({"code": 5000}));
+        assert!(error.contains("5000"), "无文案时必须带 code: {error}");
+    }
+
     use super::*;
 
     fn approx(left: f64, right: f64) {

@@ -177,6 +177,7 @@ export const zh = {
   "wbAccounts.card.waitingCredits": "等待积分数据…",
   "wbAccounts.card.creditFailed": "积分查询失败",
   "wbAccounts.card.addPlaintextAccount": "用 OAuth 扫码添加",
+  "wbAccounts.card.importLocal": "从本机导入覆盖",
   "wbAccounts.card.creditPackFallback": "积分包",
   "wbAccounts.card.setCurrent": "设为当前",
   "wbAccounts.card.switching": "切换中…",

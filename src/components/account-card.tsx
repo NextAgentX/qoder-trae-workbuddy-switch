@@ -1,4 +1,4 @@
-import { Ban, Check, CircleCheck, Coins, Loader2, PlaneTakeoff, QrCode } from "lucide-react";
+import { Ban, Check, CircleCheck, Coins, Loader2, PlaneTakeoff, QrCode, RefreshCw } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 // P0 · 程序位表（含「计划新增 / 尚未支持」态）—— 展示侧镜像，与后端 `programs.rs` 逐字对齐。
@@ -11,7 +11,7 @@ import type { AccountRefreshKind } from "@/lib/account-refresh";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { shouldOpenAccountDetail } from "@/lib/account-open-guard";
-import { ENCRYPTED_CREDENTIAL_REASON } from "@/lib/api";
+import { ENCRYPTED_CREDENTIAL_REASON, SESSION_REVOKED_REASON } from "@/lib/api";
 import { compactTokens, exactTokens } from "@/components/usage/format";
 import { demoModeEnabled } from "@/lib/demo-mode";
 import { displayText } from "@/lib/display-text";
@@ -441,6 +441,11 @@ interface Props {
    */
   onAddPlaintextAccount?: () => void;
   /**
+   * 「从本机导入」：账号库里的凭据已被服务端吊销时（issue #246），客户端里那份
+   * 往往还是活的 —— 就地覆盖是最省事的一条出路。卡片开不了弹窗，所以走回调。
+   */
+  onImportLocal?: () => void;
+  /**
    * 未检测到的程序位（IDE / CLI）点击后**引导到设置**对应子项（PLAN §3.3 规则 1）。
    *
    * 为什么不就地禁用：一枚点不动的灰按钮**不告诉用户下一步做什么**；
@@ -501,7 +506,7 @@ function ProductCurrentState({
   );
 }
 
-export function AccountCard({ account, onDelete, onCheckin, onRefresh, onRefreshPart, refreshingKinds, doneKinds, refreshKinds, onExport, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliGatewayMode, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, todayTokens, todayTokensTruncated = false, featuresDisabled = true }: Props) {
+export function AccountCard({ account, onDelete, onCheckin, onRefresh, onRefreshPart, refreshingKinds, doneKinds, refreshKinds, onExport, onSwitch, todayCheckedIn, travelStatus, credit, creditLoading, creditPriority, workbuddyActive, codebuddyCliConfigured, codebuddyCliGatewayMode, codebuddyCliActive, codebuddyCliBusy, onSwitchCodebuddyCli, codebuddyCliLoading, codebuddyCnIdeAvailable, codebuddyCnIdeActive, codebuddyCnIdeBusy, codebuddyCnIdeLoading, onSwitchCodebuddyCnIde, vscodePluginAvailable, vscodePluginActive, vscodePluginBusy, vscodePluginLoading, onSwitchVscodePlugin, jetbrainsPluginAvailable, jetbrainsPluginActive, jetbrainsPluginBusy, jetbrainsPluginLoading, onSwitchJetbrainsPlugin, onGuidePlugin, onAddPlaintextAccount, onImportLocal, onGuideToSetting, selected = false, onToggleSelect, onOpenDetail, todayTokens, todayTokensTruncated = false, featuresDisabled = true }: Props) {
   const t = useT();
   /**
    * 兜底归一（第三道闸）。
@@ -1215,20 +1220,32 @@ const workbuddyControl = workbuddyActive ? (
            * ⚠️ 这条错误态 CTA 是 §3.6 权限/错误态的**行内出口**，**不是**常规可点区 ——
            * 它随错误态一起保留，不计入「≤4」的口径（PLAN §3.3 的保留例外）。
            */
-          credit.reason === ENCRYPTED_CREDENTIAL_REASON ? (
+          credit.reason === ENCRYPTED_CREDENTIAL_REASON ||
+          credit.reason === SESSION_REVOKED_REASON ? (
             <div className="min-w-0 py-3 text-sm text-destructive">
               <div className="flex items-start gap-2">
                 <Coins className="mt-0.5 size-4 shrink-0" />
                 <span className="min-w-0 flex-1">{credit.error || t("wbAccounts.card.creditFailed")}</span>
               </div>
-              {onAddPlaintextAccount && (
-                <div className="mt-2.5 pl-6">
-                  <Button size="sm" variant="outline" onClick={onAddPlaintextAccount}>
-                    <QrCode />
-                    {t("wbAccounts.card.addPlaintextAccount")}
-                  </Button>
-                </div>
-              )}
+              {/* 加密信封 ⇒ 只能重新扫码（本机那份解不开，导入也没用）；
+                  会话被吊销 ⇒ 客户端里往往就是活的，优先「从本机导入」覆盖。 */}
+              {credit.reason === SESSION_REVOKED_REASON
+                ? onImportLocal && (
+                    <div className="mt-2.5 pl-6">
+                      <Button size="sm" variant="outline" onClick={onImportLocal}>
+                        <RefreshCw />
+                        {t("wbAccounts.card.importLocal")}
+                      </Button>
+                    </div>
+                  )
+                : onAddPlaintextAccount && (
+                    <div className="mt-2.5 pl-6">
+                      <Button size="sm" variant="outline" onClick={onAddPlaintextAccount}>
+                        <QrCode />
+                        {t("wbAccounts.card.addPlaintextAccount")}
+                      </Button>
+                    </div>
+                  )}
             </div>
           ) : (
             <div className="flex min-w-0 items-center gap-2 py-3 text-sm text-destructive" title={credit.error}>
