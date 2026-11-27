@@ -768,6 +768,15 @@ fn close_codebuddy_cn_windows(timeout_secs: i64) -> Result<(), String> {
     if rows.is_empty() {
         return Ok(());
     }
+    // ★ 关客户端的**审计日志**（issue #197）：记下要关的 PID 集合，
+    //   这样「客户端被谁关的」在日志里直接可查，不必事后用 WMI 拼时间线。
+    crate::modules::runtime_log::info(
+        "process",
+        &format!(
+            "关闭 CodeBuddy CN IDE：{} 个进程，预算 {timeout_secs}s",
+            rows.len()
+        ),
+    );
     let pids: Vec<u32> = rows.iter().map(|r| r.pid).collect();
     // 该精确映像名只属于 CN 版；用一次批量 taskkill 关闭主进程树，避免
     // 每个 PID 启动一个 taskkill 子进程。共享映像名 CodeBuddy.exe 仍按已核验 PID 处理。

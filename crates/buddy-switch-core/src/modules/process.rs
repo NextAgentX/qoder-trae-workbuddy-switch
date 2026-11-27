@@ -1648,6 +1648,16 @@ pub fn close_image(image: &str, timeout_secs: u64) -> Result<(), String> {
         // 空映像名判不出来 ⇒ 拒绝关闭（关错进程比关不掉更坏）。
         return Err("映像名为空 —— 无法确定要关闭哪个客户端。".to_string());
     }
+    // ★ 关客户端的**审计日志**（issue #197）。
+    //
+    // 现场：BuddySwitch 常驻时 WorkBuddy 客户端整树消失，用户看到「闪退 / 打不开」，
+    // 而日志里没有任何「我们要关它」的痕迹 ⇒ 只能靠 WMI 事后拼时间线。
+    //
+    // 这条改动**不改变任何行为**，只保证「每一次关闭客户端都有据可查」：关谁、给多久预算。
+    crate::modules::runtime_log::info(
+        "process",
+        &format!("关闭客户端进程映像：{image}（优雅退出预算 {timeout_secs}s）"),
+    );
 
     #[cfg(target_os = "windows")]
     {

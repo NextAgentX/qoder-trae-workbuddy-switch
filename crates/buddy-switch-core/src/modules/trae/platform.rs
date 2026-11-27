@@ -1518,6 +1518,12 @@ pub fn kill_client_for(variant: super::variant::TraeVariant) -> Result<bool, Str
         if targets.is_empty() {
             return Ok(false);
         }
+        // ★ 关客户端的**审计日志**（issue #197）：每一次关闭都留下「关谁」的痕迹，
+        //   否则客户端整树消失时日志里查不到任何线索，只能靠 WMI 事后拼时间线。
+        crate::modules::runtime_log::info(
+            "process",
+            &format!("关闭 Trae 客户端（{}）：{:?}", variant.as_str(), targets),
+        );
 
         // ★ 一级：**优雅关闭**。
         //
