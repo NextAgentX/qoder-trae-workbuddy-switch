@@ -956,15 +956,20 @@ export function AccountDetailDrawer({
                     {t("shared.drawer.checkin.title")}
                   </h3>
                   <div className="space-y-1.5 text-xs">
-                    {/* ★ 原型 B5 要求：抽屉里能看到「+100」（Trae 为 +50）。 */}
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-success">
-                        +{checkin.todayCredit ?? checkin.dailyCredit ?? 0}
-                      </span>
-                      <span className="text-muted-foreground">
-                        {t("shared.drawer.checkin.today")}
-                      </span>
-                    </div>
+                    {/* ★ 原型 B5 要求：抽屉里能看到「+100」（Trae 为 +50）。
+                        ★ issue #240：金额未知时**不渲染这一行**，而不是显示「+0」——
+                           「+0」会被读成「今天一分没得」，与事实无关，只是没有数据。 */}
+                    {(() => {
+                      const todayAmount = checkin.todayCredit ?? checkin.dailyCredit;
+                      return typeof todayAmount === "number" ? (
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-success">+{todayAmount}</span>
+                          <span className="text-muted-foreground">
+                            {t("shared.drawer.checkin.today")}
+                          </span>
+                        </div>
+                      ) : null;
+                    })()}
                     {typeof checkin.streakDays === "number" && checkin.streakDays > 0 && (
                       <div className="text-muted-foreground">
                         {t("shared.drawer.checkin.streak", { n: checkin.streakDays })}

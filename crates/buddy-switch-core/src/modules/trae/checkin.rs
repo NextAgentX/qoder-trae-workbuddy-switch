@@ -380,16 +380,16 @@ where
     report.total = planned.len();
 
     if planned.is_empty() {
-        // 空队列也要落盘摘要：否则前端会一直显示上一轮的签到结果。
-        let summary = credits::CheckinSummary {
-            time: Some(store::now_iso()),
-            results: Vec::new(),
-            total_ok: 0,
-            already: 0,
-            failed: 0,
-            warnings: Vec::new(),
-        };
-        let _ = credits::save_summary_for(variant, &summary);
+        // ★ 空队列**不得覆盖摘要**（issue #240）。
+        //
+        // 旧实现每次空队列都写一份 `results: []` 的空摘要，于是「重复签到 / 全部
+        // skip」的那一轮会把上一轮真实结果抹掉：「签到历史」里近 7 天的积分全变成
+        // 「—」，概览却仍说「今日已签到」，两个面板互相矛盾。
+        // 摘要的语义是「**最近一次真正处理过账号**的结果」，空轮不构成一次结果。
+        store::append_log(
+            &paths::checkin_log_file_for(variant),
+            "签到轮空：本轮没有需要处理的账号（已全部签到或全被过滤），摘要保持不变",
+        );
         on_event(&json!({ "type": "done", "ok": 0, "already": 0, "failed": 0, "total": 0 }));
         return report;
     }
@@ -881,6 +881,57 @@ mod tests {
         assert!(options.skip_expired);
         assert_eq!(options.retry, 1);
         assert_eq!(options.scope, Scope::All);
+    }
+
+    /// ★ 回归 #240：**空队列轮不得覆盖摘要**。
+    ///
+    /// 旧实现每次空队列都写一份 `results: []`，于是「全部已签到 ⇒ 队列空」的那一轮
+    /// 会把上一轮的真实结果抹掉：签到历史里近 7 天积分全变「—」、概览却说「今日已签到」。
+    ///
+    /// 摘要的语义是「最近一次**真正处理过账号**的结果」，空轮不构成一次结果。
+    #[tokio::test]
+    async fn empty_round_does_not_wipe_the_previous_summary() {
+        let home = std::env::temp_dir().join(format!(
+            "trae-empty-round-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("创建隔离目录");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+        let variant = TraeVariant::TraeWork;
+
+        // 铺一份「昨天那轮成功了 3 个账号」的摘要。
+        let previous = credits::CheckinSummary {
+            time: Some(store::now_iso()),
+            results: vec![json!({"userId": "u1", "ok": true, "delta": 100})],
+            total_ok: 3,
+            already: 0,
+            failed: 0,
+            warnings: Vec::new(),
+        };
+        credits::save_summary_for(variant, &previous).expect("写摘要");
+
+        // 空账号库 ⇒ plan 为空 ⇒ 走「空队列」分支。
+        let report = run_checkin(
+            CheckinOptions {
+                variant,
+                skip_checked_in: true,
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        assert_eq!(report.total, 0, "前置：本轮确实没有任何账号可签");
+
+        let after = credits::load_summary_for(variant);
+        assert_eq!(
+            after.total_ok, 3,
+            "空轮不得清掉上一轮的成功数 —— 那会让历史面板显示 0"
+        );
+        assert_eq!(after.results.len(), 1, "空轮不得把 results 覆盖成空数组");
+
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
