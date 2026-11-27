@@ -1261,8 +1261,43 @@ pub fn backup_to_slot_for(variant: TraeVariant, slot: &str) -> Result<u64, Strin
     if copied == 0 {
         return Err("未找到任何登录态文件，请确认已在 Trae 中登录".into());
     }
+    // ★ issue #239 第 2 条：**写完当场自检**。
+    //
+    // 快照是「切到该账号时要回灌的登录态」，写完解不开就等于存了一份废票 ——
+    // 而且发现得越晚越糟：客户端目录里此刻往往还有能用的历史信封可回捞，
+    // 等用户切换失败再回头找，那份现场可能已经被覆盖了。
+    //
+    // `LAST_SLOT`（回滚槽）豁免：它的语义是「切换前的**现场**」，客户端未登录时
+    // 也必须照存不误，否则回滚能力就没了。对它只告警不失败 —— 调用方
+    // （`switch_account` 第 2 步）本来就把这一步当 `skip` 处理。
+    if slot != LAST_SLOT {
+        if let Err(reason) = assert_snapshot_envelope_readable(&target_root, variant) {
+            return Err(format!(
+                "该账号的登录态快照已写出，但其中的 iCube 信封无法解密 —— \
+                 切过去客户端会停在登录页，故未保存。{reason}"
+            ));
+        }
+    }
     store::atomic_write_text(&target_root.join(".source"), &source_root.to_string_lossy())?;
     Ok(copied)
+}
+
+/// 快照里的 cloudide 信封必须**能被我们解开**（写完自检 / 切换前预检查共用）。
+///
+/// 只看「键在不在」还不够 —— 键在但解不开正是 #239 的现场形态。
+/// 键不在时返回 `Ok(())`：那是「该目录没登录过」，不是坏快照。
+fn assert_snapshot_envelope_readable(
+    snapshot_dir: &Path,
+    variant: TraeVariant,
+) -> Result<(), String> {
+    match icube::cloudide_auth_info_from_dir(snapshot_dir, variant) {
+        Ok(_) => Ok(()),
+        Err(error) if has_cloudide_envelope(snapshot_dir) => Err(format!(
+            "（{}）请在 Trae 客户端里重新登录并重新保存该账号的登录态。",
+            error.user_message(variant)
+        )),
+        Err(_) => Ok(()),
+    }
 }
 
 /// 客户端**当前**登录态是否结构完整。
@@ -1795,11 +1830,7 @@ where
         outcome.error = Some(error);
         return outcome;
     }
-    if snapshot_has_expired_login(&target_slot, variant) {
-        let message = format!(
-            "切换未开始：账号 {target} 的登录凭据已过期，且没有可用的新凭据。\
-             请在 Trae 客户端里重新登录并保存该账号的登录态后重试。"
-        );
+    if let Some(message) = target_snapshot_login_problem(&target_slot, variant, &target) {
         emit(
             &mut outcome,
             SwitchStep::new("precheck", "fail", message.clone()),
@@ -2141,12 +2172,46 @@ where
             outcome.error = Some(message);
             return outcome;
         }
+        RestoreCheck::Unreadable { reason } => {
+            // ★ issue #239：信封解不开 ≠ 读不到。恢复进去的是一份客户端自己也读不出
+            //   的登录态，客户端启动后会 `clearUserInfo` 直接落到登录页。这种状态下
+            //   报 success 等于把用户扔进登录页还说「切好了」，必须回滚 + fatal。
+            emit(
+                &mut outcome,
+                SwitchStep::new(
+                    "verify",
+                    "fail",
+                    format!("目标快照的 iCube 登录态信封无法解密：{reason}"),
+                ),
+            );
+            let (steps, rollback_error) = rollback_after_failed_switch(&restore_dir, variant, true);
+            for step in steps {
+                emit(&mut outcome, step);
+            }
+            let message = match rollback_error {
+                None => format!(
+                    "切换未完成：账号 {target} 的快照登录态信封已损坏（无法解密），已回滚到切换前状态。\
+                     客户端读不出这份凭据，切过去只会停在登录页。\
+                     下一步：在 Trae 客户端里重新登录 {target} 并重新保存该账号的登录态。"
+                ),
+                Some(reason) => format!(
+                    "切换未完成：账号 {target} 的快照登录态信封已损坏（无法解密），且{reason}。\
+                     请在客户端里确认当前登录状态后重新登录 {target}。"
+                ),
+            };
+            emit(
+                &mut outcome,
+                SwitchStep::new("fatal", "fail", message.clone()),
+            );
+            outcome.error = Some(message);
+            return outcome;
+        }
         RestoreCheck::Unverifiable => emit(
             &mut outcome,
             SwitchStep::new(
                 "verify",
                 "skip",
-                "无法从客户端读取当前账号（快照内没有可解凭据），跳过复核",
+                "无法从客户端读取当前账号（该目录没有 iCube 登录态副本），跳过复核",
             ),
         ),
     }
@@ -2203,8 +2268,27 @@ enum RestoreCheck {
     Mismatch { actual: String },
     /// 凭据可读且能确定用户，但 access token 明确过期；不得降级为跳过复核。
     Expired,
-    /// 读不到（客户端没装 / 快照内没有可解凭据）⇒ fail-open。
+    /// 信封**键存在**却读不出（magic / AES / SHA512 / JSON 任一步失败）。
+    ///
+    /// ★ issue #239：这一格以前被并进 [`RestoreCheck::Unverifiable`]，于是
+    /// 「快照信封已被写坏」被当成「读不到」⇒ `verify/skip` + `success=true`，
+    /// 用户切进登录页却零告警。**可解性是硬门槛**：键在就说明客户端本该有登录态，
+    /// 解不开就是坏，必须响亮失败。
+    Unreadable { reason: String },
+    /// 客户端没装 / 该目录没有存储文件 / **根本没有** cloudide 键 ⇒ fail-open。
+    ///
+    /// 与 [`RestoreCheck::Unreadable`] 的分界线是「**键在不在**」，不是「解密成功与否」：
+    /// 没有键说明这条产品线就没在该目录登录过，把这种情况判失败会挡掉正常切换；
+    /// 有键解不开则一定是坏状态，两种下一步完全不同。
     Unverifiable,
+}
+
+/// `storage.json` 里是否有 cloudide 键（只看键名、不解密）。
+///
+/// 复核与预检查都要靠它把「没有登录态」和「登录态坏了」分开；
+/// 与 [`local_login_from_dir`] 的 R6 收口用的是**同一个判据**，不能各写一份。
+fn has_cloudide_envelope(dir: &Path) -> bool {
+    storage_has_key(dir, icube::CLOUDIDE_KEY)
 }
 
 /// 复核逻辑本体：读**显式传入的目录**，判断客户端此刻登录着谁。
@@ -2223,33 +2307,55 @@ enum RestoreCheck {
 ///
 /// 因此**不要**在此函数内部再引入任何目录选择器 —— 那会把构造同源退回约定同源。
 ///
-/// ## fail-open 仅在读不到时
+/// ## fail-open 仅在**没有信封键**时
 ///
-/// 客户端没装、快照里没有信封、或该产品线本就没有可解凭据，都可能读不到
-/// （目录不存在时同样读不到）；把「读不到」当成失败会让正常切换被误挡。
+/// 客户端没装、快照里没有存储文件、或该目录从来没登录过（没有 cloudide 键），
+/// 都属「读不到」；把「读不到」当成失败会让正常切换被误挡。
+///
+/// ★ 但**键存在却解不开**是另一回事（issue #239）：那说明客户端本该有登录态，
+/// 而这份信封已经坏了。以前这一格被并进 fail-open，于是切换照常报 success、
+/// 用户切进登录页却没有任何告警。现在它单独走 [`RestoreCheck::Unreadable`]。
 fn verify_restored_login_in(root: &Path, variant: TraeVariant, target: &str) -> RestoreCheck {
-    if let Ok(info) = icube::cloudide_auth_info_from_dir(root, variant) {
-        let authorization = jwt::authorization_header(&info.token);
-        let parsed = jwt::parse(&authorization);
-        let exp = info.expired_at.or(parsed.exp_timestamp).unwrap_or(0);
-        if exp > 0 && exp < chrono::Utc::now().timestamp() {
-            return RestoreCheck::Expired;
+    match icube::cloudide_auth_info_from_dir(root, variant) {
+        Ok(info) => {
+            let authorization = jwt::authorization_header(&info.token);
+            let parsed = jwt::parse(&authorization);
+            let exp = info.expired_at.or(parsed.exp_timestamp).unwrap_or(0);
+            if exp > 0 && exp < chrono::Utc::now().timestamp() {
+                return RestoreCheck::Expired;
+            }
+            if let Some(actual) = info
+                .user_id
+                .filter(|value| !value.is_empty())
+                .or(parsed.user_id)
+            {
+                return if actual == target {
+                    RestoreCheck::Confirmed
+                } else {
+                    RestoreCheck::Mismatch { actual }
+                };
+            }
         }
-        if let Some(actual) = info
-            .user_id
-            .filter(|value| !value.is_empty())
-            .or(parsed.user_id)
-        {
-            return if actual == target {
-                RestoreCheck::Confirmed
-            } else {
-                RestoreCheck::Mismatch { actual }
-            };
+        Err(reason) => {
+            // 键在 ⇒ 这不是「没登录」，是「登录态坏了」，不许降级成跳过。
+            if has_cloudide_envelope(root) {
+                return RestoreCheck::Unreadable {
+                    reason: reason.user_message(variant),
+                };
+            }
         }
     }
     match extract_local_jwt_from_dir(root, variant) {
         Ok((actual, _)) if actual == target => RestoreCheck::Confirmed,
         Ok((actual, _)) => RestoreCheck::Mismatch { actual },
+        // 走到这里仍可能是「键在但解不开」：上面已经从信封路径返回，只在
+        // 「信封可读但解析不出 uid」或「根本没有键」时才会落到明文兜底。
+        Err(_) if has_cloudide_envelope(root) => RestoreCheck::Unreadable {
+            reason: format!(
+                "【{}】的快照里有 iCube 登录态副本，但读不出账号归属",
+                variant.display_name()
+            ),
+        },
         Err(_) => RestoreCheck::Unverifiable,
     }
 }
@@ -2263,13 +2369,31 @@ fn prepare_target_snapshot_credentials(
     user_id: &str,
     snapshot_dir: &Path,
 ) -> Result<(), String> {
+    // ★ issue #239：信封**键在却解不开**必须先于一切判失败。
+    //
+    // 旧实现 `let Ok(snapshot) = … else { return Ok(()) }` 把「解不开」和「没有信封」
+    // 一起当成「不需要补票」放过去：后面 `snapshot_has_expired_login` 也返回 false
+    // （读不出 ⇒ 判不出过期），复核又降级为 skip ⇒ 整条链路对坏快照零告警。
+    // 现在先看键：键不在才是「这目录没登录过」，键在就必须能读。
+    let snapshot = match icube::cloudide_auth_info_from_dir(snapshot_dir, variant) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return if has_cloudide_envelope(snapshot_dir) {
+                Err(format!(
+                    "切换未开始：账号 {user_id} 的登录态快照里 iCube 信封无法解密，\
+                     切过去客户端会停在登录页。下一步：在 Trae 客户端里重新登录该账号并重新保存登录态。\n（{error_msg}）",
+                    error_msg = error.user_message(variant)
+                ))
+            } else {
+                // 该目录没有信封键 ⇒ 确实没有可补的票，交给后面「快照不存在」的提示。
+                Ok(())
+            };
+        }
+    };
     let Some(account) = account::find_for(variant, user_id) else {
         return Ok(());
     };
     let db_exp = jwt::parse(&account.jwt).exp_timestamp.unwrap_or(0);
-    let Ok(snapshot) = icube::cloudide_auth_info_from_dir(snapshot_dir, variant) else {
-        return Ok(());
-    };
     let snapshot_exp = snapshot
         .expired_at
         .or_else(|| jwt::parse(&snapshot.token).exp_timestamp)
@@ -2294,15 +2418,53 @@ fn prepare_target_snapshot_credentials(
     .map_err(|error| format!("账号库凭据较新，但更新目标快照失败，切换已取消：{error}"))
 }
 
+/// 目标快照的登录态是否**明确**已过期。
+///
+/// ★ issue #239：读不出时不再返回 `false`（那是把「不知道」说成「没过期」）。
+/// 可解性已经由 [`prepare_target_snapshot_credentials`] 在更前面判成 fatal，
+/// 这里只需对「读得出」的情形判到期；读不出就走 `true`，宁可挡下也不要放一份
+/// 客户端自己都解不开的快照过去。
 fn snapshot_has_expired_login(snapshot_dir: &Path, variant: TraeVariant) -> bool {
-    let Ok(info) = icube::cloudide_auth_info_from_dir(snapshot_dir, variant) else {
-        return false;
+    let info = match icube::cloudide_auth_info_from_dir(snapshot_dir, variant) {
+        Ok(info) => info,
+        Err(_) => return has_cloudide_envelope(snapshot_dir),
     };
     let exp = info
         .expired_at
         .or_else(|| jwt::parse(&info.token).exp_timestamp)
         .unwrap_or(0);
     exp > 0 && exp < chrono::Utc::now().timestamp()
+}
+
+/// 目标快照在切过去之前能否被**客户端**读出来；有问题时返回可直接展示的中文原因。
+///
+/// 一把尺子量两件事，且**顺序固定**：
+/// 1. 信封键在却解不开 ⇒ 坏快照（客户端读不出 ⇒ 必然落到登录页），先报这个；
+/// 2. 信封可解但已过期 ⇒ 旧凭据，报「过期」。
+///
+/// 两条都返回 `None` 之外的文案时，`switch_account` 的预检查会判 `fail` + 中断，
+/// 而不是记一条 `skip` 继续往下走 —— 那正是 #239 里「切换报成功、用户切进登录页」的成因。
+fn target_snapshot_login_problem(
+    snapshot_dir: &Path,
+    variant: TraeVariant,
+    target: &str,
+) -> Option<String> {
+    if let Err(error) = icube::cloudide_auth_info_from_dir(snapshot_dir, variant) {
+        if has_cloudide_envelope(snapshot_dir) {
+            return Some(format!(
+                "切换未开始：账号 {target} 的登录态快照里 iCube 信封无法解密，\
+                 切过去客户端会停在登录页。客户端读不出这份凭据，只能重新登录后重存。\
+                 下一步：在 Trae 客户端里登录 {target}，再点「保存该账号的登录态」。\n（{}）",
+                error.user_message(variant)
+            ));
+        }
+    }
+    snapshot_has_expired_login(snapshot_dir, variant).then(|| {
+        format!(
+            "切换未开始：账号 {target} 的登录凭据已过期，且没有可用的新凭据。\
+             请在 Trae 客户端里重新登录并保存该账号的登录态后重试。"
+        )
+    })
 }
 
 /// 保存前的守卫：客户端**此刻实际登录**的账号必须与目标槽位一致。
@@ -4841,6 +5003,186 @@ mod tests {
             RestoreCheck::Unverifiable,
             "读不到时必须 fail-open，不能把正常切换判成失败"
         );
+    }
+
+    /// ★ 回归 #239：信封**键在却解不开** ⇒ 必须是 `Unreadable`（fail-closed），
+    /// 不能退化成 `Unverifiable` 让 `switch_account` 记一条 `verify/skip` 就报 success。
+    ///
+    /// 现场形态：客户端自动续期写出了坏信封（盐长度不对 / 换了方案），
+    /// 工具这边三步全部静默放行 ⇒ 用户切进登录页、界面却显示「切换成功」。
+    ///
+    /// 可证伪：把 `verify_restored_login_in` 的 `has_cloudide_envelope` 分支删掉，
+    /// 本用例立刻红（会退回 `Unverifiable`）。
+    #[cfg(windows)]
+    #[test]
+    fn verify_reports_unreadable_envelope_instead_of_silently_skipping() {
+        let exp = chrono::Utc::now().timestamp() + 3600;
+        let env = crate::modules::trae::test_support::TempEnv::empty();
+        let fixtures = icube::test_support::write_cloudide_only_user_data(&env.appdata(), exp);
+        let variant = TraeVariant::TraeWork;
+        let uids = fixture_uids(&fixtures, variant);
+
+        // 槽位目录要先有 storage.json —— 从客户端目录复制一份（与真机形态一致）。
+        let source = env
+            .appdata()
+            .join(platform::data_dir_names_for(variant)[0])
+            .join("User")
+            .join("globalStorage");
+        let slot = paths::profiles_dir_for(variant).join(&uids[0]);
+        let slot_storage_dir = slot.join("User").join("globalStorage");
+        std::fs::create_dir_all(&slot_storage_dir).unwrap();
+        std::fs::copy(
+            source.join("storage.json"),
+            slot_storage_dir.join("storage.json"),
+        )
+        .unwrap();
+
+        // 把槽位里的信封改成一个「magic 正常、但密文解不开」的值 —— 这正是坏信封的形态。
+        let storage = slot_storage_dir.join("storage.json");
+        let mut object: serde_json::Map<String, Value> =
+            serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
+        object.insert(
+            icube::CLOUDIDE_KEY.to_string(),
+            Value::String("746305100000".to_string() + &"A".repeat(64)),
+        );
+        std::fs::write(
+            &storage,
+            serde_json::to_string(&Value::Object(object)).unwrap(),
+        )
+        .unwrap();
+
+        match verify_restored_login_in(&slot, variant, &uids[0]) {
+            RestoreCheck::Unreadable { reason } => {
+                assert!(
+                    reason.contains("信封"),
+                    "原因必须说清是信封读不出，而不是笼统的失败：{reason}"
+                );
+            }
+            other => panic!("坏信封必须 fail-closed，实际得到 {other:?}"),
+        }
+
+        // 反向：把键**删掉**（该目录没登录过）⇒ 仍要 fail-open，不许把正常切换误挡。
+        let no_envelope = paths::profiles_dir_for(variant).join("no-envelope-slot");
+        std::fs::create_dir_all(no_envelope.join("User").join("globalStorage")).unwrap();
+        std::fs::write(
+            no_envelope
+                .join("User")
+                .join("globalStorage")
+                .join("storage.json"),
+            r#"{"machineId":"m"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_restored_login_in(&no_envelope, variant, &uids[0]),
+            RestoreCheck::Unverifiable,
+            "没有信封键 ⇒ 该目录从未登录，必须保持 fail-open"
+        );
+    }
+
+    /// ★ 回归 #239：切换前的**预检查**必须拦下坏信封，并给出可操作文案。
+    ///
+    /// `target_snapshot_login_problem` 是 precheck 的唯一判据；它返回 `Some` 时
+    /// `switch_account` 会 `fail` + 中断，而不是往下走到「切换成功」。
+    #[cfg(windows)]
+    #[test]
+    fn precheck_refuses_a_snapshot_whose_envelope_cannot_be_decrypted() {
+        let exp = chrono::Utc::now().timestamp() + 3600;
+        let env = crate::modules::trae::test_support::TempEnv::empty();
+        let fixtures = icube::test_support::write_cloudide_only_user_data(&env.appdata(), exp);
+        let variant = TraeVariant::TraeWork;
+        let uids = fixture_uids(&fixtures, variant);
+        let source = env
+            .appdata()
+            .join(platform::data_dir_names_for(variant)[0])
+            .join("User")
+            .join("globalStorage");
+
+        // 好快照 ⇒ 没有问题（证明下面的判据不是恒真）。
+        let good = paths::profiles_dir_for(variant).join(&uids[0]);
+        std::fs::create_dir_all(good.join("User").join("globalStorage")).unwrap();
+        std::fs::copy(
+            source.join("storage.json"),
+            good.join("User").join("globalStorage").join("storage.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            target_snapshot_login_problem(&good, variant, &uids[0]),
+            None
+        );
+
+        let bad = paths::profiles_dir_for(variant).join(&uids[1]);
+        let bad_storage_dir = bad.join("User").join("globalStorage");
+        std::fs::create_dir_all(&bad_storage_dir).unwrap();
+        let storage = bad_storage_dir.join("storage.json");
+        std::fs::copy(source.join("storage.json"), &storage).unwrap();
+        let mut object: serde_json::Map<String, Value> =
+            serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
+        object.insert(
+            icube::CLOUDIDE_KEY.to_string(),
+            Value::String("746305100000".to_string() + &"A".repeat(64)),
+        );
+        std::fs::write(
+            &storage,
+            serde_json::to_string(&Value::Object(object)).unwrap(),
+        )
+        .unwrap();
+
+        let message = target_snapshot_login_problem(&bad, variant, &uids[1])
+            .expect("坏信封不得放行——这正是 #239 的现场");
+        assert!(
+            message.contains("无法解密"),
+            "文案必须说明是信封解不开，用户才知道要重新登录：{message}"
+        );
+        assert!(
+            message.contains("重新登录"),
+            "文案必须给出下一步动作：{message}"
+        );
+    }
+
+    /// ★ 回归 #239：`backup_to_slot_for` 写完**当场自检** —— 源目录信封坏掉时，
+    /// 不许把它当成一份「可用的账号快照」存进槽位。
+    ///
+    /// 为什么必须在写侧拦：坏信封一旦存进槽位，切换时会静默恢复成未登录；
+    /// 而此刻客户端目录里往往还有历史可解信封，越早报错越容易救。
+    #[cfg(windows)]
+    #[test]
+    fn backup_refuses_to_store_a_snapshot_with_an_unreadable_envelope() {
+        let exp = chrono::Utc::now().timestamp() + 3600;
+        let env = crate::modules::trae::test_support::TempEnv::empty();
+        let fixtures = icube::test_support::write_cloudide_only_user_data(&env.appdata(), exp);
+        let variant = TraeVariant::TraeWork;
+        let uids = fixture_uids(&fixtures, variant);
+
+        // 源目录（客户端当前目录）= 槽位内容；先证明它能被正常存一次。
+        let source_dir = env.appdata().join(platform::data_dir_names_for(variant)[0]);
+        backup_to_slot_for(variant, "healthy").expect("好信封必须能存");
+
+        // 把源目录的信封打坏，再存一个新槽位 ⇒ 必须报错，且不得留下「看起来正常」的槽位。
+        let storage = source_dir
+            .join("User")
+            .join("globalStorage")
+            .join("storage.json");
+        let mut object: serde_json::Map<String, Value> =
+            serde_json::from_str(&std::fs::read_to_string(&storage).unwrap()).unwrap();
+        object.insert(
+            icube::CLOUDIDE_KEY.to_string(),
+            Value::String("746305100000".to_string() + &"A".repeat(64)),
+        );
+        std::fs::write(
+            &storage,
+            serde_json::to_string(&Value::Object(object)).unwrap(),
+        )
+        .unwrap();
+
+        let error = backup_to_slot_for(variant, "broken").expect_err("坏信封不得存进槽位");
+        assert!(
+            error.contains("无法解密"),
+            "报错必须点明信封解不开：{error}"
+        );
+
+        // 回滚槽 `last` 必须仍然可用（客户端未登录时也要能存现场，否则回滚能力没了）。
+        backup_to_slot_for(variant, LAST_SLOT).expect("last 槽位必须豁免自检");
+        let _ = uids;
     }
 
     // ---------- T13-3：导入侧先找「装着登录态」的目录 ----------

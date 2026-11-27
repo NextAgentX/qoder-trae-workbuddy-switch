@@ -357,11 +357,28 @@ pub fn tc_decrypt(b64: &str, mode: TcMode) -> Result<String, IcubeError> {
 ///
 /// 每次写入都生成新的 OS 随机盐；账号库刷新后只更新已有登录态信封，保留
 /// `storage.json` 中客户端下发的其它账号字段和 `iCubeServerData`。
+///
+/// ## ★ 盐必须正好 [`RANDOM_LEN`] 字节（issue #239）
+///
+/// 读侧 [`tc_decrypt`] 从 `raw[HEADER_LEN..HEADER_LEN + RANDOM_LEN]` 取盐、其后才是密文，
+/// 客户端与 `scripts/repair-trae-snapshot-credentials.mjs` 同样按 32 字节取。
+/// 所以写侧的盐只要**少于** 32 字节，密文起点就整体前移，`key`/`iv` 全部错位 ——
+/// 产出的信封**三方都解不开**，而 `tc_decrypt` 只报一句「AES 解密失败」，
+/// 现场表现是「切换成功、客户端却停在登录页」。
+///
+/// 历史上这里写成 `*uuid::Uuid::new_v4().as_bytes()`（**16** 字节），是 #239 的根因：
+/// UUIDv4 的第 6 字节高半 nibble 恒为 `4`、第 8 字节高 2 bit 恒为 `0b10`，
+/// 坏信封盐区开头能直接读出这两处指纹。
+///
+/// 修法不用 `uuid` 拼两段：`rand_core::OsRng` 直接填满 32 字节，
+/// 「盐长度 = 读侧期望长度」由类型保证，不再依赖调用者数得对。
 pub(crate) fn tc_encrypt(plain: &str, mode: TcMode) -> Result<String, IcubeError> {
     use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    use rand_core::RngCore as _;
     type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 
-    let random = *uuid::Uuid::new_v4().as_bytes();
+    let mut random = [0u8; RANDOM_LEN];
+    rand_core::OsRng.fill_bytes(&mut random);
     let (key, iv) = derive_keys(&random, &mode.pepper());
     let body = plain.as_bytes();
     let mut tagged = Vec::with_capacity(SHA512_LEN + body.len());
@@ -1636,6 +1653,70 @@ mod tests {
         let plain = device_plain_with_both_keys();
         let envelope = seal(plain.as_bytes());
         assert_eq!(tc_decrypt(&envelope, TcMode::Aes).unwrap(), plain);
+    }
+
+    /// ★ 回归 #239：`tc_encrypt` **自己写的**信封必须能被**自己读回来**。
+    ///
+    /// 上面的 `sealed_envelope_round_trips` 用的是 `seal_envelope` 辅助函数
+    /// （盐写死 32 字节 `TEST_RANDOM`），于是「生产写侧的盐长度」从未被覆盖 ——
+    /// 这正是 #239 能带着全绿单测上线的原因：`tc_encrypt` 当时用 UUIDv4 的 **16** 字节
+    /// 当盐，解密方按 32 字节取，key/iv 全错。
+    ///
+    /// 可证伪：把 `tc_encrypt` 的盐改回任何非 [`RANDOM_LEN`] 长度，本用例立刻红。
+    #[test]
+    fn tc_encrypt_round_trips_through_own_decrypt() {
+        for mode in [TcMode::Aes, TcMode::AesPrivate] {
+            let plain = device_plain_with_both_keys();
+            let envelope = tc_encrypt(&plain, mode).expect("加密不应失败");
+
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(&envelope)
+                .expect("自产信封必须能 base64 解码");
+            assert_eq!(
+                raw.len(),
+                HEADER_LEN + RANDOM_LEN + (SHA512_LEN + plain.len()).div_ceil(16) * 16,
+                "信封布局必须是 magic + {RANDOM_LEN}B 盐 + 密文；盐少了密文起点就整体前移"
+            );
+
+            assert_eq!(
+                tc_decrypt(&envelope, mode).unwrap(),
+                plain,
+                "{mode:?} 模式下自产信封必须能自解，否则客户端与 mjs 也解不开"
+            );
+        }
+    }
+
+    /// ★ 回归 #239 的指纹侧：盐区**不能**是 UUIDv4。
+    ///
+    /// 坏信封的盐是某次 `Uuid::new_v4().as_bytes()`：第 6 字节高半 nibble 恒为 `4`、
+    /// 第 8 字节高 2 bit 恒为 `0b10`。这两个位置本该是纯随机，**恒为定值**才是缺陷。
+    ///
+    /// 判据只能是「多次采样里出现过不止一个取值」，不能是「每次都不等于 `4` / `0b10`」——
+    /// 32 字节真随机盐命中这两位分别是 1/16 与 1/4，那是正常的，不该判红。
+    /// 反过来，64 次采样全部同值对真随机而言概率约 16⁻⁶³ 量级，可以忽略。
+    #[test]
+    fn tc_encrypt_salt_carries_no_uuid_fingerprint() {
+        let mut version_bits = std::collections::HashSet::new();
+        let mut variant_bits = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let envelope = tc_encrypt("{}", TcMode::Aes).expect("加密不应失败");
+            let raw = base64::engine::general_purpose::STANDARD
+                .decode(&envelope)
+                .expect("自产信封必须能 base64 解码");
+            let salt = &raw[HEADER_LEN..HEADER_LEN + RANDOM_LEN];
+            version_bits.insert(salt[6] >> 4);
+            variant_bits.insert(salt[8] >> 6);
+        }
+        assert!(
+            version_bits.len() > 1,
+            "盐第 6 字节高半 nibble 恒为 {:?} —— 这是 UUIDv4 版本位，说明盐又退回了 16 字节 UUID",
+            version_bits
+        );
+        assert!(
+            variant_bits.len() > 1,
+            "盐第 8 字节高 2 bit 恒为 {:?} —— 这是 UUID 变体位，说明盐又退回了 16 字节 UUID",
+            variant_bits
+        );
     }
 
     // -- 身份 / 凭证的解析语义 ----------------------------------------------
