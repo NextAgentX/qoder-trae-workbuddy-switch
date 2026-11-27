@@ -53,7 +53,7 @@ import { LinkedSessions } from "@/components/switch-account/linked-sessions";
 import { ExtSessionDrawer } from "@/components/sessions/ext-session-drawer";
 import * as api from "@/lib/api";
 // ★ B5：`checkinCreditsOf` 是**值**（从条目/raw 里取积分字段），`CheckinStatusEntry` 是**类型**。
-import { checkinCreditsOf } from "@/lib/api";
+import { checkinCreditsOf, SESSION_REVOKED_REASON } from "@/lib/api";
 import type { CheckinStatusEntry } from "@/lib/api";
 import { accountSearchText } from "@/lib/account-search";
 import { lastSevenDays, localDateKey } from "@/lib/checkin-history";
@@ -842,7 +842,24 @@ function RegionPanel({ region }: { region: Region }) {
     if (!current) return;
     const uid = current.uid;
     if (!uid) return;
-    if (accounts.some((a) => isWorkbuddyCurrent(a, current))) return;
+    /* ★ 两种触发情形（issue #246 第 4 条）：
+     *
+     * ① 客户端登录的账号**还不在账号库**里 —— 原逻辑，没有它就等于没同步；
+     * ② 账号**在库里、但库里的凭据已被服务端吊销**（`reason === session_revoked`）。
+     *
+     * 第 ② 种是报障现场：本地 `expiresAt` 还有 27 天，服务端却 401，而自动导入只在
+     * 「库里没有这个账号」时才触发 ⇒ 库里的死凭据永远不会被客户端那份**活的**覆盖。
+     *
+     * 安全性：只在「客户端当前登录的就是它」时才覆盖同一个账号的凭据 —— 用户
+     * 在客户端里换人时 uid 对不上，这里直接不触发。这与「回捕」是同一条判据。
+     */
+    const inStore = accounts.some((a) => isWorkbuddyCurrent(a, current));
+    /* `creditMap` 的键是账号 **id**（不是 uid），所以先按 uid 找到那条记录。 */
+    const storedAccount = accounts.find((a) => isWorkbuddyCurrent(a, current));
+    const currentUidRevoked =
+      storedAccount !== undefined &&
+      creditMap[storedAccount.id]?.reason === SESSION_REVOKED_REASON;
+    if (inStore && !currentUidRevoked) return;
     if (autoImportTriedUids.current.has(uid)) return;
     autoImportTriedUids.current.add(uid);
     void importLocalStore(region)
@@ -850,7 +867,7 @@ function RegionPanel({ region }: { region: Region }) {
       .catch(() => {
         /* 本机无可用登录态时静默，不打扰用户 */
       });
-  }, [accounts, status, loading, importLocalStore, reconcileAccounts, region]);
+  }, [accounts, status, loading, creditMap, importLocalStore, reconcileAccounts, region]);
 
   // 切到该版本时立刻重查一次状态：`status.current` 决定卡片上的「当前账号」标记，
   // 若沿用上一次的快照，切换账号（尤其是国际版）后标记会停在旧账号上。

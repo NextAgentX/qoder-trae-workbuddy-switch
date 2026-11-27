@@ -198,6 +198,20 @@ pub fn switch_account_cross_with_sync(
     let mut copy_report: Option<Value> = None;
     let mut sync_report = None;
     if restart {
+        // ★ 切走之前先**回捕**客户端此刻的登录态（issue #246 step 4b）。
+        //
+        // 为什么必须在关闭之前：客户端在运行期间会自己刷新 / 轮换会话，账号库里那份
+        // 副本因此**永久落后**。等用户切回来才发现凭据已死，而那时客户端里的旧会话
+        // 早被覆盖掉了 —— 回捕窗口只有「客户端还活着、且还没被切走」这一小段。
+        //
+        // 只在「客户端当前 uid == 正要切走的账号」时回捕：其它情况说明用户手动在
+        // 客户端里换了人，此时回捕会把**别人**的会话写进这个账号，比不做更坏。
+        // 回捕失败只告警不阻断：它是有则加勉的一步，不该让用户切不了账号。
+        match capture_client_login_into_store(region, account_id) {
+            Ok(Some(uid)) => progress(&format!("已回捕客户端当前登录态（{uid}）")),
+            Ok(None) => {}
+            Err(error) => progress(&format!("回捕客户端登录态失败（不阻断切换）：{error}")),
+        }
         progress("正在关闭 WorkBuddy…");
         close_workbuddy_for(region, 20)?;
         let recovery = session::recover_linked_sessions_for(region)?;
@@ -266,9 +280,116 @@ pub fn switch_account_cross_with_sync(
     Ok(result)
 }
 
+/// 把客户端**此刻**的登录态回捕进账号库（issue #246 step 4b）。
+///
+/// 返回 `Ok(Some(uid))` 表示确实回捕了该 uid；`Ok(None)` 表示「不需要回捕」
+/// （客户端没登录 / 当前登录的不是要切走的账号）。
+///
+/// ## 判据为什么是「uid 相等」而不是「无条件覆盖」
+///
+/// 账号库里的副本与客户端里的登录态是**两个独立会话**（实测：同 uid 但 sessionState /
+/// domain / expiresAt 全不同）。只有当两者属于同一账号时，客户端那份才是这个账号的
+/// **更新版本**；否则客户端登录的是别人，写过去就是把别人的凭据挂到这个账号名下。
+///
+/// ## 为什么用 `save_collected_account_for` 而不是直接 upsert
+///
+/// 它内部走 upsert_collected_account，带「明文 token 不被加密信封覆盖」的保护
+/// （WorkBuddy 5.6 起客户端写的是信封，而我方 OAuth 拿到的是明文；让信封覆盖明文会让
+/// 签到 / 积分 / 网关这些需要明文 Bearer 的链路静默失效）。回捕走同一条路径才不会
+/// 绕过这个保护。
+pub(crate) fn capture_client_login_into_store(
+    region: Region,
+    expected_uid: &str,
+) -> Result<Option<String>, String> {
+    let Some(current) = auth_file::import_from_auth_file_for(region) else {
+        return Ok(None);
+    };
+    let captured_uid = current
+        .get("uid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|uid| !uid.is_empty())
+        .map(str::to_string);
+    let Some(captured_uid) = captured_uid else {
+        // 客户端没登录：没有可回捕的东西，不是错误。
+        return Ok(None);
+    };
+    if captured_uid != expected_uid.trim() {
+        // 客户端登录的是另一个账号 —— 不碰账号库。
+        return Ok(None);
+    }
+    account::save_collected_account_for(region, current)
+        .map_err(|error| format!("写入账号库失败：{error}"))?;
+    Ok(Some(captured_uid))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ★ 回归 #246 第 2 条：切走前回捕客户端登录态，但**只在 uid 相同时**。
+    ///
+    /// 两个方向都必须钉住：
+    /// - uid 相同 ⇒ 账号库那份被客户端的最新凭据覆盖（这才是回捕的意义）；
+    /// - uid 不同 ⇒ **绝不**动账号库（否则会把别人的会话挂到这个账号名下）。
+    ///
+    /// 用隔离 HOME + 真实认证文件走 `import_from_auth_file_for`，不碰用户数据。
+    #[test]
+    fn capture_client_login_only_touches_the_same_uid() {
+        let home = std::env::temp_dir().join(format!(
+            "buddy-switch-capture-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("创建隔离目录");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+        let region = Region::Cn;
+
+        // 客户端里登录的是 uid-client，账号库里另有一条 uid-client 的**旧**记录。
+        let mut store = json!({
+            "id": "acct-1",
+            "uid": "uid-client",
+            "access_token": "old-token",
+            "refresh_token": "old-refresh",
+            "expiresAt": 1_000i64,
+        });
+        store["uid"] = json!("uid-client");
+        account::save_collected_account_for(region, store).expect("铺账号库");
+
+        // 客户端认证文件：同 uid、更新的 token。
+        auth_file::write_account_to_auth_file_for(
+            region,
+            &json!({
+                "id": "acct-1",
+                "uid": "uid-client",
+                "access_token": "new-token",
+                "refresh_token": "new-refresh",
+                "expiresAt": 9_999_999_999i64,
+                "domain": "www.codebuddy.cn",
+            }),
+        )
+        .expect("写客户端认证文件");
+
+        // ① uid 相同 ⇒ 回捕成功，账号库里换成新 token。
+        let captured = capture_client_login_into_store(region, "uid-client").expect("回捕不应失败");
+        assert_eq!(captured.as_deref(), Some("uid-client"));
+        let saved = account::find_account_for(region, "acct-1").expect("账号仍在库里");
+        assert_eq!(
+            saved.get("access_token").and_then(Value::as_str),
+            Some("new-token"),
+            "回捕必须把客户端的最新 token 写进账号库"
+        );
+
+        // ② uid 不同 ⇒ 返回 None 且账号库**完全不变**。
+        let before = account::find_account_for(region, "acct-1").expect("账号仍在库里");
+        let captured =
+            capture_client_login_into_store(region, "some-other-uid").expect("uid 不匹配不是错误");
+        assert_eq!(captured, None, "uid 不同时不得回捕");
+        let after = account::find_account_for(region, "acct-1").expect("账号仍在库里");
+        assert_eq!(before, after, "uid 不同时账号库一个字都不该动");
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn switch_account_missing_id_returns_before_auth_side_effects() {
