@@ -25,7 +25,7 @@ import type {
   Region,
   ScopeFallbackConfig,
 } from "@/lib/types";
-import { SCOPES, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, type Scope } from "@/lib/scope";
 import { mergeProbeCells, type ProbeCellIndex } from "@/lib/limit-link";
 
 /** 网关配置缺省值（与后端 GatewayConfig::default 对齐）。 */
@@ -553,9 +553,11 @@ export const useGatewayStore = create<GatewayState>((set, get) => ({
         get().loadLogs(),
         get().loadModels("cn"),
         get().loadModels("global"),
-        /* 禁用偏好按**作用域**键控 ⇒ 六个作用域全拉（每个只是一次小 GET），
-           任一平台的模型页进入时都已有数据，不必各自等待。 */
-        ...SCOPES.map((scope) => get().loadDisabled(scope)),
+        /* 禁用偏好按**作用域**键控 ⇒ core 六个作用域全拉（每个只是一次小 GET），
+           任一平台的模型页进入时都已有数据，不必各自等待。
+           ⚠️ 必须是 `CORE_SCOPES`：外部平台不在 Rust 的 Scope 枚举里，`get_disabled_models`
+           对它们 fail-closed，用 `SCOPES` 会让网关卡常驻一条「未知的作用域」错误条。 */
+        ...CORE_SCOPES.map((scope) => get().loadDisabled(scope)),
       ]);
       set({ lastLoadedAt: Date.now() });
     } finally {

@@ -46,7 +46,7 @@ import {
 } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { normalizeQoderGatewayCatalog } from "@/lib/qoder-gateway";
-import { SCOPES, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, type Scope } from "@/lib/scope";
 import { normalizeTraeGatewayModels } from "@/lib/trae-gateway";
 import { cn } from "@/lib/utils";
 import { useGatewayStore } from "@/stores/gateway";
@@ -425,7 +425,7 @@ export function ModelFallbackSheet({
                         <SelectItem value={SELF_SCOPE}>
                           {t("shared.gateway.fallback.field.thisScope")}
                         </SelectItem>
-                        {SCOPES.filter((candidate) => candidate !== scope).map((candidate) => {
+                        {CORE_SCOPES.filter((candidate) => candidate !== scope).map((candidate) => {
                           // 跨平台现在三个入口都支持（由 `cross_depth` 限深，最多一层）。
                           return (
                             <SelectItem key={candidate} value={candidate}>

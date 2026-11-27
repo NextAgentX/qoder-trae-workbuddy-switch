@@ -1,5 +1,5 @@
 import type { Ref } from "react";
-import { LayoutGrid, Plus, Search, Table2, Trash2 } from "lucide-react";
+import { LayoutGrid, Plus, RefreshCw, Search, Table2, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { DemoAction } from "@/components/demo-action";
@@ -92,6 +92,9 @@ export interface AccountToolbarProps {
    */
   addAction?: { label: string; onClick: () => void } | null;
 
+  /** Provider-scoped account refresh; omitted when the page's refresh is elsewhere. */
+  refreshAction?: { label: string; onClick: () => void; disabled?: boolean; busy?: boolean } | null;
+
   /**
    * ★ 回收站入口（**常驻控件**，用户要求「回收站放出来」）。
    *
@@ -116,6 +119,7 @@ export function AccountToolbar({
   tableViewEnabled = true,
   selection,
   addAction,
+  refreshAction,
   onOpenRecycleBin,
 }: AccountToolbarProps) {
   const t = useT();
@@ -260,6 +264,13 @@ export function AccountToolbar({
         {/* ★ `grow` 把右侧分组推到行尾（原型 `<div class="grow">` `:2425`）。
             ⚠️ 有了它，主操作**不再**需要 `ml-auto` —— 两个都写会让自由空间被分两半。 */}
         <div className="grow" />
+
+        {refreshAction ? (
+          <Button type="button" variant="outline" size="sm" onClick={refreshAction.onClick} disabled={refreshAction.disabled}>
+            {refreshAction.busy ? <RefreshCw className="animate-spin" /> : <RefreshCw />}
+            {refreshAction.label}
+          </Button>
+        ) : null}
 
         {/* 全选：原型是**一枚 ghost 文字按钮**（`btn ghost sm`，`:2426`），
             不是「勾选框 + 文字」。勾选框仍保留在表格表头（`.check.mixed`）。 */}

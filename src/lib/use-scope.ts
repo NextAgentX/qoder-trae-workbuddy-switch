@@ -114,6 +114,8 @@ export function resolveRegion(input: {
   /** 当前页面所属平台 */
   product: Product;
 }): Region {
+  // 这三家外部平台目前只有国内账号与余额数据，不接受 global 作用域。
+  if (input.product === "doubao" || input.product === "loomy" || input.product === "raccoon") return "cn";
   // ① 路径里的 scope（`/s/wb-global/accounts`）—— 最显式，优先
   const fromPath = parseScope(input.pathScope);
   if (fromPath) {
@@ -172,6 +174,7 @@ export function useScope(product: Product): [Region, (next: Region) => void] {
 
   const setRegion = useCallback(
     (next: Region) => {
+      if (product === "doubao" || product === "loomy" || product === "raccoon") return;
       // 先写记忆，再改 URL：即使 URL 更新被 replace 掉，记忆也已生效
       rememberScope(product, next);
       setParams(

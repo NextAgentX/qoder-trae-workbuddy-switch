@@ -1,14 +1,16 @@
 [package]
 name = "buddy-switch-gateway"
-version = "2026.11.181424"
+version = "2026.11.271119"
 edition = "2021"
 description = "WorkBuddy API 网关：把 WorkBuddy 模型额度暴露为 OpenAI / Anthropic 兼容端点"
 
 [dependencies]
 buddy-switch-core = { path = "../buddy-switch-core" }
 axum = "0.7"
+async-stream = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+base64 = "0.22"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -198,6 +198,11 @@ const DEMO_READ_COMMANDS = new Set([
   // ⚠️ switch / detect 是动作（detect 会读本机 secret），一律不进这里。
   "get_vscode_codebuddy_plugin_status", "get_jetbrains_codebuddy_plugin_status",
   "get_credit_expiry", "get_credit_statistics", "get_auto_checkin_config",
+  "get_external_credit_accounts",
+  "get_external_credit_accounts_for_provider",
+  "get_external_gateway_status",
+  "get_external_gateway_models",
+  "get_external_gateway_usage",
   "get_token_statistics",
   "get_checkin_logs", "get_auto_rotate_config", "rotate_status", "get_rotate_logs",
   "get_github_config", "check_update", "get_launch_at_login_enabled", "switch_progress",
@@ -455,6 +460,18 @@ const ROUTES: Record<string, Route> = {
   get_checkin_status: { method: "GET", path: "/api/checkin/status" },
   get_credit_expiry: { method: "POST", path: "/api/credits" },
   get_credit_statistics: { method: "GET", path: "/api/credits/stats" },
+  get_external_credit_accounts: { method: "GET", path: "/api/external-credits/accounts" },
+  get_external_credit_accounts_for_provider: { method: "GET", path: "/api/external-credits/accounts/provider" },
+  get_external_gateway_status: { method: "GET", path: "/api/external-gateway/status" },
+  get_external_gateway_models: { method: "GET", path: "/api/external-gateway/models" },
+  get_external_gateway_usage: { method: "GET", path: "/api/external-gateway/usage" },
+  start_external_gateway: { method: "POST", path: "/api/external-gateway/start" },
+  stop_external_gateway: { method: "POST", path: "/api/external-gateway/stop" },
+  add_external_credit_account: { method: "POST", path: "/api/external-credits/accounts/add" },
+  remove_external_credit_account: { method: "POST", path: "/api/external-credits/accounts/remove" },
+  remove_external_credit_provider_account: { method: "POST", path: "/api/external-credits/accounts/provider/remove" },
+  refresh_external_credits: { method: "POST", path: "/api/external-credits/refresh" },
+  refresh_external_credit_provider: { method: "POST", path: "/api/external-credits/refresh/provider" },
   get_token_statistics: { method: "GET", path: "/api/token-stats" },
   checkin: { method: "POST", path: "/api/checkin" },
   checkin_all: { method: "POST", path: "/api/checkin/all" },
@@ -2170,6 +2187,94 @@ export function getCreditStatistics(refresh = false, region?: RegionFilter): Pro
   if (refresh) args.refresh = true;
   if (region) args.region = region;
   return call("get_credit_statistics", Object.keys(args).length > 0 ? args : undefined);
+}
+
+export type ExternalCreditProvider = "doubao" | "loomy" | "raccoon";
+export interface ExternalCreditAccount {
+  id: string;
+  provider: ExternalCreditProvider;
+  name: string;
+  remaining: number | null;
+  dailyRemaining: number | null;
+  updatedAt: number | null;
+  error: string | null;
+  ok?: boolean;
+  unit?: string;
+}
+
+export async function getExternalCreditAccounts(): Promise<ExternalCreditAccount[]> {
+  if (demoModeEnabled) return [];
+  const result = await call<{ accounts: ExternalCreditAccount[] }>("get_external_credit_accounts");
+  return result.accounts ?? [];
+}
+
+export async function getExternalCreditProviderAccounts(
+  provider: ExternalCreditProvider,
+): Promise<ExternalCreditAccount[]> {
+  if (demoModeEnabled) return [];
+  const result = await call<{ accounts: ExternalCreditAccount[] }>(
+    "get_external_credit_accounts_for_provider",
+    { provider },
+  );
+  return result.accounts ?? [];
+}
+
+export function addExternalCreditAccount(input: {
+  provider: ExternalCreditProvider;
+  name: string;
+  credential: string;
+  refreshCredential?: string;
+}): Promise<{ id: string }> {
+  return call("add_external_credit_account", input);
+}
+
+export function removeExternalCreditAccount(accountId: string): Promise<{ ok: boolean }> {
+  return call("remove_external_credit_account", { accountId });
+}
+
+export function removeExternalCreditProviderAccount(
+  provider: ExternalCreditProvider,
+  accountId: string,
+): Promise<{ ok: boolean }> {
+  return call("remove_external_credit_provider_account", { provider, accountId });
+}
+
+export function refreshExternalCredits(): Promise<{ accounts: ExternalCreditAccount[] }> {
+  return call("refresh_external_credits");
+}
+
+export function refreshExternalCreditProvider(
+  provider: ExternalCreditProvider,
+): Promise<{ accounts: ExternalCreditAccount[] }> {
+  return call("refresh_external_credit_provider", { provider });
+}
+
+export interface ExternalGatewayStatus {
+  provider: ExternalCreditProvider;
+  baseUrl: string;
+  apiKey: string;
+  running: boolean;
+  port: number;
+}
+
+export function getExternalGatewayStatus(provider: ExternalCreditProvider): Promise<ExternalGatewayStatus> {
+  return call("get_external_gateway_status", { provider });
+}
+
+export function getExternalGatewayModels(provider: ExternalCreditProvider): Promise<{ data: { id: string }[] }> {
+  return call("get_external_gateway_models", { provider });
+}
+
+export function getExternalGatewayUsage(provider: ExternalCreditProvider): Promise<{ data: Array<{ id: string; protocol: string; model: string; status: number; inputTokens?: number; outputTokens?: number; totalTokens?: number; completedAt: number }> }> {
+  return call("get_external_gateway_usage", { provider });
+}
+
+export function startExternalGateway(provider: ExternalCreditProvider): Promise<ExternalGatewayStatus> {
+  return call("start_external_gateway", { provider });
+}
+
+export function stopExternalGateway(provider: ExternalCreditProvider): Promise<ExternalGatewayStatus> {
+  return call("stop_external_gateway", { provider });
 }
 
 export function getTokenStatistics(days?: number, region?: RegionFilter): Promise<TokenStatistics> {

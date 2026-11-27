@@ -317,6 +317,18 @@ fn api_routes() -> Router {
         .route("/api/checkin/status", get(api_checkin_status))
         .route("/api/credits", post(api_credits))
         .route("/api/credits/stats", get(api_credit_statistics))
+        .route("/api/external-credits/accounts", get(api_external_credit_accounts))
+        .route("/api/external-credits/accounts/provider", get(api_external_credit_provider_accounts))
+        .route("/api/external-credits/accounts/add", post(api_external_credit_account_add))
+        .route("/api/external-credits/accounts/remove", post(api_external_credit_account_remove))
+        .route("/api/external-credits/accounts/provider/remove", post(api_external_credit_provider_account_remove))
+        .route("/api/external-credits/refresh", post(api_external_credit_refresh))
+        .route("/api/external-credits/refresh/provider", post(api_external_credit_provider_refresh))
+        .route("/api/external-gateway/status", get(api_external_gateway_status))
+        .route("/api/external-gateway/models", get(api_external_gateway_models))
+        .route("/api/external-gateway/usage", get(api_external_gateway_usage))
+        .route("/api/external-gateway/start", post(api_external_gateway_start))
+        .route("/api/external-gateway/stop", post(api_external_gateway_stop))
         .route("/api/token-stats", get(api_token_statistics))
         .route("/api/checkin", post(api_checkin))
         .route("/api/checkin/all", post(api_checkin_all))
@@ -3391,6 +3403,111 @@ async fn api_credit_statistics(RawQuery(query): RawQuery) -> Response {
     let filter = parse_region_filter(query_value(query.as_deref(), "region").as_deref());
     let refresh = query_flag_enabled(query.as_deref(), "refresh");
     json_ok(credit_usage::get_statistics_for_filter(filter, refresh).await)
+}
+
+async fn api_external_credit_accounts() -> Response {
+    match buddy_switch_core::modules::external_credits::list_accounts() {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_external_credit_provider_accounts(RawQuery(query): RawQuery) -> Response {
+    let provider = query_value(query.as_deref(), "provider").unwrap_or_default();
+    match buddy_switch_core::modules::external_credits::list_accounts_for(Some(&provider)) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_credit_account_add(Json(body): Json<Value>) -> Response {
+    let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("");
+    let credential = body.get("credential").and_then(Value::as_str).unwrap_or("");
+    let refresh = body.get("refreshCredential").and_then(Value::as_str);
+    match buddy_switch_core::modules::external_credits::add_account(provider, name, credential, refresh) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_credit_account_remove(Json(body): Json<Value>) -> Response {
+    let id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+    match buddy_switch_core::modules::external_credits::remove_account(id) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_credit_provider_account_remove(Json(body): Json<Value>) -> Response {
+    let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
+    let id = body.get("accountId").and_then(Value::as_str).unwrap_or("");
+    match buddy_switch_core::modules::external_credits::remove_account_for(id, Some(provider)) {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_credit_refresh() -> Response {
+    match buddy_switch_core::modules::external_credits::refresh_all().await {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn api_external_credit_provider_refresh(Json(body): Json<Value>) -> Response {
+    let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
+    match buddy_switch_core::modules::external_credits::refresh_provider(Some(provider)).await {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_gateway_status(RawQuery(query): RawQuery) -> Response {
+    let provider = query_value(query.as_deref(), "provider").unwrap_or_default();
+    match buddy_switch_gateway::external::Provider::parse(&provider)
+        .and_then(|provider| buddy_switch_gateway::external::runtime().status(provider))
+    {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_gateway_models(RawQuery(query): RawQuery) -> Response {
+    let provider = query_value(query.as_deref(), "provider").unwrap_or_default();
+    let result = match buddy_switch_gateway::external::Provider::parse(&provider) {
+        Ok(provider) => buddy_switch_gateway::external::models_snapshot(provider).await,
+        Err(error) => Err(error),
+    };
+    match result { Ok(value) => json_ok(value), Err(error) => json_err(error, StatusCode::BAD_REQUEST) }
+}
+
+async fn api_external_gateway_usage(RawQuery(query): RawQuery) -> Response {
+    let provider = query_value(query.as_deref(), "provider").unwrap_or_default();
+    match buddy_switch_gateway::external::Provider::parse(&provider)
+        .and_then(buddy_switch_gateway::external::usage_snapshot)
+    {
+        Ok(value) => json_ok(value),
+        Err(error) => json_err(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn api_external_gateway_start(Json(body): Json<Value>) -> Response {
+    let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
+    let result = match buddy_switch_gateway::external::Provider::parse(provider) {
+        Ok(provider) => buddy_switch_gateway::external::runtime().start(provider).await,
+        Err(error) => Err(error),
+    };
+    match result { Ok(value) => json_ok(value), Err(error) => json_err(error, StatusCode::BAD_REQUEST) }
+}
+
+async fn api_external_gateway_stop(Json(body): Json<Value>) -> Response {
+    let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
+    let result = match buddy_switch_gateway::external::Provider::parse(provider) {
+        Ok(provider) => buddy_switch_gateway::external::runtime().stop(provider).await,
+        Err(error) => Err(error),
+    };
+    match result { Ok(value) => json_ok(value), Err(error) => json_err(error, StatusCode::BAD_REQUEST) }
 }
 
 async fn api_token_statistics(RawQuery(query): RawQuery) -> Response {

@@ -36,7 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useT } from "@/lib/i18n";
-import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, scopeParts, type Scope } from "@/lib/scope";
 import type { TraeAccount } from "@/lib/trae-types";
 import { AGGREGATE_SOURCES, aggregateDisplayName, type AggregateAccount } from "@/lib/aggregate-accounts";
 
@@ -206,8 +206,8 @@ export function groupExportTargets(
     if (bucket) bucket.push(account);
     else map.set(account.scope, [account]);
   }
-  /* 顺序按 `SCOPES`（与页面上的分组顺序一致）。 */
-  return SCOPES.filter((scope) => map.has(scope)).map((scope) => ({
+  /* 顺序按 `CORE_SCOPES`（与页面上的分组顺序一致；外部平台不参与聚合）。 */
+  return CORE_SCOPES.filter((scope) => map.has(scope)).map((scope) => ({
     scope,
     accounts: map.get(scope) ?? [],
   }));

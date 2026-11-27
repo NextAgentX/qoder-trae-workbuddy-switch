@@ -23,7 +23,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { ScopeMark } from "@/components/scope-chip";
 import { useT } from "@/lib/i18n";
-import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, scopeParts, type Scope } from "@/lib/scope";
 import {
   aggregateDisplayName,
   aggregateSearchText,
@@ -70,7 +70,7 @@ export function AggregateFilterPanel({
 }: AggregateFilterPanelProps) {
   const t = useT();
 
-  /** 作用域 → 它名下的账号（保持 `SCOPES` 顺序）。 */
+  /** 作用域 → 它名下的账号（保持 `CORE_SCOPES` 顺序；外部平台不参与聚合）。 */
   const byScope = useMemo(() => {
     const map = new Map<Scope, AggregateAccount[]>();
     for (const account of accounts) {
@@ -155,7 +155,7 @@ export function AggregateFilterPanel({
 
         <div className="my-1 h-px bg-border" />
 
-        {SCOPES.map((scope) => {
+        {CORE_SCOPES.map((scope) => {
           const items = byScope.get(scope) ?? [];
           const keys = items.map((account) => account.ref);
           const state = rowState(keys, draft);

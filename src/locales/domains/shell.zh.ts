@@ -13,6 +13,9 @@ export const zh = {
   "product.trae": "Trae",
   /* Qoder 是商标，两种语言下写法相同，但仍走词表（与上面两条同款）。 */
   "product.qoder": "Qoder",
+  "product.doubao": "豆包",
+  "product.loomy": "Loomy",
+  "product.raccoon": "商汤小浣熊",
   "product.switchAria": "切换产品",
   "product.navAria": "{product} 导航",
 

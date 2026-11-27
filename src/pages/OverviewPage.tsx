@@ -22,7 +22,7 @@ import {
   platformOfPath,
   type Capability,
 } from "@/lib/platforms/registry";
-import { SCOPES, scopeOf, scopeParts, writeLastScope, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, scopeOf, scopeParts, writeLastScope, type Scope } from "@/lib/scope";
 import { useVisibleScopes } from "@/lib/scope-visibility";
 import { scopeShortcutTarget } from "@/lib/scope-shortcuts";
 import { useRefreshAction } from "@/lib/use-refresh-action";
@@ -496,7 +496,9 @@ export default function OverviewPage() {
               <span className="text-sm font-semibold">{t("wbOverview.otherScopes.title")}</span>
             </div>
             <div className="flex flex-col gap-0.5 p-2">
-              {SCOPES.filter((s) => s !== scope && visibleScopes.includes(s)).map((s) => (
+              {/* 这一卡讲的是「客户端 + 登录态」，外部平台没有可检测的客户端，
+                  列进来会永远显示「未检测到」（`RunPill` 也只会是停止点）。 */}
+              {CORE_SCOPES.filter((s) => s !== scope && visibleScopes.includes(s)).map((s) => (
                 <button
                   key={s}
                   type="button"

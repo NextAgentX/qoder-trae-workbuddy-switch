@@ -90,6 +90,9 @@ const AVAILABLE_TABS: Record<Product, readonly UsageGatewayTab[]> = {
   workbuddy: ["trend", "models", "sessions", "credits"],
   trae: ["credits"],
   qoder: [],
+  doubao: [],
+  loomy: [],
+  raccoon: [],
 };
 
 /** 少数（平台 × 视图）的开关名与说明有**专门口径**（默认表说不清时）。 */

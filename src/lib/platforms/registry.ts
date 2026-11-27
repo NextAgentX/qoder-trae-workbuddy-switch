@@ -26,7 +26,7 @@
  */
 
 /** 平台标识。**刻意保持 `trae` 而非 `traework`**：路由前缀 `/trae/...` 与既有键名都依赖它。 */
-export type Product = "workbuddy" | "trae" | "qoder";
+export type Product = "workbuddy" | "trae" | "qoder" | "doubao" | "loomy" | "raccoon";
 
 /**
  * 平台能力（PLAN §2.7）—— **平台固有，用户不可改**。
@@ -199,10 +199,31 @@ export const PLATFORM_DESCRIPTORS: Record<Product, PlatformDescriptor> = {
     regions: ["cn", "global"],
     capabilities: ["checkin", "credits", "oauth", "gateway"],
   },
+  doubao: {
+    id: "doubao",
+    labelKey: "product.doubao",
+    home: "/s/doubao-cn/overview",
+    regions: ["cn"],
+    capabilities: ["credits"],
+  },
+  loomy: {
+    id: "loomy",
+    labelKey: "product.loomy",
+    home: "/s/loomy-cn/overview",
+    regions: ["cn"],
+    capabilities: ["credits"],
+  },
+  raccoon: {
+    id: "raccoon",
+    labelKey: "product.raccoon",
+    home: "/s/raccoon-cn/overview",
+    regions: ["cn"],
+    capabilities: ["credits"],
+  },
 };
 
 /** 全部平台，按 UI 展示顺序。 */
-export const PRODUCTS: readonly Product[] = ["workbuddy", "trae", "qoder"];
+export const PRODUCTS: readonly Product[] = ["workbuddy", "trae", "qoder", "doubao", "loomy", "raccoon"];
 
 /**
  * 目的地（Destination）—— 侧栏的一级页面（VOCABULARY 第 1 节的 L4）。
@@ -324,18 +345,24 @@ export function destinationAvailable(product: Product, dest: Destination): boole
  * ⚠️ **映射只有这一处**（下面两张表）。别在别处再写一份 `"wb"` 字面量 ——
  * 那会让「改标识」变成全仓搜索。
  */
-export type PlatformSlug = "wb" | "trae" | "qoder";
+export type PlatformSlug = "wb" | "trae" | "qoder" | "doubao" | "loomy" | "raccoon";
 
 export const PLATFORM_SLUG: Record<Product, PlatformSlug> = {
   workbuddy: "wb",
   trae: "trae",
   qoder: "qoder",
+  doubao: "doubao",
+  loomy: "loomy",
+  raccoon: "raccoon",
 };
 
 export const SLUG_TO_PRODUCT: Record<PlatformSlug, Product> = {
   wb: "workbuddy",
   trae: "trae",
   qoder: "qoder",
+  doubao: "doubao",
+  loomy: "loomy",
+  raccoon: "raccoon",
 };
 
 /**

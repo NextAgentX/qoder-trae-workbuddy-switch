@@ -1,4 +1,5 @@
-import { ChevronDown, LayoutGrid } from "lucide-react";
+import { ChevronDown } from "lucide-react";
+import { AggregateMark } from "@/components/product-marks";
 import { useState } from "react";
 
 import { ScopeMark, scopeLabel } from "@/components/scope-chip";
@@ -11,7 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useT } from "@/lib/i18n";
 import { AGGREGATE_SHORTCUT_HINT } from "@/lib/scope-shortcuts";
-import { SCOPES, type Scope, scopeParts } from "@/lib/scope";
+import { CORE_SCOPES, SCOPES, type Scope, scopeParts } from "@/lib/scope";
 import type { Product } from "@/lib/platforms/registry";
 import type { ScopeStatus, ScopeStatusMap } from "@/lib/use-scope-status";
 import { cn } from "@/lib/utils";
@@ -73,8 +74,8 @@ export function ScopeSelector({
    * ⚠️ `attentionCount` 任一为 `null`/缺失（未知）⇒ **不显示需处理数**，而不是当 0 求和。
    * 拿未知冒充 0 会让「9 个需处理」在某些时刻**变小**，而用户无从知道原因。
    */
-  const aggregateAttention = SCOPES.every((item) => statuses[item]?.attentionCount != null)
-    ? SCOPES.reduce((sum, item) => sum + (statuses[item]?.attentionCount ?? 0), 0)
+  const aggregateAttention = CORE_SCOPES.every((item) => statuses[item]?.attentionCount != null)
+    ? CORE_SCOPES.reduce((sum, item) => sum + (statuses[item]?.attentionCount ?? 0), 0)
     : null;
 
   const nameOf = (s: Scope): string => scopeLabel(t, s);
@@ -106,10 +107,12 @@ export function ScopeSelector({
    *
    * @param total 账号总数（`null` = 还没取到 ⇒ **不显示数字**，而不是显示 0）
    */
+  /* 聚合项只覆盖 core 六个作用域（外部平台没有账号池，不参与聚合）。数字用 `CORE_SCOPES`，
+     否则会显示「跨 9 个作用域」而账号总数仍按 6 个算 —— 两个数对不上。 */
   function aggregateSub(total: number | null, attention: number | null): string {
     const base = total === null
-      ? t("aggregate.scopeMenu.entrySubUnknown", { scopes: SCOPES.length })
-      : t("aggregate.scopeMenu.entrySub", { n: total, scopes: SCOPES.length });
+      ? t("aggregate.scopeMenu.entrySubUnknown", { scopes: CORE_SCOPES.length })
+      : t("aggregate.scopeMenu.entrySub", { n: total, scopes: CORE_SCOPES.length });
     return attention != null && attention > 0
       ? `${base} · ${t("aggregate.scopeMenu.entryAttention", { n: attention })}`
       : base;
@@ -168,9 +171,7 @@ export function ScopeSelector({
                 aggregate && "bg-primary/[0.13]",
               )}
             >
-              <span className="grid size-7 shrink-0 place-items-center rounded-[9px] bg-primary/20 text-primary">
-                <LayoutGrid className="size-3.5" />
-              </span>
+              <AggregateMark size={28} />
               <span className="flex min-w-0 flex-1 flex-col leading-tight">
                 <span className="truncate text-[12.5px] font-medium">
                   {t("aggregate.scopeMenu.entryName")}
@@ -236,9 +237,5 @@ export function ScopeSelector({
  */
 function ScopeMarkOrAggregate({ aggregate, product }: { aggregate: boolean; product: Product }) {
   if (!aggregate) return <ScopeMark product={product} size={26} />;
-  return (
-    <span className="grid size-[26px] shrink-0 place-items-center rounded-[8px] bg-primary/20 text-primary">
-      <LayoutGrid className="size-4" />
-    </span>
-  );
+  return <AggregateMark size={26} />;
 }

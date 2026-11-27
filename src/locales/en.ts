@@ -1,5 +1,6 @@
 import { en as backup } from "./domains/backup.en";
 import { en as aggregate } from "./domains/aggregate.en";
+import { en as externalPlatforms } from "./domains/externalPlatforms.en";
 import { en as cache } from "./domains/cache.en";
 import { en as clientSettings } from "./domains/clientSettings.en";
 import { en as legalConsent } from "./domains/legalConsent.en";
@@ -61,4 +62,5 @@ export const en: Partial<Record<TranslationKey, string>> = {
   ...clientSettings,
   ...legalConsent,
   ...aggregate,
+  ...externalPlatforms,
 };
