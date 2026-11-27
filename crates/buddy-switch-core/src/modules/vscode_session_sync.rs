@@ -2341,8 +2341,6 @@ mod tests {
         }
     }
 
-    /// AC1：复制成功后出现 1 个组、2 个 active 成员、1 条配对基线；重复复制不产生重复组。
-    #[test]
     /// ★ 回归 #244：同一逻辑会话的两代 id 必须并进**同一个**组。
     ///
     /// 现场：复制时目标已有同 id ⇒ 重随机新 id，于是同一会话在源是 `87d83a22`、
@@ -2401,6 +2399,8 @@ mod tests {
         );
     }
 
+    /// AC1：复制成功后出现 1 个组、2 个 active 成员、1 条配对基线；重复复制不产生重复组。
+    #[test]
     fn copy_registers_one_group_and_does_not_duplicate() {
         let fixture = Fixture::new("register");
         seed_source(&fixture);

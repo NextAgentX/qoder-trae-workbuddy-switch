@@ -558,7 +558,6 @@ mod tests {
     ///
     /// 可证伪：把 `find(|amount| *amount > 0.0)` 换成 `.next()`（不筛正数）⇒ 第 3 条
     /// 断言会拿到 `0.0` 而红；把字段顺序调换 ⇒ 第 1 条断言拿到 `30.0` 而红。
-    #[test]
     /// ★ 回归 #246：签到结果**四种都要落日志**，不能只有 success 才写。
     ///
     /// 现场：批量签到 10 个账号全部成功，`auto_checkin_logs.json` 里只有 9 行 ——
@@ -606,6 +605,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[test]
     fn checkin_reward_prefers_daily_then_today_and_ignores_non_positive() {
         assert_eq!(
             checkin_reward_from_status(&json!({"dailyCredit": 100.0, "todayCredit": 30.0})),
