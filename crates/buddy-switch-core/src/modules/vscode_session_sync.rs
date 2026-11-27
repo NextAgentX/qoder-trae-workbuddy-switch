@@ -50,6 +50,12 @@ const OVERWRITE_SUFFIX: &str = "-overwrite";
 struct ConversationLocator {
     workspace_hash: String,
     title: String,
+    /// 会话创建时间（毫秒时间戳原文，`index.json` 的 `createdAt`）。
+    ///
+    /// ★ 用途只有一个（issue #244）：同一逻辑会话被复制成多代后 id 会变，
+    /// 「工作区 + createdAt + 标题」是识别同源副本的**稳定指纹** —— 整目录复制时
+    /// 索引条目原样带过去，这三项在副本上逐字不变。
+    created_at: Option<String>,
 }
 
 /// 扫某账号的工作区索引，得到 `会话 id → 定位信息`。
@@ -100,10 +106,22 @@ fn conversation_index(
                 .filter(|name| !name.is_empty())
                 .unwrap_or("(无标题)")
                 .to_string();
+            // `createdAt` 在索引里可能是数字也可能是字符串，统一转成字符串比较 ——
+            // 只用于「两条是否同源」的相等判断，不做时间运算。
+            let created_at = conversation
+                .get("createdAt")
+                .or_else(|| conversation.get("created_at"))
+                .and_then(|value| match value {
+                    Value::String(text) => Some(text.trim().to_string()),
+                    Value::Number(number) => Some(number.to_string()),
+                    _ => None,
+                })
+                .filter(|text| !text.is_empty());
             out.entry(id.to_string())
                 .or_insert_with(|| ConversationLocator {
                     workspace_hash: workspace_hash.clone(),
                     title,
+                    created_at,
                 });
         }
     }
@@ -351,6 +369,65 @@ fn register_copied_sessions_inner(
     errors
 }
 
+/// 找「同源会话」已经在的那个组（issue #244）。
+///
+/// ## 为什么需要它
+///
+/// 「同一逻辑会话」在复制多代之后会有多个 id：目标已有同 id 时会重随机新 id
+///（见 `linked_vscode_session.rs` 的 `KeepUnlessConflict`），于是同一会话在 A 里是
+/// `87d83a22`、在 B 里是 `f5488e20`。原实现只按 `(uid, sessionId)` 精确匹配找组，
+/// 于是从 B 再复制时匹配不到 A 那个组 ⇒ 新建第二个组 ⇒ 两个组互不相认，
+/// 「同步关联会话」查不到配对。
+///
+/// ## 判据
+///
+/// 用**同源指纹**：`工作区 + createdAt + 标题`。整目录复制时索引条目原样带过去，
+/// 这三项在副本上逐字不变 —— 本机实测两条同源会话的 `createdAt` / `lastMessageAt` /
+/// `name` **完全相同**。
+///
+/// ⚠️ 只认「组里已有成员的指纹与源相同」，不是「组里有任意会话同工作区」：
+/// 同一工作区里同一天建的两条不同会话必须仍然分开。标题为空 / `createdAt` 缺失
+/// 时**不**做指纹匹配（没有可靠指纹就退回原语义，宁可多建一组也不误并）。
+///
+/// 多个组命中时取**最早建立**的那个（血缘链的根，`createdAt` 最小），
+/// 保证「多次复制」收敛到同一个组而不是在几个候选间跳。
+fn lineage_group_for(
+    context: &SyncContext<'_>,
+    groups: &[LinkGroup],
+    variant: WbVariant,
+    isolate_variant: bool,
+    source_uid: &str,
+    source_id: &str,
+) -> Option<usize> {
+    let source = context.index_of(source_uid).get(source_id)?;
+    let created_at = source.created_at.as_deref()?;
+    let title = source.title.as_str();
+    if title.is_empty() || title == "(无标题)" {
+        return None;
+    }
+    let fingerprint_matches = |uid: &str, session_id: &str| {
+        let Some(locator) = context.index_of(uid).get(session_id) else {
+            return false;
+        };
+        locator.workspace_hash == source.workspace_hash
+            && locator.created_at.as_deref() == Some(created_at)
+            && locator.title == title
+    };
+
+    groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| !isolate_variant || group.variant == variant)
+        .filter(|(_, group)| {
+            group
+                .members
+                .iter()
+                .any(|member| fingerprint_matches(&member.uid, &member.session_id))
+        })
+        .min_by_key(|(_, group)| group.created_at)
+        .map(|(index, _)| index)
+}
+
 /// 登记单个副本：比对双方归一化摘要，写组 / 成员 / 配对基线（全部在存储锁内）。
 fn register_one(
     context: &SyncContext<'_>,
@@ -385,17 +462,44 @@ fn register_one(
     let (source_uid, target_uid) = (source_uid.to_string(), target_uid.to_string());
     let (source_id, target_id) = (source_id.to_string(), target_id.to_string());
     session_link::with_link_store_write(paths, move |store| {
-        // 同一逻辑会话复用同一组：按「源身份」找组，找不到才新建。
+        // 同一逻辑会话复用同一组。两级判据（issue #244）：
+        //
+        // ① **精确匹配**（原有）：组里已有 `(source_uid, source_id)` 这个成员；
+        // ② **同源指纹**（新增）：精确匹配失败时，找「同档位、且含同源会话」的组。
+        //
+        // 为什么必须有 ②：复制时目标已有同 id 会重随机新 id（`KeepUnlessConflict`），
+        // 于是一次 B→C 复制之后，同一逻辑会话在 C 里是 `f5488e20`、在 B 里还是
+        // `87d83a22`。再复制时源是 B 的 `87d83a22` —— 组里只有 C 的 `f5488e20`，
+        // 精确匹配失败 ⇒ 又建一个组。同一会话被拆成两个互不相认的组，
+        // 「同步关联会话」自然查不到配对。
+        //
+        // 指纹 = `工作区 + createdAt + 标题`：整目录复制时索引条目原样带过去，
+        // 这三项在副本上逐字不变，是识别「同源不同代」最可靠的一组字段。
+        // 只用它做**候选**：组里还必须存在一个**已登记的成员**与之指纹相同，
+        // 避免把「同一秒建的两条不同会话」误并。
+        //
         // 插件路径不按 variant 过滤（同一扩展数据仓可跨档位复制）。
         // IDE 路径 `isolate_variant`：只复用同档位的组，避免国内版 / 国际版并成一组。
-        let index = match store.groups.iter().position(|group| {
-            let same_variant = !isolate_variant || group.variant == variant;
-            same_variant
+        let same_variant = |group: &LinkGroup| !isolate_variant || group.variant == variant;
+        let by_identity = store.groups.iter().position(|group| {
+            same_variant(group)
                 && group
                     .members
                     .iter()
                     .any(|member| member.uid == source_uid && member.session_id == source_id)
-        }) {
+        });
+        let index = match by_identity {
+            Some(index) => Some(index),
+            None => lineage_group_for(
+                context,
+                &store.groups,
+                variant,
+                isolate_variant,
+                &source_uid,
+                &source_id,
+            ),
+        };
+        let index = match index {
             Some(index) => index,
             None => {
                 store.groups.push(LinkGroup {
@@ -1967,9 +2071,14 @@ mod tests {
 
     /// 复制一次并登记关联，返回副本会话 id（登记失败即断言失败）。
     fn copy_and_register(fixture: &Fixture) -> String {
+        copy_and_register_for(fixture, CONV_SRC)
+    }
+
+    /// 同上，但显式指定源会话 id（#244 的两代 id 用例需要）。
+    fn copy_and_register_for(fixture: &Fixture, conversation_id: &str) -> String {
         let items = vec![CopyItem {
             workspace_hash: WS.to_string(),
-            conversation_id: CONV_SRC.to_string(),
+            conversation_id: conversation_id.to_string(),
         }];
         let report =
             copy_sessions_in(&fixture.root, &fixture.backup, SRC_UID, DST_UID, &items).unwrap();
@@ -2234,6 +2343,64 @@ mod tests {
 
     /// AC1：复制成功后出现 1 个组、2 个 active 成员、1 条配对基线；重复复制不产生重复组。
     #[test]
+    /// ★ 回归 #244：同一逻辑会话的两代 id 必须并进**同一个**组。
+    ///
+    /// 现场：复制时目标已有同 id ⇒ 重随机新 id，于是同一会话在源是 `87d83a22`、
+    /// 在目标变成了 `f5488e20`。再从一个只持有旧 id 的账号复制时，原实现按
+    /// `(uid, sessionId)` 精确匹配找不到组 ⇒ 新建第二个组 ⇒「同步关联会话」
+    /// 显示「暂无关联会话」，而实际上关联是有的、只是被拆到了另一组。
+    ///
+    /// 这里直接构造「组里登记的是 id-A，本次复制的源是 id-B，两者同源指纹一致」
+    /// （同工作区 + 同 createdAt + 同标题）—— 正是现场的形态。
+    ///
+    /// 可证伪：去掉 `lineage_group_for` 的分支，本用例会数到 2 个组。
+    #[test]
+    fn same_lineage_with_different_ids_lands_in_one_group() {
+        let fixture = Fixture::new("lineage-merge");
+        seed_source(&fixture);
+
+        // 先正常复制一次，得到「组里有 (SRC_UID, CONV_SRC)」的初始状态。
+        copy_and_register(&fixture);
+        let groups_before = match session_link::load_store(&fixture.paths()) {
+            StoreState::Ready(store) => store.groups.len(),
+            other => panic!("关联表不可用：{other:?}"),
+        };
+        assert_eq!(groups_before, 1);
+
+        // 现在造「第二代」：源账号里出现一条**新 id**、但同源指纹一致的会话。
+        // 重命名旧目录 + 改索引里那条的 id，模拟「复制时重随机了 id」。
+        const CONV_GEN2: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let ws_dir = vscode_session::history_root(&fixture.root, SRC_UID).join(WS);
+        std::fs::rename(ws_dir.join(CONV_SRC), ws_dir.join(CONV_GEN2)).unwrap();
+        write(
+            &ws_dir.join("index.json"),
+            &json!({
+                "conversations": [{
+                    "id": CONV_GEN2, "type": "craft", "name": "测试会话",
+                    "createdAt": "2026-09-15T07:47:01.550Z",
+                    "lastMessageAt": "2026-09-16T05:22:25.406Z", "chatMode": "craft",
+                }],
+                "current": CONV_GEN2,
+            })
+            .to_string(),
+        );
+
+        // 用新 id 再登记一次：精确匹配必然失败（组里只有旧 id），
+        // 只能靠同源指纹并进原组。
+        copy_and_register_for(&fixture, CONV_GEN2);
+
+        let store = match session_link::load_store(&fixture.paths()) {
+            StoreState::Ready(store) => store,
+            other => panic!("关联表不可用：{other:?}"),
+        };
+        assert_eq!(
+            store.groups.len(),
+            1,
+            "同源的两代会话必须并进同一个组，实际组数={}（#244）",
+            store.groups.len()
+        );
+    }
+
     fn copy_registers_one_group_and_does_not_duplicate() {
         let fixture = Fixture::new("register");
         seed_source(&fixture);
