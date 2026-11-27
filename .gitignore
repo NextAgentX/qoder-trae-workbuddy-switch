@@ -99,6 +99,7 @@ _*.cjs
 # Agent 运行时状态（本机工具目录，不入库）
 .omc/
 .claude-flow/
+.superpowers/
 
 # 本仓内的 git worktree 目录（每个 worktree 是独立 checkout，不应入库）
 .worktrees/

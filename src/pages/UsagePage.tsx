@@ -59,6 +59,7 @@ const TraeTokenStatsPage = lazy(() => import("@/pages/TraeTokenStatsPage"));
 const TraeCreditsPage = lazy(() => import("@/pages/TraeCreditsPage"));
 const QoderUsagePage = lazy(() => import("@/pages/QoderUsagePage"));
 const QoderCreditsPage = lazy(() => import("@/pages/QoderCreditsPage"));
+const ExternalProviderUsagePage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalUsagePage })));
 
 /** 一级四视图（与原型 `tabs` 一一对应）。 */
 export type UsageTab = "trend" | "models" | "sessions" | "keys" | "credits";
@@ -102,6 +103,9 @@ const PLATFORM_TABS: Record<Product, UsageTab[]> = {
        · 积分：`qoder_credits`（上游额度接口的**实时余额**，与「趋势」是两个口径）。
      ⚠️ 会话视图是**只读排行**：Qoder 没有会话复制能力，不摆「打开 / 复制」按钮。 */
   qoder: ["trend", "models", "sessions", "keys", "credits"],
+  doubao: [],
+  loomy: [],
+  raccoon: [],
 };
 
 /** 平台 → 子页面（Token 页 / 积分页）。 */
@@ -154,6 +158,9 @@ const USAGE_PAGES: Record<
     mergeScopes: false,
     ledger: true,
   },
+  doubao: { tokens: ExternalProviderUsagePage, credits: ExternalProviderUsagePage, tokenViews: false, mergeScopes: false, ledger: false },
+  loomy: { tokens: ExternalProviderUsagePage, credits: ExternalProviderUsagePage, tokenViews: false, mergeScopes: false, ledger: false },
+  raccoon: { tokens: ExternalProviderUsagePage, credits: ExternalProviderUsagePage, tokenViews: false, mergeScopes: false, ledger: false },
 };
 
 /**
@@ -168,6 +175,9 @@ const PLATFORM_LEDGER_VALUES: Record<Product, readonly UsageLedger[]> = {
   workbuddy: LEDGER_VALUES,
   trae: LEDGER_VALUES,
   qoder: LEDGER_VALUES,
+  doubao: [],
+  loomy: [],
+  raccoon: [],
 };
 
 /**
@@ -184,6 +194,9 @@ const LEDGER_VIEWS: Record<Product, readonly UsageTab[]> = {
   workbuddy: ["trend", "models", "sessions", "credits"],
   trae: ["trend", "models"],
   qoder: ["trend", "models", "sessions"],
+  doubao: [],
+  loomy: [],
+  raccoon: [],
 };
 
 export default function UsagePage({ defaultTab = "trend" }: { defaultTab?: UsageTab } = {}) {

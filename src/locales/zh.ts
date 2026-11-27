@@ -1,5 +1,6 @@
 import { zh as backup } from "./domains/backup.zh";
 import { zh as aggregate } from "./domains/aggregate.zh";
+import { zh as externalPlatforms } from "./domains/externalPlatforms.zh";
 import { zh as cache } from "./domains/cache.zh";
 import { zh as clientSettings } from "./domains/clientSettings.zh";
 import { zh as legalConsent } from "./domains/legalConsent.zh";
@@ -61,6 +62,7 @@ export const zh = {
   ...clientSettings,
   ...legalConsent,
   ...aggregate,
+  ...externalPlatforms,
 } as const;
 
 /** 词表键。`en.ts` 以它为 `Partial` 的上界，故英文侧拼错键名会编译报错。 */

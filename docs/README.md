@@ -73,6 +73,10 @@
 | [`2026-11-24-hourly-axis-interval-labels-design.md`](superpowers/specs/2026-11-24-hourly-axis-interval-labels-design.md) | 今天用量图小时轴区间标签（issue #223 评论） | 已实现 · 2026-11-24 |
 | [`2026-11-24-hourly-axis-interval-labels.md`](superpowers/plans/2026-11-24-hourly-axis-interval-labels.md) | 今天用量图小时轴区间标签实施计划 | 已完成 · 2026-11-24 |
 | [`GATEWAY-MODEL-EFFORT.md`](specs/GATEWAY-MODEL-EFFORT.md) | 按模型的**默认思考档**（`model_efforts`）：语义、数据流、非 DeepSeek 约束、回归防线 | 现行 · 2026-11-01 落地 |
+| [`EXTERNAL-CREDITS.md`](specs/EXTERNAL-CREDITS.md) | 豆包、Loomy、商汤小浣熊余额查询、独立多协议网关、请求账本与 ZCode Start Plan 边界 | 现行 · issue #218 / #219 |
+| [`2026-11-25-external-platforms-design.md`](superpowers/specs/2026-11-25-external-platforms-design.md) | 豆包、Loomy、商汤小浣熊各自拥有五个独立平台入口 | 已实施 · 2026-11-26 |
+| [`2026-11-25-independent-external-platforms.md`](superpowers/plans/2026-11-25-independent-external-platforms.md) | 豆包、Loomy、商汤小浣熊独立平台实施计划 | 已完成 · 2026-11-26 |
+| [`2026-11-25-external-platforms-alignment.md`](superpowers/plans/2026-11-25-external-platforms-alignment.md) | 三个外部平台 × 五个入口的 15 页面逐入口核对矩阵 | 已完成 · 2026-11-26 |
 
 ### 分期架构（P3–P15）
 

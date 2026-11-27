@@ -44,17 +44,23 @@ import {
  *
  * ⚠️ **刻意用连字符而不是 `/`**：它要能直接进路径段，用 `/` 会与分隔符冲突。
  */
-export type Scope = `${PlatformSlug}-${Region}`;
+export type Scope = `${"wb" | "trae" | "qoder"}-${Region}` | "doubao-cn" | "loomy-cn" | "raccoon-cn";
 
 /** 全部作用域，按 UI 展示顺序（平台顺序 → 该平台的区域顺序）。 */
-export const SCOPES: readonly Scope[] = [
+export const CORE_SCOPES = [
   "wb-cn",
   "wb-global",
   "trae-cn",
   "trae-global",
   "qoder-cn",
   "qoder-global",
-];
+] as const satisfies readonly Scope[];
+
+/** 外部积分平台独立页面的 CN 作用域；不属于 core 的客户端 / 网关命令作用域。 */
+export const EXTERNAL_SCOPES = ["doubao-cn", "loomy-cn", "raccoon-cn"] as const satisfies readonly Scope[];
+
+/** 所有可切换平台作用域：core 作用域 + 独立外部平台作用域。 */
+export const SCOPES: readonly Scope[] = [...CORE_SCOPES, ...EXTERNAL_SCOPES];
 
 /**
  * 默认作用域。
@@ -86,7 +92,10 @@ export function parseScope(value: string | null | undefined): Scope | null {
 
 /** 由平台与区域拼出作用域。**不做校验**（两个入参都是强类型，非法组合在编译期就被挡住）。 */
 export function scopeOf(product: Product, region: Region): Scope {
-  return `${PLATFORM_SLUG[product]}-${region}`;
+  if (product === "doubao" || product === "loomy" || product === "raccoon") {
+    return `${PLATFORM_SLUG[product]}-cn` as Scope;
+  }
+  return `${PLATFORM_SLUG[product]}-${region}` as Scope;
 }
 
 /** 拆出平台与区域。**调用前请先 `parseScope`**，否则非法值会得到无意义的结果。 */

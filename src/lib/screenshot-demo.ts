@@ -3332,6 +3332,15 @@ export function screenshotDemoResponse(command: string, args?: Record<string, un
   switch (command) {
     case "get_status": return demoRegionStatus(args?.region === "global" ? "global" : "cn");
     case "get_accounts": return { accounts: demoAccounts };
+    case "get_external_credit_accounts": return { accounts: [] };
+    case "get_external_credit_accounts_for_provider": return { accounts: [] };
+    case "get_external_gateway_status": {
+      const provider = String(args?.provider ?? "doubao");
+      const port = provider === "loomy" ? 57897 : provider === "raccoon" ? 57898 : 57896;
+      return { provider, baseUrl: `http://127.0.0.1:${port}`, apiKey: "sk-ext-demo", running: false, port };
+    }
+    case "get_external_gateway_models": return { object: "list", data: [] };
+    case "get_external_gateway_usage": return { object: "list", data: [] };
     /* P5 T03：`accounts_list` 是 WorkBuddy / Trae **共用**的参数化命令（靠 `scope` 区分平台），
        所以演示数据也必须按 scope 分 —— 否则 Trae 页面在演示模式下会拿到 WB 的账号
        （那是最难发现的一类假通过：页面有数据、只是数据是错的）。 */

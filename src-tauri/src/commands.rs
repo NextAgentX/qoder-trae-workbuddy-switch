@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use buddy_switch_core::modules::{
     account, app_prefs, auth_file, backup, cache, capability, checkin, client_limits,
     client_settings, codebuddy_cli, codebuddy_memory, config, credit_usage, credits, diagnostics,
+    external_credits,
     export_import, gateway_ledger, migrate, oauth, process, programs, qoder, refresh,
     region::Region, region::RegionFilter, rotate, runtime_log, session, session_bundle, skill,
     switch, token_daily, token_stats, trae, travel, update, vscode_session,
@@ -2157,6 +2158,86 @@ pub async fn get_credit_expiry(
 pub async fn get_credit_statistics(refresh: Option<bool>, region: Option<String>) -> Value {
     let filter = parse_region_filter(region.as_deref());
     credit_usage::get_statistics_for_filter(filter, refresh.unwrap_or(false)).await
+}
+
+/// 第三方积分来源账号列表；结果不包含 Cookie / Token。
+#[tauri::command]
+pub fn get_external_credit_accounts() -> Result<Value, String> {
+    external_credits::list_accounts()
+}
+
+#[tauri::command]
+pub fn get_external_credit_accounts_for_provider(provider: String) -> Result<Value, String> {
+    external_credits::list_accounts_for(Some(&provider))
+}
+
+/// 添加第三方积分来源账号。凭据只落入本机权限收紧的数据文件。
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_external_credit_account(
+    provider: String,
+    name: String,
+    credential: String,
+    refresh_credential: Option<String>,
+) -> Result<Value, String> {
+    external_credits::add_account(
+        &provider,
+        &name,
+        &credential,
+        refresh_credential.as_deref(),
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_external_credit_account(account_id: String) -> Result<Value, String> {
+    external_credits::remove_account(&account_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_external_credit_provider_account(
+    provider: String,
+    account_id: String,
+) -> Result<Value, String> {
+    external_credits::remove_account_for(&account_id, Some(&provider))
+}
+
+#[tauri::command]
+pub async fn refresh_external_credits() -> Result<Value, String> {
+    external_credits::refresh_all().await
+}
+
+#[tauri::command]
+pub async fn refresh_external_credit_provider(provider: String) -> Result<Value, String> {
+    external_credits::refresh_provider(Some(&provider)).await
+}
+
+#[tauri::command]
+pub fn get_external_gateway_status(provider: String) -> Result<Value, String> {
+    let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
+    buddy_switch_gateway::external::runtime().status(provider)
+}
+
+#[tauri::command]
+pub async fn get_external_gateway_models(provider: String) -> Result<Value, String> {
+    let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
+    buddy_switch_gateway::external::models_snapshot(provider).await
+}
+
+#[tauri::command]
+pub fn get_external_gateway_usage(provider: String) -> Result<Value, String> {
+    let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
+    buddy_switch_gateway::external::usage_snapshot(provider)
+}
+
+#[tauri::command]
+pub async fn start_external_gateway(provider: String) -> Result<Value, String> {
+    let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
+    buddy_switch_gateway::external::runtime().start(provider).await
+}
+
+#[tauri::command]
+pub async fn stop_external_gateway(provider: String) -> Result<Value, String> {
+    let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
+    buddy_switch_gateway::external::runtime().stop(provider).await
 }
 
 #[tauri::command]

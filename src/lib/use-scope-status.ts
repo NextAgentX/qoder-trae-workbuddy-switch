@@ -30,7 +30,7 @@
  * 侧栏一颗圆点，现在是一张跨作用域的状态表 —— 信息的范围变了，取数范围随之改变。
  */
 
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import * as api from "@/lib/api";
 import type { AccountMeta, AppStatus } from "@/lib/types";
@@ -43,6 +43,7 @@ import {
   type TraeVariantLogins,
 } from "@/lib/trae-variant-status";
 import { useCachedResource } from "@/lib/use-cached-resource";
+import { t } from "@/lib/i18n";
 import { useDocumentVisible } from "@/lib/use-document-visible";
 import { useAccountsStore } from "@/stores/accounts";
 import { useResourceStore } from "@/stores/resources";
@@ -275,8 +276,25 @@ export function useScopeStatus(): {
    * 后直接读 store 的**最新** entry（不受 React 渲染时序影响），把结果转成
    * 显式值给调用方。
    */
-  refreshProduct: (product: "trae" | "qoder") => Promise<string | null>;
+  refreshProduct: (product: "trae" | "qoder" | "doubao" | "loomy" | "raccoon") => Promise<string | null>;
 } {
+  const [externalCounts, setExternalCounts] = useState({ doubao: 0, loomy: 0, raccoon: 0 });
+  useEffect(() => {
+    let cancelled = false;
+    /* 一次 `get_external_credit_accounts` 就够：三条 provider 命令各自都会读一次同一个
+       JSON 文件，合成一条能省下两次磁盘读，也避免三份快照之间的时序差。 */
+    void api.getExternalCreditAccounts()
+      .then((accounts) => {
+        if (cancelled) return;
+        const counts = { doubao: 0, loomy: 0, raccoon: 0 };
+        for (const account of accounts) {
+          if (account.provider in counts) counts[account.provider] += 1;
+        }
+        setExternalCounts(counts);
+      })
+      .catch(() => { /* 读不到就保持 0：与 `UNKNOWN_STATUS` 的 accountCount 语义一致 */ });
+    return () => { cancelled = true; };
+  }, []);
   const cnStatus = useAccountsStore((s) => s.status);
   const cnAccounts = useAccountsStore((s) => s.accounts);
   const globalStatus = useAccountsStore((s) => s.global.status);
@@ -317,13 +335,34 @@ export function useScopeStatus(): {
       "trae-global": trae.data?.global ?? UNKNOWN_STATUS,
       "qoder-cn": qoder.data?.cn ?? UNKNOWN_STATUS,
       "qoder-global": qoder.data?.global ?? UNKNOWN_STATUS,
+      "doubao-cn": { ...UNKNOWN_STATUS, accountCount: externalCounts.doubao },
+      "loomy-cn": { ...UNKNOWN_STATUS, accountCount: externalCounts.loomy },
+      "raccoon-cn": { ...UNKNOWN_STATUS, accountCount: externalCounts.raccoon },
     }),
-    [cnStatus, cnAccounts, globalStatus, globalAccounts, trae.data, qoder.data],
+    [cnStatus, cnAccounts, globalStatus, globalAccounts, trae.data, qoder.data, externalCounts],
   );
 
   // 见返回类型处的说明：refresh 不抛错 ⇒ 刷新完成后从 store 读最新 entry 判成败。
   const refreshProduct = useCallback(
-    async (product: "trae" | "qoder"): Promise<string | null> => {
+    async (product: "trae" | "qoder" | "doubao" | "loomy" | "raccoon"): Promise<string | null> => {
+      if (product === "doubao" || product === "loomy" || product === "raccoon") {
+        try {
+          const result = await api.refreshExternalCreditProvider(product);
+          const accounts = result.accounts ?? [];
+          setExternalCounts((current) => ({ ...current, [product]: accounts.length }));
+          /* `refresh_provider` 永远返回 Ok，失败的账号在行内带 `ok: false` + `error`。
+             只要有一个账号失败就必须把错误冒泡出去 —— 否则顶栏会弹「已刷新」，
+             而页面自己的告警说「凭据已失效」，两个提示互相打架。 */
+          const failed = accounts.filter((account) => (account as { ok?: boolean }).ok === false);
+          if (failed.length === 0) return null;
+          const first = failed[0] as { name?: string; error?: string };
+          return failed.length === 1
+            ? (first.error || first.name || t("externalPlatforms.refresh.failedOne"))
+            : t("externalPlatforms.refresh.failedMany", { n: failed.length });
+        } catch (error) {
+          return api.asError(error);
+        }
+      }
       const key = product === "trae" ? TRAE_SCOPE_STATUS_KEY : QODER_SCOPE_STATUS_KEY;
       await (product === "trae" ? trae.refresh() : qoder.refresh());
       const entry = useResourceStore.getState().entries[key];

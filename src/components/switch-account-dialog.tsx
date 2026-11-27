@@ -62,7 +62,7 @@ import * as api from "@/lib/api";
 import { decodeError } from "@/lib/error-code";
 import { hasCapability } from "@/lib/platforms/registry";
 import { REGIONS, regionLabel } from "@/lib/region";
-import { SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, scopeOf, scopeParts, type Scope } from "@/lib/scope";
 import { useT, type Translate } from "@/lib/i18n";
 import {
   buildSessionTree,
@@ -348,7 +348,9 @@ export function SwitchAccountDialog({
           : t("wbAccounts.dialog.copyHintSame");
 
   const currentScope: Scope = scopeOf("workbuddy", targetRegion);
-  const candidateScopes: readonly Scope[] = crossScope ? SCOPES : [currentScope];
+  /* 外部平台没有客户端账号可切换（凭据是另一套），列出它们会让每一行都套上
+     当前 WorkBuddy CN 账号的名字，且切换必然被拒 —— 死行 + 错标签。 */
+  const candidateScopes: readonly Scope[] = crossScope ? CORE_SCOPES : [currentScope];
   const sourceOptions: SourceOption[] = candidateScopes.map((scope) => {
     const parts = scopeParts(scope);
     return {

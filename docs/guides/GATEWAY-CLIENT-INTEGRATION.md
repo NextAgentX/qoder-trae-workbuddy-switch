@@ -23,7 +23,7 @@
 
 ## 1. 网关能力矩阵（事实）
 
-三个产品分区（WorkBuddy / Trae / Qoder）**彼此完全独立**：独立端口、独立 Key 库、独立账号池、独立配置文件。**Key 不能跨区使用**。
+WorkBuddy / Trae / Qoder 产品分区**彼此完全独立**：独立端口、独立 Key 库、独立账号池、独立配置文件。豆包、Loomy、小浣熊消费账号网关也各自独立，不与这三条产品线共享账号池或 API Key。
 
 自 2026-10-14 起还有**第四个入口「统一网关」**（跨作用域、默认关），见 §1.3 —— 它的定位不是替代前三个，而是「一个 provider 用遍全部平台」。下表第三列是它；Qoder 分区见 §1.4（只列差异，其余逐条同构）。
 
@@ -58,7 +58,7 @@
    WB 侧与统一入口 `x-api-key` 和 `Authorization: Bearer` 都收；Trae 侧**只收 `Authorization: Bearer`**（Qoder 侧同样只认 Bearer）。
    ⇒ Claude Code 接 Trae / Qoder 网关时**必须用 `ANTHROPIC_AUTH_TOKEN`**（走 Bearer）；用 `ANTHROPIC_API_KEY`（走 `x-api-key`）会拿到 401。
 3. **端口不能合并。**
-   四套网关挂的路由**逐字重叠**（`/v1/models`、`/v1/chat/completions`），axum 同路径 merge 会**运行期 panic**。所以永远是四个端口、四个 Key 库、四份配置。
+这些网关挂的路由**逐字重叠**（`/v1/models`、`/v1/chat/completions`），axum 同路径 merge 会**运行期 panic**。所以每条独立入口都使用自己的端口和 Key。
 
 ### 1.2 额度来源与区域
 
@@ -111,6 +111,22 @@
 
 <sup>†</sup> Trae / Qoder 上游只有 chat SSE ⇒ `/v1/responses` 由网关做协议翻译（入站翻成 chat、出站转 Responses 事件流 / 对象），
 Codex 的 `wire_api = "responses"` 可直接用。翻译边界同 WB（见 §3.1「坑」）。
+
+### 1.5 豆包、Loomy、小浣熊消费账号网关
+
+在各平台自己的「网关」入口启动监听；监听只绑定 `127.0.0.1`，端口和 API Key 分别隔离：
+
+| 平台 | 端口 | OpenAI 基址 | 上游适配 |
+|:---|---:|:---|:---|
+| 豆包 | `57896` | `http://127.0.0.1:57896/v1` | DoubaoWork 专有 SSE 转换；文本对话，限制见下方 |
+| Loomy | `57897` | `http://127.0.0.1:57897/v1` | Loomy 原生 OpenAI 兼容模型服务 |
+| 商汤小浣熊 | `57898` | `http://127.0.0.1:57898/v1` | 小浣熊消费客户端模型服务 |
+
+三者都支持 `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/messages`（Anthropic）、`POST /v1/responses`（Responses）和 `GET /v1/usage`，认证支持 `Authorization: Bearer <本平台 API Key>` / `x-api-key`。先在对应平台的「账号」入口添加登录凭据，再在「网关」启动；请求只从当前平台账号池轮询。发生上游网络错误或可重试状态时，会在响应开始前将同一请求交给该 provider 的下一个账号；流已经开始后不重放。豆包支持文本、base64 或公网 HTTPS 图片输入，以及 `POST /v1/images/generations`（`doubao-image`）、`POST /v1/video/generations`（`doubao-video`）和 `POST /v1/audio/generations`（`doubao-music`）。远程图片限定 PNG/JPEG/WebP、8 MiB、固定公网 DNS 地址并禁止重定向。视频接口会等待豆包异步任务完成后返回媒体链接。音频输入和工具调用暂不支持。三家消费端点均为非官方私有协议，可能随上游变化；此处不代表 SenseNova 公有 API。
+
+`/v1/usage` 是需用同一 API Key 鉴权的本机请求记录，最多保存 500 条，含协议、模型、HTTP 状态和上游实际报告的 token 数；上游不提供 token 数时字段为空。三家网关的 Anthropic/Responses SSE 都会随上游增量实时转换。
+
+> 小浣熊消费账号网关和 SenseNova API 是不同产品/授权面；此入口仅读取用户添加的消费端凭据。
 
 ---
 
@@ -651,10 +667,13 @@ Trae IDE 与 SOLO 桌面端**支持自定义模型**（国内版 v3.3.51 起灰�
 
 | 项 | 值 |
 |:---|:---|
-| `5789x` 一段的分工 | 57890 界面 · 57891 WB 网关 · 57892 统一入口 · 57893 hook · **57894 Trae 网关** · **57895 Qoder 网关** |
+| `5789x` 一段的分工 | 57890 界面 · 57891 WB 网关 · 57892 统一入口 · 57893 hook · **57894 Trae 网关** · **57895 Qoder 网关** · 57896 豆包 · 57897 Loomy · 57898 小浣熊 |
 | WorkBuddy 网关 | `127.0.0.1:57891` |
 | Trae 网关 | `127.0.0.1:57894`（原 `7864`） |
 | Qoder 网关 | `127.0.0.1:57895`（原 `7865`） |
+| 豆包消费账号网关 | `127.0.0.1:57896` |
+| Loomy 消费账号网关 | `127.0.0.1:57897` |
+| 商汤小浣熊消费账号网关 | `127.0.0.1:57898` |
 | **统一入口（第四个入口，默认关）** | `127.0.0.1:57892` |
 | Trae 本地 MITM 代理（登录态捕获用，**与网关无关**） | `8899` |
 | 外部 Agent hook 接收端（P15，**只绑回环**，客户端 hook 往这里 POST） | `127.0.0.1:57893` |

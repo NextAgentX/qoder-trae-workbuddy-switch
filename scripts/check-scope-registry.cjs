@@ -128,12 +128,13 @@ function check(name, fn) {
 
 console.log("\n作用域与平台注册表门禁\n");
 
-check("注册表能列出 6 个作用域（3 平台 × 2 区域，P0 验收项）", () => {
+check("注册表能列出 9 个可切换作用域（6 个客户端作用域 + 3 个独立 CN 平台）", () => {
   const got = [...scope.SCOPES];
-  if (got.length !== 6) throw new Error(`实际 ${got.length} 个：${got.join(",")}`);
-  for (const s of ["wb-cn", "wb-global", "trae-cn", "trae-global", "qoder-cn", "qoder-global"]) {
+  if (got.length !== 9) throw new Error(`实际 ${got.length} 个：${got.join(",")}`);
+  for (const s of ["wb-cn", "wb-global", "trae-cn", "trae-global", "qoder-cn", "qoder-global", "doubao-cn", "loomy-cn", "raccoon-cn"]) {
     if (!got.includes(s)) throw new Error(`缺少 ${s}`);
   }
+  if (scope.CORE_SCOPES.length !== 6 || scope.EXTERNAL_SCOPES.length !== 3) throw new Error("core 与外部平台作用域边界不符");
   return got.join(" / ");
 });
 
@@ -346,16 +347,16 @@ check("★ P2 路由：`/s/:scope/:dest` 已注册，且旧路由**保留**（�
   return `新路由 1 条 + 旧路由 ${legacy.length} 条并存`;
 });
 
-check("★ P2 目的地映射覆盖 3 平台 × 6 目的地（侧栏固定 6 项的依据）", () => {
+check("★ P2 目的地映射覆盖 6 平台 × 6 目的地（侧栏按能力隐藏不适用项）", () => {
   const app = stripComments(fs.readFileSync(path.join(ROOT, "src/App.tsx"), "utf8"));
   const m = app.match(/const SCOPED_ROUTES[\s\S]*?\n\};/);
   if (!m) throw new Error("找不到 SCOPED_ROUTES");
   const block = m[0];
   const bad = [];
   for (const dest of registry.DESTINATIONS) {
-    // 每个 dest 应在表里出现三次（WorkBuddy / Trae / Qoder 各一次）
+    // 每个 dest 应在表里出现六次（每个平台各一条页面映射）
     const n = (block.match(new RegExp(`\\b${dest}:`, "g")) || []).length;
-    if (n !== 3) bad.push(`${dest}(${n} 次，期望 3)`);
+    if (n !== registry.PRODUCTS.length) bad.push(`${dest}(${n} 次，期望 ${registry.PRODUCTS.length})`);
   }
   if (bad.length) throw new Error(`映射不完整：${bad.join(", ")}`);
   return `${registry.PRODUCTS.length} 平台 × ${registry.DESTINATIONS.length} 目的地`;
@@ -3092,7 +3093,7 @@ function fnBody(code, name) {
   return body;
 }
 
-check("★ P6 降级分支：作用域 >9 ⇒ 不绑定 + reason=too-many（真实应用 6 个 ⇒ 必须模拟 10 个）", () => {
+check("★ P6 降级分支：作用域 >9 ⇒ 不绑定 + reason=too-many（真实应用 9 个 ⇒ 正常绑定）", () => {
   /* 变异①：删掉 `> SCOPE_SHORTCUT_LIMIT` 判断（超限仍返回绑定）⇒ 本条变红。 */
   const ten = scopeShortcutsLib.planScopeShortcuts({ scopes: TEN_SCOPES, enabled: true });
   if (ten.bindings.size !== 0) throw new Error(`10 个作用域仍绑定了 ${ten.bindings.size} 个 —— 降级失效`);
@@ -3106,16 +3107,17 @@ check("★ P6 降级分支：作用域 >9 ⇒ 不绑定 + reason=too-many（真�
   const on = scopeShortcutsLib.planScopeShortcuts({ scopes: FOUR_SCOPES, enabled: true });
   if (on.bindings.size !== 4 || on.degraded || on.reason !== null) throw new Error("4 个作用域应正常绑定");
   if (on.bindings.get("wb-cn") !== 1 || on.bindings.get("trae-global") !== 4) throw new Error("序号不是 1..N");
-  /* ★ 真实规模（6 个）必须**照常绑定** —— 加 Qoder 不能让既有用户的 1..4 一起消失
+  /* ★ 真实规模（9 个）必须**照常绑定** —— 数字键的 9 槽刚好够当前作用域
      （变异②：把上限改回 5 ⇒ 本条变红）。 */
-  if (REAL_SCOPES.length !== 6) throw new Error(`真实作用域应 6 个，实际 ${REAL_SCOPES.length}`);
+  if (REAL_SCOPES.length !== 9) throw new Error(`真实作用域应 9 个，实际 ${REAL_SCOPES.length}`);
   const real = scopeShortcutsLib.planScopeShortcuts({ scopes: REAL_SCOPES, enabled: true });
-  if (real.bindings.size !== 6 || real.degraded || real.reason !== null) {
-    throw new Error(`真实 6 个作用域应正常绑定，实际 ${real.bindings.size}/${real.degraded}/${real.reason}`);
+  if (real.bindings.size !== 9 || real.degraded || real.reason !== null) {
+    throw new Error(`真实 9 个作用域应正常绑定，实际 ${real.bindings.size}/${real.degraded}/${real.reason}`);
   }
   if (real.bindings.get("qoder-global") !== 6) throw new Error("第 6 个作用域应绑到 ⌘6");
+  if (real.bindings.get("raccoon-cn") !== 9) throw new Error("第 9 个作用域应绑到 ⌘9");
   if (scopeShortcutsLib.SCOPE_SHORTCUT_LIMIT !== 9) throw new Error("阈值应为 9（数字键天然上限）");
-  return "10 个→too-many / 关闭→user-disabled / 4 个→1..4 / 真实 6 个→1..6";
+  return "10 个→too-many / 关闭→user-disabled / 4 个→1..4 / 真实 9 个→1..9";
 });
 
 check("★ P6 绑定与序号提示同源：空 bindings ⇒ 作用域条目一律无 shortcutHint（假控件护栏）", () => {
@@ -9434,20 +9436,18 @@ check("★ 自动检查更新：开关必须接到轮询（摆了开关不等于
  *   ⑤ 筛选偏好是**纯函数 + 规范化**（选满 ⇒ 删键，否则新增账号永远看不见）。
  */
 
-check("★ 聚合不是第 7 个作用域：SCOPES 仍是 6 项且不含 aggregate", () => {
+check("★ 聚合不是作用域：SCOPES 含 9 个平台作用域、不含 aggregate", () => {
   const scopeSrc = readCode("src/lib/scope.ts");
-  const block = scopeSrc.match(/export const SCOPES[^=]*=\s*\[([\s\S]*?)\]/);
-  if (!block) throw new Error("找不到 SCOPES 字面量（断言失效：是否改名？）");
-  const items = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-  if (items.length !== 6) throw new Error(`SCOPES 是 ${items.length} 项，期望 6 项`);
+  const items = scope.SCOPES;
+  if (items.length !== 9) throw new Error(`SCOPES 是 ${items.length} 项，期望 9 项`);
   if (items.includes("aggregate")) {
     throw new Error("aggregate 被塞进了 SCOPES —— 会同时破坏类型、注册表一致性与快捷键序号");
   }
-  /* `Scope` 必须是 `${平台}-${区域}` 的模板字面量：出现一个非此形状的成员就说明有人在放宽它。 */
-  if (!/export type Scope = `\$\{PlatformSlug\}-\$\{Region\}`/.test(scopeSrc)) {
-    throw new Error("Scope 不再是封闭的 `${PlatformSlug}-${Region}` 模板字面量");
+  /* 外部平台限定 cn，不把它们扩成不存在的 global 作用域。 */
+  if (!/"doubao-cn" \| "loomy-cn" \| "raccoon-cn"/.test(scopeSrc)) {
+    throw new Error("外部平台作用域必须保持 CN-only");
   }
-  return "6 项 · 无 aggregate · 类型仍封闭";
+  return "9 个平台作用域 · 无 aggregate · 外部平台 CN-only";
 });
 
 check("★ 聚合走独立路由 /aggregate，且**不在** SCOPED_ROUTES 里", () => {

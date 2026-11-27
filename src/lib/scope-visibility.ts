@@ -16,13 +16,18 @@
 
 import { create } from "zustand";
 
-import { SCOPES, type Scope } from "@/lib/scope";
+import { EXTERNAL_SCOPES, SCOPES, type Scope } from "@/lib/scope";
 
-const STORAGE_KEY = "buddy-switch:v1:visible-scopes";
+const STORAGE_KEY = "buddy-switch:v2:visible-scopes";
+const LEGACY_STORAGE_KEY = "buddy-switch:v1:visible-scopes";
 
 function safeStorage(): Pick<Storage, "getItem" | "setItem"> | undefined {
   try {
-    return typeof window === "undefined" ? undefined : window.localStorage;
+    /* 浏览器用 `window.localStorage`；单元测试（node 环境）没有 `window`，
+       但可能给 `globalThis.localStorage` 装了内存实现，两条都认。 */
+    if (typeof window !== "undefined") return window.localStorage;
+    const candidate = (globalThis as { localStorage?: Storage }).localStorage;
+    return typeof candidate?.getItem === "function" ? candidate : undefined;
   } catch {
     return undefined;
   }
@@ -37,10 +42,26 @@ function normalizeScopes(value: unknown): Scope[] {
   return SCOPES.filter((s) => valid.includes(s));
 }
 
-function readVisibleScopes(storage: Pick<Storage, "getItem"> | undefined): Scope[] {
+function readVisibleScopes(storage: Pick<Storage, "getItem" | "setItem"> | undefined): Scope[] {
   try {
     const raw = storage?.getItem(STORAGE_KEY);
-    if (!raw) return [...SCOPES];
+    if (!raw) {
+      const legacy = storage?.getItem(LEGACY_STORAGE_KEY);
+      if (!legacy) return [...SCOPES];
+      const oldScopes = normalizeScopes(JSON.parse(legacy));
+      /* 旧值是坏数据（`[]` / 全是非法项）⇒ 与常规路径同样回落全量；
+         不能只剩外部平台 —— 那会让升级后的用户看不到自己的 WorkBuddy 账号。 */
+      const migrated = oldScopes.length === 0
+        ? [...SCOPES]
+        : normalizeScopes([...oldScopes, ...EXTERNAL_SCOPES]);
+      /* 回写 v2：迁移只发生一次，之后旧键即使被改也不再影响结果。 */
+      try {
+        storage?.setItem(STORAGE_KEY, JSON.stringify(migrated));
+      } catch {
+        /* 存不进去就下次再迁，不影响本次结果 */
+      }
+      return migrated;
+    }
     const scopes = normalizeScopes(JSON.parse(raw));
     // 至少保留 1 个：解析结果为空 ⇒ 视为坏数据，回落全量
     return scopes.length >= 1 ? scopes : [...SCOPES];

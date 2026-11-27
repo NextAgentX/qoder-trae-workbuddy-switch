@@ -4,6 +4,9 @@ import codebuddyCnIdeIcon from "@/assets/codebuddy-cn-ide-icon.png";
 import traeIcon from "@/assets/trae.png";
 import traeworkIcon from "@/assets/traework.png";
 import qoderIcon from "@/assets/qoder.png";
+import doubaoIcon from "@/assets/doubao-official-icon.png";
+import loomyIcon from "@/assets/loomy-official-icon.png";
+import raccoonIcon from "@/assets/raccoon-official-icon.png";
 
 interface MarkProps {
   size?: number;
@@ -200,6 +203,105 @@ export function TraeVariantMark({
         alt=""
         className="absolute left-1/2 top-1/2 size-[118%] max-w-none -translate-x-1/2 -translate-y-1/2 object-cover"
       />
+    </span>
+  );
+}
+
+/* ─────────────── 外部积分平台（豆包 / Loomy / 商汤小浣熊） ───────────────
+ *
+ * 三个官方图标均已按 WorkBuddy / Trae / Qoder 的**同一组参数**归一化：
+ * 画布 256×256 透明、内容占画布 80.4%、严格居中
+ * （脚本：`scripts/normalize-platform-logos.mjs`；源图取自各自官网公开的
+ * favicon / apple-touch-icon）。因此渲染手法逐字复用 —— 放大 118% 居中裁掉
+ * 透明圈，再由容器 `rounded-[22%]` 收口，与同排产品图标视觉体量一致。
+ *
+ * ⚠️ 小浣熊的源图是**横版 lockup**（178×111），归一化时按长边缩放到 80.4%
+ * 并居中，因此它在方形容器里上下留白更多 —— 这是保持原图比例的正确结果，
+ * 不要为了「撑满」去拉伸它。
+ */
+
+export function DoubaoMark({ size = 32, className }: MarkProps) {
+  return (
+    <span
+      aria-hidden
+      className={cn("relative inline-flex shrink-0 overflow-hidden rounded-[22%]", className)}
+      style={{ width: size, height: size }}
+    >
+      <img
+        src={doubaoIcon}
+        alt=""
+        className="absolute left-1/2 top-1/2 size-[118%] max-w-none -translate-x-1/2 -translate-y-1/2 object-cover"
+      />
+    </span>
+  );
+}
+
+export function LoomyMark({ size = 32, className }: MarkProps) {
+  return (
+    <span
+      aria-hidden
+      className={cn("relative inline-flex shrink-0 overflow-hidden rounded-[22%]", className)}
+      style={{ width: size, height: size }}
+    >
+      <img
+        src={loomyIcon}
+        alt=""
+        className="absolute left-1/2 top-1/2 size-[118%] max-w-none -translate-x-1/2 -translate-y-1/2 object-cover"
+      />
+    </span>
+  );
+}
+
+export function RaccoonMark({ size = 32, className }: MarkProps) {
+  return (
+    <span
+      aria-hidden
+      className={cn("relative inline-flex shrink-0 overflow-hidden rounded-[22%]", className)}
+      style={{ width: size, height: size }}
+    >
+      <img
+        src={raccoonIcon}
+        alt=""
+        className="absolute left-1/2 top-1/2 size-[118%] max-w-none -translate-x-1/2 -translate-y-1/2 object-cover"
+      />
+    </span>
+  );
+}
+
+/**
+ * 聚合入口标识（四宫格拼合）。
+ *
+ * ## 为什么是四宫格
+ *
+ * 聚合页的语义是「把多个平台的作用域收进一处看」—— 四宫格正好是「多合为一」的
+ * 通用图形隐喻：三格分别放 WorkBuddy / Trae / Qoder 的**官方图标**（沿用各自的
+ * 归一化资产，不另画一遍），第四格放一个品牌色圆点，表示「还有更多」。
+ *
+ * ## 为什么不用 lucide 图标拼
+ *
+ * `LayoutGrid` 之类的线性图标与旁边四枚**彩色实心**产品图标并排会显得轻飘，
+ * 用户也读不出「这是四个平台」。这里直接复用真实产品图标，语义自解释。
+ *
+ * ## 几何
+ *
+ * 与产品图标同尺寸同圆角（`rounded-[22%]`），内部 2×2 栅格、格子间距为尺寸的 6%，
+ * 每格自身带 18% 圆角 —— 视觉密度与 WorkBuddy / Trae / Qoder 的单个图标相当。
+ */
+export function AggregateMark({ size = 32, className }: MarkProps) {
+  const gap = Math.max(1, Math.round(size * 0.06));
+  const cell = (size - gap) / 2;
+  return (
+    <span
+      aria-hidden
+      className={cn("relative inline-flex shrink-0 overflow-hidden rounded-[22%] bg-muted/60", className)}
+      style={{ width: size, height: size, padding: gap, display: "grid", gap, gridTemplateColumns: "1fr 1fr", gridTemplateRows: "1fr 1fr" }}
+    >
+      <WorkBuddyMark size={cell} className="!rounded-[18%]" />
+      <TraeMark size={cell} className="!rounded-[18%]" />
+      <QoderMark size={cell} className="!rounded-[18%]" />
+      <span className="grid place-items-center rounded-[18%] bg-primary/15">
+        <span className="rounded-full bg-primary" style={{ width: cell * 0.34, height: cell * 0.34 }} />
+      </span>
     </span>
   );
 }

@@ -55,6 +55,12 @@ const GATEWAY_LEDGER: Record<Product, (region: Region) => Promise<GatewayUsageDi
   workbuddy: api.getGatewayUsageDim,
   trae: api.getTraeGatewayUsageDim,
   qoder: api.getQoderGatewayUsageDim,
+  /* 外部平台的请求账本不在前端聚合：`ExternalProviderPage` 直接读各自网关的
+     `/v1/usage`，与这里「跨平台合计」的口径不同。这里给空账本，让它落到
+     `days === null`（= 无数据源），而不是编造 0。 */
+  doubao: async () => ({ date: "", retentionDays: 0, days: [] }),
+  loomy: async () => ({ date: "", retentionDays: 0, days: [] }),
+  raccoon: async () => ({ date: "", retentionDays: 0, days: [] }),
 };
 
 async function loadClientSeries(product: Product, region: Region) {
@@ -114,6 +120,12 @@ export async function loadOverviewCredits(
     }
     case "qoder":
       return null;
+    /* 外部平台的余额由 `ExternalProviderPage` 直接读账号表（同一份数据、
+       同一格式），走这里会多一次调用并可能与之瞬时不一致。 */
+    case "doubao":
+    case "loomy":
+    case "raccoon":
+      return null;
   }
 }
 
@@ -123,7 +135,7 @@ interface OverviewGatewayLogs {
   workbuddyLogs?: GatewayLogEntry[];
 }
 
-const GATEWAY_LOGS: Record<Product, () => Promise<OverviewGatewayLogs>> = {
+const GATEWAY_LOGS: Record<Product, () => Promise<OverviewGatewayLogs | null>> = {
   workbuddy: async () => {
     const [{ logs }, config] = await Promise.all([
       api.getGatewayLogs(),
@@ -151,6 +163,11 @@ const GATEWAY_LOGS: Record<Product, () => Promise<OverviewGatewayLogs>> = {
       keep: normalizeQoderGatewayConfig(config).logKeep,
     };
   },
+  /* 外部平台概览由 `ExternalProviderPage` 自己取数（它读的是各家网关的
+     `/v1/usage`，协议与字段都不同）。给 `null` 表示「无数据源」，不回落 0。 */
+  doubao: async () => null,
+  loomy: async () => null,
+  raccoon: async () => null,
 };
 
 function summarizeGatewayLogs({ logs, keep }: OverviewGatewayLogs, today: string, region: Region) {

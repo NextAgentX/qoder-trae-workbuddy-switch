@@ -19,6 +19,9 @@ export const en = {
      merged "Trae" client). The sidebar must use the merged name. */
   "product.trae": "Trae",
   "product.qoder": "Qoder",
+  "product.doubao": "Doubao",
+  "product.loomy": "Loomy",
+  "product.raccoon": "SenseTime Raccoon",
   "product.switchAria": "Switch product",
   "product.navAria": "{product} navigation",
 

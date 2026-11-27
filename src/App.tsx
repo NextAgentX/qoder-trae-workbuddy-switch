@@ -35,8 +35,6 @@ import { AUTO_CHECK_UPDATE_INTERVAL_MS, currentSeenUpdateVersion, shouldAutoShow
 import { normalizeReleaseNotes } from "@/lib/release-notes";
 import { useScopeStatus } from "@/lib/use-scope-status";
 import { useCompanionVisibility } from "@/lib/use-companion-visibility";
-import { TRAE_VARIANTS_KEY, loadTraeVariantStatuses } from "@/lib/trae-variant-status";
-import type { TraeVariantStatus } from "@/lib/trae-types";
 
 // ---------------------------------------------------------------------------
 // 路由级懒加载（P0-2）
@@ -85,11 +83,16 @@ const QoderOverviewPage = lazy(() => import("@/pages/QoderOverviewPage"));
 const QoderSettingsPage = lazy(() => import("@/pages/QoderSettingsPage"));
 const QoderPendingPage = lazy(() => import("@/pages/QoderPendingPage"));
 const QoderApiServicePage = lazy(() => import("@/pages/QoderApiServicePage"));
+const ExternalOverviewPage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalOverviewPage })));
+const ExternalAccountsPage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalAccountsPage })));
+const ExternalUsagePage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalUsagePage })));
+const ExternalGatewayPage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalGatewayPage })));
+const ExternalSettingsPage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalSettingsPage })));
+const ExternalSessionsPage = lazy(() => import("@/pages/ExternalProviderPage").then((module) => ({ default: module.ExternalSessionsPage })));
 /* P0 收敛清单第 1 项：`Product` 的类型定义**已搬进注册表**，这里改为 import。
    （原来 App.tsx 里有一份局部 `type Product`，两处重复 —— 现在只剩一处。） */
 import { DESTINATION_CAPABILITY, type Destination, DESTINATIONS, destinationOfLegacyPath, hasCapability, platformDescriptor, type Product, platformOfPath } from "@/lib/platforms/registry";
 import { parseScope, type Scope, scopeOf, scopeParts, writeLastScope } from "@/lib/scope";
-import { useCachedResource } from "@/lib/use-cached-resource";
 import { useScope } from "@/lib/use-scope";
 import { useTraeVariant } from "@/lib/use-trae-variant";
 import { useCreditAutoRefresh } from "@/lib/use-credit-auto-refresh";
@@ -213,6 +216,9 @@ const SCOPED_ROUTES: Record<Product, Record<Destination, ElementType>> = {
     gateway: QoderApiServicePage,
     settings: QoderSettingsPage,
   },
+  doubao: { overview: ExternalOverviewPage, accounts: ExternalAccountsPage, usage: ExternalUsagePage, sessions: ExternalSessionsPage, gateway: ExternalGatewayPage, settings: ExternalSettingsPage },
+  loomy: { overview: ExternalOverviewPage, accounts: ExternalAccountsPage, usage: ExternalUsagePage, sessions: ExternalSessionsPage, gateway: ExternalGatewayPage, settings: ExternalSettingsPage },
+  raccoon: { overview: ExternalOverviewPage, accounts: ExternalAccountsPage, usage: ExternalUsagePage, sessions: ExternalSessionsPage, gateway: ExternalGatewayPage, settings: ExternalSettingsPage },
 };
 
 /**
@@ -263,7 +269,9 @@ function ScopedDestination() {
 
   const { product } = scopeParts(scope);
   const Page = SCOPED_ROUTES[product][rawDest as Destination];
-  return <Page />;
+  /* `key` 让切换平台/目的地时**重新挂载**：外部平台三家共用同一个 `ExternalProviderPage`，
+     不换 key 会保留上一家的账号、余额、网关状态与用量快照（切换后闪一下别家的数据）。 */
+  return <Page key={`${scope}:${rawDest}`} />;
 }
 
 /**
@@ -387,30 +395,6 @@ function SidebarNavItem({ item, collapsed }: { item: ScopedNavItem; collapsed: b
  *
  * 键在「不在 Trae 分区」时置为 `null`（不缓存、不探测），避免在 WorkBuddy 分区下白跑。
  */
-function useTraeVariantRunning(active: boolean): Record<string, boolean> {
-  const { data, refresh } = useCachedResource<TraeVariantStatus[]>(
-    active ? TRAE_VARIANTS_KEY : null,
-    loadTraeVariantStatuses,
-    { freshMs: 60 * 1000 },
-  );
-
-  useEffect(() => {
-    if (!active) return;
-    // ⚠️ 这里刻意用 `refresh()`（强制）而不是 `revalidate()`：本 hook 是**唯一**的定时器
-    // 持有者，而它的 `freshMs` 恰好等于间隔（60s）。换成 `revalidate()` 后，tick 会因为
-    // 「距上次写入还差几十毫秒不到一个窗口」被窗口闸门吃掉 ⇒ 实际节奏退化成 **120 秒**，
-    // 且不报任何错。要用 `revalidate()` 就必须同时把 `freshMs` 调小于间隔
-    // （`use-scope-status.ts` 就是这么做的，那里有多个消费者、非去重不可）。
-    const timer = window.setInterval(() => void refresh(), 60 * 1000);
-    return () => window.clearInterval(timer);
-  }, [active, refresh]);
-
-  return useMemo(
-    () => Object.fromEntries((data ?? []).map((item) => [item.variant, item.running])),
-    [data],
-  );
-}
-
 /**
  * 侧栏左下角的「会话悬浮窗」入口（P9 · T04）。
  *
@@ -837,13 +821,17 @@ function Layout() {
   );
 
   const appVersion = useAccountsStore((s) => s.status?.version || s.global.status?.version);
+  /**
+   * 侧栏左下角的运行圆点。
+   *
+   * ⚠️ WorkBuddy 必须**跨区域取或**：桌面客户端只有一个进程，只开在 international
+   * 账号页没加载过时 `global.status` 是 `null`，光看 `statuses[scope].running` 会在
+   * 「CN 进程其实在跑」时显示未运行。Trae / Qoder / 外部平台仍然跟随当前作用域快照。
+   */
   const workbuddyRunning = useAccountsStore((s) =>
     Boolean(s.status?.running || s.global.status?.running),
   );
-  const traeRunning = useTraeVariantRunning(product === "trae");
-  // Trae 分区的状态圆点跟随**当前选中的区域**（而不是「Trae 是否有任意一条在跑」）：
-  // 在「Trae CN 已关闭、Trae 国际版在运行」时，只探「Trae 是否运行」会显示错误的绿灯。
-  const running = product === "workbuddy" ? workbuddyRunning : Boolean(traeRunning[traeRegion]);
+  const running = product === "workbuddy" ? workbuddyRunning : statuses[scope].running;
 
   useCreditAutoRefresh();
   useWorkbuddyStatusRefresh();
@@ -964,6 +952,9 @@ function Layout() {
         // 账号列表重读是本轮刷新的主判据，失败必须冒泡给下面的 toast。
         void store.refreshRegionStatus(navRegion);
         await store.reconcileAccounts(navRegion);
+      } else if (product === "doubao" || product === "loomy" || product === "raccoon") {
+        const providerError = await refreshProduct(product);
+        if (providerError) throw new Error(providerError);
       } else {
         // Trae / Qoder 的刷新失败不抛错（写进快照的 `error` 字段）⇒ 用显式结果判成败。
         const aggregateError = await refreshProduct(product);

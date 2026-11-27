@@ -101,7 +101,7 @@ import {
   type AggregateDetailContext,
 } from "@/lib/aggregate-detail";
 import { useT } from "@/lib/i18n";
-import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
+import { CORE_SCOPES, scopeParts, type Scope } from "@/lib/scope";
 import type { AccountMeta, CheckinLog, CreditStatsEvent, Region } from "@/lib/types";
 import { isWorkbuddyCurrent } from "@/lib/account-current";
 import { pickPriorityAccountId, creditExpiryFromPacks } from "@/lib/credit-priority";
@@ -1199,7 +1199,7 @@ export default function AggregateAccountsPage() {
       return (
         <div className="mt-4 flex flex-col items-center gap-3 py-16 text-muted-foreground">
           <RotateCw className="size-5 animate-spin" />
-          <span className="text-[12.5px]">{t("aggregate.loading", { n: SCOPES.length })}</span>
+          <span className="text-[12.5px]">{t("aggregate.loading", { n: CORE_SCOPES.length })}</span>
         </div>
       );
     }
@@ -1266,7 +1266,7 @@ export default function AggregateAccountsPage() {
 
         {/* 失败 / 未安装：**筛选生效时整组不出现**（用户是在已有账号里缩小范围）。 */}
         {!filtering
-          ? SCOPES.filter((scope) => !groups.some((group) => group.scope === scope)).map((scope) => {
+          ? CORE_SCOPES.filter((scope) => !groups.some((group) => group.scope === scope)).map((scope) => {
               const isFailed = failed.has(scope);
               const empty = !accounts.some((account) => account.scope === scope);
               if (isFailed) {
@@ -1303,7 +1303,7 @@ export default function AggregateAccountsPage() {
                     {scopeLabel(t, scope)}
                   </span>
                   <span>
-                    {SCOPES.includes(scope) && !empty
+                    {CORE_SCOPES.includes(scope as (typeof CORE_SCOPES)[number]) && !empty
                       ? t("aggregate.note.noAccounts")
                       : t("aggregate.note.noClient", { client })}
                   </span>
@@ -1858,7 +1858,7 @@ export default function AggregateAccountsPage() {
           <span className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
             {mode === "flat"
               ? t("aggregate.count.sorted", { n: totals.total })
-              : t("aggregate.count.total", { n: totals.total, scopes: SCOPES.length })}
+              : t("aggregate.count.total", { n: totals.total, scopes: CORE_SCOPES.length })}
           </span>
         )}
 

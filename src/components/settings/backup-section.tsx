@@ -75,7 +75,7 @@ import { displayText } from "@/lib/display-text";
 import { formatDate } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { useRefreshAction } from "@/lib/use-refresh-action";
-import { SCOPES, type Scope } from "@/lib/scope";
+import { CORE_SCOPES } from "@/lib/scope";
 import type { AutoBackupEntry, ImportPreviewScopeRow } from "@/lib/types";
 import { useBackupStore } from "@/stores/backup";
 import type { TranslationKey } from "@/locales/zh";
@@ -97,7 +97,7 @@ const KIND_LABEL_KEY: Record<AutoBackupEntry["kind"], TranslationKey> = {
 /** 空统计（4 作用域；配置分区数是**真实常量**，不是每作用域数据）。 */
 function emptyStats(): ScopeStats {
   const out = {} as ScopeStats;
-  for (const scope of SCOPES) {
+  for (const scope of CORE_SCOPES) {
     out[scope] = { accounts: 0, config: CONFIG_SECTIONS_PER_SCOPE, gateway: 0 };
   }
   return out;
@@ -486,7 +486,7 @@ export function BackupSection() {
             </div>
           ) : (
             <div className="divide-y divide-border/50">
-              {SCOPES.map((scope: Scope) => {
+              {CORE_SCOPES.map((scope) => {
                 const tri = scopeCheckState(selection, scope);
                 const parts = selection[scope];
                 const stat = stats[scope];

@@ -22,7 +22,7 @@
  * 业务判断**，也**不写进备份文件**。
  */
 
-import { SCOPES, type Scope } from "./scope";
+import { CORE_SCOPES } from "./scope";
 import type { BackupSelectionState } from "./api";
 
 /** 一个作用域下的三个可备份分区（与后端 `ScopeSelection` 同源）。 */
@@ -37,7 +37,8 @@ export interface ScopeParts {
 }
 
 /** 全量勾选：4 作用域 × 3 分区。 */
-export type BackupSelection = Record<Scope, ScopeParts>;
+export type BackupScope = (typeof CORE_SCOPES)[number];
+export type BackupSelection = Record<BackupScope, ScopeParts>;
 
 /** 逐作用域的**实际**条目数（用于勾选旁的数字与预估）。缺省即 0。 */
 export interface ScopeStat {
@@ -45,7 +46,7 @@ export interface ScopeStat {
   config: number;
   gateway: number;
 }
-export type ScopeStats = Record<Scope, ScopeStat>;
+export type ScopeStats = Record<BackupScope, ScopeStat>;
 
 /** 导出预估（**由实际勾选推导**，§3.10 第 1 条）。 */
 export interface BackupEstimate {
@@ -79,14 +80,14 @@ export const CONFIG_SECTIONS_PER_SCOPE = 4;
 /** 默认全选：4 作用域 × 3 分区（D14）。 */
 export function defaultBackupSelection(): BackupSelection {
   const out = {} as BackupSelection;
-  for (const scope of SCOPES) out[scope] = { accounts: true, config: true, gateway: true };
+  for (const scope of CORE_SCOPES) out[scope] = { accounts: true, config: true, gateway: true };
   return out;
 }
 
 /** 切换某作用域的**某一个分区**。 */
 export function toggleScopePart(
   selection: BackupSelection,
-  scope: Scope,
+  scope: BackupScope,
   part: BackupPart,
 ): BackupSelection {
   const current = selection[scope];
@@ -94,13 +95,13 @@ export function toggleScopePart(
 }
 
 /** 某作用域是否三个分区全勾。 */
-export function isScopeAll(selection: BackupSelection, scope: Scope): boolean {
+export function isScopeAll(selection: BackupSelection, scope: BackupScope): boolean {
   const parts = selection[scope];
   return parts.accounts && parts.config && parts.gateway;
 }
 
 /** 某作用域是否三个分区全不勾。 */
-export function isScopeNone(selection: BackupSelection, scope: Scope): boolean {
+export function isScopeNone(selection: BackupSelection, scope: BackupScope): boolean {
   const parts = selection[scope];
   return !parts.accounts && !parts.config && !parts.gateway;
 }
@@ -111,27 +112,27 @@ export function isScopeNone(selection: BackupSelection, scope: Scope): boolean {
  * `mixed` 是「部分勾选」的语义，渲染侧必须落到 `aria-checked="mixed"`（§3.11），
  * 否则屏幕阅读器会把半选读成「未选」，用户以为整组被关掉了。
  */
-export function scopeCheckState(selection: BackupSelection, scope: Scope): "all" | "none" | "mixed" {
+export function scopeCheckState(selection: BackupSelection, scope: BackupScope): "all" | "none" | "mixed" {
   if (isScopeAll(selection, scope)) return "all";
   if (isScopeNone(selection, scope)) return "none";
   return "mixed";
 }
 
 /** 点作用域头：**全不勾 ⇒ 全勾；否则 ⇒ 全不勾**（含半选，一步收敛到「全勾」）。 */
-export function toggleScopeAll(selection: BackupSelection, scope: Scope): BackupSelection {
+export function toggleScopeAll(selection: BackupSelection, scope: BackupScope): BackupSelection {
   const next = !isScopeAll(selection, scope);
   return { ...selection, [scope]: { accounts: next, config: next, gateway: next } };
 }
 
 /** 至少勾了一个分区的作用域数。 */
 export function selectedScopeCount(selection: BackupSelection): number {
-  return SCOPES.filter((scope) => !isScopeNone(selection, scope)).length;
+  return CORE_SCOPES.filter((scope) => !isScopeNone(selection, scope)).length;
 }
 
 /** 勾选的分区总数。 */
 export function selectedPartCount(selection: BackupSelection): number {
   let total = 0;
-  for (const scope of SCOPES) {
+  for (const scope of CORE_SCOPES) {
     for (const part of BACKUP_PARTS) if (selection[scope][part]) total += 1;
   }
   return total;
@@ -154,7 +155,7 @@ export function buildSelectionState(
   appSettings?: Record<string, unknown>,
 ): BackupSelectionState {
   const scopes: BackupSelectionState["scopes"] = {};
-  for (const scope of SCOPES) scopes[scope] = { ...selection[scope] };
+  for (const scope of CORE_SCOPES) scopes[scope] = { ...selection[scope] };
   if (appSettings && Object.keys(appSettings).length > 0) {
     return { scopes, includesCredentials, appSettings };
   }
@@ -172,7 +173,7 @@ export function estimateBackup(
   let scopes = 0;
   let parts = 0;
 
-  for (const scope of SCOPES) {
+  for (const scope of CORE_SCOPES) {
     const picked = selection[scope];
     const stat = scopeStats[scope];
     if (picked.accounts || picked.config || picked.gateway) scopes += 1;

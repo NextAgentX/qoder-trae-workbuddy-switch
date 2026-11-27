@@ -24,10 +24,10 @@ import {
   toggleScopeAll,
   toggleScopePart,
   type BackupPart,
+  type BackupScope,
   type BackupSelection,
 } from "@/lib/backup-selection";
 import type { BackupSelectionState } from "@/lib/api";
-import type { Scope } from "@/lib/scope";
 import type {
   AutoBackupConfig,
   AutoBackupEntry,
@@ -57,8 +57,8 @@ interface BackupState {
   /** 自动备份 / 导入前快照列表（最新在前）。 */
   autoBackups: AutoBackupEntry[];
 
-  togglePart: (scope: Scope, part: BackupPart) => void;
-  toggleScope: (scope: Scope) => void;
+  togglePart: (scope: BackupScope, part: BackupPart) => void;
+  toggleScope: (scope: BackupScope) => void;
   setCreds: (value: boolean) => void;
   setConflict: (policy: BackupConflictPolicy) => void;
   setPreview: (preview: ImportPreview | null) => void;

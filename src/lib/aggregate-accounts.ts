@@ -30,8 +30,8 @@ import type { QoderAccountView } from "@/lib/api";
 import type { TraeAccount, TraeJwtStatus } from "@/lib/trae-types";
 import { cooldownNeedsAttention } from "@/lib/trae-cooldown";
 import { qoderCredentialExpired } from "@/lib/qoder-credential";
-import { SCOPES, scopeParts, type Scope } from "@/lib/scope";
-import type { PlatformSlug } from "@/lib/platforms/registry";
+import { CORE_SCOPES, scopeParts, type Scope } from "@/lib/scope";
+import { PLATFORM_SLUG, type PlatformSlug } from "@/lib/platforms/registry";
 
 /* ══════════════════════ 形状 ══════════════════════ */
 
@@ -55,7 +55,7 @@ export function aggregateRef(scope: Scope, key: string): string {
 }
 
 /**
- * 拆账号键。格式不符（不含 `:`、scope 不在 `SCOPES` 里）⇒ `null`。
+ * 拆账号键。格式不符（不含 `:`、scope 不在 core 作用域里）⇒ `null`。
  *
  * ⚠️ **fail-closed**：宁可丢掉一个键，也不要让一个来路不明的字符串冒充作用域
  * （`localStorage` 是用户可见可改的文件，这里必须当成不可信输入）。
@@ -66,7 +66,7 @@ export function parseAggregateRef(ref: string): { scope: Scope; key: string } | 
   const scope = ref.slice(0, i) as Scope;
   const key = ref.slice(i + 1);
   if (!key) return null;
-  if (!(SCOPES as readonly string[]).includes(scope)) return null;
+  if (!(CORE_SCOPES as readonly string[]).includes(scope)) return null;
   return { scope, key };
 }
 
@@ -329,7 +329,7 @@ export function filterAggregateAccounts(
 /**
  * 按作用域分组。**空组不返回** —— 调用方另外处理「未安装 / 没有账号」的说明行。
  *
- * 组序固定为 `SCOPES` 的声明顺序（平台顺序 → 区域顺序），因此刷新后卡片不会跳位。
+ * 组序固定为 `CORE_SCOPES` 的声明顺序（平台顺序 → 区域顺序），因此刷新后卡片不会跳位。
  */
 export function groupAggregateAccounts(all: readonly AggregateAccount[]): AggregateGroup[] {
   const byScope = new Map<Scope, AggregateAccount[]>();
@@ -338,7 +338,7 @@ export function groupAggregateAccounts(all: readonly AggregateAccount[]): Aggreg
     if (bucket) bucket.push(account);
     else byScope.set(account.scope, [account]);
   }
-  return SCOPES.filter((scope) => byScope.has(scope)).map((scope) => ({
+  return CORE_SCOPES.filter((scope) => byScope.has(scope)).map((scope) => ({
     scope,
     items: byScope.get(scope) ?? [],
   }));
@@ -349,7 +349,7 @@ export function sortByUrgency(
   all: readonly AggregateAccount[],
   now: number = Date.now(),
 ): AggregateAccount[] {
-  const scopeOrder = new Map<string, number>(SCOPES.map((scope, i) => [scope, i]));
+  const scopeOrder = new Map<string, number>(CORE_SCOPES.map((scope, i) => [scope, i]));
   return [...all].sort((x, y) => {
     const u = aggregateUrgency(x, now) - aggregateUrgency(y, now);
     if (u !== 0) return u;
@@ -386,7 +386,7 @@ const TRAE_VARIANT: Record<string, "trae_merged" | "global_trae_merged"> = {
   "trae-global": "global_trae_merged",
 };
 
-export const AGGREGATE_SOURCES: readonly AggregateSource[] = SCOPES.map((scope) => {
+export const AGGREGATE_SOURCES: readonly AggregateSource[] = CORE_SCOPES.map((scope) => {
   const { product, region } = scopeParts(scope);
   if (product === "workbuddy") {
     return { scope, platform: "workbuddy", region: region as "cn" | "global" };
@@ -399,9 +399,7 @@ export const AGGREGATE_SOURCES: readonly AggregateSource[] = SCOPES.map((scope) 
 
 /** 平台短标识（用于 `platformOfScope` 这类判断，避免各处再 `scopeParts` 一遍）。 */
 export function platformOfScope(scope: Scope): PlatformSlug {
-  return scopeParts(scope).product === "workbuddy"
-    ? "wb"
-    : scopeParts(scope).product === "trae"
-      ? "trae"
-      : "qoder";
+  /* 直接查注册表映射，不再用三元链 —— `Scope` 已含三个外部平台，
+     三元链会把它们静默落到 `"qoder"`，且编译器不会点名。 */
+  return PLATFORM_SLUG[scopeParts(scope).product];
 }
