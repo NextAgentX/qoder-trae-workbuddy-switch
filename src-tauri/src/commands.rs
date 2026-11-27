@@ -10,10 +10,9 @@ use std::sync::Mutex;
 use buddy_switch_core::modules::{
     account, app_prefs, auth_file, backup, cache, capability, checkin, client_limits,
     client_settings, codebuddy_cli, codebuddy_memory, config, credit_usage, credits, diagnostics,
-    external_credits,
-    export_import, gateway_ledger, migrate, oauth, process, programs, qoder, refresh,
-    region::Region, region::RegionFilter, rotate, runtime_log, session, session_bundle, skill,
-    switch, token_daily, token_stats, trae, travel, update, vscode_session,
+    export_import, external_credits, gateway_ledger, migrate, oauth, process, programs, qoder,
+    refresh, region::Region, region::RegionFilter, rotate, runtime_log, session, session_bundle,
+    skill, switch, token_daily, token_stats, trae, travel, update, vscode_session,
 };
 use tauri::{Emitter, Manager};
 // P5 §2.5 第 (2) 条：capability **默认拒绝**。表数据只在 core（`product_spec`），本文件只查表。
@@ -2179,12 +2178,7 @@ pub fn add_external_credit_account(
     credential: String,
     refresh_credential: Option<String>,
 ) -> Result<Value, String> {
-    external_credits::add_account(
-        &provider,
-        &name,
-        &credential,
-        refresh_credential.as_deref(),
-    )
+    external_credits::add_account(&provider, &name, &credential, refresh_credential.as_deref())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2231,13 +2225,17 @@ pub fn get_external_gateway_usage(provider: String) -> Result<Value, String> {
 #[tauri::command]
 pub async fn start_external_gateway(provider: String) -> Result<Value, String> {
     let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
-    buddy_switch_gateway::external::runtime().start(provider).await
+    buddy_switch_gateway::external::runtime()
+        .start(provider)
+        .await
 }
 
 #[tauri::command]
 pub async fn stop_external_gateway(provider: String) -> Result<Value, String> {
     let provider = buddy_switch_gateway::external::Provider::parse(&provider)?;
-    buddy_switch_gateway::external::runtime().stop(provider).await
+    buddy_switch_gateway::external::runtime()
+        .stop(provider)
+        .await
 }
 
 #[tauri::command]

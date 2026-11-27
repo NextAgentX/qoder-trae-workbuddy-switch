@@ -64,7 +64,9 @@ pub struct GatewayAccount {
 pub fn gateway_accounts(provider: &str) -> Result<Vec<GatewayAccount>, String> {
     provider_label(provider).ok_or("暂不支持该积分来源")?;
     let store = load_store()?;
-    Ok(store.accounts.into_iter()
+    Ok(store
+        .accounts
+        .into_iter()
         .filter(|account| account.provider == provider)
         .map(|account| GatewayAccount {
             id: account.id,
@@ -88,7 +90,9 @@ fn store_lock() -> &'static std::sync::Mutex<()> {
 }
 
 fn lock_store() -> std::sync::MutexGuard<'static, ()> {
-    store_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    store_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn load_store() -> Result<Store, String> {
@@ -161,9 +165,11 @@ pub fn add_account(
     }
     if provider == "raccoon" {
         /* 整段 Cookie 里两个键都可能出现，独立各取一次 —— 只取第一个命中会把
-           `raccoon_refresh_token` 丢掉。 */
-        let token = raccoon_cookie_pair(&credential, "xhx_token").map(|(_, value)| value.to_string());
-        let refresh = raccoon_cookie_pair(&credential, "raccoon_refresh_token").map(|(_, value)| value.to_string());
+        `raccoon_refresh_token` 丢掉。 */
+        let token =
+            raccoon_cookie_pair(&credential, "xhx_token").map(|(_, value)| value.to_string());
+        let refresh = raccoon_cookie_pair(&credential, "raccoon_refresh_token")
+            .map(|(_, value)| value.to_string());
         if token.is_some() || refresh.is_some() {
             match token {
                 Some(value) => credential = value,
@@ -284,10 +290,10 @@ pub async fn refresh_provider(provider: Option<&str>) -> Result<Value, String> {
         }
     }
     /* 刷新期间要逐个 await 上游（每个账号最长 15 秒），期间用户可能已经添加或删除了账号。
-       所以这里不写回本函数的快照，而是**重新读盘、只按 id 合并本轮的余额字段** ——
-       否则一次刷新会静默撤销期间发生的增删。 */
+    所以这里不写回本函数的快照，而是**重新读盘、只按 id 合并本轮的余额字段** ——
+    否则一次刷新会静默撤销期间发生的增删。 */
     /* 锁只包「读盘 → 合并 → 写盘」这一小段：上游 await 若也持锁，一次刷新会把
-       添加/删除请求卡住十几秒。 */
+    添加/删除请求卡住十几秒。 */
     let latest = {
         let _guard = lock_store();
         let mut latest = load_store()?;
@@ -295,7 +301,11 @@ pub async fn refresh_provider(provider: Option<&str>) -> Result<Value, String> {
             if provider.is_some_and(|provider| account.provider != provider) {
                 continue;
             }
-            if let Some(refreshed) = store.accounts.iter().find(|candidate| candidate.id == account.id) {
+            if let Some(refreshed) = store
+                .accounts
+                .iter()
+                .find(|candidate| candidate.id == account.id)
+            {
                 account.remaining = refreshed.remaining;
                 account.daily_remaining = refreshed.daily_remaining;
                 account.updated_at = refreshed.updated_at;
@@ -520,7 +530,8 @@ fn raccoon_cookie_pair<'a>(raw: &'a str, wanted: &str) -> Option<(&'a str, &'a s
     cookie.split(';').find_map(|part| {
         let (key, value) = part.trim().split_once('=')?;
         let key = key.trim();
-        key.eq_ignore_ascii_case(wanted).then_some((key, value.trim()))
+        key.eq_ignore_ascii_case(wanted)
+            .then_some((key, value.trim()))
     })
 }
 

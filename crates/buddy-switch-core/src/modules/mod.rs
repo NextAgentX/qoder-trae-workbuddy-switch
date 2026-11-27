@@ -44,11 +44,11 @@ pub mod diagnostics;
 // E1 · 代理 KPI 台账的只读视图（core 只读 gateway 写的台账，不引入反向依赖）。
 pub mod credit_usage;
 pub mod credits;
-/// 豆包 / Loomy / 商汤小浣熊的独立积分来源（不进入可切换产品注册表）。
-pub mod external_credits;
 pub mod cst;
 pub mod error_code;
 pub mod export_import;
+/// 豆包 / Loomy / 商汤小浣熊的独立积分来源（不进入可切换产品注册表）。
+pub mod external_credits;
 pub mod identity;
 pub mod proxy_kpi_view;
 pub mod reconcile;

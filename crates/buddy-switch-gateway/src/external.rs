@@ -942,8 +942,8 @@ async fn chat(State(state): State<StateData>, headers: HeaderMap, request: Reque
             let response = doubao_chat(&state, &account.credential, upstream_payload.clone()).await;
             if response.status().is_success() || !retryable_status(response.status()) {
                 /* ⚠️ OpenAI 协议也要走 `adapt_doubao_response`：上游被强制 `stream=true`，
-                    直接透传会让 `"stream": false` 的调用方收到 SSE 原文。
-                    适配器对 OpenAI 的非流式分支会把增量聚合成一个 `chat.completion` 对象。 */
+                直接透传会让 `"stream": false` 的调用方收到 SSE 原文。
+                适配器对 OpenAI 的非流式分支会把增量聚合成一个 `chat.completion` 对象。 */
                 return adapt_doubao_response(response, protocol, &model, client_stream, &payload)
                     .await;
             }
