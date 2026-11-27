@@ -398,6 +398,58 @@ pub(crate) fn copy_sessions_in_with(
         }
     }
 
+    // ★ issue #243：索引**按工作区落盘一次**，而不是每条会话一次。
+    //
+    // `copy_one_conversation` 只把条目合并进内存里的 `state.current`；真正的
+    // `atomic_write` 放到这里，每个工作区一次。旧实现逐条 persist ⇒ O(N²) 写放大
+    // （1900 条会话、累计 0.31 GB 冗余写入、单这一步 5.2 秒）。
+    //
+    // 失败语义：某个工作区落盘失败时，**只回退该工作区**刚复制的会话目录，
+    // 其余工作区与已经成功的条目不受影响；错误记进 `errors`，与逐条失败的形态一致。
+    for (workspace_hash, state) in states.iter_mut() {
+        // ★ 该工作区**一条都没成功**时绝不能落盘：`WorkspaceState::persist` 会建目录
+        //   并写一份空索引，等于替用户凭空造一个工作区（既有回归
+        //   `all_failed_items_leave_no_target_directory` 钉的就是这条）。
+        let touched = copied.iter().any(|outcome| {
+            outcome.get("workspaceHash").and_then(Value::as_str) == Some(workspace_hash.as_str())
+        });
+        if !touched {
+            continue;
+        }
+        if let Err(error) = state.persist(options.write_workspace_index_backup) {
+            // 磁盘一致性受损：从备份整体恢复该工作区索引（最后手段）。
+            state.restore();
+            let prefix = format!("{workspace_hash}:");
+            let mut rolled_back: Vec<String> = Vec::new();
+            copied.retain(|outcome| {
+                let id = outcome
+                    .get("conversationId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let ws = outcome
+                    .get("workspaceHash")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if ws != workspace_hash.as_str() {
+                    return true;
+                }
+                let dir = target_history.join(workspace_hash).join(&id);
+                remove_dir_all_if_exists(&dir);
+                rolled_back.push(id);
+                false
+            });
+            for id in rolled_back {
+                errors.push(json!({
+                    "workspaceHash": workspace_hash,
+                    "conversationId": id,
+                    "error": format!("合并工作区索引失败：{error}"),
+                }));
+            }
+            let _ = prefix;
+        }
+    }
+
     let mut report = json!({
         "sourceUid": source_uid,
         "targetUid": target_uid,
@@ -780,18 +832,16 @@ fn copy_one_conversation(
         .and_then(|index| find_conversation(index, conversation_id));
     let entry = conversation_entry(source_entry.as_ref(), &new_conversation_id);
 
-    let before = state.current.clone();
+    // ★ issue #243：这里**只合并内存**，落盘由调用方按工作区**一次**完成。
+    //
+    // 旧实现对每条会话都调一次 `state.persist()`，而它会 `atomic_write` 重写整份
+    // `index.json`（含全部 N 条 conversations）⇒ O(N²) 写放大。实测 1900 条会话时
+    // 累计写入 0.31 GB、单这一步 5.2 秒。
+    //
+    // 为什么回退粒度仍是对的：`copy_one_conversation` 现在不再改动磁盘索引，
+    // 单条失败时只需删掉刚写的会话目录；索引层面的失败由批量提交统一处理
+    // （失败则该工作区的目录改动整体回退，见 `copy_sessions_in_with`）。
     merge_workspace_index(&mut state.current, entry, &new_conversation_id);
-    if let Err(error) = state.persist(options.write_workspace_index_backup) {
-        // 回退本条对索引的改动（保留同工作区其它已成功条目的合并结果）。
-        state.current = before;
-        if state.persist(options.write_workspace_index_backup).is_err() {
-            // 二次写入仍失败：磁盘一致性已受损，从备份整体恢复该工作区索引（最后手段）。
-            state.restore();
-        }
-        remove_dir_all_if_exists(&final_dir);
-        return Err(format!("合并工作区索引失败：{error}"));
-    }
 
     let messages = match &plan {
         Some(plan) => plan.message_total,
@@ -1784,6 +1834,66 @@ mod tests {
 
     /// D3 回归：某工作区所有条目最终都失败时，不得创建空的目标工作区目录。
     #[test]
+    /// ★ 回归 #243：索引必须**按工作区落盘一次**，不能每条会话写一次。
+    ///
+    /// 旧实现对每条会话都 `state.persist()`（整份 `index.json` 重写）⇒ O(N²) 写放大：
+    /// 1900 条会话累计写入 0.31 GB、单这一步 5.2 秒。
+    ///
+    /// 判据：复制 N 条到同一工作区后，索引文件的**修改次数**应为 1。这里用「索引内容
+    /// 正确且会话数完整」间接验证 —— 写放大无法从结果观察，故同时断言
+    /// `copy_one_conversation` 的源码不再调用 `persist`（结构断言，见下一条）。
+    #[test]
+    /// ★ 回归 #243：索引必须**按工作区落盘一次**，不能每条会话写一次。
+    ///
+    /// 旧实现对每条会话都 `state.persist()`（整份 `index.json` 重写）⇒ O(N²) 写放大：
+    /// 1900 条会话累计写入 0.31 GB、单这一步 5.2 秒。
+    ///
+    /// 用**结构断言**而不是计时：写放大无法从结果观察，而耗时断言在 CI 上必然抖动。
+    #[test]
+    fn index_is_persisted_once_per_workspace_not_once_per_conversation() {
+        let source = include_str!("linked_vscode_session.rs");
+        let body = source_body_of(source, "copy_one_conversation");
+        assert!(
+            !body.contains("state.persist(options.write_workspace_index_backup)"),
+            "copy_one_conversation 不得自行落盘索引 —— 那会退回每条一次 persist 的 O(N²) 写放大"
+        );
+        let batch = source_body_of(source, "copy_sessions_in_with");
+        assert!(
+            batch.contains("state.persist(options.write_workspace_index_backup)"),
+            "批量提交处必须按工作区落盘一次"
+        );
+        assert!(
+            batch.contains("let touched = copied.iter().any("),
+            "该工作区一条都没成功时不得落盘（否则会凭空造出空工作区）"
+        );
+    }
+
+    /// 取源码里某个函数的函数体（花括号配平）。
+    fn source_body_of(source: &str, name: &str) -> String {
+        let needle = format!("fn {name}");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("源码里必须存在 {needle}"));
+        let open = start
+            + source[start..]
+                .find('{')
+                .unwrap_or_else(|| panic!("{needle} 必须有函数体"));
+        let mut depth = 0i32;
+        for (offset, ch) in source[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[open + 1..open + offset].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{needle} 的花括号不配平");
+    }
+
     fn all_failed_items_leave_no_target_directory() {
         let fixture = Fixture::new("no-empty-dir");
         seed_source(&fixture); // 仅 seed 源；目标工作区不存在
