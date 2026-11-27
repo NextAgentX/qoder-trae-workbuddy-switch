@@ -733,6 +733,30 @@ async fn fetch_enterprise_user_usage_for(region: Region, account: &Value) -> Val
     post_with_account_tenant_policy(region, account, &url, json!({}), false).await
 }
 
+/// 取企业月度配额并折成一条资源；条件不满足时返回 `None`，由调用方决定后续语义。
+///
+/// 覆盖两种「个人资源为空」的场景：三条新接口返回空包（还没走到旧接口就先命中），
+/// 以及旧接口也返回空（走到函数末尾的兜底）。
+async fn try_enterprise_quota_resource(region: Region, account: &Value, now: i64) -> Option<Value> {
+    if region != Region::Cn || enterprise_id(account).is_none() {
+        return None;
+    }
+    let usage = fetch_enterprise_user_usage_for(region, account).await;
+    if !is_success(&usage) {
+        return None;
+    }
+    enterprise_usage_resource(&usage, now)
+}
+
+/// 个人资源为空时，是否该再探一次企业月度配额。
+///
+/// 判据只看账号带不带 `enterpriseId`，**不看响应内容**：个人账号带上企业 ID 去请求
+/// 同样返回 200 和 `limitNum`（只是 `credit=0`），从响应反推会把个人账号误判成企业账号。
+/// 个人账号返回 false，保持「空包即无额度」的原语义，也不多发请求。
+fn should_probe_enterprise_quota(resources: &[Value], account: &Value) -> bool {
+    resources.is_empty() && enterprise_id(account).is_some()
+}
+
 fn merge_resources(summary_resources: Vec<Value>, detail_resources: Vec<Value>) -> Vec<Value> {
     let detail_codes: HashSet<String> = detail_resources
         .iter()
@@ -927,6 +951,20 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
     if let Some(resources) =
         normalized_new_resources(&responses.summary, &responses.paid, &responses.free, now)
     {
+        // ★ 空包不是终点 —— 第一版就死在这次提前 return 上。
+        //
+        // `has_resource_packages` 对 `{"Packages":[]}` 判 true ⇒ 企业 / 教育公益版账号
+        // 拿到的是 `Some(vec![])`，在这里直接返回一个「0 额度」结果，下面那段企业配额
+        // 兜底永远执行不到，合并后编译出来照样显示 0。
+        //
+        // 个人账号保持原语义：空就是没有额度，不额外发请求。
+        if should_probe_enterprise_quota(&resources, &responses.account) {
+            if let Some(resource) =
+                try_enterprise_quota_resource(region, &responses.account, now).await
+            {
+                return credit_result(account, vec![resource], now);
+            }
+        }
         return credit_result(account, resources, now);
     }
 
@@ -965,13 +1003,8 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
     // 不在这里再做一次 401 刷新：`fallback_account` 来自 `fetch_new_resource_responses`，
     // 若三条新接口撞过 401 已经刷新并落盘，这里携带的就是新 token；
     // 再刷一次会重蹈「用旧 refresh token 覆盖新 token」的覆辙，而收益为零。
-    if region == Region::Cn && enterprise_id(&fallback_account).is_some() {
-        let usage = fetch_enterprise_user_usage_for(region, &fallback_account).await;
-        if is_success(&usage) {
-            if let Some(resource) = enterprise_usage_resource(&usage, now) {
-                return credit_result(account, vec![resource], now);
-            }
-        }
+    if let Some(resource) = try_enterprise_quota_resource(region, &fallback_account, now).await {
+        return credit_result(account, vec![resource], now);
     }
 
     json!({
@@ -1085,6 +1118,41 @@ mod tests {
         );
         assert_eq!(enterprise_id(&json!({"enterpriseId": "   "})), None);
         assert_eq!(enterprise_id(&json!({"enterpriseId": Value::Null})), None);
+    }
+
+    /// 回归：第一版把企业兜底放在旧接口回退之后，但 `{"Packages":[]}` 会被
+    /// `has_resource_packages` 判成有效响应 ⇒ 主流程立刻 `return credit_result([])`，
+    /// 兜底成了死代码。合并后编译出来仍然显示 0，用户报的就是这个。
+    ///
+    /// 可证伪：删掉 `get_credit_expiry_for` 里那段 `should_probe_enterprise_quota` 分支，
+    /// 本用例不会红（它只测谓词），但真实链路会继续显示 0 —— 所以这里同时锁住
+    /// 「空数组仍是有效响应」这个前提，免得有人把它改成 `None` 而以为已经修好。
+    #[test]
+    fn empty_personal_resources_still_probe_enterprise_quota() {
+        let empty_body = json!({"code": 0, "data": {"Packages": []}});
+        let resources = normalized_new_resources(
+            &empty_body,
+            &json!({"code": 0, "data": {"Accounts": []}}),
+            &json!({"code": 0, "data": {"Accounts": []}}),
+            1_800_000_000_000,
+        )
+        .expect("空数组是有效响应，不是 None");
+
+        assert!(resources.is_empty());
+
+        let enterprise = json!({"uid": "u", "enterpriseId": "ent-1", "type": "ultimate"});
+        assert!(
+            should_probe_enterprise_quota(&resources, &enterprise),
+            "企业账号拿到空包时必须继续探企业配额，否则兜底不可达"
+        );
+
+        // 个人账号保持原语义：空包就是没有额度，不发多余请求。
+        let personal = json!({"uid": "u", "type": "personal"});
+        assert!(!should_probe_enterprise_quota(&resources, &personal));
+
+        // 企业账号若自己也有个人资源包，优先用个人包，不该被企业配额覆盖。
+        let non_empty = vec![json!({"packageCode": "TCACA_code_007", "remaining": 10.0})];
+        assert!(!should_probe_enterprise_quota(&non_empty, &enterprise));
     }
 
     /// 企业额度接口按 Bearer 身份推导企业，不应把账号资料里的 tenant ID 当授权参数发送。
