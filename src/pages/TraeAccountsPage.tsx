@@ -67,7 +67,7 @@ import * as api from "@/lib/api";
 import type { CheckinStatusEntry } from "@/lib/api";
 import type { AccountTokenTodayEntry } from "@/lib/types";
 import { accountSearchText } from "@/lib/account-search";
-import { lastSevenDays, localDateKey } from "@/lib/checkin-history";
+import { lastSevenDays } from "@/lib/checkin-history";
 import {
   filterAccounts,
   groupAccounts,
@@ -88,7 +88,7 @@ import {
   saveSchedulePatch,
   SCHEDULE_CONFIG_KEY,
 } from "@/lib/schedule-config";
-import { traeVariantLabel } from "@/lib/trae-types";
+import { traeVariantLabel, type TraeLogEntry } from "@/lib/trae-types";
 import { traeProgramsFor } from "@/lib/trae-programs";
 import { describeTraeCooldown } from "@/lib/trae-cooldown";
 import {
@@ -301,8 +301,7 @@ export default function TraeAccountsPage() {
    */
   const overview = snapshot?.overview ?? null;
   const credits = snapshot?.credits ?? null;
-  /* ⚠️ 页面**不再**单独解构 `snapshot.checkin`（issue #240）：抽屉的「签到积分」与
-     「签到历史」都改读 `credits.records` 后，它在本页已无消费者，留着只会误导。 */
+  const checkin = snapshot?.checkin ?? null;
   const variantStatuses = snapshot?.variantStatuses ?? TRAE_VARIANT_FALLBACK;
   /**
    * 每条产品线各自的当前登录账号（`profiles.currentAccount` 的 uid + 展示名）。
@@ -440,14 +439,13 @@ export default function TraeAccountsPage() {
    */
   const [detailAccount, setDetailAccount] = useState<TraeAccount | null>(null);
   /**
-   * ⚠️ 签到历史**不再**读 `get_trae_logs({ kind: "checkin" })`（issue #240）。
+   * ★ 抽屉「签到历史（近 7 天）」的数据源（打开抽屉时拉取）。
    *
-   * 日志是给人看的**纯文本**：批量签到只落一条不带 uid 的汇总行，按 uid 匹配永远
-   * 匹配不上，7 天全显示「未签到」。历史面板已改读 `credits.records`
-   * （`credits_history.json`，按 `date + userId` 追加、`delta` 齐全），与「今日已签到」
-   * 同源。原 `detailCheckinLogs` state 与它的加载函数因此一并删除 ——
-   * 留着会让下一个人以为那个数据源还在用。
+   * `get_trae_logs({ kind: "checkin" })` 是本机**真实**的签到日志（`TraeLogEntry` 带 `date`），
+   * 与 WorkBuddy 侧的 `getCheckinLogs()` 同一层语义。取不到时 `null` ⇒ 该区块**不渲染**
+   * （不摆一张空表，也不臆造「+N」）。
    */
+  const [detailCheckinLogs, setDetailCheckinLogs] = useState<TraeLogEntry[] | null>(null);
   const [detailAutoEditRemark, setDetailAutoEditRemark] = useState(false);
   /**
    * 抽屉「快照」页签的数据源（打开抽屉时按需拉取）。
@@ -1126,16 +1124,26 @@ export default function TraeAccountsPage() {
     });
   }
 
+  /** 拉一次本机签到日志（抽屉的「近 7 天」用它；失败 ⇒ 该区块不渲染）。 */
+  function loadDetailCheckinLogs() {
+    void api
+      .getTraeLogs({ kind: "checkin", variant })
+      .then((res) => setDetailCheckinLogs(res.entries))
+      .catch(() => setDetailCheckinLogs(null));
+  }
+
   /** 点「查看详情」：打开抽屉。 */
   function openDetail(account: TraeAccount) {
     setDetailAutoEditRemark(false);
     setDetailAccount(account);
+    loadDetailCheckinLogs();
   }
 
   /** 点「更多 → 编辑备注」：打开抽屉并**直接进入编辑态**。 */
   function openRemark(account: TraeAccount) {
     setDetailAutoEditRemark(true);
     setDetailAccount(account);
+    loadDetailCheckinLogs();
   }
 
   /**
@@ -1999,69 +2007,50 @@ export default function TraeAccountsPage() {
     : null;
 
   /**
-   * ★ 抽屉「签到积分」（原型 B5）：`todayCheckedIn` 必给；「今日获得」取
-   * `credits_history.json` 里该账号**今天**那条的 `delta`（issue #240）。
+   * ★ 抽屉「签到积分」（原型 B5）：`todayCheckedIn` 必给；「今日获得」来自**最近一轮**签到摘要里
+   * 该账号的 `delta`（上游实测字段）。
    *
-   * 为什么不再读 `checkin.summary`：摘要只覆盖「最近一次运行」，空队列轮会被覆盖成
-   * `results: []`，于是「其实签了、也得了分」被显示成「+0」或直接不渲染。
-   * `credits.records` 是**按天追加的台账**，与「今日已签到」的判断同源。
-   *
-   * ⚠️ 台账里没有今天的记录 ⇒ `todayCredit: null` ⇒ 抽屉不渲染那一行
+   * ⚠️ 摘要不是今天的、或该账号不在摘要里 ⇒ `todayCredit: null` ⇒ 抽屉**不渲染**那一行
    * （§3.4 规则 1：无数据不渲染）。**绝不**用固定奖励凑一个「+N」。
    */
   const detailCheckin = detail
     ? {
         todayCheckedIn: detail.checkedToday,
-        todayCredit: credits?.records.find(
-          (record) => record.userId === detail.userId && record.date === localDateKey(Date.now()),
-        )?.delta ?? null,
+        todayCredit:
+          checkin?.summaryIsToday
+            ? checkin.summary.results.find((row) => row.userId === detail.userId && row.ok)?.delta ?? null
+            : null,
       }
     : null;
 
   /**
-   * ★ 抽屉「签到历史（近 7 天）」（issue #240）。
+   * ★ 抽屉「签到历史（近 7 天）」：日期 + 结果来自**本机签到日志**
+   * （`get_trae_logs({ kind: "checkin" })`，`TraeLogEntry.date`）。
    *
-   * 数据源**只有一份**：`credits_history.json`（`credits.records`，按 `date + userId`
-   * 追加，`delta` 齐全）。之前这里读的是 `logs/checkin.log` 的纯文本 + 「最近一轮摘要」，
-   * 三个面板（历史 / 概览 / 抽屉）各用一份数据源，口径必然打架：
-   *
-   * - 批量签到的成功记录只落**汇总行**（不带 uid）⇒ 按 uid 匹配永远匹配不上，
-   *   7 天全显示「未签到」；
-   * - 摘要被空队列轮覆盖 ⇒ 7 天积分全「—」。
-   *
-   * 台账记录本身的语义：有记录 = 当天该账号签过（`delta` 可能为 0，表示「已签到、
-   * 本次无新增」）；没有记录 = 未签到。`delta > 0` 才是真正「获得了积分」的那一档。
+   * 「获得积分」按**账号 + 日期**取 `checkin.summary.results` 里那一条的 `delta`；
+   * 该摘要只覆盖**最近一轮**，取不到时为 `null` ⇒ 渲染「—」（**绝不**臆造固定奖励）。
    */
-  const detailCheckinHistory: DetailCheckinHistoryRow[] | null = detail
-    ? lastSevenDays().map((day) => {
-        const record = credits?.records.find(
-          (row) => row.userId === detail.userId && row.date === day,
-        );
-        if (!record) {
-          return {
-            date: day,
-            resultLabel: t("shared.drawer.checkin.result.none"),
-            tone: "none" as const,
-            amount: null,
-          };
-        }
-        /* `delta > 0` = 本轮真的到账；`delta === 0` = 上游已签过或本轮无新增。
-           两者都是「签到成功」，但只有前者该显示金额，后者显示「—」（不是 +0）。 */
-        return record.delta > 0
-          ? {
-              date: day,
-              resultLabel: t("shared.drawer.checkin.result.success"),
-              tone: "ok" as const,
-              amount: record.delta,
-            }
-          : {
-              date: day,
-              resultLabel: t("shared.drawer.checkin.result.already"),
-              tone: "warn" as const,
-              amount: null,
-            };
-      })
-    : null;
+  const detailCheckinHistory: DetailCheckinHistoryRow[] | null =
+    detail && detailCheckinLogs
+      ? lastSevenDays().map((day) => {
+          const entry = detailCheckinLogs
+            .filter((log) => log.kind === "checkin" && log.date === day)
+            .find((log) => log.message.includes(detail.userId));
+          const outcome = checkin?.summaryIsToday
+            ? checkin.summary.results.find((row) => row.userId === detail.userId && row.ok)
+            : undefined;
+          const amount = outcome ? outcome.delta : null;
+          if (!entry) {
+            return { date: day, resultLabel: t("shared.drawer.checkin.result.none"), tone: "none" as const, amount };
+          }
+          /* 日志行是**纯文本**，不做自然语言解析：只按「是否含失败关键字」二分。
+             宁可把失败显示成「成功」以外的一档，也不猜更细的状态。 */
+          const failed = /失败|error|fail/i.test(entry.message);
+          return failed
+            ? { date: day, resultLabel: t("shared.drawer.checkin.result.fail"), tone: "fail" as const, amount }
+            : { date: day, resultLabel: t("shared.drawer.checkin.result.success"), tone: "ok" as const, amount };
+        })
+      : null;
 
   /* 页头作用域（原型 `viewAccounts`）复用上方的 `scope`；「需处理」= JWT 已过期，
      与 WorkBuddy 侧的 `needsRelogin` 同一层语义。 */

@@ -10,16 +10,31 @@ permissions:
   pages: write
   id-token: write
 
+# Pages 同时只允许一个部署。**不要** cancel-in-progress：打断正在进行的生产部署
+# 会让线上停在半截；新的 push 排队等前一次跑完即可（官方 starter 同款写法）。
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    name: Build and deploy read-only demo
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # ── 构建 ────────────────────────────────────────────────────────────────────
+  # ★ 上传与部署**必须拆成两个 job**，不要合并回一个。
+  #
+  # `deploy-pages` 靠「按名字列举本次 run 的产物」来找到要部署的东西。两者在同一个
+  # job 里连着跑时，它会在 `upload-pages-artifact` finalize 之后几百毫秒就去列举，
+  # 偶尔拿到空列表直接失败：
+  #
+  #   Artifact github-pages has been successfully uploaded!
+  #   Fetching artifact metadata for "github-pages" in this workflow run
+  #   Found 0 artifact(s)   ← 上传成功、部署却找不到
+  #
+  # 这是 actions/deploy-pages 的已知缺陷（issue #451），不是本仓配置问题，而且
+  # **重跑不能救**：重跑会再传一份同名产物，第二次报的是
+  # `Multiple artifacts named "github-pages"`（issue #338）。2026-11-27 那次就踩了。
+  #
+  # 拆开后部署跑在另一个 job / 另一个 runner 上，隔几秒才开始列举，稳定命中。
+  build:
+    name: Build read-only demo
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -53,6 +68,15 @@ jobs:
           # `build:demo` 输出到 dist-demo；`dist/` 是 WebUI/Tauri 构建，不参与 Pages。
           path: dist-demo
 
+  # ── 部署 ────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy read-only demo
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
