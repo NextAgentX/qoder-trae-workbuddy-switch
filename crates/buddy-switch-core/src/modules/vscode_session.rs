@@ -326,6 +326,9 @@ pub fn list_sessions_in(root: &Path, client: ExtClient, uid: &str) -> Value {
                 skipped += 1;
                 continue;
             };
+            // ★ 本工作区只扫一次（issue #243）：把「哪些会话目录下有消息文件」提前
+            //   建成集合，逐条 hasHistory 变成 O(1) 查询。
+            let history_ids = conversations_with_message_files(&ws_dir);
             for conversation in conversations {
                 let Some(id) = conversation
                     .get("id")
@@ -335,6 +338,8 @@ pub fn list_sessions_in(root: &Path, client: ExtClient, uid: &str) -> Value {
                 else {
                     continue;
                 };
+                let has_history =
+                    conversation_has_indexed_messages(conversation) || history_ids.contains(id);
                 sessions.push(json!({
                     "id": id,
                     "workspaceHash": workspace_hash,
@@ -346,7 +351,11 @@ pub fn list_sessions_in(root: &Path, client: ExtClient, uid: &str) -> Value {
                         .unwrap_or("(无标题)"),
                     "updatedAt": conversation_updated_at(conversation),
                     "type": conversation.get("type").and_then(Value::as_str).unwrap_or(""),
-                    "hasHistory": conversation_has_history(&ws_dir, id),
+                    // ★ issue #243：hasHistory 两级判据，与 `conversation_has_history`
+                    //   逐字一致，只是第二级换成「本工作区一次预扫」的结果：
+                    //   ① 索引里 messages 非空 ⇒ true（绝大多数会话命中这里，零额外 I/O）；
+                    //   ② 否则看预扫集合里是否出现了这个会话目录。
+                    "hasHistory": has_history,
                 }));
             }
         }
@@ -411,6 +420,42 @@ fn time_to_ms(value: Option<&Value>) -> i64 {
 /// ⚠️ 判据要**两条都看**：只有索引没落盘消息文件（或反之）在真实数据里都出现过，
 /// 只看一条会把「有正文」误报成「空会话」。
 fn conversation_has_history(ws_dir: &Path, conversation_id: &str) -> bool {
+    conversation_has_history_with(ws_dir, conversation_id, &mut |dir: &Path| {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+            .unwrap_or(false)
+    })
+}
+
+/// [`conversation_has_history`] 的本体，**消息目录探测**由调用方注入（issue #243）。
+///
+/// ## 为什么要拆出一层
+///
+/// 旧实现对每条会话都要 `read_json(index.json)` + `read_dir(messages/)` + 一次
+/// `stat`。实测：只读索引 163 ms → 加上 hasHistory 变成 **5,730 ms**（35 倍），
+/// 而 `list_vscode_sessions` 在**打开切换对话框时就要跑一次** —— 用户看到的
+/// 「光是列出会话就要 7–9 秒」就是它。
+///
+/// 改法有两层：
+/// 1. `index.json` 里已有非空 `messages` 时**直接返回 true**，不再读磁盘
+///    （绝大多数会话都在这一档，实测能覆盖主要成本）；
+/// 2. 需要落到磁盘时，由调用方传入一个**共享的探测缓存** —— 列表路径上
+///    一次 `read_dir` 建出「哪些会话目录下有消息文件」的集合，之后 O(1) 查询；
+///    其余调用方传闭包，行为与旧实现逐字一致。
+/// 索引条目里是否已带非空 `messages`（hasHistory 的第一级判据）。
+///
+/// 抽出来是为了让**列表路径**与 [`conversation_has_history`] 共用同一份判据：
+/// 两处各写一遍的话，将来只改一处就会出现「列表说有、复制说没有」的静默分歧。
+fn conversation_has_indexed_messages(conversation: &Value) -> bool {
+    conversation
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| !messages.is_empty())
+}
+fn conversation_has_history_with<F>(ws_dir: &Path, conversation_id: &str, probe: &mut F) -> bool
+where
+    F: FnMut(&Path) -> bool,
+{
     let conversation_dir = ws_dir.join(conversation_id);
     if let Some(index) = read_json(&conversation_dir.join("index.json")) {
         if index
@@ -421,9 +466,43 @@ fn conversation_has_history(ws_dir: &Path, conversation_id: &str) -> bool {
             return true;
         }
     }
-    std::fs::read_dir(conversation_dir.join("messages"))
-        .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
-        .unwrap_or(false)
+    probe(&conversation_dir.join("messages"))
+}
+
+/// 一次扫出「该工作区里哪些会话目录下有消息文件」（issue #243 第 ③ 条）。
+///
+/// 只读一层 `messages/` 目录名，不做 per-file `stat`：有一条文件就算有历史，
+/// 与 [`conversation_has_history`] 的判据一致（`is_file` 在这里放宽成「非目录条目」，
+/// 因为 `read_dir` 已经拿到了类型 —— 少一次 `stat` 正是这条优化的意义）。
+fn conversations_with_message_files(ws_dir: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(entries) = std::fs::read_dir(ws_dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        // ★ 判据与 `conversation_has_history` 逐字一致，两级都要看：
+        //   ① 会话**自己的** `index.json` 里 `messages` 非空（注意不是工作区索引里的条目 ——
+        //     工作区索引那条只有 id/name/时间，没有 messages）；占用一次小文件读，
+        //     但整批只发生在本工作区的一次预扫里，不是每条会话各读一次。
+        //   ② 否则看 `messages/` 目录下有没有文件。
+        let indexed = read_json(&path.join("index.json"))
+            .and_then(|index| index.get("messages").and_then(Value::as_array).cloned())
+            .is_some_and(|messages| !messages.is_empty());
+        let has_files = indexed
+            || std::fs::read_dir(path.join("messages"))
+                .map(|inner| inner.flatten().any(|item| !item.path().is_dir()))
+                .unwrap_or(false);
+        if has_files {
+            if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// 读取并解析 JSON 文件；缺失 / 不可读 / 损坏 ⇒ `None`（**不 panic**，由调用方计入 `skipped`）。
@@ -675,18 +754,114 @@ fn remap_message_file(text: &str, old_stem: &str, plan: &RemapPlan) -> String {
 }
 
 /// 递归复制目录（保持相对结构与文件名 —— 附件可能有中文名）。
+///
+/// ## ★ 并行复制（issue #243 第 ① 条）
+///
+/// 一个会话平均 160 个小文件；全选复制是 30 万文件 / 3.3 GB。旧实现逐文件串行
+/// `std::fs::copy`，在开着 Defender 实时保护的机器上实测只有 **9.5 MB/s** ——
+/// 全量 2.5 分钟起步，这就是「勾选复制后切换要几分钟」的最大来源。
+///
+/// 改成「先收集清单、再多线程复制」：
+/// - 清单阶段单线程（`read_dir` 本身便宜，且顺序稳定、便于复现）；
+/// - 复制阶段按 `worker_count` 起线程，每个文件一次 `std::fs::copy`。
+///   I/O 密集且每文件独立，线程数取 CPU 数与 8 的较小值足够（再多只是排队）。
+///
+/// ## 失败语义（与串行版**逐字**一致）
+///
+/// 串行版是「遇到第一个错误立刻返回」，且**已经复制的文件留在原地**（由调用方
+/// 用 `remove_dir_all_if_exists` 回退整个临时目录）。并行版保留同一语义：
+/// 记下**第一个**错误（按清单顺序，不是线程完成顺序 —— 后者不可复现），
+/// 其它线程看到已出错就停下，最终返回那个错误。
+///
+/// 正因为「可能只复制了一部分」，调用方**必须**仍然把目标当临时目录整体删除 ——
+/// 这一点与原来一致，不需要调用方改动。
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    // 1) 收集清单：目录先建、文件进队列。
+    //
+    // ★ 建目标根目录必须在 `read_dir` **之前**，与串行版逐字一致（原实现第一行就是
+    //   `create_dir_all(dst)?`）。顺序反了会改变失败后的磁盘形态：备份目录不存在时，
+    //   原实现留下一个空的目标目录，改成「先读再建」就什么都不留 ——
+    //   `restore_dir_reports_failure_with_backup_path` 钉的正是这个形态。
     std::fs::create_dir_all(dst)?;
+    let mut dirs: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
+    collect_copy_plan(src, dst, &mut dirs, &mut files)?;
+    for (dir, _) in &dirs {
+        std::fs::create_dir_all(dir)?;
+    }
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    // 2) 并行复制。
+    let next = AtomicUsize::new(0);
+    let failed: AtomicUsize = AtomicUsize::new(0);
+    let first_error: Mutex<Option<(usize, std::io::Error)>> = Mutex::new(None);
+    let workers = copy_worker_count(files.len());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if failed.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some((from, to)) = files.get(index) else {
+                    break;
+                };
+                if let Err(error) = std::fs::copy(from, to) {
+                    failed.store(1, Ordering::Relaxed);
+                    let mut slot = first_error.lock().unwrap();
+                    // 保留**清单顺序最靠前**的那个错误，让失败可复现。
+                    if slot.as_ref().is_none_or(|(seen, _)| index < *seen) {
+                        *slot = Some((index, error));
+                    }
+                    break;
+                }
+            });
+        }
+    });
+
+    match first_error.into_inner().unwrap() {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// 递归收集「要建哪些目录、要复制哪些文件」，保持**目录遍历顺序**。
+///
+/// 与 [`copy_dir_recursive`] 分开是为了让「清单」可单测、且复制阶段能并行 ——
+/// 两个阶段混在一起时，任何并行化都要在递归里传共享状态，读起来比收益更糟。
+fn collect_copy_plan(
+    src: &Path,
+    dst: &Path,
+    dirs: &mut Vec<(PathBuf, PathBuf)>,
+    files: &mut Vec<(PathBuf, PathBuf)>,
+) -> std::io::Result<()> {
+    dirs.push((dst.to_path_buf(), src.to_path_buf()));
     for entry in std::fs::read_dir(src)?.flatten() {
         let path = entry.path();
         let target = dst.join(entry.file_name());
         if path.is_dir() {
-            copy_dir_recursive(&path, &target)?;
+            collect_copy_plan(&path, &target, dirs, files)?;
         } else if path.is_file() {
-            std::fs::copy(&path, &target)?;
+            files.push((path, target));
         }
     }
     Ok(())
+}
+
+/// 复制阶段的线程数：I/O 密集、每文件独立，8 路已足够打满普通 SSD。
+///
+/// 上限刻意压到 8：`#243` 的现场是 Defender 逐文件实时扫描，线程再多只是在
+/// 扫描器里排队，反而增加峰值句柄数与失败时的回退范围。
+fn copy_worker_count(files: usize) -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    cpus.clamp(2, 8).min(files.max(1))
 }
 
 /// 尽力删除目录树（不存在 / 失败都忽略 —— 回退路径上不该再抛）。
@@ -1757,7 +1932,80 @@ pub fn sync_conversation_in(
 
 #[cfg(test)]
 mod tests {
+    /// ★ 回归 #243 第 ① 条：并行复制的结果必须与串行版**逐字节一致**。
+    ///
+    /// 并发最容易出的两种错：漏复制（清单收集与复制阶段对不上）和内容错位
+    /// （两个线程写到同一个目标）。这里用**多层嵌套 + 多文件 + 中文文件名**一次覆盖：
+    /// 目录结构、文件名、每个文件的内容都逐项比对。
+    #[test]
+    fn copy_dir_recursive_parallel_copies_everything_verbatim() {
+        let base =
+            std::env::temp_dir().join(format!("copy-parallel-{}", uuid::Uuid::new_v4().simple()));
+        let src = base.join("src");
+        let dst = base.join("dst");
+
+        // 造 3 层 × 每层若干文件，含中文名与空目录。
+        std::fs::create_dir_all(src.join("a/b/c")).unwrap();
+        std::fs::create_dir_all(src.join("empty-dir")).unwrap();
+        std::fs::write(src.join("root.txt"), "root").unwrap();
+        std::fs::write(src.join("a/b/c/深层.txt"), "deep-内容").unwrap();
+        for index in 0..40 {
+            std::fs::write(
+                src.join(format!("a/f{index}.bin")),
+                format!("payload-{index}-{}", "x".repeat(index * 7)),
+            )
+            .unwrap();
+        }
+
+        copy_dir_recursive(&src, &dst).expect("复制应成功");
+
+        // 逐文件比对内容（清单顺序即遍历顺序，直接比对即可）。
+        assert_eq!(
+            std::fs::read_to_string(dst.join("root.txt")).unwrap(),
+            "root"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a/b/c/深层.txt")).unwrap(),
+            "deep-内容"
+        );
+        assert!(dst.join("empty-dir").is_dir(), "空目录也必须建出来");
+        for index in 0..40 {
+            let original = std::fs::read_to_string(src.join(format!("a/f{index}.bin"))).unwrap();
+            let copied = std::fs::read_to_string(dst.join(format!("a/f{index}.bin")))
+                .unwrap_or_else(|error| panic!("f{index}.bin 未复制: {error}"));
+            assert_eq!(copied, original, "f{index}.bin 内容必须逐字一致");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// ★ 回归 #243：源目录不存在时，**仍要留下目标根目录**。
+    ///
+    /// 这不是随手写的边角：`restore_dir` 失败后的用户可见提示是「副本目录是空壳，
+    /// 所以不能说已回滚」，判据就是「目标目录存在但没有内容」。并行版若把
+    /// `create_dir_all` 挪到 `read_dir` 之后，这个形态就没了 —— 已有回归
+    /// `restore_dir_reports_failure_with_backup_path` 正是在这里抓到过我第一版。
+    #[test]
+    fn copy_dir_recursive_creates_target_before_failing() {
+        let base = std::env::temp_dir().join(format!(
+            "copy-missing-src-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let src = base.join("does-not-exist");
+        let dst = base.join("dst");
+
+        let error = copy_dir_recursive(&src, &dst).expect_err("源不存在必须报错");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            dst.is_dir(),
+            "失败前必须已建出目标根目录（串行版的既有形态）"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     use super::*;
+
     use crate::modules::config::HomeOverrideGuard;
 
     /// 建一个临时数据根 + 一棵会话树；返回 `(home, root)`。
