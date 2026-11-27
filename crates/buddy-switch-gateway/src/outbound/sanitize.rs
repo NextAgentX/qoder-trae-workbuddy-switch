@@ -21,6 +21,7 @@ const FEATURES: &[&str] = &[
     "You are a coding agent running in the Codex CLI",
     "github.com/anthropics/",
     "11128",
+    "You are an interactive agent in TraeCode",
 ];
 
 /// 改写层：逐字替换对，每句只改一个词。
@@ -50,6 +51,16 @@ const REWRITES: &[(&str, &str)] = &[
     // 上游反探测：请求体里出现裸数字 11128 即整单拦截（与本数字上下文无关）。
     // 插入连字符保留可读性与指代（零宽空格无效，实测上游会归一化）。
     ("11128", "11-128"),
+    // issue #241：Trae 3.4.24 起在系统提示开头加入的身份句。上游渠道校验把它当作
+    // 「不是官方客户端」的证据，命中即 HTTP 400 + `code: 11-128`（与本文件其它身份句同款
+    // 逐字匹配）。把产品名换成等价说法即可绕过：语义不变，但不再命中上游的固定串。
+    //
+    // 现场（2026-11-26 用户报障）：Trae CN 调 hy4flash 每次都报「这次调用没通过渠道校验」；
+    // 同一账号用官方客户端是 200。客户端自己加了这一句，网关此前没有对应的改写规则。
+    (
+        "You are an interactive agent in TraeCode",
+        "You are an interactive agent in the Trae IDE",
+    ),
 ];
 
 /// 裸键名兜底替换值（`header` → `hdr`，破坏逐字匹配但保留可读性）。
@@ -397,6 +408,46 @@ mod tests {
     }
 
     #[test]
+    /// ★ 回归 issue #241：Trae 3.4.24 的身份句必须被改写。
+    ///
+    /// 上游渠道校验按**逐字**匹配判定「不是官方客户端」，命中即 400 + `11-128`。
+    /// 漏改 = Trae 调 hy4flash 等模型时每次都失败，而客户端本身完全正常。
+    ///
+    /// 可证伪：删掉 `REWRITES` 里那条规则，本用例立刻红；
+    /// 只加 `FEATURES` 不加 `REWRITES`，`every_rewrite_source_is_covered_by_feature_precheck`
+    /// 之外的这条也会红（预检命中但改写不发生，原文残留）。
+    #[test]
+    fn traecode_identity_line_is_rewritten() {
+        let source = "You are an interactive agent in TraeCode that helps the USER with software engineering tasks.";
+        assert!(has_fingerprint(source), "预检必须命中，否则改写层永不执行");
+
+        let cleaned = sanitize_text(source);
+        assert!(
+            !cleaned.contains("TraeCode"),
+            "改写后不得残留可被逐字匹配的产品名: {cleaned}"
+        );
+        assert!(
+            cleaned.contains("that helps the USER with software engineering tasks."),
+            "句子其余部分必须逐字保留（语义不变）: {cleaned}"
+        );
+    }
+
+    /// 反向：`TraeCode` 只出现在用户自己的对话内容里时也必须被改写 ——
+    /// 上游拦的是请求体全文，不分角色。这不是误伤：留着就会整单失败。
+    #[test]
+    fn traecode_identity_is_rewritten_inside_message_arrays() {
+        let mut messages = vec![json!({
+            "role": "system",
+            "content": "You are an interactive agent in TraeCode that helps the USER.",
+        })];
+        assert!(sanitize_messages(&mut messages));
+        let text = messages[0]["content"].as_str().unwrap();
+        assert!(
+            !text.contains("TraeCode"),
+            "系统消息里的身份句必须改写: {text}"
+        );
+    }
+
     fn codex_instruction_gains_tool_word() {
         let cleaned = sanitize_text(
             "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
