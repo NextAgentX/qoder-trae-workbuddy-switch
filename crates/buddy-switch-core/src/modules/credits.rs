@@ -958,6 +958,46 @@ pub async fn get_credit_expiry(account: &Value) -> Value {
     get_credit_expiry_for(Region::Cn, account).await
 }
 
+/// 给账号落「会话已被吊销」标记（issue #246 / 总览 #247）。
+///
+/// ## 为什么只读路径也要落盘
+///
+/// `get_credit_expiry_for` 本来不该改账号库。但「服务端明确拒绝了这个账号的凭据」
+/// 是一个**确定的失败态**：不落标记时，卡片徽章不变红，而卡片上那句话写着
+/// 「会话已被吊销」—— 同一个账号，两个地方说着矛盾的话。
+///
+/// ## 防抖（与保活路径同款）
+///
+/// 积分查询是**只读路径**，用户点一下卡片就跑一次。若每次都写库，就是「点一次卡片
+/// 写一次全库」，`updatedAt` 也会一直跳。所以：标记已为 true **且原因相同**才跳过；
+/// 原因变了仍要更新（从「刷新失败」变成「会话被吊销」，用户该看到的提示不一样）。
+///
+/// ## 为什么按 id 重读而不是 upsert 传进来的快照
+///
+/// 调用方传的 `account` 可能已过期；直接 upsert 会把并发的其它更新
+/// （例如刚落盘的新 `access_token`）覆盖回去。
+fn mark_session_revoked(region: Region, account: &Value) {
+    let reason = SESSION_REVOKED_REASON;
+    let already = account.get("needs_relogin").and_then(Value::as_bool) == Some(true)
+        && account.get("needs_relogin_reason").and_then(Value::as_str) == Some(reason);
+    if already {
+        return;
+    }
+    let Some(id) = account
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let Some(mut stored) = crate::modules::account::find_account_for(region, id) else {
+        return;
+    };
+    stored["needs_relogin"] = json!(true);
+    stored["needs_relogin_reason"] = json!(reason);
+    let _ = crate::modules::account::upsert_account_for(region, &stored);
+}
+
 /// 失败结果的**机器可读**原因：登录会话已被服务端吊销（refresh token 失效）。
 ///
 /// issue #246 的现场：本地 `expiresAt` 还有 27 天，服务端却 401 —— 「过期时间」
@@ -1069,6 +1109,9 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
     }
 
     let revoked = is_session_revoked(&response);
+    if revoked {
+        mark_session_revoked(region, account);
+    }
     let mut failure = json!({
         "ok": false,
         "accountId": account_id,
@@ -1087,6 +1130,57 @@ pub async fn get_credit_expiry_for(region: Region, account: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// ★ 回归 #247（最后一条技术债）：吊销时**落 needs_relogin**，原因变化时会更新。
+    ///
+    /// 为什么需要防抖：积分查询是**只读路径**，用户点一下卡片就跑一次。若每次都
+    /// `upsert_account_for`，就是「点一次卡片写一次全库」，`updatedAt` 也会一直跳 ——
+    /// 用户看到的是「什么都没做，账号库却在变」。
+    ///
+    /// 可证伪：删掉 `mark_session_revoked` 的 `already` 早退，最后一条断言仍会过
+    /// （原因相同），但「原因不同必须更新」那条会抓出「无脑早退」的错实现 ——
+    /// 两个方向都钉住，才不是只测了一半。
+    #[test]
+    fn revoked_session_is_marked_and_reason_updates() {
+        let home = std::env::temp_dir().join(format!(
+            "credits-revoked-mark-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("创建隔离目录");
+        let _guard = crate::modules::config::HomeOverrideGuard::set(&home);
+        let region = Region::Cn;
+
+        let account = json!({ "id": "acct-r", "uid": "uid-r", "email": "r@x.y" });
+        crate::modules::account::upsert_account_for(region, &account).expect("铺账号库");
+        let initial = crate::modules::account::find_account_for(region, "acct-r").unwrap();
+        assert!(
+            initial.get("needs_relogin").is_none(),
+            "前置：初始不应带标记: {initial}"
+        );
+
+        mark_session_revoked(region, &account);
+        let stored = crate::modules::account::find_account_for(region, "acct-r").unwrap();
+        assert_eq!(stored["needs_relogin"], json!(true), "吊销必须落标记");
+        assert_eq!(
+            stored["needs_relogin_reason"],
+            json!(SESSION_REVOKED_REASON)
+        );
+
+        // 原因不同的历史标记 ⇒ 必须被改写成吊销原因（用户该看到的提示不一样）。
+        let mut other = stored.clone();
+        other["needs_relogin_reason"] = json!("刷新失败(code=1): boom");
+        crate::modules::account::upsert_account_for(region, &other).unwrap();
+        mark_session_revoked(region, &other);
+        let updated = crate::modules::account::find_account_for(region, "acct-r").unwrap();
+        assert_eq!(
+            updated["needs_relogin_reason"],
+            json!(SESSION_REVOKED_REASON),
+            "原因不同时必须更新，否则用户看到的是过时提示"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     /// ★ 回归 #246：401 不得再回显 openresty / APISIX 的整页标题，必须给可操作的话。
     ///
     /// 现场（用户截图原话）：卡片上一行「服务端返回 HTML 错误页：401 Authorization Required」，
